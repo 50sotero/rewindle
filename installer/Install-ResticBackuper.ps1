@@ -2427,12 +2427,13 @@ function Invoke-PlanMode {
         }
     }
     Write-PlanDocument -Path $outputPath -Json (ConvertTo-Json -InputObject $plan -Depth 8)
-    return 0
 }
 
 if ($PlanOnly) {
     try {
-        exit (Invoke-PlanMode)
+        # Plan mode prints nothing and its exit code is decided here, not by whatever a stage might leak into the pipeline.
+        [void](Invoke-PlanMode)
+        exit 0
     }
     catch {
         [Console]::Error.WriteLine("No plan was written: $($_.Exception.Message)")

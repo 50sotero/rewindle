@@ -180,7 +180,8 @@ class PlanModeCannotChangeTheMachineTests(unittest.TestCase):
                 self.assertIn("$PlanOnly", body[: body.index("Read-Host")], f"{name} asks a question before checking -PlanOnly")
 
     def test_install_code_runs_only_after_plan_mode_has_exited(self) -> None:
-        marker = self.text.index("if ($PlanOnly) {\n    try {\n        exit (Invoke-PlanMode)")
+        marker = self.text.index("if ($PlanOnly) {\n    try {")
+        self.assertIn("[void](Invoke-PlanMode)\n        exit 0", self.text[marker : marker + 400])
         for name in ("Start-InstallPhase", "Invoke-InstallPreflight", "Assert-InstallationVerified"):
             self.assertGreater(self.text.index(f"function {name} "), marker, f"{name} is defined after plan mode exits")
         self.assertGreater(self.text.index("Register-ScheduledTask -TaskName $backupTaskName"), marker)
