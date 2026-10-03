@@ -83,10 +83,11 @@ export function inputsOf(choices: Choices, plan: InstallPlan | null): PlanInputs
   };
 }
 
-/** The folder a drive card stands for: the installer's own suggestion when it is on that drive, otherwise "<drive>\Rewindle Backups". */
-export function defaultRepositoryFor(root: string, plan: InstallPlan | null): string {
-  const suggested = plan?.defaults.repository;
-  if (suggested && plan?.defaults.storageMode === 'local_ntfs' && samePath(driveRoot(suggested), root)) return suggested;
+/**
+ * The folder a drive card stands for: "<drive>\Rewindle Backups". (The installer's own suggestion, ResticBackups\Personal, is only
+ * used to pick the drive; a reinstall goes back to the folder the removed copy kept, see initialChoices.)
+ */
+export function defaultRepositoryFor(root: string, _plan: InstallPlan | null): string {
   return joinPath(root, DEFAULT_FOLDER_NAME);
 }
 
@@ -100,7 +101,7 @@ function initialDrive(plan: InstallPlan): PlanVolume | undefined {
     ?? eligible[0];
 }
 
-function initialChoices(plan: InstallPlan): Choices {
+function initialChoices(plan: InstallPlan, preferredRepository?: string): Choices {
   const defaults = plan.defaults.sources;
   const folders: FolderChoice[] = plan.environment.knownFolders.map(folder => ({
     path: folder.path, key: folder.key, exists: folder.exists, custom: false,
@@ -109,15 +110,16 @@ function initialChoices(plan: InstallPlan): Choices {
   for (const path of defaults) {
     if (!folders.some(folder => samePath(folder.path, path))) folders.push({ path, key: null, exists: true, custom: true, selected: true });
   }
-  const drive = initialDrive(plan);
-  const suggested = plan.defaults.repository;
-  const repository = drive ? (suggested && samePath(driveRoot(suggested), drive.root) ? suggested : defaultRepositoryFor(drive.root, plan)) : '';
+  // A reinstall carries on with the backups the removed copy kept, when the drive that holds them is there.
+  const keptDrive = preferredRepository ? plan.environment.volumes.find(volume => volume.eligible && samePath(volume.root, driveRoot(preferredRepository))) : undefined;
+  const drive = keptDrive ?? initialDrive(plan);
+  const repository = keptDrive && preferredRepository ? preferredRepository : drive ? defaultRepositoryFor(drive.root, plan) : '';
   return {
     folders: folders.slice(0, MAX_SOURCES),
     storageMode: 'local_ntfs',
     driveRoot: drive?.root ?? '',
     repository,
-    customRepository: false,
+    customRepository: !!(keptDrive && preferredRepository),
     schedule: plan.defaults.schedule,
     vss: true,
     startBackup: true,
@@ -248,7 +250,8 @@ export function useWizard() {
           // The old copy is gone; ask the installer about this PC again (it reports no installation now) and start the steps.
           reinstalling.current = false;
           setOperation(null);
-          void startRef.current();
+          const parsed = finished.result ? parseProgressLine(finished.result) : null;
+          void startRef.current(parsed?.kind === 'result' ? parsed.result.kept?.repository ?? undefined : undefined);
         } else {
           setScreen('uninstalled');
         }
@@ -273,8 +276,8 @@ export function useWizard() {
     });
   }, []);
 
-  const startRef = useRef<() => Promise<void>>(async () => undefined);
-  const start = useCallback(async () => {
+  const startRef = useRef<(preferredRepository?: string) => Promise<void>>(async () => undefined);
+  const start = useCallback(async (preferredRepository?: string) => {
     setHostError(null);
     setScreenState('loading');
     try {
@@ -283,7 +286,7 @@ export function useWizard() {
       setTheme(current => current ?? { dark: info.dark, highContrast: info.highContrast, reducedMotion: info.reducedMotion });
       const plan = parsePlan(await bridge.request('getPlan', { inputs: {} }));
       setBase(plan);
-      const initial = initialChoices(plan);
+      const initial = initialChoices(plan, preferredRepository);
       setChoices(initial);
       setValidation({ plan, checking: false, error: null });
       setScreen(firstScreen(plan));

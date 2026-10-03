@@ -97,6 +97,10 @@ export function installSetupSampleBridge(): void {
         if (sample.nonEmpty.includes(lower(repository))) {
           errors.push(finding('repository_not_empty', 'repository', 'This folder already has files in it that aren’t a Rewindle backup. Choose an empty folder or a new one.', repository));
         }
+        // The backups a removed copy kept are found again when the same folder is chosen.
+        if (uninstalled && sample.defaultRepository && lower(repository) === lower(sample.defaultRepository)) {
+          warnings.push(finding('repository_exists', 'repository', 'This folder already holds Rewindle backups. Setup carries on with them and keeps your earlier snapshots.', repository));
+        }
         if (volume.is_system) {
           warnings.push(finding('repository_on_system_disk', 'repository', 'Your backups would be on the same drive as Windows. If that drive fails, you lose your files and their backups together.', repository));
         } else if (volume.same_physical_disk_as_system) {
