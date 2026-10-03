@@ -652,6 +652,11 @@ try {
         Assert-True ($refused.Error -match [regex]::Escape($refusal.Message)) "$($refusal.Label): the explanation mentions '$($refusal.Message)' (got: $($refused.Error.Trim()))"
     }
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $outside 'plan.json'))) 'nothing was written outside the temporary folder'
+    # The short (8.3) spelling of the temporary folder names the same folder (when the volume has short names at all).
+    $shortTemp = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($temp).ShortPath
+    $viaShortName = Invoke-Plan -Bundle $bundle -Roots $roots -Temp $temp -Arguments $baseArguments -PlanPath (Join-Path $shortTemp 'plan-by-short-name.json')
+    Assert-Equal 0 $viaShortName.ExitCode "a plan path spelled with the short name of the temporary folder is accepted ($shortTemp; stderr: $($viaShortName.Error))"
+    Assert-True (Test-Path -LiteralPath (Join-Path $temp 'plan-by-short-name.json') -PathType Leaf) 'the plan was written into the temporary folder'
     $junctionTarget = Join-Path $temp 'junction-target'
     New-Item -ItemType Directory -Path $junctionTarget | Out-Null
     $junctionInTemp = Join-Path $temp 'junction-in-temp'
