@@ -17,20 +17,21 @@ function PhaseIcon({ state }: { state: ListedPhase['state'] }) {
 
 const STATE_WORDS: Record<ListedPhase['state'], string> = { completed: 'done', started: 'in progress', failed: 'failed', skipped: 'not needed', pending: 'waiting' };
 
-/** What the wizard knows was left in place after a failed install, from the phases that had finished. */
-export function describeRollback(operation: OperationState): { changed: boolean; text: string } {
-  const finished = new Set(operation.phases.filter(phase => phase.state === 'completed' || phase.state === 'failed').map(phase => phase.phase));
-  const touched = ['payload', 'permissions', 'credential', 'repository', 'recovery_key', 'canary', 'tasks', 'dashboard', 'verification'].some(phase => finished.has(phase));
-  if (!touched) return { changed: false, text: 'Nothing on this PC was changed.' };
-  const kept = [
-    finished.has('repository') ? 'the backup location folder' : null,
-    finished.has('recovery_key') ? 'your recovery key' : null,
-    'Rewindle’s settings folder',
-  ].filter(Boolean).join(', ');
-  return {
-    changed: true,
-    text: `Setup removed what it had installed: the program files, scheduled backups, shortcut and the Installed apps entry. It kept ${kept} if they had been created, so nothing you might need was deleted.`,
-  };
+/**
+ * What a failed install left, in the words the installer's contract allows: before it copied anything (the `payload` phase) nothing of
+ * Rewindle is on the PC, and from then on the installer undoes its changes and says so itself in its error message, which is shown as
+ * it is. Only an installer that ended without a result line (it was stopped) gets guidance of the wizard's own.
+ */
+export function describeOutcome(operation: OperationState): string[] {
+  const reached = new Set(operation.phases.map(phase => phase.phase));
+  const changed = ['payload', 'canary', 'credential', 'repository', 'recovery_key', 'permissions', 'tasks', 'dashboard', 'verification'].some(phase => reached.has(phase));
+  const lines: string[] = [];
+  if (!operation.result) {
+    lines.push('If Setup was stopped part-way, some files may have been left behind. Run Setup again: it tells you what is in the way, and you can remove a leftover Rewindle from Settings › Apps › Installed apps.');
+  } else if (!changed) {
+    lines.push('Nothing of Rewindle was installed.');
+  }
+  return lines;
 }
 
 /** The install (or uninstall) as it happens: one progress bar, every phase with its state, and the installer's own lines on request. */
@@ -85,7 +86,7 @@ export function OperationView({ wizard, operation }: { wizard: Wizard; operation
       {!failed && operation.stage === 'elevating' && (
         <div className="stage-card is-waiting">
           <span className="stage-shield"><ShieldIcon size={22} /></span>
-          <div><strong>Waiting for your permission</strong><p>Choose <strong>Yes</strong> in the Windows prompt. If you don’t see it, look for a flashing shield on the taskbar.</p></div>
+          <div><strong>Waiting for your permission</strong><p>Choose <strong>Yes</strong> in the Windows prompt. If it asks for a password, use the one for the account you’re signed in with. If you don’t see the prompt, look for a flashing shield on the taskbar.</p></div>
         </div>
       )}
 
@@ -145,12 +146,12 @@ function FailureNotice({ wizard, operation, onCopy, copied }: { wizard: Wizard; 
       </Callout>
     );
   }
-  const rollback = uninstall ? null : describeRollback(operation);
+  const notes = uninstall ? [] : describeOutcome(operation);
   const message = operation.result?.error?.message || finished.message || 'The installer stopped without saying why.';
   return (
     <Callout tone="error" title="What went wrong">
       <p className="failure-message">{message}</p>
-      {rollback && <p>{rollback.text}</p>}
+      {notes.map(note => <p key={note}>{note}</p>)}
       {uninstall && <p>Your backups and recovery key were not touched. Try again, or remove Rewindle from Settings › Apps › Installed apps.</p>}
       <div className="callout-actions">
         <Button size="sm" onClick={onCopy}><Copy size={13} aria-hidden="true" />{copied ? 'Copied' : 'Copy details'}</Button>

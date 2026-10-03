@@ -34,7 +34,8 @@ namespace Rewindle.Setup
         public bool ResultOk;
         public string ResultErrorMessage;
         public string RecoveryKeyPath;
-        public bool RecoveryKeyReadableByUser;
+        // True or false as the installer worked it out, null when it could not say (or there is no key). Only false stops a copy.
+        public bool? RecoveryKeyReadableByUser;
         public string DashboardExecutable;
         public string InstallRoot;
     }
@@ -387,8 +388,7 @@ namespace Rewindle.Setup
                     line.ResultErrorMessage = Json.String(failure, "message", 2048);
                 }
                 line.RecoveryKeyPath = Json.String(line.Fields, "recovery_key_path", MaximumPathLength);
-                bool? readable = Json.Bool(line.Fields, "recovery_key_readable_by_user");
-                line.RecoveryKeyReadableByUser = readable.HasValue && readable.Value;
+                line.RecoveryKeyReadableByUser = Json.Bool(line.Fields, "recovery_key_readable_by_user");
                 line.DashboardExecutable = Json.String(line.Fields, "dashboard_executable", MaximumPathLength);
                 line.InstallRoot = Json.String(line.Fields, "install_root", MaximumPathLength);
             }

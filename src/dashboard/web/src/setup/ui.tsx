@@ -32,16 +32,21 @@ export function Spinner({ size = 14, label }: { size?: number; label?: string })
   return <LoaderCircle className="spin" size={size} aria-hidden={label ? undefined : true} aria-label={label} role={label ? 'img' : undefined} />;
 }
 
-/** The installer's errors and warnings for one screen, in plain sentences. Errors first; they stop the wizard from going on. */
-export function IssueList({ errors, warnings, className = '' }: { errors: PlanIssue[]; warnings: PlanIssue[]; className?: string }) {
+/**
+ * The installer's errors and warnings for one screen, in plain sentences. Errors first; they stop the wizard from going on. `action`
+ * can put a button beside a finding (the way to fix it, for a finding about a folder the person can take out of the list).
+ */
+export function IssueList({ errors, warnings, className = '', action }: {
+  errors: PlanIssue[]; warnings: PlanIssue[]; className?: string; action?: (issue: PlanIssue) => ReactNode;
+}) {
   if (errors.length === 0 && warnings.length === 0) return null;
   return (
     <div className={`issue-list ${className}`}>
       {errors.map((issue, index) => (
-        <p key={`e${index}${issue.code}`} className="callout is-error"><CircleAlert size={16} aria-hidden="true" /><span>{issue.message}</span></p>
+        <div key={`e${index}${issue.code}${issue.path ?? ''}`} className="callout is-error"><CircleAlert size={16} aria-hidden="true" /><span>{issue.message}</span>{action?.(issue)}</div>
       ))}
       {warnings.map((issue, index) => (
-        <p key={`w${index}${issue.code}`} className="callout is-warning"><AlertTriangle size={16} aria-hidden="true" /><span>{issue.message}</span></p>
+        <div key={`w${index}${issue.code}${issue.path ?? ''}`} className="callout is-warning"><AlertTriangle size={16} aria-hidden="true" /><span>{issue.message}</span>{action?.(issue)}</div>
       ))}
     </div>
   );

@@ -91,6 +91,11 @@ button.rail-link:hover .rail-label { color: var(--ink); text-decoration: underli
 .callout.is-warning .callout-text, .callout.is-error .callout-text { color: var(--ink); }
 .callout-dot { flex-shrink: 0; width: 6px; height: 6px; margin: 8px 4px 0; border-radius: 50%; background: var(--ink-3); }
 .issue-list { display: flex; flex-direction: column; gap: 8px; }
+.issue-action { margin-left: auto; flex-shrink: 0; align-self: center; }
+.callout:has(.issue-action) { align-items: center; }
+.kept-place { display: flex; flex-direction: column; gap: 1px; margin-bottom: 8px; }
+.kept-place > span:first-child { font-weight: 600; color: var(--ink); }
+.kept-place .inline-path { color: var(--ink-2); font-size: var(--type-sm); }
 .failure-message { font-weight: 550; overflow-wrap: anywhere; }
 .steps-list { margin: 4px 0 0; padding-left: 20px; list-style: decimal; display: flex; flex-direction: column; gap: 4px; }
 .callout-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; margin-top: 8px; }
@@ -383,4 +388,9 @@ button.rail-link:hover .rail-label { color: var(--ink); text-decoration: underli
   .setup-progress-fill, .space-adding, .compact-bar > span { forced-color-adjust: none; background: Highlight; }
   .rail-step[data-state="current"] .rail-dot, .rail-step[data-state="done"] .rail-dot { forced-color-adjust: none; background: Highlight; color: HighlightText; }
   .shield-icon { forced-color-adjust: none; }
+  .chip, .badge { border: 1px solid CanvasText; }
+  /* The main button of a screen is the one in the system's "default button" colors, so Next and Install read differently from Back. */
+  .setup-button.bg-ink:not(:disabled) { forced-color-adjust: none; background: Highlight; color: HighlightText; border: 2px solid Highlight; }
+  .setup-button.bg-ink:disabled { border: 1px dashed GrayText; }
+  .setup-button.bg-ink .shield-edge { stroke: HighlightText; }
 }

@@ -25,8 +25,15 @@ namespace Rewindle.Setup
 
         // The runtime's version when one is installed (machine-wide or for this user), or null: the registry keys the installer
         // reads, so Setup and the installer always agree about whether it is there.
+        // Set only by the test that opens the window as if the runtime were missing.
+        internal static Func<string> Probe { get; set; }
+
         public static string InstalledVersion()
         {
+            if (Probe != null)
+            {
+                return Probe();
+            }
             string[] locations =
             {
                 @"HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\" + RuntimeClientKey,

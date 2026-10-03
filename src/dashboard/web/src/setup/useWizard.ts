@@ -2,7 +2,7 @@
 // install or uninstall that is running. The screens only read it and call its actions.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ContractError, INSTALL_PHASES, isUnsupported, parsePlan, parseProgressLine,
+  ContractError, INSTALL_PHASES, UNINSTALL_PHASES, isUnsupported, parsePlan, parseProgressLine,
   type InstallPlan, type InstallResult, type KnownFolderKey, type PlanInputs, type PlanVolume, type ProgressPhase, type StorageMode,
 } from './contract';
 import {
@@ -59,6 +59,8 @@ export interface OperationState {
   cancelling: boolean;
   /** Whether the person asked for the first backup (decides whether that phase is listed before it is reported). */
   startBackup: boolean;
+  /** An uninstall that is the first half of a reinstall: when it succeeds, Setup goes on to the setup steps instead of ending. */
+  reinstall: boolean;
 }
 
 export interface Validation { plan: InstallPlan | null; checking: boolean; error: string | null }
@@ -143,14 +145,15 @@ export function selectedTotal(choices: Choices, sizes: Record<string, FolderSize
 /** Overall progress of an install, 0 to 1, from the phases' weights. */
 export function operationProgress(operation: OperationState): number {
   if (operation.finished?.outcome === 'succeeded') return 1;
-  if (operation.operation === 'uninstall') {
-    const done = operation.phases.filter(phase => phase.state !== 'started').length;
-    return Math.min(0.95, done / Math.max(5, operation.phases.length + 1));
-  }
   const phases = listedPhases(operation);
   const total = phases.reduce((sum, phase) => sum + phase.weight, 0) || 1;
   const reached = phases.reduce((sum, phase) => sum + (phase.state === 'pending' ? 0 : phase.state === 'started' ? phase.weight / 2 : phase.weight), 0);
   return Math.min(0.99, reached / total);
+}
+
+/** A phase's title in the wizard's words, or the installer's own for a phase the wizard does not know. */
+export function phaseTitle(kind: Operation, id: string, reported: string): string {
+  return (kind === 'uninstall' ? UNINSTALL_PHASES : INSTALL_PHASES).find(phase => phase.id === id)?.title ?? (reported || id);
 }
 
 export interface ListedPhase { id: string; title: string; state: ProgressPhase['state'] | 'pending'; detail: string | null; weight: number }
@@ -158,16 +161,16 @@ export interface ListedPhase { id: string; title: string; state: ProgressPhase['
 /** The phases to list: the installer's known ones (pending until reported), then any others it reported, in order. */
 export function listedPhases(operation: OperationState): ListedPhase[] {
   const reported = new Map(operation.phases.map(phase => [phase.phase, phase]));
-  if (operation.operation === 'uninstall') {
-    return operation.phases.map(phase => ({ id: phase.phase, title: phase.title || 'Removing Rewindle', state: phase.state, detail: phase.detail, weight: 1 }));
-  }
-  const known = INSTALL_PHASES
+  const table = operation.operation === 'uninstall' ? UNINSTALL_PHASES : INSTALL_PHASES;
+  const known = table
     .filter(phase => phase.id !== 'first_backup' || operation.startBackup || reported.has(phase.id))
     .map(phase => {
       const report = reported.get(phase.id);
-      return { id: phase.id, title: report?.title || phase.title, state: report?.state ?? 'pending' as const, detail: report?.detail ?? null, weight: phase.weight };
+      // The wizard's own words for the phases it knows (the installer's titles say "repository" and "dashboard"); the installer's
+      // title is used only for a phase this version does not know.
+      return { id: phase.id, title: phase.title, state: report?.state ?? 'pending' as const, detail: report?.detail ?? null, weight: phase.weight };
     });
-  const extra = operation.phases.filter(phase => !INSTALL_PHASES.some(known => known.id === phase.phase))
+  const extra = operation.phases.filter(phase => !table.some(known => known.id === phase.phase))
     .map(phase => ({ id: phase.phase, title: phase.title || phase.phase, state: phase.state, detail: phase.detail, weight: 4 }));
   return [...known, ...extra];
 }
@@ -190,6 +193,8 @@ export function useWizard() {
   const measureSequence = useRef(0);
   const planSequence = useRef(0);
   const measured = useRef(new Set<string>());
+  // Set when the uninstall under way is the first half of a reinstall (read in the host's events, so a ref).
+  const reinstalling = useRef(false);
 
   const setScreen = useCallback((next: Screen) => {
     setScreenState(next);
@@ -239,7 +244,16 @@ export function useWizard() {
         setScreen('review');
         setOperation(null);
       } else if (finished.outcome === 'succeeded' && finished.operation === 'uninstall') {
-        setScreen('uninstalled');
+        if (reinstalling.current) {
+          // The old copy is gone; ask the installer about this PC again (it reports no installation now) and start the steps.
+          reinstalling.current = false;
+          setOperation(null);
+          void startRef.current();
+        } else {
+          setScreen('uninstalled');
+        }
+      } else if (finished.operation === 'uninstall') {
+        reinstalling.current = false;
       }
     }
   }), [setScreen]);
@@ -259,6 +273,7 @@ export function useWizard() {
     });
   }, []);
 
+  const startRef = useRef<() => Promise<void>>(async () => undefined);
   const start = useCallback(async () => {
     setHostError(null);
     setScreenState('loading');
@@ -280,6 +295,7 @@ export function useWizard() {
     }
   }, [measure, setScreen]);
 
+  startRef.current = start;
   useEffect(() => { void start(); }, [start]);
 
   // Every change to the choices is checked again by the installer, a moment after the last change.
@@ -383,10 +399,11 @@ export function useWizard() {
     dismissNotice: () => setNotice(null),
   }), [base, choices, measure, setScreen, start, update]);
 
-  const runOperation = useCallback(async (kind: Operation) => {
+  const runOperation = useCallback(async (kind: Operation, options: { reinstall?: boolean } = {}) => {
     if (!choices) return;
     setNotice(null);
-    setOperation({ operation: kind, stage: 'preparing', phases: [], lines: [], result: null, finished: null, cancelling: false, startBackup: choices.startBackup });
+    reinstalling.current = kind === 'uninstall' && !!options.reinstall;
+    setOperation({ operation: kind, stage: 'preparing', phases: [], lines: [], result: null, finished: null, cancelling: false, startBackup: choices.startBackup, reinstall: reinstalling.current });
     setScreenState(kind === 'install' ? 'installing' : 'uninstalling');
     try {
       if (kind === 'install') {
@@ -418,6 +435,8 @@ export function useWizard() {
     goTo: setScreen,
     install: () => runOperation('install'),
     uninstall: () => runOperation('uninstall'),
+    /** Removes the installed copy (keeping backups and the recovery key), then goes through the setup steps again. */
+    reinstall: () => runOperation('uninstall', { reinstall: true }),
     cancelOperation,
     clearOperation: () => setOperation(null),
     request: bridge.request.bind(bridge),

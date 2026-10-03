@@ -2,7 +2,7 @@ import { Check, Clapperboard, CloudOff, Download, FileText, Folder, FolderPlus, 
 import { useId, type ComponentType } from 'react';
 import { Button } from '@/components/atoms/Button';
 import { issuesFor, type KnownFolderKey } from '../contract';
-import { folderName, formatBytes, formatCount, plural } from '../format';
+import { folderName, formatBytes, formatCount, plural, samePath } from '../format';
 import { IssueList, Spinner } from '../ui';
 import { selectedTotal, type FolderChoice, type FolderSize, type Wizard } from '../useWizard';
 
@@ -113,7 +113,16 @@ export function Folders({ wizard }: { wizard: Wizard }) {
         </p>
       )}
 
-      <IssueList errors={errors} warnings={warnings.filter(warning => !(placeholders.length > 0 && warning.code.includes('placeholder')))} />
+      <IssueList errors={errors} warnings={warnings.filter(warning => !(placeholders.length > 0 && warning.code.includes('placeholder')))}
+        action={issue => {
+          // A finding about one folder comes with the way out: take that folder off the list (or, for a Windows folder, untick it).
+          const folder = issue.path ? choices.folders.find(item => samePath(item.path, issue.path as string)) : undefined;
+          if (!folder || !folder.selected && folder.exists) return null;
+          const name = folder.key ?? folderName(folder.path);
+          return folder.custom
+            ? <Button size="sm" className="issue-action" onClick={() => wizard.actions.removeFolder(folder.path)}>Remove {name}</Button>
+            : <Button size="sm" className="issue-action" onClick={() => wizard.actions.toggleFolder(folder.path)}>Don’t protect {name}</Button>;
+        }} />
 
       <p className="sr-only" role="status" aria-live="polite">
         {total.measuring ? '' : `${plural(selectedCount, 'folder', 'folders')} selected, ${formatBytes(total.bytes, locale)}, ${formatCount(total.files, locale)} files.`}

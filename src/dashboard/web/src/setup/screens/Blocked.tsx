@@ -43,12 +43,21 @@ export function HostError({ wizard }: { wizard: Wizard }) {
 
 /** After a successful uninstall. */
 export function Uninstalled({ wizard }: { wizard: Wizard }) {
+  const kept = wizard.operation?.result?.kept;
+  const places = kept ? [
+    kept.repository ? { label: 'Your backups', path: kept.repository } : null,
+    kept.recoveryKey ? { label: 'Your recovery key', path: kept.recoveryKey } : null,
+    kept.recoveryTools ? { label: 'Recovery tools', path: kept.recoveryTools } : null,
+  ].filter((place): place is { label: string; path: string } => place !== null) : [];
   return (
     <div className="screen-stack">
       <div className="blocked-emblem is-neutral"><Trash2 size={26} aria-hidden="true" /></div>
       <ul className="done-facts">
         <li><span>The Rewindle app, its scheduled backups, the Start menu shortcut and the Installed apps entry were removed.</span></li>
         <li><span><strong>Your backups and recovery key were kept.</strong> Keep the recovery key: you need it to restore anything from those backups.</span></li>
+        {places.length > 0 && (
+          <li><span>{places.map(place => <span key={place.label} className="kept-place"><span>{place.label}</span><span className="inline-path">{place.path}</span></span>)}</span></li>
+        )}
         <li><span>To protect this PC again, run Rewindle Setup again. <button type="button" className="text-link" onClick={() => wizard.openLink('readme')}>Read the README</button></span></li>
       </ul>
     </div>

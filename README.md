@@ -268,7 +268,10 @@ High Contrast.
   USB drive. Finish waits until you confirm you've saved it.
 
 If Rewindle is already installed, Setup opens a maintenance page instead (open
-it, reinstall or repair, or uninstall). The wizard is built from
+it, reinstall or repair, or uninstall). This alpha does not upgrade in place, so
+reinstalling removes the app first, asking Windows for permission, and then goes
+through the steps again; your backups and recovery key are kept. The wizard is
+built from
 [installer/setup](installer/setup/README.md).
 
 ### What the installer does

@@ -26,8 +26,8 @@ export function Maintenance({ wizard, onReinstall, onUninstall, openDashboard }:
         <button type="button" className="choice" onClick={onReinstall}>
           <span className="choice-icon"><RefreshCw size={18} aria-hidden="true" /></span>
           <span className="choice-text">
-            <strong>Reinstall or repair</strong>
-            <span>Go through the setup steps again. Your existing backups and recovery key stay where they are.</span>
+            <strong>Reinstall or repair <ShieldIcon size={13} /></strong>
+            <span>Remove the app, then go through the setup steps again. Your existing backups and recovery key stay where they are.</span>
           </span>
         </button>
         <button type="button" className="choice" onClick={onUninstall}>

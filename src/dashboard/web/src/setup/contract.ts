@@ -15,7 +15,8 @@ export type StorageMode = 'local_ntfs' | 'google_drivefs_stream';
 export type DriveType = 'fixed' | 'removable' | 'network' | 'cdrom' | 'ram' | 'unknown';
 export type KnownFolderKey = 'Desktop' | 'Documents' | 'Pictures' | 'Music' | 'Videos' | 'Downloads' | 'Favorites';
 
-export interface PlanIssue { code: string; field: IssueField; message: string }
+/** One finding of the plan. `path` is the folder, file or task it is about (for a source folder, the folder itself); `detail` is for a log. */
+export interface PlanIssue { code: string; field: IssueField; message: string; path: string | null; detail: string | null }
 
 export interface PlanVolume {
   root: string;
@@ -27,7 +28,10 @@ export interface PlanVolume {
   isSystem: boolean;
   sameDiskAsSystem: boolean;
   eligible: boolean;
+  /** A code (`not_ntfs`, `low_free_space`, `network_drive`, ...) when the drive cannot hold backups. */
   ineligibleReason: string | null;
+  /** The installer's own plain sentence for it, when it sent one. */
+  ineligibleMessage: string | null;
   recommended: boolean;
 }
 
@@ -99,31 +103,66 @@ export interface InstallResult {
   error: { code: string; message: string } | null;
   installRoot: string | null;
   recoveryKeyPath: string | null;
-  recoveryKeyReadableByUser: boolean;
+  /** True or false as the installer worked it out; null when there is no key or it could not tell. Only an explicit false stops a copy. */
+  recoveryKeyReadableByUser: boolean | null;
   dashboardExecutable: string | null;
   version: string | null;
+  /** Non-fatal findings: `dashboard_autostart_failed`, `first_backup_not_started`, `recovery_key_not_readable_by_user`. */
+  warnings: { code: string; message: string }[];
+  /** After an uninstall: what it deliberately kept, so the person can be told where. */
+  kept: KeptPaths | null;
 }
+
+export interface KeptPaths { stateRoot: string | null; repository: string | null; recoveryKey: string | null; recoveryTools: string | null }
 
 export type ProgressLine = { kind: 'phase'; phase: ProgressPhase } | { kind: 'result'; result: InstallResult };
 
-/** The installer's phases, in the order it runs them, with the words the wizard shows until the installer's own title arrives. */
+/**
+ * The installer's phases, in the order it emits them (docs/setup-contract.md, section 3.3: the restore test file comes before the
+ * password, and locking the folders comes last of the ones that write), with the words the wizard shows until the installer's own
+ * title arrives. The weights only shape the overall bar; the installer reports no percentages.
+ */
 export const INSTALL_PHASES: readonly { id: string; title: string; weight: number }[] = [
-  { id: 'preflight', title: 'Checking this PC', weight: 5 },
-  { id: 'webview2', title: 'Getting the display component', weight: 6 },
-  { id: 'payload', title: 'Copying Rewindle', weight: 10 },
-  { id: 'permissions', title: 'Protecting Rewindle’s files', weight: 5 },
-  { id: 'credential', title: 'Creating your encryption password', weight: 5 },
-  { id: 'repository', title: 'Preparing your backup location', weight: 14 },
-  { id: 'recovery_key', title: 'Saving your recovery key', weight: 5 },
-  { id: 'canary', title: 'Adding a restore test file', weight: 6 },
-  { id: 'tasks', title: 'Scheduling daily backups', weight: 8 },
+  { id: 'preflight', title: 'Checking your PC and your choices', weight: 6 },
+  { id: 'webview2', title: 'Making sure the display component is there', weight: 6 },
+  { id: 'payload', title: 'Copying Rewindle onto this PC', weight: 12 },
+  { id: 'canary', title: 'Preparing the restore test file', weight: 4 },
+  { id: 'credential', title: 'Creating your encryption password', weight: 4 },
+  { id: 'repository', title: 'Creating the backup location', weight: 14 },
+  { id: 'recovery_key', title: 'Writing your recovery key', weight: 5 },
+  { id: 'permissions', title: 'Protecting Rewindle’s files', weight: 6 },
+  { id: 'tasks', title: 'Scheduling the daily backup', weight: 8 },
   { id: 'dashboard', title: 'Setting up the Rewindle app', weight: 6 },
-  { id: 'verification', title: 'Checking that everything works', weight: 16 },
+  { id: 'verification', title: 'Checking that everything works', weight: 15 },
   { id: 'first_backup', title: 'Starting your first backup', weight: 8 },
 ];
 
-// The uninstaller reports with the same schema; its phase names are its own, so they are shown with the titles it sends.
-export const UNINSTALL_FALLBACK_TITLE = 'Removing Rewindle';
+/** The uninstaller's phases (section 4 of the contract). The last two may be skipped when there is nothing to remove. */
+export const UNINSTALL_PHASES: readonly { id: string; title: string; weight: number }[] = [
+  { id: 'preflight', title: 'Checking what is installed', weight: 8 },
+  { id: 'stop', title: 'Stopping Rewindle', weight: 14 },
+  { id: 'tasks', title: 'Removing the scheduled backups', weight: 14 },
+  { id: 'program_files', title: 'Removing the Rewindle program files', weight: 30 },
+  { id: 'shortcut', title: 'Removing the Start menu shortcut', weight: 6 },
+  { id: 'registration', title: 'Removing Rewindle from Installed apps', weight: 8 },
+  { id: 'verification', title: 'Checking that Rewindle was removed', weight: 20 },
+];
+
+/** Plain sentences for the codes a drive's `ineligible_reason` can be, for when the installer sent no sentence of its own. */
+const INELIGIBLE_TEXT: Record<string, string> = {
+  network_drive: 'Network drives can’t hold backups.',
+  optical_drive: 'Discs can’t hold backups that change every day.',
+  ram_disk: 'A RAM disk is emptied when the PC restarts.',
+  unknown_drive_type: 'Windows doesn’t say what kind of drive this is.',
+  not_ready: 'This drive isn’t ready. Check that it is connected and unlocked.',
+  not_ntfs: 'Backups need a drive formatted as NTFS.',
+  low_free_space: 'This drive doesn’t have enough free space.',
+};
+
+/** Why a drive can't be used, in words for the person. */
+export function ineligibleText(volume: PlanVolume): string {
+  return volume.ineligibleMessage ?? (volume.ineligibleReason ? INELIGIBLE_TEXT[volume.ineligibleReason] : undefined) ?? 'Backups can’t be kept on this drive.';
+}
 
 const FIELDS: readonly IssueField[] = ['repository', 'sources', 'schedule', 'storage_mode', 'environment'];
 const DRIVE_TYPES: readonly DriveType[] = ['fixed', 'removable', 'network', 'cdrom', 'ram', 'unknown'];
@@ -160,6 +199,8 @@ function issues(value: unknown): PlanIssue[] {
     // An issue about a field the wizard does not know is shown with the environment's: on the first screen, never lost.
     field: FIELDS.includes(item.field as IssueField) ? item.field as IssueField : 'environment',
     message: text(item.message, 'The installer reported a problem without describing it.'),
+    path: textOrNull(item.path),
+    detail: textOrNull(item.detail),
   }));
 }
 
@@ -175,6 +216,7 @@ function volumes(value: unknown): PlanVolume[] {
     sameDiskAsSystem: bool(item.same_physical_disk_as_system),
     eligible: bool(item.eligible),
     ineligibleReason: textOrNull(item.ineligible_reason),
+    ineligibleMessage: textOrNull(item.ineligible_message),
     recommended: bool(item.recommended),
   }));
 }
@@ -253,9 +295,13 @@ export function parseProgressLine(raw: unknown): ProgressLine | null {
         error,
         installRoot: textOrNull(raw.install_root),
         recoveryKeyPath: textOrNull(raw.recovery_key_path),
-        recoveryKeyReadableByUser: bool(raw.recovery_key_readable_by_user, false),
+        recoveryKeyReadableByUser: typeof raw.recovery_key_readable_by_user === 'boolean' ? raw.recovery_key_readable_by_user : null,
         dashboardExecutable: textOrNull(raw.dashboard_executable),
         version: textOrNull(raw.version),
+        warnings: list(raw.warnings).filter(isObject).map(item => ({ code: text(item.code, 'unknown'), message: text(item.message) })),
+        kept: isObject(raw.kept)
+          ? { stateRoot: textOrNull(raw.kept.state_root), repository: textOrNull(raw.kept.repository), recoveryKey: textOrNull(raw.kept.recovery_key), recoveryTools: textOrNull(raw.kept.recovery_tools) }
+          : null,
       },
     };
   }

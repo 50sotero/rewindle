@@ -10,7 +10,7 @@ import LoadingState from '@/components/primitives/LoadingState';
 import { issuesFor, SCHEDULE_PATTERN } from './contract';
 import { formatBytes, plural } from './format';
 import { ConfirmDialog, ShieldIcon, Spinner } from './ui';
-import { CHOICE_STEPS, STEPS, selectedPaths, selectedTotal, useWizard, type Screen, type Wizard } from './useWizard';
+import { CHOICE_STEPS, STEPS, phaseTitle, selectedPaths, selectedTotal, useWizard, type Screen, type Wizard } from './useWizard';
 import { Welcome } from './screens/Welcome';
 import { Folders } from './screens/Folders';
 import { Location } from './screens/Location';
@@ -52,7 +52,7 @@ function headerFor(wizard: Wizard): Header {
     case 'uninstalling':
       if (outcome === 'cancelled') return { title: 'Rewindle wasn’t removed' };
       if (outcome === 'failed') return { title: 'Rewindle couldn’t be removed' };
-      return { title: 'Removing Rewindle' };
+      return { title: 'Removing Rewindle', lead: operation?.reinstall ? 'Next, Setup takes you through the steps again.' : undefined };
     case 'uninstalled': return { title: 'Rewindle was removed' };
     default: return { title: 'Rewindle Setup' };
   }
@@ -70,6 +70,7 @@ export default function SetupApp() {
   const { screen, choices, operation } = wizard;
   const [recovery, setRecovery] = useState<RecoveryState>({ acknowledged: false, savedTo: null });
   const [confirmUninstall, setConfirmUninstall] = useState(false);
+  const [confirmReinstall, setConfirmReinstall] = useState(false);
   const [confirmSkip, setConfirmSkip] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
   const [spoken, setSpoken] = useState({ polite: '', assertive: '' });
@@ -107,7 +108,14 @@ export default function SetupApp() {
       case 'hostError': return { back: closeAction(), next: { label: 'Try again', icon: <RotateCcw size={15} aria-hidden="true" />, onClick: wizard.actions.retry, variant: 'primary' } };
       case 'unsupported': return { next: closeAction('primary') };
       case 'maintenance': return { next: closeAction() };
-      case 'welcome': return { back: wizard.maintenance ? back('maintenance') : { ...back('welcome'), disabled: true }, next: next('folders') };
+      case 'welcome': {
+        // A problem with the PC itself (not with a choice) is told on this page, and there is no point going on until it is fixed.
+        const blocked = issuesFor(plan, 'environment').errors.length > 0;
+        return {
+          back: wizard.maintenance ? back('maintenance') : { ...back('welcome'), disabled: true }, next: next('folders', blocked),
+          hint: blocked ? 'Fix the problem above to continue' : undefined,
+        };
+      }
       case 'folders': {
         const total = selectedTotal(choices!, wizard.sizes);
         const count = selectedPaths(choices!).length;
@@ -216,7 +224,7 @@ export default function SetupApp() {
     const key = latest ? `${latest.phase}:${latest.state}` : operation.stage;
     if (key === lastPhase.current) return;
     lastPhase.current = key;
-    const text = latest ? `${latest.title}${latest.state === 'completed' ? ', done' : latest.state === 'started' ? '…' : latest.state === 'skipped' ? ', not needed' : ', failed'}`
+    const text = latest ? `${phaseTitle(operation.operation, latest.phase, latest.title)}${latest.state === 'completed' ? ', done' : latest.state === 'started' ? '…' : latest.state === 'skipped' ? ', not needed' : ', failed'}`
       : operation.stage === 'elevating' ? 'Waiting for permission. Choose Yes in the Windows prompt.' : '';
     setSpoken({ polite: text, assertive: '' });
   }, [operation]);
@@ -230,7 +238,7 @@ export default function SetupApp() {
     switch (screen) {
       case 'hostError': return <HostError wizard={wizard} />;
       case 'unsupported': return <Unsupported wizard={wizard} />;
-      case 'maintenance': return <Maintenance wizard={wizard} onReinstall={() => wizard.goTo('welcome')} onUninstall={() => setConfirmUninstall(true)} openDashboard={() => void openDashboard()} />;
+      case 'maintenance': return <Maintenance wizard={wizard} onReinstall={() => setConfirmReinstall(true)} onUninstall={() => setConfirmUninstall(true)} openDashboard={() => void openDashboard()} />;
       case 'welcome': return <Welcome wizard={wizard} />;
       case 'folders': return <Folders wizard={wizard} />;
       case 'location': return <Location wizard={wizard} />;
@@ -345,6 +353,11 @@ export default function SetupApp() {
           onCancel={() => setConfirmUninstall(false)} onConfirm={() => { setConfirmUninstall(false); void wizard.uninstall(); }}>
           <p>This removes the Rewindle app, its scheduled backups, the Start menu shortcut and its entry in Installed apps. A backup that is running is stopped.</p>
           <p><strong>Your backups and recovery key are kept</strong>, so you can still restore files or install Rewindle again. Windows will ask for permission.</p>
+        </ConfirmDialog>
+        <ConfirmDialog open={confirmReinstall} title="Set up Rewindle again?" confirm="Remove and set up again" cancel="Keep Rewindle" confirmIcon={<ShieldIcon size={15} />}
+          onCancel={() => setConfirmReinstall(false)} onConfirm={() => { setConfirmReinstall(false); void wizard.reinstall(); }}>
+          <p>Setup removes the Rewindle app and its scheduled backups first, then takes you through the setup steps again. Windows asks for permission for each part.</p>
+          <p><strong>Your backups and recovery key are kept.</strong> Choose the same backup location in the steps to carry on with them.</p>
         </ConfirmDialog>
         <ConfirmDialog open={confirmSkip} title="Skip saving your recovery key?" confirm="Skip for now" cancel="Go back"
           onCancel={() => setConfirmSkip(false)} onConfirm={() => { setConfirmSkip(false); wizard.goTo('done'); }}>

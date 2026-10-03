@@ -56,12 +56,20 @@ export function installSetupSampleBridge(): void {
   const volumesNow = () => spareDriveConnected && sample.name === 'no-second-drive' ? [...sample.volumes, SPARE_DRIVE] : sample.volumes;
   const volumeOf = (path: string) => volumesNow().find(volume => volume.root.toLowerCase() === rootOf(path).toLowerCase());
   const exists = (path: string) => !sample.missing.includes(lower(path));
+  // Whether the sample has been uninstalled: a reinstall starts from a PC without Rewindle on it.
+  let uninstalled = false;
+  const existingNow = () => uninstalled ? { ...sample.existing, rewindle: null } : sample.existing;
 
   // The checks the real installer makes in plan mode, imitated closely enough to show every message the wizard can get.
+  type Finding = { code: string; field: string; message: string; path: string | null; detail: string | null };
+  const finding = (code: string, field: string, message: string, path: string | null = null): Finding => ({ code, field, message, path, detail: null });
+
   function plan(inputs: Payload) {
-    const errors: { code: string; field: string; message: string }[] = [];
-    const warnings: { code: string; field: string; message: string }[] = [];
-    for (const error of sample.environmentErrors ?? []) errors.push({ ...error, field: 'environment' });
+    const errors: Finding[] = [];
+    const warnings: Finding[] = [];
+    for (const error of sample.environmentErrors ?? []) errors.push(finding(error.code, 'environment', error.message));
+    // While Rewindle is installed the installer refuses a second installation (this alpha does not upgrade in place).
+    if (existingNow().rewindle) errors.push(finding('already_installed', 'environment', 'Rewindle is already installed on this PC. Remove it first; your backups and recovery key are kept.', 'C:\\Program Files\\ResticBackuper'));
 
     const mode = inputs?.storageMode === 'google_drivefs_stream' ? 'google_drivefs_stream' : 'local_ntfs';
     const repository = typeof inputs?.repository === 'string' ? inputs.repository : sample.defaultRepository;
@@ -70,55 +78,51 @@ export function installSetupSampleBridge(): void {
     const schedule = typeof inputs?.schedule === 'string' ? inputs.schedule : '02:00';
 
     if (inputs && typeof inputs.schedule === 'string' && !/^([01]\d|2[0-3]):[0-5]\d$/.test(schedule)) {
-      errors.push({ code: 'schedule_invalid', field: 'schedule', message: 'Choose a time between 00:00 and 23:59.' });
+      errors.push(finding('schedule_invalid', 'schedule', 'Choose a time between 00:00 and 23:59.'));
     }
     if (mode === 'google_drivefs_stream') {
       if (!sample.drivefs.detected) {
-        errors.push({ code: 'drivefs_missing', field: 'storage_mode', message: 'Google Drive for desktop isn’t running on this PC.' });
+        errors.push(finding('drivefs_not_running', 'storage_mode', 'Google Drive for desktop isn’t running on this PC.'));
       }
     } else if (repository) {
       const volume = volumeOf(repository);
       if (!volume) {
-        errors.push({ code: 'repository_drive_missing', field: 'repository', message: `There is no drive ${rootOf(repository) || 'with that name'} on this PC.` });
+        errors.push(finding('repository_drive_unavailable', 'repository', `There is no drive ${rootOf(repository) || 'with that name'} on this PC.`, repository));
       } else if (!volume.eligible) {
-        errors.push({ code: 'repository_drive_ineligible', field: 'repository', message: volume.ineligible_reason ?? 'Backups can’t be kept on this drive.' });
+        errors.push(finding(volume.ineligible_reason === 'not_ntfs' ? 'repository_not_ntfs' : 'repository_drive_unavailable', 'repository', volume.ineligible_message ?? 'Backups can’t be kept on this drive.', volume.root));
       } else {
         if (volume.free_bytes < MINIMUM_FREE) {
-          errors.push({ code: 'repository_low_space', field: 'repository', message: `${volume.root} has less than 10 GB free. Backups need at least 10 GB of room to start.` });
+          errors.push(finding('repository_low_space', 'repository', `${volume.root} has less than 10 GB free. Backups need at least 10 GB of room to start.`, volume.root));
         }
         if (sample.nonEmpty.includes(lower(repository))) {
-          errors.push({ code: 'repository_not_empty', field: 'repository', message: 'This folder already has files in it that aren’t a Rewindle backup. Choose an empty folder or a new one.' });
+          errors.push(finding('repository_not_empty', 'repository', 'This folder already has files in it that aren’t a Rewindle backup. Choose an empty folder or a new one.', repository));
         }
         if (volume.is_system) {
-          warnings.push({ code: 'repository_on_system_drive', field: 'repository', message: 'Your backups would be on the same drive as Windows. If that drive fails, you lose your files and their backups together.' });
+          warnings.push(finding('repository_on_system_disk', 'repository', 'Your backups would be on the same drive as Windows. If that drive fails, you lose your files and their backups together.', repository));
         } else if (volume.same_physical_disk_as_system) {
-          warnings.push({ code: 'repository_same_physical_disk', field: 'repository', message: 'This drive is part of the same physical disk as Windows. If that disk fails, your files and their backups are lost together.' });
+          warnings.push(finding('repository_on_system_disk', 'repository', 'This drive is part of the same physical disk as Windows. If that disk fails, your files and their backups are lost together.', repository));
         }
       }
     }
 
     if (inputs && sources.length === 0) {
-      errors.push({ code: 'sources_empty', field: 'sources', message: 'Choose at least one folder to protect.' });
+      errors.push(finding('sources_required', 'sources', 'Choose at least one folder to protect.'));
     }
     sources.forEach((source, index) => {
       const name = source.split('\\').pop();
       if (!exists(source)) {
-        errors.push({ code: 'source_missing', field: 'sources', message: `“${name}” can’t be found. It may have been moved or deleted (${source}).` });
+        errors.push(finding('source_not_found', 'sources', `“${name}” can’t be found. It may have been moved or deleted (${source}).`, source));
       }
       const parent = sources.find((other, otherIndex) => otherIndex !== index && within(source, other) && lower(source) !== lower(other));
       if (parent) {
-        errors.push({ code: 'source_overlap', field: 'sources', message: `“${name}” is inside “${parent.split('\\').pop()}”, which is already protected. Remove one of them.` });
+        errors.push(finding('sources_overlap', 'sources', `“${name}” is inside “${parent.split('\\').pop()}”, which is already protected. Remove one of them.`, source));
       }
       if (repository && mode === 'local_ntfs' && (within(source, repository) || within(repository, source))) {
-        errors.push({ code: 'source_overlaps_repository', field: 'sources', message: `“${name}” and your backup location overlap. Backups can’t be kept inside a folder they protect.` });
+        errors.push(finding('source_overlaps_repository', 'sources', `“${name}” and your backup location overlap. Backups can’t be kept inside a folder they protect.`, source));
       }
       const volume = volumeOf(source);
       if (vss && volume && (volume.drive_type !== 'fixed' || volume.filesystem !== 'NTFS')) {
-        errors.push({ code: 'source_needs_vss_off', field: 'sources', message: `“${name}” is on a removable drive. To include it, turn off “Back up files that are open” under When to back up › Advanced.` });
-      }
-      const measured = sample.sizes[lower(source)];
-      if (measured?.placeholderFiles) {
-        warnings.push({ code: 'source_cloud_placeholders', field: 'sources', message: `${measured.placeholderFiles.toLocaleString()} files in “${name}” are online-only (OneDrive). Rewindle can’t back up online-only files, so backups of this folder stop until they are kept on this PC.` });
+        errors.push(finding('source_vss_unsupported', 'sources', `“${name}” is on a removable drive. To include it, turn off “Back up files that are open” under When to back up › Advanced.`, source));
       }
     });
 
@@ -146,7 +150,7 @@ export function installSetupSampleBridge(): void {
         dotnet_framework_48: sample.dotnet,
         elevated: false,
         webview2: '141.0.3537.71',
-        existing_install: sample.existing,
+        existing_install: existingNow(),
         volumes: volumesNow(),
         drivefs: sample.drivefs,
         known_folders: sample.knownFolders,
@@ -214,46 +218,62 @@ export function installSetupSampleBridge(): void {
     job.elevated = true;
     stage('running');
 
+    // The installer's own phases and titles, as docs/setup-contract.md lists them (the wizard shows its own plainer words for them).
     const steps: [string, string, number, ('skipped' | 'fail')?, string?][] = kind === 'install' ? [
-      ['preflight', 'Checking this PC', 700],
-      ['webview2', 'Microsoft Edge WebView2 is already installed', 250, 'skipped'],
-      ['payload', 'Copying Rewindle to Program Files', 1100],
-      ['permissions', 'Protecting Rewindle’s files', 600],
-      ['credential', 'Creating your encryption password', 500],
-      ['repository', 'Preparing your backup location', 1500, sample.install === 'failure' ? 'fail' : undefined, 'The drive E: stopped responding while the backup location was being prepared.'],
-      ['recovery_key', 'Saving your recovery key', 500],
-      ['canary', 'Adding a restore test file', 600],
-      ['tasks', 'Scheduling daily backups', 800],
-      ['dashboard', 'Setting up the Rewindle app', 700],
-      ['verification', 'Checking that everything works', 1600],
-      ['first_backup', 'Starting your first backup', 800, choices?.startBackup === false ? 'skipped' : undefined],
+      ['preflight', 'Checking your PC and the choices you made', 700],
+      ['webview2', 'Making sure Microsoft Edge WebView2 is available', 250],
+      ['payload', 'Copying Rewindle onto this PC', 1100],
+      ['canary', 'Preparing the restore test file', 500],
+      ['credential', 'Creating the backup password and storing it for your account', 500],
+      ['repository', 'Creating the encrypted backup repository', 1500, sample.install === 'failure' ? 'fail' : undefined,
+        'The drive E: stopped responding while the backup location was being prepared. Setup removed what it had installed and kept the repository and recovery key.'],
+      ['recovery_key', 'Writing your recovery key', 500],
+      ['permissions', 'Locking the Rewindle folders so only administrators can change them', 600],
+      ['tasks', 'Scheduling the daily backup and registering Rewindle with Windows', 800],
+      ['dashboard', 'Setting up the Rewindle dashboard', 700],
+      ['verification', 'Checking that everything was installed correctly', 1600],
+      ['first_backup', 'Starting the first backup', 800, choices?.startBackup === false ? 'skipped' : undefined],
     ] : [
-      ['preflight', 'Checking the installed copy', 700],
-      ['tasks', 'Removing scheduled backups', 900],
-      ['dashboard', 'Closing and removing the Rewindle app', 900],
-      ['payload', 'Removing program files', 1200],
-      ['verification', 'Checking that Rewindle is removed', 800],
+      ['preflight', 'Checking what is installed', 700],
+      ['stop', 'Stopping Rewindle', 900],
+      ['tasks', 'Removing the scheduled tasks', 900],
+      ['program_files', 'Removing the Rewindle program files', 1200],
+      ['shortcut', 'Removing the Start menu shortcut', 400],
+      ['registration', 'Removing Rewindle from Installed apps', 400],
+      ['verification', 'Checking that Rewindle was removed', 800],
     ];
+    const KEY_PATH = `${HOME}\\ResticBackuper-RecoveryKey.txt`;
     for (const [phase, title, duration, outcome, failure] of steps) {
       if (outcome === 'skipped') { line({ phase, state: 'skipped', title }); await wait(duration); continue; }
       line({ phase, state: 'started', title });
       await wait(duration);
       if (outcome === 'fail') {
         line({ phase, state: 'failed', title, detail: failure ?? null });
-        line({ type: 'result', ok: false, error: { code: 'repository_prepare_failed', message: failure }, install_root: null, recovery_key_path: null, recovery_key_readable_by_user: false, dashboard_executable: null, version: '0.2.0-alpha.1' });
+        const failed = { type: 'result', ok: false, error: { code: 'repository_initialization_failed', message: failure, detail: null }, install_root: null, recovery_key_path: null, recovery_key_readable_by_user: null, dashboard_executable: null, version: '0.2.0-alpha.1', warnings: [] };
+        line(failed);
         await wait(300);
-        return finish('failed', failure ?? 'Setup could not finish.', { type: 'result', ok: false, error: { code: 'repository_prepare_failed', message: failure } }, 1);
+        return finish('failed', failure ?? 'Setup could not finish.', failed, 1);
       }
-      line({ phase, state: 'completed', title, detail: phase === 'first_backup' ? 'Your first backup is running in the background.' : null });
+      line({
+        phase, state: 'completed', title,
+        detail: phase === 'webview2' ? 'Already installed' : phase === 'repository' ? 'Created a new repository' : phase === 'first_backup' ? 'Your first backup is running in the background.' : null,
+      });
     }
     const result = kind === 'install' ? {
       type: 'result', ok: true, error: null, install_root: 'C:\\Program Files\\ResticBackuper',
-      recovery_key_path: `${HOME}\\ResticBackuper-RecoveryKey.txt`,
+      recovery_key_path: KEY_PATH,
       recovery_key_readable_by_user: sample.install !== 'key-unreadable',
       dashboard_executable: 'C:\\Program Files\\ResticBackuper\\ResticBackuperDashboard.exe', version: '0.2.0-alpha.1',
-    } : { type: 'result', ok: true, error: null, install_root: null, recovery_key_path: null, recovery_key_readable_by_user: false, dashboard_executable: null, version: '0.2.0-alpha.1' };
+      warnings: sample.install === 'key-unreadable' ? [{ code: 'recovery_key_not_readable_by_user', message: 'The recovery key can only be opened by administrators.' }] : [],
+    } : {
+      type: 'result', ok: true, error: null, operation: 'uninstall', install_root: 'C:\\Program Files\\ResticBackuper',
+      removed: { install_root: true, scheduled_tasks: ['ResticBackuper', 'ResticBackuperDashboard'], start_menu_shortcut: true, installed_apps_entry: true },
+      kept: { state_root: 'C:\\ProgramData\\ResticBackuper', repository: sample.defaultRepository, recovery_key: KEY_PATH, recovery_tools: sample.defaultRepository ? `${sample.defaultRepository.replace(/\\[^\\]*$/, '')}\\RecoveryTools` : null, cloud_verification_root: null },
+      warnings: [],
+    };
     line(result);
     await wait(250);
+    if (kind === 'uninstall') uninstalled = true;
     finish('succeeded', '', result, 0);
   }
 

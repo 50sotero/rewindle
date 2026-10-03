@@ -354,9 +354,11 @@ namespace Rewindle.Setup.Tests
             ProgressLine phase = InstallerContract.ReadProgressLine("{\"schema\":\"Rewindle.InstallProgress.v1\",\"seq\":1,\"type\":\"phase\",\"phase\":\"payload\",\"state\":\"started\"}");
             Check(phase.Fields != null && !phase.IsResult, "a phase line is an object, not a result");
             ProgressLine ok = InstallerContract.ReadProgressLine("{\"type\":\"result\",\"ok\":true,\"error\":null,\"recovery_key_path\":\"C:\\\\Users\\\\you\\\\key.txt\",\"recovery_key_readable_by_user\":true,\"dashboard_executable\":\"C:\\\\Program Files\\\\ResticBackuper\\\\ResticBackuperDashboard.exe\",\"install_root\":\"C:\\\\Program Files\\\\ResticBackuper\"}");
-            Check(ok.IsResult && ok.ResultOk && ok.RecoveryKeyReadableByUser && ok.RecoveryKeyPath == @"C:\Users\you\key.txt", "a successful result line");
+            Check(ok.IsResult && ok.ResultOk && ok.RecoveryKeyReadableByUser == true && ok.RecoveryKeyPath == @"C:\Users\you\key.txt", "a successful result line");
             ProgressLine failed = InstallerContract.ReadProgressLine("{\"type\":\"result\",\"ok\":false,\"error\":{\"code\":\"x\",\"message\":\"It broke.\"}}");
             Check(failed.IsResult && !failed.ResultOk && failed.ResultErrorMessage == "It broke.", "a failed result line");
+            ProgressLine unknown = InstallerContract.ReadProgressLine("{\"type\":\"result\",\"ok\":true,\"error\":null,\"recovery_key_path\":\"C:\\\\k.txt\",\"recovery_key_readable_by_user\":null}");
+            Check(unknown.ResultOk && unknown.RecoveryKeyReadableByUser == null, "a readable-by-user answer of null stays unknown, not false");
             ProgressLine contradictory = InstallerContract.ReadProgressLine("{\"type\":\"result\",\"ok\":true,\"error\":{\"code\":\"x\",\"message\":\"no\"}}");
             Check(!contradictory.ResultOk, "ok:true with an error object is a failure");
             ProgressLine junk = InstallerContract.ReadProgressLine("WARNING: something printed text into the file");

@@ -3,9 +3,11 @@ param(
     # Where the screenshots and the step log go.
     [Parameter(Mandatory = $true)][string]$Output,
     [ValidateSet('light', 'dark')][string[]]$Theme = @('light', 'dark'),
+    # Draws the pages as Windows' High Contrast does (the web view's forced-colors mode).
+    [switch]$ForcedColors,
     # happy: a whole install. plan-failure: the first check of the PC fails and "Try again" goes through. install-failure: the installer
-    # reports a failure part-way. declined: the first Windows prompt is declined and "Try again" goes through. all: the four.
-    [ValidateSet('happy', 'plan-failure', 'install-failure', 'declined', 'all')][string[]]$Case = @('happy'),
+    # reports a failure part-way. declined: the first Windows prompt is declined and "Try again" goes through. runtime-missing: the window opens as on a PC without the WebView2 Runtime. all: every case.
+    [ValidateSet('happy', 'plan-failure', 'install-failure', 'declined', 'runtime-missing', 'all')][string[]]$Case = @('happy'),
     # The window's size in device-independent pixels.
     [double]$Width = 960,
     [double]$Height = 680,
@@ -81,7 +83,7 @@ try {
     Copy-Item -LiteralPath $webView.CoreAssembly, $webView.WpfAssembly, $webView.LoaderDll -Destination $libraries
 
     New-Item -ItemType Directory -Path $Output -Force | Out-Null
-    $cases = if ($Case -contains 'all') { @('happy', 'plan-failure', 'install-failure', 'declined') } else { $Case }
+    $cases = if ($Case -contains 'all') { @('happy', 'plan-failure', 'install-failure', 'declined', 'runtime-missing') } else { $Case }
     foreach ($caseName in $cases) {
     foreach ($name in $Theme) {
         $process = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @(
@@ -91,6 +93,7 @@ try {
             '--out', ('"' + [IO.Path]::GetFullPath($Output) + '"'),
             '--theme', $name,
             '--case', $caseName,
+            '--forced-colors', $(if ($ForcedColors) { 'yes' } else { 'no' }),
             '--width', $Width.ToString([Globalization.CultureInfo]::InvariantCulture),
             '--height', $Height.ToString([Globalization.CultureInfo]::InvariantCulture)
         )

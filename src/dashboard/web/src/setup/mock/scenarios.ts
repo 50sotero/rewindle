@@ -21,7 +21,7 @@ export const HOME = 'C:\\Users\\you';
 
 export interface SampleVolume {
   root: string; label: string; filesystem: string; drive_type: string; size_bytes: number; free_bytes: number;
-  is_system: boolean; same_physical_disk_as_system: boolean; eligible: boolean; ineligible_reason: string | null; recommended: boolean;
+  is_system: boolean; same_physical_disk_as_system: boolean; eligible: boolean; ineligible_reason: string | null; ineligible_message: string | null; recommended: boolean;
 }
 
 export interface SampleFolder { bytes: number; files: number; placeholderFiles?: number; placeholderBytes?: number; deniedFolders?: number }
@@ -51,7 +51,7 @@ export interface Scenario {
 
 const volume = (root: string, label: string, sizeGb: number, freeGb: number, extra: Partial<SampleVolume> = {}): SampleVolume => ({
   root, label, filesystem: 'NTFS', drive_type: 'fixed', size_bytes: Math.round(sizeGb * GB), free_bytes: Math.round(freeGb * GB),
-  is_system: false, same_physical_disk_as_system: false, eligible: true, ineligible_reason: null, recommended: false, ...extra,
+  is_system: false, same_physical_disk_as_system: false, eligible: true, ineligible_reason: null, ineligible_message: null, recommended: false, ...extra,
 });
 
 const SYSTEM = volume('C:\\', 'Windows', 476, 182, { is_system: true, same_physical_disk_as_system: true });
@@ -61,14 +61,14 @@ const EXTERNAL = volume('E:\\', 'Backup Drive', 1863, 1652, { drive_type: 'remov
 export const SPARE_DRIVE = EXTERNAL;
 const STICK = volume('F:\\', 'USB STICK', 29, 21, {
   filesystem: 'FAT32', drive_type: 'removable', eligible: false,
-  ineligible_reason: 'This drive uses FAT32. Backups need a drive formatted as NTFS.',
+  ineligible_reason: 'not_ntfs', ineligible_message: 'This drive uses FAT32. Backups need a drive formatted as NTFS.',
 });
 const OPTICAL = volume('H:\\', 'DVD Drive', 0, 0, {
-  filesystem: '', drive_type: 'cdrom', eligible: false, ineligible_reason: 'Discs can’t hold backups that change every day.',
+  filesystem: '', drive_type: 'cdrom', eligible: false, ineligible_reason: 'optical_drive', ineligible_message: 'Discs can’t hold backups that change every day.',
 });
 const DRIVEFS = volume('G:\\', 'Google Drive', 15, 9.2, {
   filesystem: 'FAT32', eligible: false,
-  ineligible_reason: 'This is Google Drive for desktop. Choose “Google Drive” below to keep backups there.',
+  ineligible_reason: 'not_ntfs', ineligible_message: 'This is Google Drive for desktop. Choose “Google Drive” below to keep backups there.',
 });
 
 const KNOWN = ['Desktop', 'Documents', 'Pictures', 'Music', 'Videos', 'Downloads', 'Favorites'];

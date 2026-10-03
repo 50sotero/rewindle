@@ -659,7 +659,8 @@ namespace Rewindle.Setup
         {
             ProgressLine reported = RecoveryKeyReport();
             string id = request.Id;
-            if (!reported.RecoveryKeyReadableByUser)
+            // Only an explicit "no" is taken as the answer; "unknown" is tried, and reading it says so if it cannot be done.
+            if (reported.RecoveryKeyReadableByUser == false)
             {
                 throw new SetupFailure("recovery_key_unreadable", UnreadableKeyMessage);
             }

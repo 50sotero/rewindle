@@ -112,10 +112,21 @@ class InstallerContractTests(unittest.TestCase):
 
     def test_the_phases_the_wizard_lists_are_the_contracts(self) -> None:
         contract_ts = read(WIZARD / "contract.ts")
-        listed = re.findall(r"\{ id: '(\w+)', title:", contract_ts)
+
+        def table(name: str) -> list[str]:
+            block = re.search(rf"export const {name}[^=]*=\s*\[(.*?)\n\];", contract_ts, re.S)
+            self.assertIsNotNone(block, name)
+            return re.findall(r"\{ id: '(\w+)', title:", block.group(1))
+
+        # The order the installer emits them in (docs/setup-contract.md, section 3.3): the restore test file comes before the password and
+        # the folders are locked last of the steps that write.
         self.assertEqual(
-            ["preflight", "webview2", "payload", "permissions", "credential", "repository", "recovery_key", "canary", "tasks", "dashboard", "verification", "first_backup"],
-            listed,
+            ["preflight", "webview2", "payload", "canary", "credential", "repository", "recovery_key", "permissions", "tasks", "dashboard", "verification", "first_backup"],
+            table("INSTALL_PHASES"),
+        )
+        self.assertEqual(
+            ["preflight", "stop", "tasks", "program_files", "shortcut", "registration", "verification"],
+            table("UNINSTALL_PHASES"),
         )
 
     def test_no_command_line_is_built_by_joining_text(self) -> None:

@@ -267,8 +267,11 @@ namespace Rewindle.Setup.Smoke
     {
         private static string outputFolder;
         private static string theme = "light";
-        // happy, plan-failure (the first check of the PC fails), install-failure or declined (the first Windows prompt is declined).
+        // happy, plan-failure (the first check of the PC fails), install-failure, declined (the first Windows prompt is declined) or
+        // runtime-missing (the window opens as on a PC without the WebView2 Runtime).
         private static string scenario = "happy";
+        // Draws the page as Windows' High Contrast makes it (the web view's forced-colors mode), for a look at it.
+        private static bool forcedColors;
         // While true, every check of the PC fails; the plan-failure case turns it off before choosing "Try again".
         internal static volatile bool PlansFail;
         private static readonly List<string> log = new List<string>();
@@ -292,6 +295,7 @@ namespace Rewindle.Setup.Smoke
                     case "--out": outputFolder = args[index + 1]; break;
                     case "--theme": theme = args[index + 1]; break;
                     case "--case": scenario = args[index + 1]; break;
+                    case "--forced-colors": forcedColors = args[index + 1] == "yes"; break;
                     case "--width": width = double.Parse(args[index + 1]); break;
                     case "--height": height = double.Parse(args[index + 1]); break;
                 }
@@ -366,6 +370,10 @@ namespace Rewindle.Setup.Smoke
                 BitmapDecoder decoder = BitmapDecoder.Create(new Uri(iconPath), BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
                 icon = decoder.Frames[0];
             }
+            if (scenario == "runtime-missing")
+            {
+                WebViewRuntime.Probe = delegate { return null; };
+            }
             Application application = new Application();
             application.ShutdownMode = ShutdownMode.OnMainWindowClose;
             SetupWindow window = new SetupWindow(workspace, environment, icon);
@@ -438,8 +446,32 @@ namespace Rewindle.Setup.Smoke
             }
         }
 
+        // The window as it opens on a PC without the WebView2 Runtime: the plain native screen, and no web view.
+        private static async Task DriveMissingRuntime(SetupWindow window)
+        {
+            await Task.Delay(1500);
+            if (ViewOf(window) != null) { throw new InvalidOperationException("A web view was created although the runtime was reported missing."); }
+            log.Add("ok: no web view was created");
+            UIElement content = (UIElement)window.Content;
+            int width = (int)window.ActualWidth;
+            int height = (int)window.ActualHeight;
+            RenderTargetBitmap bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
+            bitmap.Render(content);
+            PngBitmapEncoder encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(bitmap));
+            string file = Path.Combine(outputFolder, "smoke-" + scenario + "-" + theme + "-01-native-runtime-missing.png");
+            using (FileStream stream = File.Create(file)) { encoder.Save(stream); }
+            log.Add("shot: " + file);
+            Console.WriteLine("Wrote " + file);
+        }
+
         private static async Task Drive(SetupWindow window)
         {
+            if (scenario == "runtime-missing")
+            {
+                await DriveMissingRuntime(window);
+                return;
+            }
             PlansFail = scenario == "plan-failure";
             DateTime until = DateTime.UtcNow.AddSeconds(60);
             WebView2 view = null;
@@ -468,6 +500,14 @@ namespace Rewindle.Setup.Smoke
             await Task.Delay(500);
 
             await WaitUntil(view, "document.getElementById('screen-title') && document.getElementById('screen-title').textContent.length > 0", "the first screen", 45000);
+            if (forcedColors)
+            {
+                await view.CoreWebView2.CallDevToolsProtocolMethodAsync(
+                    "Emulation.setEmulatedMedia",
+                    "{\"features\":[{\"name\":\"forced-colors\",\"value\":\"active\"}]}");
+                log.Add("ok: forced colors on");
+                await Task.Delay(500);
+            }
             string title = await Eval(view, "document.getElementById('screen-title').textContent");
             log.Add("first screen: " + title);
             if (scenario == "plan-failure")

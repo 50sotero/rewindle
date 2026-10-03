@@ -9,7 +9,7 @@ export function Done({ wizard }: { wizard: Wizard }) {
   const count = selectedPaths(choices).length;
   const locale = wizard.host?.locale;
   const firstBackup = wizard.operation?.phases.find(phase => phase.phase === 'first_backup');
-  const started = choices.startBackup && firstBackup?.state === 'completed';
+  const started = choices.startBackup && firstBackup?.state === 'completed' && !wizard.operation?.result?.warnings.some(warning => warning.code === 'first_backup_not_started');
   const reduced = wizard.theme?.reducedMotion;
 
   return (

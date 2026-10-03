@@ -1,6 +1,6 @@
 import { Cloud, Disc3, FolderOpen, HardDrive, Info, Network, Usb } from 'lucide-react';
 import { Button } from '@/components/atoms/Button';
-import { issuesFor, type PlanVolume } from '../contract';
+import { ineligibleText, issuesFor, type PlanVolume } from '../contract';
 import { driveLetter, formatBytes, samePath } from '../format';
 import { Callout, IssueList, SpaceBar, Spinner } from '../ui';
 import { selectedTotal, type Wizard } from '../useWizard';
@@ -70,7 +70,7 @@ export function Location({ wizard }: { wizard: Wizard }) {
                     <span className="drive-meta" id={`drive-${volume.root[0]}-detail`}>{free}{volume.filesystem && volume.filesystem !== 'NTFS' ? ` · ${volume.filesystem}` : ''}</span>
                   </>
                 ) : (
-                  <span className="drive-meta" id={`drive-${volume.root[0]}-detail`}>{volume.ineligibleReason ?? 'Backups can’t be kept on this drive.'}</span>
+                  <span className="drive-meta" id={`drive-${volume.root[0]}-detail`}>{ineligibleText(volume)}</span>
                 )}
               </span>
               <span className="radio-dot" aria-hidden="true" />

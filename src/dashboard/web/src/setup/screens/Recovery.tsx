@@ -16,7 +16,8 @@ export interface RecoveryState { acknowledged: boolean; savedTo: string | null }
 export function Recovery({ wizard, state, onChange }: { wizard: Wizard; state: RecoveryState; onChange: (next: RecoveryState) => void }) {
   const result = wizard.operation?.result;
   const path = result?.recoveryKeyPath ?? null;
-  const readable = result?.recoveryKeyReadableByUser ?? false;
+  // Only an explicit "no" from the installer means the copy can't be made here; "unknown" is tried, and says so if it fails.
+  const readable = result?.recoveryKeyReadableByUser !== false;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
