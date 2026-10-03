@@ -10,16 +10,16 @@ const ICONS: Record<KnownFolderKey, ComponentType<{ size?: number; 'aria-hidden'
   Desktop: Monitor, Documents: FileText, Pictures: Image, Music, Videos: Clapperboard, Downloads: Download, Favorites: Star,
 };
 
-function SizeLine({ size, exists, locale }: { size?: FolderSize; exists: boolean; locale?: string }) {
+/** A folder's size as it is measured: a spinner, then the total. `compact` leaves out the number of files (it goes in the tooltip). */
+function SizeLine({ size, exists, locale, compact }: { size?: FolderSize; exists: boolean; locale?: string; compact?: boolean }) {
   if (!exists) return <span className="size-line is-muted">Not on this PC</span>;
   if (!size) return <span className="size-line is-muted"><Spinner size={12} /> Measuring…</span>;
   if (size.error) return <span className="size-line is-muted">{size.error}</span>;
   return (
-    <span className="size-line">
+    <span className="size-line" title={`${plural(size.files, 'file', 'files')}${size.done ? '' : ' so far'}`}>
       {!size.done && <Spinner size={12} />}
       <span>{formatBytes(size.bytes, locale)}</span>
-      <span className="size-dot" aria-hidden="true">·</span>
-      <span>{plural(size.files, 'file', 'files')}{!size.done && '…'}</span>
+      {!compact && <><span className="size-dot" aria-hidden="true">·</span><span>{plural(size.files, 'file', 'files')}{!size.done && '…'}</span></>}
     </span>
   );
 }
@@ -35,7 +35,7 @@ function FolderCard({ folder, size, onToggle, locale }: { folder: FolderChoice; 
       <span className="folder-card-icon"><Icon size={18} aria-hidden={true} /></span>
       <span className="folder-card-text">
         <strong>{name}</strong>
-        <span id={sizeId}><SizeLine size={size} exists={folder.exists} locale={locale} /></span>
+        <span id={sizeId}><SizeLine size={size} exists={folder.exists} locale={locale} compact /></span>
       </span>
       <span className="check-box" aria-hidden="true">{folder.selected && <Check size={13} strokeWidth={3} />}</span>
     </button>

@@ -24,8 +24,15 @@ namespace Rewindle.Setup
     {
         private const string PersonalizeKey = @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
 
+        // Set only by the tests that open the window, to see it in a theme other than the one Windows is set to.
+        internal static ThemeState Override { get; set; }
+
         public static ThemeState Read()
         {
+            if (Override != null)
+            {
+                return Override;
+            }
             ThemeState state = new ThemeState();
             state.HighContrast = SystemParameters.HighContrast;
             // "Show animations in Windows" off is the Windows setting for reduced motion.

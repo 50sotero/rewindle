@@ -1,4 +1,4 @@
-import { CircleSlash, ExternalLink, Trash2, WifiOff } from 'lucide-react';
+import { ExternalLink, Trash2, WifiOff } from 'lucide-react';
 import { issuesFor } from '../contract';
 import { Callout, IssueList } from '../ui';
 import type { Wizard } from '../useWizard';
@@ -15,7 +15,6 @@ export function Unsupported({ wizard }: { wizard: Wizard }) {
   const shown = errors.length > 0 ? [] : reasons;
   return (
     <div className="screen-stack">
-      <div className="blocked-emblem"><CircleSlash size={28} aria-hidden="true" /></div>
       {shown.length > 0 && (
         <ul className="reason-list">
           {shown.map(reason => <li key={reason}>{reason}</li>)}

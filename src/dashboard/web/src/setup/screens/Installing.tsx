@@ -38,17 +38,27 @@ export function OperationView({ wizard, operation }: { wizard: Wizard; operation
   const [details, setDetails] = useState(false);
   const [copied, setCopied] = useState(false);
   const log = useRef<HTMLPreElement>(null);
-  const phases = listedPhases(operation);
+  const finished = operation.finished;
+  const failed = !!finished && finished.outcome !== 'succeeded';
+  const allPhases = listedPhases(operation);
+  // After a failure or a cancellation the list says what happened, so the steps that never ran are left out.
+  const phases = failed ? allPhases.filter(phase => phase.state !== 'pending') : allPhases;
   const progress = operationProgress(operation);
   const percent = Math.round(progress * 100);
   const current = [...phases].reverse().find(phase => phase.state === 'started');
-  const finished = operation.finished;
-  const failed = finished && finished.outcome !== 'succeeded';
   const uninstall = operation.operation === 'uninstall';
 
   useEffect(() => {
     if (details && log.current) log.current.scrollTop = log.current.scrollHeight;
   }, [details, operation.lines.length]);
+
+  // The step that is running stays in view when the list is longer than the window.
+  const currentId = current?.id;
+  const reduced = wizard.theme?.reducedMotion ?? false;
+  useEffect(() => {
+    if (!currentId) return;
+    document.querySelector('.phase[data-state="started"]')?.scrollIntoView({ block: 'nearest', behavior: reduced ? 'auto' : 'smooth' });
+  }, [currentId, reduced]);
 
   const copyDetails = async () => {
     const header = [
@@ -91,7 +101,7 @@ export function OperationView({ wizard, operation }: { wizard: Wizard; operation
         </div>
       )}
 
-      {failed && finished && <FailureNotice wizard={wizard} operation={operation} />}
+      {failed && finished && <FailureNotice wizard={wizard} operation={operation} onCopy={() => void copyDetails()} copied={copied} />}
 
       {(phases.length > 0 || operation.stage === 'running') && (
         <ol className="phase-list" aria-label={uninstall ? 'Uninstall steps' : 'Install steps'}>
@@ -114,7 +124,7 @@ export function OperationView({ wizard, operation }: { wizard: Wizard; operation
             <button type="button" className="advanced-toggle" aria-expanded={details} aria-controls="install-details" onClick={() => setDetails(value => !value)}>
               <ChevronDown size={16} aria-hidden="true" className="advanced-chevron" />Details
             </button>
-            <Button size="sm" variant="quiet" onClick={() => void copyDetails()}><Copy size={13} aria-hidden="true" />{copied ? 'Copied' : 'Copy details'}</Button>
+            {!failed && <Button size="sm" variant="quiet" onClick={() => void copyDetails()}><Copy size={13} aria-hidden="true" />{copied ? 'Copied' : 'Copy details'}</Button>}
           </div>
           {details && <pre id="install-details" ref={log} className="details-log" tabIndex={0} aria-label="Installer messages">{operation.lines.join('\n')}</pre>}
         </div>
@@ -123,7 +133,7 @@ export function OperationView({ wizard, operation }: { wizard: Wizard; operation
   );
 }
 
-function FailureNotice({ wizard, operation }: { wizard: Wizard; operation: OperationState }) {
+function FailureNotice({ wizard, operation, onCopy, copied }: { wizard: Wizard; operation: OperationState; onCopy: () => void; copied: boolean }) {
   const finished = operation.finished!;
   const uninstall = operation.operation === 'uninstall';
   if (finished.outcome === 'cancelled') {
@@ -138,12 +148,14 @@ function FailureNotice({ wizard, operation }: { wizard: Wizard; operation: Opera
   const rollback = uninstall ? null : describeRollback(operation);
   const message = operation.result?.error?.message || finished.message || 'The installer stopped without saying why.';
   return (
-    <Callout tone="error" title={uninstall ? 'Rewindle couldn’t be removed' : 'Setup couldn’t finish'}>
+    <Callout tone="error" title="What went wrong">
       <p className="failure-message">{message}</p>
       {rollback && <p>{rollback.text}</p>}
       {uninstall && <p>Your backups and recovery key were not touched. Try again, or remove Rewindle from Settings › Apps › Installed apps.</p>}
-      <p>Choose <strong>Copy details</strong> to keep the installer’s messages, and{' '}
-        <button type="button" className="text-link" onClick={() => wizard.openLink('issues')}>report the problem</button> if it happens again.</p>
+      <div className="callout-actions">
+        <Button size="sm" onClick={onCopy}><Copy size={13} aria-hidden="true" />{copied ? 'Copied' : 'Copy details'}</Button>
+        <button type="button" className="text-link" onClick={() => wizard.openLink('issues')}>Report the problem</button>
+      </div>
     </Callout>
   );
 }

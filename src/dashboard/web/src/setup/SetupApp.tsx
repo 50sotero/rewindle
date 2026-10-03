@@ -5,6 +5,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { AnimatePresence, MotionConfig, motion } from 'motion/react';
 import { ArrowLeft, ArrowRight, Check, LayoutDashboard, RotateCcw, X } from 'lucide-react';
 import { Button } from '@/components/atoms/Button';
+import { bridge } from './bridge';
 import LoadingState from '@/components/primitives/LoadingState';
 import { issuesFor, SCHEDULE_PATTERN } from './contract';
 import { formatBytes, plural } from './format';
@@ -73,7 +74,11 @@ export default function SetupApp() {
   const [openError, setOpenError] = useState<string | null>(null);
   const [spoken, setSpoken] = useState({ polite: '', assertive: '' });
   const titleRef = useRef<HTMLHeadingElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const reduced = wizard.theme?.reducedMotion ?? false;
+
+  // Each screen opens at its top, whatever the one before it was scrolled to.
+  useLayoutEffect(() => { scrollRef.current?.scrollTo({ top: 0 }); }, [screen]);
 
   // Theme, contrast and motion, before the frame that shows them.
   useLayoutEffect(() => {
@@ -163,6 +168,24 @@ export default function SetupApp() {
         return {};
     }
   }, [choices, close, openDashboard, operation, plan, recovery.acknowledged, screen, wizard]);
+
+  // Ctrl+= / Ctrl+- / Ctrl+0 make the page larger or smaller (Ctrl+wheel is the web view's own). The web view's browser shortcuts are
+  // off, so the host does the zooming when it is asked. Outside the setup program the browser zooms by itself.
+  useEffect(() => {
+    if (!window.chrome?.webview) return;
+    const onZoom = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+      const zoom = event.key === '=' || event.key === '+' ? 'in' : event.key === '-' || event.key === '_' ? 'out' : event.key === '0' ? 'reset' : null;
+      if (!zoom) return;
+      event.preventDefault();
+      if (event.repeat) return;
+      bridge.request<{ message?: string }>('setZoom', { zoom })
+        .then(answer => setSpoken({ polite: answer?.message ?? '', assertive: '' }))
+        .catch(() => undefined);
+    };
+    window.addEventListener('keydown', onZoom);
+    return () => window.removeEventListener('keydown', onZoom);
+  }, []);
 
   // Enter for Next and Esc for Back, when nothing focused uses them.
   useEffect(() => {
@@ -280,7 +303,7 @@ export default function SetupApp() {
               <span className="compact-bar"><span style={{ width: `${((stepIndex + 1) / STEPS.length) * 100}%` }} /></span>
             </div>
           )}
-          <div className="setup-scroll">
+          <div className="setup-scroll" ref={scrollRef}>
             <AnimatePresence mode="wait" initial={false}>
               <motion.main key={screen} className="setup-page" aria-labelledby="screen-title"
                 initial={{ opacity: 0, x: reduced ? 0 : 10 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: reduced ? 0 : -6, transition: { duration: reduced ? 0 : 0.1 } }}

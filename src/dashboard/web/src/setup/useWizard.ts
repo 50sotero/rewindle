@@ -185,6 +185,8 @@ export function useWizard() {
   const [operation, setOperation] = useState<OperationState | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [maintenance, setMaintenance] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshNote, setRefreshNote] = useState<string | null>(null);
   const measureSequence = useRef(0);
   const planSequence = useRef(0);
   const measured = useRef(new Set<string>());
@@ -333,6 +335,28 @@ export function useWizard() {
     chooseDrive: (root: string) => update(current => ({
       ...current, storageMode: 'local_ntfs', driveRoot: root, customRepository: false, repository: defaultRepositoryFor(root, base),
     })),
+    /** Asks the installer to describe this PC again, for a drive that was connected after Setup started. */
+    refreshDrives: async () => {
+      setRefreshing(true); setRefreshNote(null);
+      try {
+        const plan = parsePlan(await bridge.request('getPlan', { inputs: {}, refresh: true }));
+        const before = base?.environment.volumes.filter(volume => volume.eligible).length ?? 0;
+        const after = plan.environment.volumes.filter(volume => volume.eligible).length;
+        setBase(plan);
+        // Unless the person chose a folder themselves, a drive that is now better than the one chosen (a separate one, not Windows') is taken.
+        update(current => {
+          if (current.storageMode !== 'local_ntfs' || current.customRepository) return current;
+          const drive = initialDrive(plan);
+          const chosen = plan.environment.volumes.find(volume => samePath(volume.root, current.driveRoot) && volume.eligible);
+          const better = drive && !drive.isSystem && !drive.sameDiskAsSystem && (!chosen || chosen.isSystem || chosen.sameDiskAsSystem);
+          if (!drive || !better || samePath(drive.root, current.driveRoot)) return current;
+          return { ...current, driveRoot: drive.root, repository: defaultRepositoryFor(drive.root, plan) };
+        });
+        setRefreshNote(after > before ? 'Found a new drive.' : 'No new drives found.');
+      } catch (error) {
+        setRefreshNote(messageOf(error));
+      } finally { setRefreshing(false); }
+    },
     chooseDriveFs: () => update(current => {
       const myDrive = base?.environment.drivefs.myDriveRoot;
       if (!myDrive) return current;
@@ -389,7 +413,7 @@ export function useWizard() {
   }, []);
 
   return {
-    host, theme, screen, furthest, base, hostError, choices, validation, sizes, operation, notice, maintenance,
+    host, theme, screen, furthest, base, hostError, choices, validation, sizes, operation, notice, maintenance, refreshing, refreshNote,
     actions, setNotice,
     goTo: setScreen,
     install: () => runOperation('install'),

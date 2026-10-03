@@ -1,11 +1,11 @@
 // A stand-in for Rewindle Setup's desktop host, answering the wizard with the invented computers in scenarios.ts. It lets the
 // wizard run in an ordinary browser (`npm run dev:setup`) without installing anything: no command it answers reads or changes
-// this computer. Choose a sample computer with ?scenario=<name> (see SCENARIOS) and a theme with ?theme=dark|light.
+// this computer. Choose a sample computer with ?scenario=<name> (see SCENARIOS), a theme with ?theme=dark|light and reduced motion with ?motion=reduced.
 //
 // This module is reached only through the guarded dynamic import in ../main.tsx, so the setup program's own build does not
 // contain it (build.ps1 in installer/setup checks the built bundle for SETUP_SAMPLE_MARKER).
 import type { HostMessage, PageRequest, SetupWebView } from '../bridge';
-import { GIB, HOME, SCENARIOS, scenario, type Scenario, type ScenarioName } from './scenarios';
+import { GIB, HOME, SCENARIOS, SPARE_DRIVE, scenario, type Scenario, type ScenarioName } from './scenarios';
 
 export const SETUP_SAMPLE_MARKER = 'rewindle-setup-sample-bridge';
 
@@ -43,13 +43,18 @@ export function installSetupSampleBridge(): void {
   };
   const event = (name: string, data: unknown) => post({ type: 'event', event: name, data } as HostMessage);
 
+  // ?motion=reduced asks for the reduced-motion page without changing Windows' setting, for stable screenshots.
+  const reduceMotion = () => params.get('motion') === 'reduced' || prefers('(prefers-reduced-motion: reduce)');
   const dark = () => theme === 'dark' ? true : theme === 'light' ? false : prefers('(prefers-color-scheme: dark)');
-  const sendTheme = () => event('theme', { dark: dark(), highContrast: prefers('(forced-colors: active)'), reducedMotion: prefers('(prefers-reduced-motion: reduce)') });
+  const sendTheme = () => event('theme', { dark: dark(), highContrast: prefers('(forced-colors: active)'), reducedMotion: reduceMotion() });
   if (typeof window.matchMedia === 'function' && !theme) {
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', sendTheme);
   }
 
-  const volumeOf = (path: string) => sample.volumes.find(volume => volume.root.toLowerCase() === rootOf(path).toLowerCase());
+  // Whether the person has "connected" the spare drive: in the no-second-drive sample it appears once Setup is asked to look again.
+  let spareDriveConnected = false;
+  const volumesNow = () => spareDriveConnected && sample.name === 'no-second-drive' ? [...sample.volumes, SPARE_DRIVE] : sample.volumes;
+  const volumeOf = (path: string) => volumesNow().find(volume => volume.root.toLowerCase() === rootOf(path).toLowerCase());
   const exists = (path: string) => !sample.missing.includes(lower(path));
 
   // The checks the real installer makes in plan mode, imitated closely enough to show every message the wizard can get.
@@ -142,7 +147,7 @@ export function installSetupSampleBridge(): void {
         elevated: false,
         webview2: '141.0.3537.71',
         existing_install: sample.existing,
-        volumes: sample.volumes,
+        volumes: volumesNow(),
         drivefs: sample.drivefs,
         known_folders: sample.knownFolders,
       },
@@ -255,9 +260,10 @@ export function installSetupSampleBridge(): void {
   async function handle(command: string, payload: Payload): Promise<unknown> {
     switch (command) {
       case 'hello':
-        return { protocol: 1, version: '0.2.0-alpha.1', dark: dark(), highContrast: prefers('(forced-colors: active)'), reducedMotion: prefers('(prefers-reduced-motion: reduce)'), host: 'sample', scenario: sample.name, locale: navigator.language };
+        return { protocol: 1, version: '0.2.0-alpha.1', dark: dark(), highContrast: prefers('(forced-colors: active)'), reducedMotion: reduceMotion(), host: 'sample', scenario: sample.name, locale: navigator.language };
       case 'getPlan':
         await wait(450 + Math.random() * 350);
+        if (payload?.refresh === true) spareDriveConnected = true;
         return plan(payload?.inputs as Payload);
       case 'browseFolder': {
         await wait(300);
@@ -297,6 +303,8 @@ export function installSetupSampleBridge(): void {
         if (sample.install === 'key-unreadable') throw new Refusal('recovery_key_unreadable', 'Setup can’t open your recovery key, because only administrators can read it.');
         recoveryKeySaved = true;
         return { saved: recoveryKeySaved, path: 'E:\\Rewindle recovery key.txt' };
+      case 'setZoom':
+        return { message: 'Zoom 100%' };
       case 'showRecoveryKey':
       case 'openDashboard':
       case 'openUrl':

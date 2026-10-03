@@ -31,8 +31,8 @@ export function Welcome({ wizard }: { wizard: Wizard }) {
 
       {legacy && (
         <Callout tone="info" icon={<Info size={18} aria-hidden="true" />} title="You also have the earlier personal edition">
-          <p>Rewindle installs alongside it and doesn’t change it. Each keeps its own backups, schedule and recovery key, so this PC will run both backups.</p>
-          <p>The Rewindle app shows Rewindle’s backups. Keep the personal edition’s backups and recovery key until you no longer need its history.</p>
+          <p>Rewindle installs alongside it and doesn’t change it. It can’t take over the personal edition’s backups, so it starts its own in a new, empty backup location, with its own schedule and recovery key. This PC will run both.</p>
+          <p>Keep the personal edition’s backups and recovery key for as long as you need their history.</p>
         </Callout>
       )}
 

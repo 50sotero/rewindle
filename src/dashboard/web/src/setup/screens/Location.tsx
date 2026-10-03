@@ -34,7 +34,8 @@ export function Location({ wizard }: { wizard: Wizard }) {
   const total = selectedTotal(choices, wizard.sizes);
   const { errors, warnings } = issuesFor(plan, 'repository', 'storage_mode');
   const cloud = choices.storageMode === 'google_drivefs_stream';
-  const volumes = environment.volumes.filter(volume => volume.driveType !== 'network' || volume.eligible);
+  // A disc drive or a RAM disk is never a place for backups, so it is not listed; every other drive is, with the reason when it can't be used.
+  const volumes = environment.volumes.filter(volume => volume.driveType !== 'cdrom' && volume.driveType !== 'ram');
   const chosen = cloud
     ? volumes.find(volume => environment.drivefs.myDriveRoot && samePath(volume.root, environment.drivefs.myDriveRoot.slice(0, 3)))
     : volumes.find(volume => samePath(volume.root, choices.driveRoot));
@@ -85,9 +86,17 @@ export function Location({ wizard }: { wizard: Wizard }) {
         )}
       </fieldset>
 
+      <p className="fine-print refresh-line">
+        <button type="button" className="text-link" disabled={wizard.refreshing} onClick={() => void wizard.actions.refreshDrives()}>Look for drives again</button>
+        <span>Connected a drive just now? It shows up here after you look again.</span>
+        {wizard.refreshing && <Spinner size={12} />}
+        <span className="sr-only" role="status" aria-live="polite">{wizard.refreshNote ?? ''}</span>
+        {wizard.refreshNote && !wizard.refreshing && <span className="refresh-note" aria-hidden="true">{wizard.refreshNote}</span>}
+      </p>
+
       {!anyEligible && (
         <Callout tone="error" title="No drive here can hold backups">
-          Connect an external drive formatted as NTFS, then choose Back and Next to look again.
+          Connect an external hard drive or SSD (formatted as NTFS, Windows’ usual format), then choose “Look for drives again”.
         </Callout>
       )}
 

@@ -57,6 +57,8 @@ const volume = (root: string, label: string, sizeGb: number, freeGb: number, ext
 const SYSTEM = volume('C:\\', 'Windows', 476, 182, { is_system: true, same_physical_disk_as_system: true });
 const DATA = volume('D:\\', 'Data', 465, 318, { same_physical_disk_as_system: true });
 const EXTERNAL = volume('E:\\', 'Backup Drive', 1863, 1652, { drive_type: 'removable', recommended: true });
+/** The external drive the no-second-drive sample "plugs in" when Setup is asked to look for drives again. */
+export const SPARE_DRIVE = EXTERNAL;
 const STICK = volume('F:\\', 'USB STICK', 29, 21, {
   filesystem: 'FAT32', drive_type: 'removable', eligible: false,
   ineligible_reason: 'This drive uses FAT32. Backups need a drive formatted as NTFS.',

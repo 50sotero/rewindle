@@ -2,7 +2,6 @@ using System;
 using System.IO;
 using System.Reflection;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Threading;
 using System.Windows;
@@ -18,7 +17,6 @@ namespace Rewindle.Setup
         private const string ShowName = @"Local\RewindleSetup.Show";
         private const string IconResource = "REWINDLE_ICON";
 
-        private static string libraryFolder;
         private static SetupWindow window;
 
         [STAThread]
@@ -75,9 +73,7 @@ namespace Rewindle.Setup
 
                 // The WebView2 libraries are unpacked and made findable before any code that mentions a WebView2 type runs.
                 workspace.ExtractLibraries();
-                libraryFolder = workspace.LibraryFolder;
-                AppDomain.CurrentDomain.AssemblyResolve += ResolveWebViewAssembly;
-                PreloadWebViewLoader(workspace.LibraryFolder);
+                WebViewLibraries.Install(workspace.LibraryFolder);
                 workspace.ExtractWeb();
                 // The release bundle is large; it unpacks in the background while the first page opens.
                 workspace.EnsureBundleExtracted();
@@ -169,40 +165,6 @@ namespace Rewindle.Setup
             }
             target.Activate();
         }
-
-        private static Assembly ResolveWebViewAssembly(object sender, ResolveEventArgs args)
-        {
-            string name = new AssemblyName(args.Name).Name;
-            if (libraryFolder != null &&
-                (string.Equals(name, "Microsoft.Web.WebView2.Core", StringComparison.OrdinalIgnoreCase) ||
-                 string.Equals(name, "Microsoft.Web.WebView2.Wpf", StringComparison.OrdinalIgnoreCase)))
-            {
-                string path = Path.Combine(libraryFolder, name + ".dll");
-                if (File.Exists(path))
-                {
-                    return Assembly.LoadFrom(path);
-                }
-            }
-            return null;
-        }
-
-        // The SDK's managed library asks for WebView2Loader.dll by name. Loading it from the unpacked folder first makes that
-        // name resolve to it, wherever this program was started from.
-        private static void PreloadWebViewLoader(string folder)
-        {
-            SetDllDirectory(folder);
-            string loader = Path.Combine(folder, "WebView2Loader.dll");
-            if (LoadLibrary(loader) == IntPtr.Zero)
-            {
-                SetupLog.Write("WebView2Loader.dll could not be preloaded (error " + Marshal.GetLastWin32Error() + ").");
-            }
-        }
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern bool SetDllDirectory(string path);
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern IntPtr LoadLibrary(string path);
 
         // The application icon, which is also embedded in the program's resources for Explorer: decoded for the window and for
         // the plain native screens. A missing or unreadable icon only means the default one.

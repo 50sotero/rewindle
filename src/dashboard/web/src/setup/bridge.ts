@@ -6,7 +6,7 @@
 export type SetupCommand =
   | 'hello' | 'getPlan' | 'browseFolder' | 'browseRepositoryFolder' | 'measureFolders' | 'cancelMeasure'
   | 'install' | 'cancelInstall' | 'uninstall' | 'openDashboard' | 'saveRecoveryKeyCopy' | 'showRecoveryKey'
-  | 'copyText' | 'openUrl' | 'close';
+  | 'copyText' | 'openUrl' | 'setZoom' | 'close';
 
 /** The only links the page can ask for. The host maps each name to a fixed address of the project's own; the page never sends a URL. */
 export type ProjectLink = 'readme' | 'issues' | 'license' | 'requirements';

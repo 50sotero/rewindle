@@ -80,6 +80,13 @@ jobs:
         shell: pwsh
         run: .\build\Build-Release.ps1
 
+      # Compiles the setup program's logic (installer\setup, without its window) with the .NET Framework compiler and checks the
+      # installer contract, the progress-file reader, ZIP unpacking, folder measurement, plan mode (against a stub script), the
+      # install flow (against a fake launcher) and the message bridge's validation. It never starts the setup program or an installer.
+      - name: Setup host checks
+        shell: powershell
+        run: .\tests\Test-SetupHost.ps1
+
       # Windows PowerShell 5.1 on purpose: the checks load the .NET Framework dashboard just built.
       # -SkipInstalledChecks keeps them from reading any installed backup configuration.
       - name: Dashboard regression checks

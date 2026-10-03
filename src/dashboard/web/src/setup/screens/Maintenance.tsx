@@ -27,7 +27,7 @@ export function Maintenance({ wizard, onReinstall, onUninstall, openDashboard }:
           <span className="choice-icon"><RefreshCw size={18} aria-hidden="true" /></span>
           <span className="choice-text">
             <strong>Reinstall or repair</strong>
-            <span>Set Rewindle up again with the choices you make next. Your existing backups and recovery key stay where they are.</span>
+            <span>Go through the setup steps again. Your existing backups and recovery key stay where they are.</span>
           </span>
         </button>
         <button type="button" className="choice" onClick={onUninstall}>
