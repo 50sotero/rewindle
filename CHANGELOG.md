@@ -7,7 +7,7 @@ labels. Releases before 0.2.0 were published under the name ResticBackuper.
 
 ## [Unreleased]
 
-## [0.2.0-alpha.1] - Unreleased
+## [0.2.0-alpha.1] - 2026-10-03
 
 The first Rewindle release from this repository: the engine and the Rewindle
 dashboard are built, installed and tested together. Windows x64 only.
@@ -373,3 +373,6 @@ dashboard are built, installed and tested together. Windows x64 only.
   runtimes.
 - Conservative uninstaller that preserves repositories, state, credentials,
   recovery keys, and recovery tools.
+
+[Unreleased]: https://github.com/50sotero/rewindle/compare/v0.2.0-alpha.1...HEAD
+[0.2.0-alpha.1]: https://github.com/50sotero/rewindle/releases/tag/v0.2.0-alpha.1
