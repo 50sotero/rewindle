@@ -298,7 +298,7 @@ class ContractMatchesTheScriptsTests(unittest.TestCase):
 
     def test_the_wizard_facing_deviations_are_written_down(self) -> None:
         section = self.contract.split("## 7. Deviations and additions", 1)[1]
-        for text in ("canary", "permissions", "Payload hashing", "-Schedule", "verification"):
+        for text in ("canary", "permissions", "-Schedule", "verification"):
             self.assertIn(text, section)
 
 

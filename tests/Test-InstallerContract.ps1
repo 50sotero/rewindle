@@ -17,9 +17,10 @@ if (-not $AllowSystemInstall) {
 # End-to-end test of the installer's machine-readable backend (docs/setup-contract.md) on the disposable hosted runner:
 #   1. plan mode, run as a standard (non-administrator) account;
 #   2. refused and failing installs, which must leave nothing behind and still end with a result line;
-#   3. a real unattended install with a progress feed, run as a test administrator named by -ExpectedUserSid;
-#   4. a second install that must refuse, the recovery key checks, an uninstall with a progress feed, a second uninstall that
-#      must refuse, and a check that the machine is clean (only the data an uninstall keeps remains).
+#   3. two complete cycles, each a real unattended install with a progress feed, run as a test administrator named by
+#      -ExpectedUserSid, then an uninstall with a progress feed and a check that the machine is clean (only the data an
+#      uninstall keeps remains). The first cycle installs the dashboard and also covers a refused second install, the recovery
+#      key checks and a refused second uninstall; the second runs with -SkipDashboard to cover the skipped phases.
 # It needs the release the build step produced. Hosted runners run every step as an administrator with UAC off, so the test
 # accounts are real local users started through the secondary-logon service, the same pattern as the restore-manager step.
 
@@ -45,6 +46,9 @@ $cloudToolsRoot = Join-Path $programData 'ResticBackuperRecoveryTools'
 $shortcutPath = Join-Path $programData 'Microsoft\Windows\Start Menu\Programs\ResticBackuper.lnk'
 $registryKey = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\ResticBackuper'
 $taskNames = @('ResticBackuper', 'ResticBackuperDashboard', 'ResticBackuperGoogleDriveSync')
+# The phases of an install in the order the script emits them (docs/setup-contract.md, section 3.3).
+$installPhaseOrder = @('preflight', 'webview2', 'payload', 'canary', 'credential', 'repository', 'recovery_key', 'permissions', 'tasks', 'dashboard', 'verification', 'first_backup')
+$uninstallPhaseOrder = @('preflight', 'stop', 'tasks', 'program_files', 'shortcut', 'registration', 'verification')
 
 # What of a Rewindle installation exists on this machine (an empty list means none).
 function Get-InstallationFootprint {
@@ -73,7 +77,6 @@ $handoff = Join-Path $root 'handoff'
 $docs = Join-Path $root 'sources\docs'
 $photos = Join-Path $root 'sources\photos'
 $planRepository = Join-Path $root 'plan-only\Backup'
-$installRepository = Join-Path $root 'install\Backup'
 $assertions = 0
 $createdUsers = @()
 
@@ -204,11 +207,14 @@ function Get-PhaseSequence {
     return @($Lines | Where-Object { $_.type -eq 'phase' } | ForEach-Object { '{0}:{1}' -f $_.phase, $_.state })
 }
 
+# The phase lines a complete run must produce: every phase in order, started then completed, except those that are skipped.
 function Get-ExpectedSequence {
-    param([string[]]$Phases, [string[]]$Skipped = @())
+    param([string[]]$Order, [string[]]$Skipped = @())
     $sequence = @()
-    foreach ($phase in $Phases) { $sequence += "${phase}:started", "${phase}:completed" }
-    foreach ($phase in $Skipped) { $sequence += "${phase}:skipped" }
+    foreach ($phase in $Order) {
+        if ($Skipped -contains $phase) { $sequence += "${phase}:skipped" }
+        else { $sequence += "${phase}:started", "${phase}:completed" }
+    }
     return $sequence
 }
 
@@ -260,6 +266,146 @@ function Get-WebView2Version {
         }
     }
     return $null
+}
+
+# One complete cycle on the clean machine: an install with a progress feed, what it leaves, an uninstall with a progress feed,
+# and what that leaves. -Extras adds the checks that only need to run once.
+function Invoke-InstallCycle {
+    param(
+        [Parameter(Mandatory)][string]$Id,
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][string]$Repository,
+        [Parameter(Mandatory)]$AdministratorUser,
+        [Parameter(Mandatory)]$StandardUser,
+        [Parameter(Mandatory)][string]$InstallerScript,
+        [switch]$SkipDashboard,
+        [switch]$Extras
+    )
+    Write-Section "$Label : a real install with a progress feed"
+    $dashboard = -not $SkipDashboard
+    $arguments = @('-Repository', $Repository, '-SourceList', "$docs;$photos", '-MinimumFreeGiB', '1', '-Schedule', '03:15')
+    if ($SkipDashboard) { $arguments += '-SkipDashboard' }
+    $installName = "install-$Id"
+    $run = Invoke-AsUser -User $AdministratorUser -Name $installName -Template $progressTemplate -TimeoutSeconds 1800 -Values @{
+        HANDOFF = Join-Path $handoff "$installName.txt"; SCRIPT = $InstallerScript; POWERSHELL = $windowsPowerShell
+        ARGUMENTS = (ConvertTo-LiteralList $arguments)
+    }
+    Show-Run $run
+    $feedPath = Get-HandoffPath "$installName.txt"
+    if (Test-Path -LiteralPath $feedPath) { Write-Host '--- progress feed'; Write-Host ([IO.File]::ReadAllText($feedPath)) }
+    Assert-Equal 0 $run.ExitCode "$Label : the install exits 0"
+    $lines = Read-ProgressFeed $feedPath
+    $skipped = @('first_backup')
+    if ($SkipDashboard) { $skipped += @('webview2', 'dashboard') }
+    Assert-Equal (Get-ExpectedSequence -Order $installPhaseOrder -Skipped $skipped) @(Get-PhaseSequence $lines) "$Label : the phases arrive in the documented order"
+    foreach ($entry in @($lines | Where-Object { $_.type -eq 'phase' })) {
+        Assert-True (-not [string]::IsNullOrWhiteSpace($entry.title)) "$Label : phase line for $($entry.phase) has a title"
+        Assert-True ($entry.state -ne 'failed') "$Label : phase $($entry.phase) did not fail"
+        if ($entry.state -eq 'skipped') { Assert-True (-not [string]::IsNullOrWhiteSpace($entry.detail)) "$Label : the skipped phase $($entry.phase) says why" }
+    }
+    $result = $lines[$lines.Count - 1]
+    Assert-True ($result.ok -eq $true -and $null -eq $result.error) "$Label : the install ends with a successful result line"
+    Assert-Equal $installRoot $result.install_root "$Label : result.install_root"
+    Assert-Equal $version $result.version "$Label : result.version"
+    if ($dashboard) {
+        Assert-Equal (Join-Path $installRoot 'ResticBackuperDashboard.exe') $result.dashboard_executable "$Label : result.dashboard_executable"
+        Assert-True (Test-Path -LiteralPath $result.dashboard_executable -PathType Leaf) "$Label : the dashboard program exists"
+    }
+    else {
+        Assert-True ($null -eq $result.dashboard_executable) "$Label : there is no dashboard program without the dashboard"
+    }
+    Assert-True (Test-Path -LiteralPath $result.recovery_key_path -PathType Leaf) "$Label : the recovery key file exists"
+    Assert-Equal 'ResticBackuper-RecoveryKey.txt' (Split-Path -Leaf $result.recovery_key_path) "$Label : the recovery key has its documented name"
+    Assert-True ($result.recovery_key_readable_by_user -eq $true) "$Label : the installer reports that the user can read the recovery key"
+    Assert-True (@($result.PSObject.Properties.Name) -contains 'warnings') "$Label : the result carries its warnings array"
+
+    # What is on the machine.
+    Assert-True (Test-Path -LiteralPath (Join-Path $installRoot 'runtime-manifest.json') -PathType Leaf) "$Label : the runtime manifest exists"
+    Assert-True (Test-Path -LiteralPath (Join-Path $Repository 'config') -PathType Leaf) "$Label : the repository was initialized"
+    Assert-True (Test-Path -LiteralPath (Join-Path $stateRoot 'repository-password.dpapi.json') -PathType Leaf) "$Label : the password is stored"
+    Assert-True (Test-Path -LiteralPath $registryKey) "$Label : the Installed apps entry exists"
+    Assert-True ($null -ne (Get-ScheduledTask -TaskName 'ResticBackuper' -ErrorAction SilentlyContinue)) "$Label : the backup task exists"
+    Assert-Equal $dashboard ($null -ne (Get-ScheduledTask -TaskName 'ResticBackuperDashboard' -ErrorAction SilentlyContinue)) "$Label : the dashboard task exists exactly when the dashboard was installed"
+    Assert-Equal $dashboard (Test-Path -LiteralPath $shortcutPath -PathType Leaf) "$Label : the Start menu shortcut exists exactly when the dashboard was installed"
+    $configuration = [IO.File]::ReadAllText((Join-Path $installRoot 'backup-config.json')) | ConvertFrom-Json
+    Assert-Equal $Repository $configuration.repository "$Label : the configuration names the repository"
+    Assert-Equal $result.recovery_key_path $configuration.recovery_key_file "$Label : the configuration names the recovery key the result reports"
+    Assert-True ([IO.File]::ReadAllText($result.recovery_key_path) -match '(?m)^Password:\s*\S{40,}') "$Label : the recovery key holds a password"
+    $manifestBefore = (Get-FileHash -LiteralPath (Join-Path $installRoot 'runtime-manifest.json') -Algorithm SHA256).Hash
+
+    if ($Extras) {
+        # The recovery key: readable by its own account, not by another account.
+        $keyProbe = Invoke-AsUser -User $AdministratorUser -Name 'read-key-owner' -Template $readProbe -Values @{ PATH = $result.recovery_key_path }
+        Assert-Equal 'READABLE' $keyProbe.Stdout.Trim() "$Label : the installing account reads the recovery key"
+        $keyProbe = Invoke-AsUser -User $StandardUser -Name 'read-key-other' -Template $readProbe -Values @{ PATH = $result.recovery_key_path }
+        Assert-Equal 'DENIED' $keyProbe.Stdout.Trim() "$Label : another account cannot read the recovery key"
+
+        Write-Section "$Label : a second install must refuse and change nothing"
+        $run = Invoke-AsUser -User $AdministratorUser -Name 'install-again' -Template $progressTemplate -Values @{
+            HANDOFF = Join-Path $handoff 'install-again.txt'; SCRIPT = $InstallerScript; POWERSHELL = $windowsPowerShell
+            ARGUMENTS = (ConvertTo-LiteralList $arguments)
+        }
+        Assert-True ($run.ExitCode -ne 0) "$Label : a second install fails"
+        $again = Read-ProgressFeed (Get-HandoffPath 'install-again.txt')
+        Assert-Equal @('preflight:started', 'preflight:failed') @(Get-PhaseSequence $again) "$Label : the second install stops in the preflight"
+        Assert-Equal 'already_installed' $again[$again.Count - 1].error.code "$Label : the second install says Rewindle is already installed"
+        Assert-Equal $manifestBefore (Get-FileHash -LiteralPath (Join-Path $installRoot 'runtime-manifest.json') -Algorithm SHA256).Hash "$Label : the refused install did not touch the installation"
+    }
+
+    Write-Section "$Label : uninstall with a progress feed"
+    $uninstallName = "uninstall-$Id"
+    $run = Invoke-AsUser -User $AdministratorUser -Name $uninstallName -Template $progressTemplate -TimeoutSeconds 900 -Values @{
+        HANDOFF = Join-Path $handoff "$uninstallName.txt"; SCRIPT = (Join-Path $installRoot 'Uninstall-ResticBackuper.ps1'); POWERSHELL = $windowsPowerShell; ARGUMENTS = ''
+    }
+    Show-Run $run
+    $uninstallFeedPath = Get-HandoffPath "$uninstallName.txt"
+    if (Test-Path -LiteralPath $uninstallFeedPath) { Write-Host '--- progress feed'; Write-Host ([IO.File]::ReadAllText($uninstallFeedPath)) }
+    Assert-Equal 0 $run.ExitCode "$Label : the uninstall exits 0"
+    $lines = Read-ProgressFeed $uninstallFeedPath
+    $uninstallSkipped = @()
+    if ($SkipDashboard) { $uninstallSkipped += 'shortcut' }
+    Assert-Equal (Get-ExpectedSequence -Order $uninstallPhaseOrder -Skipped $uninstallSkipped) @(Get-PhaseSequence $lines) "$Label : the uninstall phases arrive in the documented order"
+    $uninstallResult = $lines[$lines.Count - 1]
+    Assert-True ($uninstallResult.ok -eq $true -and $null -eq $uninstallResult.error) "$Label : the uninstall ends with a successful result line"
+    Assert-Equal 'uninstall' $uninstallResult.operation "$Label : the result names the operation"
+    Assert-True ($uninstallResult.removed.install_root -eq $true) "$Label : the program folder is reported removed"
+    $expectedTasks = if ($dashboard) { @('ResticBackuper', 'ResticBackuperDashboard') } else { @('ResticBackuper') }
+    Assert-Equal $expectedTasks @($uninstallResult.removed.scheduled_tasks | Sort-Object) "$Label : the scheduled tasks are reported removed"
+    Assert-Equal $dashboard $uninstallResult.removed.start_menu_shortcut "$Label : the shortcut is reported removed exactly when it existed"
+    Assert-True ($uninstallResult.removed.installed_apps_entry -eq $true) "$Label : the Installed apps entry is reported removed"
+    Assert-Equal $stateRoot $uninstallResult.kept.state_root "$Label : the uninstall keeps the state folder"
+    Assert-Equal $Repository $uninstallResult.kept.repository "$Label : the uninstall keeps the repository"
+    Assert-Equal $result.recovery_key_path $uninstallResult.kept.recovery_key "$Label : the uninstall keeps the recovery key"
+    Assert-True (-not [string]::IsNullOrWhiteSpace($uninstallResult.kept.recovery_tools)) "$Label : the uninstall reports the recovery tools it keeps"
+
+    Write-Section "$Label : the machine is clean, and only the kept data remains"
+    Assert-True (-not (Test-Path -LiteralPath $installRoot)) "$Label : the program folder is gone"
+    Assert-True (-not (Test-Path -LiteralPath $shortcutPath)) "$Label : the Start menu shortcut is gone"
+    Assert-True (-not (Test-Path -LiteralPath $registryKey)) "$Label : the Installed apps entry is gone"
+    foreach ($name in $taskNames) {
+        Assert-True ($null -eq (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) "$Label : the scheduled task $name is gone"
+    }
+    Assert-True (Test-Path -LiteralPath (Join-Path $Repository 'config') -PathType Leaf) "$Label : the repository is kept"
+    Assert-True (Test-Path -LiteralPath $result.recovery_key_path -PathType Leaf) "$Label : the recovery key is kept"
+    Assert-True (Test-Path -LiteralPath $stateRoot -PathType Container) "$Label : the state folder is kept"
+    Assert-True (Test-Path -LiteralPath $uninstallResult.kept.recovery_tools -PathType Container) "$Label : the recovery tools are kept"
+    Assert-Equal @($stateRoot) @(Get-InstallationFootprint) "$Label : only the state folder remains of the Rewindle footprint (the repository and recovery key live elsewhere)"
+
+    if ($Extras) {
+        $run = Invoke-AsUser -User $AdministratorUser -Name 'uninstall-again' -Template $progressTemplate -Values @{
+            HANDOFF = Join-Path $handoff 'uninstall-again.txt'; SCRIPT = (Join-Path $bundle 'payload\Uninstall-ResticBackuper.ps1'); POWERSHELL = $windowsPowerShell; ARGUMENTS = ''
+        }
+        Assert-True ($run.ExitCode -ne 0) "$Label : a second uninstall fails"
+        $nothing = Read-ProgressFeed (Get-HandoffPath 'uninstall-again.txt')
+        Assert-Equal @('preflight:started', 'preflight:failed') @(Get-PhaseSequence $nothing) "$Label : the second uninstall stops in the preflight"
+        Assert-Equal 'not_installed' $nothing[$nothing.Count - 1].error.code "$Label : the second uninstall says nothing is installed"
+    }
+
+    # Leave a clean machine for the next cycle: the data an uninstall keeps is removed here, because this test created it.
+    Remove-Item -LiteralPath $stateRoot -Recurse -Force
+    Remove-Item -LiteralPath $result.recovery_key_path -Force
+    Remove-Item -LiteralPath (Split-Path -Parent $Repository) -Recurse -Force
+    Assert-Equal @() @(Get-InstallationFootprint) "$Label : nothing of Rewindle remains after the test removed the data an uninstall keeps"
 }
 
 $administratorUser = $null
@@ -323,9 +469,7 @@ try {
     }
     Assert-Equal 7 @($plan.environment.known_folders).Count 'seven known folders are listed'
     Assert-True ($null -eq $plan.environment.existing_install.rewindle) 'no installation is reported on the clean runner'
-    $volumeOfRepository = [IO.Path]::GetPathRoot($planRepository)
-    $systemRoot = [IO.Path]::GetPathRoot($env:SystemRoot)
-    if ($volumeOfRepository -ieq $systemRoot) {
+    if ([IO.Path]::GetPathRoot($planRepository) -ieq [IO.Path]::GetPathRoot($env:SystemRoot)) {
         Assert-True (@($plan.warnings | Where-Object { $_.code -eq 'repository_on_system_disk' }).Count -eq 1) 'a repository on the Windows drive is warned about'
     }
     Assert-Equal @() @(Get-InstallationFootprint) 'plan mode left nothing installed'
@@ -345,8 +489,7 @@ try {
 
     # ---------------------------------------------------------------------------------------------------------------------
     Write-Section '2. Installs that must fail cleanly'
-    $webView2 = Get-WebView2Version
-    if (-not $webView2) {
+    if (-not (Get-WebView2Version)) {
         # Fetch the WebView2 runtime up front, with retries, so a flaky download cannot fail the contract test. If it still
         # fails, the installer tries on its own.
         for ($attempt = 1; $attempt -le 3 -and -not (Get-WebView2Version); $attempt++) {
@@ -361,7 +504,8 @@ try {
         }
         Write-Host "WebView2 runtime before the install: $(Get-WebView2Version)"
     }
-    $common = @('-Repository', $installRepository, '-SourceList', "$docs;$photos", '-MinimumFreeGiB', '1')
+    $firstRepository = Join-Path $root 'install\Backup'
+    $common = @('-Repository', $firstRepository, '-SourceList', "$docs;$photos", '-MinimumFreeGiB', '1')
 
     $run = Invoke-AsUser -User $administratorUser -Name 'install-bad-schedule' -Template $progressTemplate -Values @{
         HANDOFF = Join-Path $handoff 'install-bad-schedule.txt'; SCRIPT = $installerScript; POWERSHELL = $windowsPowerShell
@@ -376,7 +520,7 @@ try {
     Assert-True (-not [string]::IsNullOrWhiteSpace($result.error.message)) 'the failed install carries a message'
     Assert-Equal 'failed' @($lines | Where-Object { $_.type -eq 'phase' })[1].state 'the failed phase line'
     Assert-Equal @() @(Get-InstallationFootprint) 'a refused install changed nothing'
-    Assert-True (-not (Test-Path -LiteralPath $installRepository)) 'a refused install created no repository'
+    Assert-True (-not (Test-Path -LiteralPath $firstRepository)) 'a refused install created no repository'
 
     $run = Invoke-AsUser -User $administratorUser -Name 'install-bad-progress-path' -Template @'
 $ErrorActionPreference = 'Stop'
@@ -390,110 +534,10 @@ exit $LASTEXITCODE
     Assert-Equal @() @(Get-InstallationFootprint) 'a refused progress path changed nothing'
 
     # ---------------------------------------------------------------------------------------------------------------------
-    Write-Section '3. A real install with a progress feed'
-    $run = Invoke-AsUser -User $administratorUser -Name 'install' -Template $progressTemplate -Values @{
-        HANDOFF = Join-Path $handoff 'install.txt'; SCRIPT = $installerScript; POWERSHELL = $windowsPowerShell
-        ARGUMENTS = (ConvertTo-LiteralList ($common + @('-Schedule', '03:15')))
-    } -TimeoutSeconds 1800
-    Show-Run $run
-    $installFeedPath = Get-HandoffPath 'install.txt'
-    if (Test-Path -LiteralPath $installFeedPath) { Write-Host '--- progress feed'; Write-Host ([IO.File]::ReadAllText($installFeedPath)) }
-    Assert-Equal 0 $run.ExitCode 'the install exits 0'
-    $lines = Read-ProgressFeed $installFeedPath
-    $phases = @('preflight', 'webview2', 'payload', 'canary', 'credential', 'repository', 'recovery_key', 'permissions', 'tasks', 'dashboard', 'verification')
-    Assert-Equal (Get-ExpectedSequence -Phases $phases -Skipped @('first_backup')) @(Get-PhaseSequence $lines) 'the phases arrive in the documented order'
-    foreach ($entry in @($lines | Where-Object { $_.type -eq 'phase' })) {
-        Assert-True (-not [string]::IsNullOrWhiteSpace($entry.title)) "phase line for $($entry.phase) has a title"
-        Assert-True ($entry.state -ne 'failed') "phase $($entry.phase) did not fail"
-    }
-    $result = $lines[$lines.Count - 1]
-    Assert-True ($result.ok -eq $true -and $null -eq $result.error) 'the install ends with a successful result line'
-    Assert-Equal $installRoot $result.install_root 'result.install_root'
-    Assert-Equal $version $result.version 'result.version'
-    Assert-Equal (Join-Path $installRoot 'ResticBackuperDashboard.exe') $result.dashboard_executable 'result.dashboard_executable'
-    Assert-True (Test-Path -LiteralPath $result.dashboard_executable -PathType Leaf) 'the dashboard program exists'
-    Assert-True (Test-Path -LiteralPath $result.recovery_key_path -PathType Leaf) 'the recovery key file exists'
-    Assert-Equal 'ResticBackuper-RecoveryKey.txt' (Split-Path -Leaf $result.recovery_key_path) 'the recovery key has its documented name'
-    Assert-True ($result.recovery_key_readable_by_user -eq $true) 'the installer reports that the user can read the recovery key'
-    Assert-True (@($result.PSObject.Properties.Name) -contains 'warnings') 'the result carries its warnings array'
-
-    # What is on the machine.
-    Assert-True (Test-Path -LiteralPath (Join-Path $installRoot 'runtime-manifest.json') -PathType Leaf) 'the runtime manifest exists'
-    Assert-True (Test-Path -LiteralPath (Join-Path $installRepository 'config') -PathType Leaf) 'the repository was initialized'
-    Assert-True (Test-Path -LiteralPath (Join-Path $stateRoot 'repository-password.dpapi.json') -PathType Leaf) 'the password is stored'
-    Assert-True (Test-Path -LiteralPath $shortcutPath -PathType Leaf) 'the Start menu shortcut exists'
-    Assert-True (Test-Path -LiteralPath $registryKey) 'the Installed apps entry exists'
-    foreach ($name in @('ResticBackuper', 'ResticBackuperDashboard')) {
-        Assert-True ($null -ne (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) "the scheduled task $name exists"
-    }
-    $configuration = [IO.File]::ReadAllText((Join-Path $installRoot 'backup-config.json')) | ConvertFrom-Json
-    Assert-Equal $installRepository $configuration.repository 'the configuration names the repository'
-    Assert-Equal $result.recovery_key_path $configuration.recovery_key_file 'the configuration names the recovery key the result reports'
-    $keyText = [IO.File]::ReadAllText($result.recovery_key_path)
-    Assert-True ($keyText -match '(?m)^Password:\s*\S{40,}') 'the recovery key holds a password'
-    $manifestBefore = (Get-FileHash -LiteralPath (Join-Path $installRoot 'runtime-manifest.json') -Algorithm SHA256).Hash
-
-    # The recovery key: readable by its own account, not by another account.
-    $keyProbe = Invoke-AsUser -User $administratorUser -Name 'read-key-owner' -Template $readProbe -Values @{ PATH = $result.recovery_key_path }
-    Assert-Equal 'READABLE' $keyProbe.Stdout.Trim() 'the installing account reads the recovery key'
-    $keyProbe = Invoke-AsUser -User $standardUser -Name 'read-key-other' -Template $readProbe -Values @{ PATH = $result.recovery_key_path }
-    Assert-Equal 'DENIED' $keyProbe.Stdout.Trim() 'another account cannot read the recovery key'
-
-    # ---------------------------------------------------------------------------------------------------------------------
-    Write-Section '4. A second install must refuse and change nothing'
-    $run = Invoke-AsUser -User $administratorUser -Name 'install-again' -Template $progressTemplate -Values @{
-        HANDOFF = Join-Path $handoff 'install-again.txt'; SCRIPT = $installerScript; POWERSHELL = $windowsPowerShell
-        ARGUMENTS = (ConvertTo-LiteralList ($common + @('-Schedule', '03:15')))
-    }
-    Assert-True ($run.ExitCode -ne 0) 'a second install fails'
-    $lines = Read-ProgressFeed (Get-HandoffPath 'install-again.txt')
-    Assert-Equal @('preflight:started', 'preflight:failed') @(Get-PhaseSequence $lines) 'the second install stops in the preflight'
-    Assert-Equal 'already_installed' $lines[$lines.Count - 1].error.code 'the second install says Rewindle is already installed'
-    Assert-Equal $manifestBefore (Get-FileHash -LiteralPath (Join-Path $installRoot 'runtime-manifest.json') -Algorithm SHA256).Hash 'the refused install did not touch the installation'
-
-    # ---------------------------------------------------------------------------------------------------------------------
-    Write-Section '5. Uninstall with a progress feed'
-    $uninstallScript = Join-Path $installRoot 'Uninstall-ResticBackuper.ps1'
-    $run = Invoke-AsUser -User $administratorUser -Name 'uninstall' -Template $progressTemplate -Values @{
-        HANDOFF = Join-Path $handoff 'uninstall.txt'; SCRIPT = $uninstallScript; POWERSHELL = $windowsPowerShell; ARGUMENTS = ''
-    } -TimeoutSeconds 900
-    Show-Run $run
-    $uninstallFeedPath = Get-HandoffPath 'uninstall.txt'
-    if (Test-Path -LiteralPath $uninstallFeedPath) { Write-Host '--- progress feed'; Write-Host ([IO.File]::ReadAllText($uninstallFeedPath)) }
-    Assert-Equal 0 $run.ExitCode 'the uninstall exits 0'
-    $lines = Read-ProgressFeed $uninstallFeedPath
-    Assert-Equal (Get-ExpectedSequence -Phases @('preflight', 'stop', 'tasks', 'program_files', 'shortcut', 'registration', 'verification')) @(Get-PhaseSequence $lines) 'the uninstall phases arrive in the documented order'
-    $uninstallResult = $lines[$lines.Count - 1]
-    Assert-True ($uninstallResult.ok -eq $true -and $null -eq $uninstallResult.error) 'the uninstall ends with a successful result line'
-    Assert-Equal 'uninstall' $uninstallResult.operation 'the result names the operation'
-    Assert-True ($uninstallResult.removed.install_root -eq $true) 'the program folder is reported removed'
-    Assert-Equal @('ResticBackuper', 'ResticBackuperDashboard') @($uninstallResult.removed.scheduled_tasks | Sort-Object) 'both scheduled tasks are reported removed'
-    Assert-True ($uninstallResult.removed.start_menu_shortcut -eq $true -and $uninstallResult.removed.installed_apps_entry -eq $true) 'the shortcut and the Installed apps entry are reported removed'
-    Assert-Equal $stateRoot $uninstallResult.kept.state_root 'the uninstall keeps the state folder'
-    Assert-Equal $installRepository $uninstallResult.kept.repository 'the uninstall keeps the repository'
-    Assert-Equal $result.recovery_key_path $uninstallResult.kept.recovery_key 'the uninstall keeps the recovery key'
-    Assert-True (-not [string]::IsNullOrWhiteSpace($uninstallResult.kept.recovery_tools)) 'the uninstall reports the recovery tools it keeps'
-
-    Write-Section '6. The machine is clean, and only the kept data remains'
-    Assert-True (-not (Test-Path -LiteralPath $installRoot)) 'the program folder is gone'
-    Assert-True (-not (Test-Path -LiteralPath $shortcutPath)) 'the Start menu shortcut is gone'
-    Assert-True (-not (Test-Path -LiteralPath $registryKey)) 'the Installed apps entry is gone'
-    foreach ($name in $taskNames) {
-        Assert-True ($null -eq (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) "the scheduled task $name is gone"
-    }
-    Assert-True (Test-Path -LiteralPath (Join-Path $installRepository 'config') -PathType Leaf) 'the repository is kept'
-    Assert-True (Test-Path -LiteralPath $result.recovery_key_path -PathType Leaf) 'the recovery key is kept'
-    Assert-True (Test-Path -LiteralPath $stateRoot -PathType Container) 'the state folder is kept'
-    Assert-True (Test-Path -LiteralPath $uninstallResult.kept.recovery_tools -PathType Container) 'the recovery tools are kept'
-    Assert-Equal @($stateRoot) @(Get-InstallationFootprint) 'only the state folder remains of the Rewindle footprint (the repository and recovery key live elsewhere)'
-
-    $run = Invoke-AsUser -User $administratorUser -Name 'uninstall-again' -Template $progressTemplate -Values @{
-        HANDOFF = Join-Path $handoff 'uninstall-again.txt'; SCRIPT = (Join-Path $bundle 'payload\Uninstall-ResticBackuper.ps1'); POWERSHELL = $windowsPowerShell; ARGUMENTS = ''
-    }
-    Assert-True ($run.ExitCode -ne 0) 'a second uninstall fails'
-    $lines = Read-ProgressFeed (Get-HandoffPath 'uninstall-again.txt')
-    Assert-Equal @('preflight:started', 'preflight:failed') @(Get-PhaseSequence $lines) 'the second uninstall stops in the preflight'
-    Assert-Equal 'not_installed' $lines[$lines.Count - 1].error.code 'the second uninstall says nothing is installed'
+    Invoke-InstallCycle -Id 'cycle1' -Label 'cycle 1 (with the dashboard)' -Repository $firstRepository -AdministratorUser $administratorUser `
+        -StandardUser $standardUser -InstallerScript $installerScript -Extras
+    Invoke-InstallCycle -Id 'cycle2' -Label 'cycle 2 (without the dashboard)' -Repository (Join-Path $root 'install-2\Backup') -AdministratorUser $administratorUser `
+        -StandardUser $standardUser -InstallerScript $installerScript -SkipDashboard
 
     $succeeded = $true
     [pscustomobject]@{
@@ -502,6 +546,7 @@ exit $LASTEXITCODE
         plan_as_standard_user = 'passed'
         failing_installs = 'passed'
         install_with_progress = 'passed'
+        install_without_dashboard = 'passed'
         uninstall_with_progress = 'passed'
         machine_clean_after_uninstall = 'passed'
     } | ConvertTo-Json
@@ -523,8 +568,7 @@ finally {
         if (Test-Path -LiteralPath $installRoot) {
             $leftover = Join-Path $installRoot 'Uninstall-ResticBackuper.ps1'
             if ((Test-Path -LiteralPath $leftover) -and $null -ne $administratorUser) {
-                $sid = $administratorUser.Sid
-                $cleanup = Invoke-AsUser -User $administratorUser -Name 'cleanup-uninstall' -TimeoutSeconds 600 -Values @{ SCRIPT = $leftover; SID = $sid; POWERSHELL = $windowsPowerShell } -Template @'
+                $cleanup = Invoke-AsUser -User $administratorUser -Name 'cleanup-uninstall' -TimeoutSeconds 600 -Values @{ SCRIPT = $leftover; SID = $administratorUser.Sid; POWERSHELL = $windowsPowerShell } -Template @'
 & '{{POWERSHELL}}' -NoProfile -ExecutionPolicy Bypass -File '{{SCRIPT}}' -Unattended -ExpectedUserSid '{{SID}}'
 exit $LASTEXITCODE
 '@
