@@ -1,0 +1,551 @@
+[CmdletBinding()]
+param(
+    [switch]$AllowSystemInstall,
+    [string]$Artifact
+)
+
+if ($env:GITHUB_ACTIONS -ne 'true') {
+    throw 'This script performs a real installation and uninstallation. It runs only on a GitHub Actions runner, never on a developer machine.'
+}
+if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
+    throw 'This script runs only on a GitHub-hosted runner (RUNNER_ENVIRONMENT=github-hosted), which is a disposable machine.'
+}
+if (-not $AllowSystemInstall) {
+    throw 'Pass -AllowSystemInstall to confirm that this disposable CI machine may be changed.'
+}
+
+# End-to-end test of the installer's machine-readable backend (docs/setup-contract.md) on the disposable hosted runner:
+#   1. plan mode, run as a standard (non-administrator) account;
+#   2. refused and failing installs, which must leave nothing behind and still end with a result line;
+#   3. a real unattended install with a progress feed, run as a test administrator named by -ExpectedUserSid;
+#   4. a second install that must refuse, the recovery key checks, an uninstall with a progress feed, a second uninstall that
+#      must refuse, and a check that the machine is clean (only the data an uninstall keeps remains).
+# It needs the release the build step produced. Hosted runners run every step as an administrator with UAC off, so the test
+# accounts are real local users started through the secondary-logon service, the same pattern as the restore-manager step.
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+
+$projectRoot = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) '..')).TrimEnd('\')
+$version = (Get-Content -LiteralPath (Join-Path $projectRoot 'VERSION') -Raw).Trim()
+if (-not $Artifact) { $Artifact = Join-Path $projectRoot "artifacts\Rewindle-v$version-windows-x64.zip" }
+if (-not (Test-Path -LiteralPath $Artifact -PathType Leaf)) { throw "Release artifact is missing: $Artifact" }
+$windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$administratorRole = [Security.Principal.WindowsBuiltInRole]::Administrator
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole($administratorRole)) {
+    throw 'The hosted runner is expected to run this step as an administrator.'
+}
+
+$programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+$programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+$installRoot = Join-Path $programFiles 'ResticBackuper'
+$stateRoot = Join-Path $programData 'ResticBackuper'
+$cloudToolsRoot = Join-Path $programData 'ResticBackuperRecoveryTools'
+$shortcutPath = Join-Path $programData 'Microsoft\Windows\Start Menu\Programs\ResticBackuper.lnk'
+$registryKey = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\ResticBackuper'
+$taskNames = @('ResticBackuper', 'ResticBackuperDashboard', 'ResticBackuperGoogleDriveSync')
+
+# What of a Rewindle installation exists on this machine (an empty list means none).
+function Get-InstallationFootprint {
+    $found = @()
+    foreach ($path in @($installRoot, $stateRoot, $cloudToolsRoot, $shortcutPath)) {
+        if (Test-Path -LiteralPath $path) { $found += $path }
+    }
+    if (Test-Path -LiteralPath $registryKey) { $found += $registryKey }
+    foreach ($name in $taskNames) {
+        if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) { $found += "task $name" }
+    }
+    return $found
+}
+
+$existing = @(Get-InstallationFootprint)
+if ($existing.Count -gt 0) {
+    throw "Refusing to run: Rewindle is already present on this machine ($($existing -join '; ')). This test only runs on a clean disposable runner."
+}
+
+$root = 'C:\rewindle-contract'
+if (Test-Path -LiteralPath $root) { throw "Refusing to run: $root already exists." }
+$bundle = Join-Path $root 'bundle'
+$scripts = Join-Path $root 'scripts'
+$logs = Join-Path $root 'logs'
+$handoff = Join-Path $root 'handoff'
+$docs = Join-Path $root 'sources\docs'
+$photos = Join-Path $root 'sources\photos'
+$planRepository = Join-Path $root 'plan-only\Backup'
+$installRepository = Join-Path $root 'install\Backup'
+$assertions = 0
+$createdUsers = @()
+
+function Assert-True {
+    param([bool]$Condition, [string]$Message)
+    $script:assertions++
+    if (-not $Condition) { throw "FAILED: $Message" }
+}
+
+function Assert-Equal {
+    param($Expected, $Actual, [string]$Message)
+    $script:assertions++
+    $expectedText = (@($Expected) | ForEach-Object { [string]$_ }) -join '|'
+    $actualText = (@($Actual) | ForEach-Object { [string]$_ }) -join '|'
+    if ($expectedText -cne $actualText) { throw "FAILED: $Message (expected '$expectedText', got '$actualText')" }
+}
+
+function Write-Section {
+    param([string]$Title)
+    Write-Host ''
+    Write-Host "=== $Title"
+}
+
+function Grant-Access {
+    param([string]$Path, [string]$User, [string]$Rights)
+    & icacls.exe $Path /grant ('{0}:(OI)(CI){1}' -f $User, $Rights) /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not grant $User access to $Path." }
+}
+
+function New-TestUser {
+    param([string]$Name, [switch]$Administrator)
+    $secure = ConvertTo-SecureString -String ('Rw!' + [Guid]::NewGuid().ToString('N') + 'a9') -AsPlainText -Force
+    # New-LocalUser never prompts. BUILTIN\Users holds the local logon right the secondary-logon service needs.
+    New-LocalUser -Name $Name -Password $secure -PasswordNeverExpires -AccountNeverExpires | Out-Null
+    $script:createdUsers += $Name
+    Add-LocalGroupMember -SID 'S-1-5-32-545' -Member $Name
+    if ($Administrator) { Add-LocalGroupMember -SID 'S-1-5-32-544' -Member $Name }
+    return [pscustomobject]@{
+        Name = $Name
+        Sid = (Get-LocalUser -Name $Name).SID.Value
+        Credential = (New-Object System.Management.Automation.PSCredential($Name, $secure))
+    }
+}
+
+function ConvertTo-LiteralList {
+    param([string[]]$Values)
+    return (($Values | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }) -join ', ')
+}
+
+# Runs a script as a test user and waits for it. The script body is a template: {{NAME}} markers are replaced by the values.
+function Invoke-AsUser {
+    param(
+        [Parameter(Mandatory)]$User,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Template,
+        [hashtable]$Values = @{},
+        [int]$TimeoutSeconds = 1200
+    )
+    $body = $Template
+    foreach ($key in $Values.Keys) { $body = $body.Replace('{{' + $key + '}}', [string]$Values[$key]) }
+    $scriptPath = Join-Path $scripts "$Name.ps1"
+    [IO.File]::WriteAllText($scriptPath, $body, [Text.UTF8Encoding]::new($true))
+    $stdout = Join-Path $logs "$Name.stdout.log"
+    $stderr = Join-Path $logs "$Name.stderr.log"
+    $process = Start-Process -FilePath $windowsPowerShell `
+        -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $scriptPath `
+        -Credential $User.Credential -LoadUserProfile -WorkingDirectory $root `
+        -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+    $null = $process.Handle
+    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        try { $process.Kill() } catch { }
+        throw "$Name did not finish within $TimeoutSeconds seconds."
+    }
+    $process.WaitForExit()
+    return [pscustomobject]@{
+        Name = $Name
+        ExitCode = [int]$process.ExitCode
+        Stdout = $(if (Test-Path -LiteralPath $stdout) { [IO.File]::ReadAllText($stdout) } else { '' })
+        Stderr = $(if (Test-Path -LiteralPath $stderr) { [IO.File]::ReadAllText($stderr) } else { '' })
+    }
+}
+
+function Show-Run {
+    param($Run)
+    Write-Host "--- $($Run.Name): exit code $($Run.ExitCode)"
+    if ($Run.Stdout.Trim()) { Write-Host '--- stdout'; Write-Host $Run.Stdout }
+    if ($Run.Stderr.Trim()) { Write-Host '--- stderr'; Write-Host $Run.Stderr }
+}
+
+# A file the wrapper wrote to tell this script where the user's progress or plan file is.
+function Get-HandoffPath {
+    param([string]$Name)
+    $path = Join-Path $handoff $Name
+    if (-not (Test-Path -LiteralPath $path)) { throw "The wrapper did not report where it put its file ($Name)." }
+    return ([IO.File]::ReadAllText($path)).Trim()
+}
+
+# Parses a progress feed and checks the envelope every line must have.
+function Read-ProgressFeed {
+    param([string]$Path)
+    Assert-True (Test-Path -LiteralPath $Path -PathType Leaf) "the progress feed exists ($Path)"
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    Assert-True (-not ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)) 'the feed has no byte-order mark'
+    $text = [Text.UTF8Encoding]::new($false).GetString($bytes)
+    Assert-True ($text.Length -gt 0 -and $text.EndsWith("`n")) 'the feed ends with a line feed'
+    $lines = @()
+    $previousTime = [DateTime]::MinValue
+    $sequence = 0
+    foreach ($line in ($text.TrimEnd("`n") -split "`n")) {
+        $entry = $line | ConvertFrom-Json
+        $sequence++
+        Assert-Equal 'Rewindle.InstallProgress.v1' $entry.schema "line $sequence has the schema id"
+        Assert-Equal $sequence $entry.seq "line $sequence carries the next sequence number"
+        Assert-True ($entry.time -cmatch '^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$') "line $sequence has an ISO-8601 UTC time ($($entry.time))"
+        $stamp = [DateTime]::ParseExact($entry.time, "yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal)
+        Assert-True ($stamp -ge $previousTime) "line $sequence is not earlier than the line before"
+        $previousTime = $stamp
+        Assert-True (@('phase', 'result') -contains $entry.type) "line $sequence has a known type"
+        $lines += $entry
+    }
+    Assert-Equal 'result' $lines[$lines.Count - 1].type 'the last line is the result'
+    Assert-Equal 1 @($lines | Where-Object { $_.type -eq 'result' }).Count 'there is exactly one result line'
+    return $lines
+}
+
+function Get-PhaseSequence {
+    param($Lines)
+    return @($Lines | Where-Object { $_.type -eq 'phase' } | ForEach-Object { '{0}:{1}' -f $_.phase, $_.state })
+}
+
+function Get-ExpectedSequence {
+    param([string[]]$Phases, [string[]]$Skipped = @())
+    $sequence = @()
+    foreach ($phase in $Phases) { $sequence += "${phase}:started", "${phase}:completed" }
+    foreach ($phase in $Skipped) { $sequence += "${phase}:skipped" }
+    return $sequence
+}
+
+$planTemplate = @'
+$ErrorActionPreference = 'Stop'
+$directory = Join-Path ([IO.Path]::GetTempPath()) ('RewindleSetup-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $directory | Out-Null
+$planPath = Join-Path $directory 'plan.json'
+[IO.File]::WriteAllText('{{HANDOFF}}', $planPath)
+$arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '{{SCRIPT}}', '-PlanOnly', '-PlanOutput', $planPath) + @({{ARGUMENTS}})
+& '{{POWERSHELL}}' @arguments
+exit $LASTEXITCODE
+'@
+
+# Creates the progress folder the way the wizard does (as the unelevated user, owned by that user) and runs a script with the
+# progress path. The folder's owner is set to the account explicitly because an administrator's token owns new objects as the
+# Administrators group.
+$progressTemplate = @'
+$ErrorActionPreference = 'Stop'
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$directory = Join-Path ([IO.Path]::GetTempPath()) ('RewindleSetup-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $directory | Out-Null
+$security = [IO.Directory]::GetAccessControl($directory)
+$security.SetOwner([Security.Principal.SecurityIdentifier]::new($sid))
+[IO.Directory]::SetAccessControl($directory, $security)
+$progress = Join-Path $directory 'progress.jsonl'
+[IO.File]::WriteAllText('{{HANDOFF}}', $progress)
+$arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '{{SCRIPT}}', '-Unattended', '-ExpectedUserSid', $sid, '-ProgressPath', $progress) + @({{ARGUMENTS}})
+& '{{POWERSHELL}}' @arguments
+exit $LASTEXITCODE
+'@
+
+$elevationProbe = @'
+([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+'@
+
+$readProbe = @'
+try { $null = [IO.File]::ReadAllText('{{PATH}}'); 'READABLE' } catch { 'DENIED' }
+'@
+
+function Get-WebView2Version {
+    foreach ($key in @(
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+        'HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+    )) {
+        if (Test-Path -LiteralPath $key) {
+            $value = [string](Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue).pv
+            if ($value -match '^\d+(\.\d+){1,3}$') { return $value }
+        }
+    }
+    return $null
+}
+
+$administratorUser = $null
+$standardUser = $null
+$succeeded = $false
+try {
+    Write-Section 'Preparing the disposable machine'
+    New-Item -ItemType Directory -Path $root, $scripts, $logs, $handoff, $docs, $photos | Out-Null
+    [IO.File]::WriteAllText((Join-Path $docs 'document.txt'), 'contract test document', [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $photos 'photo.txt'), 'contract test photo', [Text.UTF8Encoding]::new($false))
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [IO.Compression.ZipFile]::ExtractToDirectory((Resolve-Path -LiteralPath $Artifact).Path, $bundle)
+    $installerScript = Join-Path $bundle 'Install-ResticBackuper.ps1'
+    Assert-True (Test-Path -LiteralPath $installerScript -PathType Leaf) 'the release bundle holds the installer'
+    Assert-True (Test-Path -LiteralPath (Join-Path $bundle 'payload\Uninstall-ResticBackuper.ps1') -PathType Leaf) 'the release payload holds the uninstaller'
+    Start-Service -Name seclogon
+    $standardUser = New-TestUser -Name 'rwd-contract-std'
+    $administratorUser = New-TestUser -Name 'rwd-contract-admin' -Administrator
+    foreach ($user in @($standardUser, $administratorUser)) {
+        Grant-Access -Path $root -User $user.Name -Rights 'RX'
+        Grant-Access -Path $logs -User $user.Name -Rights 'M'
+        Grant-Access -Path $handoff -User $user.Name -Rights 'M'
+    }
+    Write-Host "Test accounts created: $($standardUser.Name) (standard), $($administratorUser.Name) (administrator)"
+
+    Write-Section 'The accounts are what the test needs them to be'
+    $probe = Invoke-AsUser -User $standardUser -Name 'probe-standard-elevation' -Template $elevationProbe
+    if ($probe.ExitCode -ne 0) { Show-Run $probe; throw 'The standard test account could not run a process.' }
+    Assert-Equal 'False' $probe.Stdout.Trim() 'the standard test account is not an administrator'
+    $probe = Invoke-AsUser -User $administratorUser -Name 'probe-admin-elevation' -Template $elevationProbe
+    if ($probe.ExitCode -ne 0) { Show-Run $probe; throw 'The administrator test account could not run a process.' }
+    if ($probe.Stdout.Trim() -ne 'True') {
+        throw 'The administrator test account does not run elevated. This test assumes the hosted runner has User Account Control off; adapt it before relying on it.'
+    }
+
+    # ---------------------------------------------------------------------------------------------------------------------
+    Write-Section '1. Plan mode as a standard user'
+    $planArguments = ConvertTo-LiteralList @('-Repository', $planRepository, '-SourceList', "$docs;$photos", '-Schedule', '02:00', '-MinimumFreeGiB', '1')
+    $run = Invoke-AsUser -User $standardUser -Name 'plan-standard' -Template $planTemplate -Values @{
+        HANDOFF = Join-Path $handoff 'plan-standard.txt'; SCRIPT = $installerScript; ARGUMENTS = $planArguments; POWERSHELL = $windowsPowerShell
+    }
+    if ($run.ExitCode -ne 0) { Show-Run $run }
+    Assert-Equal 0 $run.ExitCode 'the plan run as a standard user exits 0'
+    Assert-Equal '' $run.Stdout.Trim() 'plan mode prints nothing'
+    $planPath = Get-HandoffPath 'plan-standard.txt'
+    Assert-Equal @('plan.json') @(Get-ChildItem -LiteralPath (Split-Path -Parent $planPath) -Force | ForEach-Object Name) 'the plan is the only file in the standard user''s setup folder'
+    $plan = [IO.File]::ReadAllText($planPath) | ConvertFrom-Json
+    Assert-Equal 'Rewindle.InstallPlan.v1' $plan.schema 'plan schema id'
+    if (-not $plan.ok) { $plan | ConvertTo-Json -Depth 8 | Write-Host }
+    Assert-True $plan.ok "the plan for a valid configuration is ok (errors: $(@($plan.errors | ForEach-Object code) -join ', '))"
+    Assert-True ($plan.environment.elevated -eq $false) 'the plan ran without elevation'
+    Assert-Equal $version $plan.environment.version 'the plan reports the bundle version'
+    Assert-Equal $planRepository $plan.resolved.repository 'resolved repository'
+    Assert-Equal @($docs, $photos) @($plan.resolved.sources) 'resolved sources'
+    Assert-True ($plan.environment.dotnet_framework_48 -eq $true) '.NET Framework 4.8 is reported'
+    Assert-True (@($plan.environment.volumes).Count -ge 1) 'volumes are listed'
+    Assert-True (@($plan.environment.volumes | Where-Object { $_.is_system }).Count -eq 1) 'exactly one system volume'
+    Assert-True (@($plan.environment.volumes | Where-Object { $_.recommended }).Count -le 1) 'at most one recommended volume'
+    foreach ($entry in @($plan.environment.volumes | Where-Object { $_.recommended })) {
+        Assert-True ($entry.eligible -and $entry.filesystem -ieq 'NTFS' -and $entry.same_physical_disk_as_system -eq $false) 'the recommended volume is eligible NTFS on another physical disk'
+    }
+    Assert-Equal 7 @($plan.environment.known_folders).Count 'seven known folders are listed'
+    Assert-True ($null -eq $plan.environment.existing_install.rewindle) 'no installation is reported on the clean runner'
+    $volumeOfRepository = [IO.Path]::GetPathRoot($planRepository)
+    $systemRoot = [IO.Path]::GetPathRoot($env:SystemRoot)
+    if ($volumeOfRepository -ieq $systemRoot) {
+        Assert-True (@($plan.warnings | Where-Object { $_.code -eq 'repository_on_system_disk' }).Count -eq 1) 'a repository on the Windows drive is warned about'
+    }
+    Assert-Equal @() @(Get-InstallationFootprint) 'plan mode left nothing installed'
+    Assert-True (-not (Test-Path -LiteralPath $planRepository)) 'plan mode did not create the repository folder'
+
+    $run = Invoke-AsUser -User $standardUser -Name 'plan-standard-invalid' -Template $planTemplate -Values @{
+        HANDOFF = Join-Path $handoff 'plan-standard-invalid.txt'; SCRIPT = $installerScript; POWERSHELL = $windowsPowerShell
+        ARGUMENTS = (ConvertTo-LiteralList @('-Repository', 'relative\path', '-SourceList', "$docs;$root\no-such-folder", '-Schedule', '25:00', '-MinimumFreeGiB', '1'))
+    }
+    if ($run.ExitCode -ne 0) { Show-Run $run }
+    Assert-Equal 0 $run.ExitCode 'a plan with problems still exits 0'
+    $invalid = [IO.File]::ReadAllText((Get-HandoffPath 'plan-standard-invalid.txt')) | ConvertFrom-Json
+    Assert-True (-not $invalid.ok) 'the plan for invalid input is not ok'
+    foreach ($code in @('repository_not_absolute', 'source_not_found', 'schedule_invalid')) {
+        Assert-True (@($invalid.errors | Where-Object { $_.code -eq $code }).Count -ge 1) "the plan reports $code"
+    }
+
+    # ---------------------------------------------------------------------------------------------------------------------
+    Write-Section '2. Installs that must fail cleanly'
+    $webView2 = Get-WebView2Version
+    if (-not $webView2) {
+        # Fetch the WebView2 runtime up front, with retries, so a flaky download cannot fail the contract test. If it still
+        # fails, the installer tries on its own.
+        for ($attempt = 1; $attempt -le 3 -and -not (Get-WebView2Version); $attempt++) {
+            $bootstrapper = Join-Path $root 'MicrosoftEdgeWebview2Setup.exe'
+            try {
+                Invoke-WebRequest -UseBasicParsing -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $bootstrapper
+                $signature = Get-AuthenticodeSignature -LiteralPath $bootstrapper
+                if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notlike '*Microsoft*') { throw 'The WebView2 bootstrapper is not signed by Microsoft.' }
+                Start-Process -FilePath $bootstrapper -ArgumentList '/silent', '/install' -Wait
+            }
+            catch { Write-Host "WebView2 pre-installation attempt $attempt failed: $($_.Exception.Message)"; Start-Sleep -Seconds 5 }
+        }
+        Write-Host "WebView2 runtime before the install: $(Get-WebView2Version)"
+    }
+    $common = @('-Repository', $installRepository, '-SourceList', "$docs;$photos", '-MinimumFreeGiB', '1')
+
+    $run = Invoke-AsUser -User $administratorUser -Name 'install-bad-schedule' -Template $progressTemplate -Values @{
+        HANDOFF = Join-Path $handoff 'install-bad-schedule.txt'; SCRIPT = $installerScript; POWERSHELL = $windowsPowerShell
+        ARGUMENTS = (ConvertTo-LiteralList ($common + @('-Schedule', '99:99')))
+    }
+    Assert-True ($run.ExitCode -ne 0) 'an install with an invalid schedule fails'
+    $lines = Read-ProgressFeed (Get-HandoffPath 'install-bad-schedule.txt')
+    Assert-Equal @('preflight:started', 'preflight:failed') @(Get-PhaseSequence $lines) 'a refused install reports preflight started and failed'
+    $result = $lines[$lines.Count - 1]
+    Assert-True ($result.ok -eq $false) 'the failed install ends with ok false'
+    Assert-Equal 'schedule_invalid' $result.error.code 'the failed install carries the validation code'
+    Assert-True (-not [string]::IsNullOrWhiteSpace($result.error.message)) 'the failed install carries a message'
+    Assert-Equal 'failed' @($lines | Where-Object { $_.type -eq 'phase' })[1].state 'the failed phase line'
+    Assert-Equal @() @(Get-InstallationFootprint) 'a refused install changed nothing'
+    Assert-True (-not (Test-Path -LiteralPath $installRepository)) 'a refused install created no repository'
+
+    $run = Invoke-AsUser -User $administratorUser -Name 'install-bad-progress-path' -Template @'
+$ErrorActionPreference = 'Stop'
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$outside = Join-Path $env:SystemRoot 'rewindle-contract-progress.jsonl'
+& '{{POWERSHELL}}' -NoProfile -ExecutionPolicy Bypass -File '{{SCRIPT}}' -Unattended -ExpectedUserSid $sid -ProgressPath $outside {{ARGUMENTS}}
+exit $LASTEXITCODE
+'@ -Values @{ SCRIPT = $installerScript; POWERSHELL = $windowsPowerShell; ARGUMENTS = (($common | ForEach-Object { "'" + $_ + "'" }) -join ' ') }
+    Assert-True ($run.ExitCode -ne 0) 'an install with a progress path outside the temporary folder is refused'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'rewindle-contract-progress.jsonl'))) 'no progress file was created outside the temporary folder'
+    Assert-Equal @() @(Get-InstallationFootprint) 'a refused progress path changed nothing'
+
+    # ---------------------------------------------------------------------------------------------------------------------
+    Write-Section '3. A real install with a progress feed'
+    $run = Invoke-AsUser -User $administratorUser -Name 'install' -Template $progressTemplate -Values @{
+        HANDOFF = Join-Path $handoff 'install.txt'; SCRIPT = $installerScript; POWERSHELL = $windowsPowerShell
+        ARGUMENTS = (ConvertTo-LiteralList ($common + @('-Schedule', '03:15')))
+    } -TimeoutSeconds 1800
+    Show-Run $run
+    $installFeedPath = Get-HandoffPath 'install.txt'
+    if (Test-Path -LiteralPath $installFeedPath) { Write-Host '--- progress feed'; Write-Host ([IO.File]::ReadAllText($installFeedPath)) }
+    Assert-Equal 0 $run.ExitCode 'the install exits 0'
+    $lines = Read-ProgressFeed $installFeedPath
+    $phases = @('preflight', 'webview2', 'payload', 'canary', 'credential', 'repository', 'recovery_key', 'permissions', 'tasks', 'dashboard', 'verification')
+    Assert-Equal (Get-ExpectedSequence -Phases $phases -Skipped @('first_backup')) @(Get-PhaseSequence $lines) 'the phases arrive in the documented order'
+    foreach ($entry in @($lines | Where-Object { $_.type -eq 'phase' })) {
+        Assert-True (-not [string]::IsNullOrWhiteSpace($entry.title)) "phase line for $($entry.phase) has a title"
+        Assert-True ($entry.state -ne 'failed') "phase $($entry.phase) did not fail"
+    }
+    $result = $lines[$lines.Count - 1]
+    Assert-True ($result.ok -eq $true -and $null -eq $result.error) 'the install ends with a successful result line'
+    Assert-Equal $installRoot $result.install_root 'result.install_root'
+    Assert-Equal $version $result.version 'result.version'
+    Assert-Equal (Join-Path $installRoot 'ResticBackuperDashboard.exe') $result.dashboard_executable 'result.dashboard_executable'
+    Assert-True (Test-Path -LiteralPath $result.dashboard_executable -PathType Leaf) 'the dashboard program exists'
+    Assert-True (Test-Path -LiteralPath $result.recovery_key_path -PathType Leaf) 'the recovery key file exists'
+    Assert-Equal 'ResticBackuper-RecoveryKey.txt' (Split-Path -Leaf $result.recovery_key_path) 'the recovery key has its documented name'
+    Assert-True ($result.recovery_key_readable_by_user -eq $true) 'the installer reports that the user can read the recovery key'
+    Assert-True (@($result.PSObject.Properties.Name) -contains 'warnings') 'the result carries its warnings array'
+
+    # What is on the machine.
+    Assert-True (Test-Path -LiteralPath (Join-Path $installRoot 'runtime-manifest.json') -PathType Leaf) 'the runtime manifest exists'
+    Assert-True (Test-Path -LiteralPath (Join-Path $installRepository 'config') -PathType Leaf) 'the repository was initialized'
+    Assert-True (Test-Path -LiteralPath (Join-Path $stateRoot 'repository-password.dpapi.json') -PathType Leaf) 'the password is stored'
+    Assert-True (Test-Path -LiteralPath $shortcutPath -PathType Leaf) 'the Start menu shortcut exists'
+    Assert-True (Test-Path -LiteralPath $registryKey) 'the Installed apps entry exists'
+    foreach ($name in @('ResticBackuper', 'ResticBackuperDashboard')) {
+        Assert-True ($null -ne (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) "the scheduled task $name exists"
+    }
+    $configuration = [IO.File]::ReadAllText((Join-Path $installRoot 'backup-config.json')) | ConvertFrom-Json
+    Assert-Equal $installRepository $configuration.repository 'the configuration names the repository'
+    Assert-Equal $result.recovery_key_path $configuration.recovery_key_file 'the configuration names the recovery key the result reports'
+    $keyText = [IO.File]::ReadAllText($result.recovery_key_path)
+    Assert-True ($keyText -match '(?m)^Password:\s*\S{40,}') 'the recovery key holds a password'
+    $manifestBefore = (Get-FileHash -LiteralPath (Join-Path $installRoot 'runtime-manifest.json') -Algorithm SHA256).Hash
+
+    # The recovery key: readable by its own account, not by another account.
+    $keyProbe = Invoke-AsUser -User $administratorUser -Name 'read-key-owner' -Template $readProbe -Values @{ PATH = $result.recovery_key_path }
+    Assert-Equal 'READABLE' $keyProbe.Stdout.Trim() 'the installing account reads the recovery key'
+    $keyProbe = Invoke-AsUser -User $standardUser -Name 'read-key-other' -Template $readProbe -Values @{ PATH = $result.recovery_key_path }
+    Assert-Equal 'DENIED' $keyProbe.Stdout.Trim() 'another account cannot read the recovery key'
+
+    # ---------------------------------------------------------------------------------------------------------------------
+    Write-Section '4. A second install must refuse and change nothing'
+    $run = Invoke-AsUser -User $administratorUser -Name 'install-again' -Template $progressTemplate -Values @{
+        HANDOFF = Join-Path $handoff 'install-again.txt'; SCRIPT = $installerScript; POWERSHELL = $windowsPowerShell
+        ARGUMENTS = (ConvertTo-LiteralList ($common + @('-Schedule', '03:15')))
+    }
+    Assert-True ($run.ExitCode -ne 0) 'a second install fails'
+    $lines = Read-ProgressFeed (Get-HandoffPath 'install-again.txt')
+    Assert-Equal @('preflight:started', 'preflight:failed') @(Get-PhaseSequence $lines) 'the second install stops in the preflight'
+    Assert-Equal 'already_installed' $lines[$lines.Count - 1].error.code 'the second install says Rewindle is already installed'
+    Assert-Equal $manifestBefore (Get-FileHash -LiteralPath (Join-Path $installRoot 'runtime-manifest.json') -Algorithm SHA256).Hash 'the refused install did not touch the installation'
+
+    # ---------------------------------------------------------------------------------------------------------------------
+    Write-Section '5. Uninstall with a progress feed'
+    $uninstallScript = Join-Path $installRoot 'Uninstall-ResticBackuper.ps1'
+    $run = Invoke-AsUser -User $administratorUser -Name 'uninstall' -Template $progressTemplate -Values @{
+        HANDOFF = Join-Path $handoff 'uninstall.txt'; SCRIPT = $uninstallScript; POWERSHELL = $windowsPowerShell; ARGUMENTS = ''
+    } -TimeoutSeconds 900
+    Show-Run $run
+    $uninstallFeedPath = Get-HandoffPath 'uninstall.txt'
+    if (Test-Path -LiteralPath $uninstallFeedPath) { Write-Host '--- progress feed'; Write-Host ([IO.File]::ReadAllText($uninstallFeedPath)) }
+    Assert-Equal 0 $run.ExitCode 'the uninstall exits 0'
+    $lines = Read-ProgressFeed $uninstallFeedPath
+    Assert-Equal (Get-ExpectedSequence -Phases @('preflight', 'stop', 'tasks', 'program_files', 'shortcut', 'registration', 'verification')) @(Get-PhaseSequence $lines) 'the uninstall phases arrive in the documented order'
+    $uninstallResult = $lines[$lines.Count - 1]
+    Assert-True ($uninstallResult.ok -eq $true -and $null -eq $uninstallResult.error) 'the uninstall ends with a successful result line'
+    Assert-Equal 'uninstall' $uninstallResult.operation 'the result names the operation'
+    Assert-True ($uninstallResult.removed.install_root -eq $true) 'the program folder is reported removed'
+    Assert-Equal @('ResticBackuper', 'ResticBackuperDashboard') @($uninstallResult.removed.scheduled_tasks | Sort-Object) 'both scheduled tasks are reported removed'
+    Assert-True ($uninstallResult.removed.start_menu_shortcut -eq $true -and $uninstallResult.removed.installed_apps_entry -eq $true) 'the shortcut and the Installed apps entry are reported removed'
+    Assert-Equal $stateRoot $uninstallResult.kept.state_root 'the uninstall keeps the state folder'
+    Assert-Equal $installRepository $uninstallResult.kept.repository 'the uninstall keeps the repository'
+    Assert-Equal $result.recovery_key_path $uninstallResult.kept.recovery_key 'the uninstall keeps the recovery key'
+    Assert-True (-not [string]::IsNullOrWhiteSpace($uninstallResult.kept.recovery_tools)) 'the uninstall reports the recovery tools it keeps'
+
+    Write-Section '6. The machine is clean, and only the kept data remains'
+    Assert-True (-not (Test-Path -LiteralPath $installRoot)) 'the program folder is gone'
+    Assert-True (-not (Test-Path -LiteralPath $shortcutPath)) 'the Start menu shortcut is gone'
+    Assert-True (-not (Test-Path -LiteralPath $registryKey)) 'the Installed apps entry is gone'
+    foreach ($name in $taskNames) {
+        Assert-True ($null -eq (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) "the scheduled task $name is gone"
+    }
+    Assert-True (Test-Path -LiteralPath (Join-Path $installRepository 'config') -PathType Leaf) 'the repository is kept'
+    Assert-True (Test-Path -LiteralPath $result.recovery_key_path -PathType Leaf) 'the recovery key is kept'
+    Assert-True (Test-Path -LiteralPath $stateRoot -PathType Container) 'the state folder is kept'
+    Assert-True (Test-Path -LiteralPath $uninstallResult.kept.recovery_tools -PathType Container) 'the recovery tools are kept'
+    Assert-Equal @($stateRoot) @(Get-InstallationFootprint) 'only the state folder remains of the Rewindle footprint (the repository and recovery key live elsewhere)'
+
+    $run = Invoke-AsUser -User $administratorUser -Name 'uninstall-again' -Template $progressTemplate -Values @{
+        HANDOFF = Join-Path $handoff 'uninstall-again.txt'; SCRIPT = (Join-Path $bundle 'payload\Uninstall-ResticBackuper.ps1'); POWERSHELL = $windowsPowerShell; ARGUMENTS = ''
+    }
+    Assert-True ($run.ExitCode -ne 0) 'a second uninstall fails'
+    $lines = Read-ProgressFeed (Get-HandoffPath 'uninstall-again.txt')
+    Assert-Equal @('preflight:started', 'preflight:failed') @(Get-PhaseSequence $lines) 'the second uninstall stops in the preflight'
+    Assert-Equal 'not_installed' $lines[$lines.Count - 1].error.code 'the second uninstall says nothing is installed'
+
+    $succeeded = $true
+    [pscustomobject]@{
+        ok = $true
+        assertions = $assertions
+        plan_as_standard_user = 'passed'
+        failing_installs = 'passed'
+        install_with_progress = 'passed'
+        uninstall_with_progress = 'passed'
+        machine_clean_after_uninstall = 'passed'
+    } | ConvertTo-Json
+}
+catch {
+    Write-Host "TEST FAILED: $($_.Exception.Message)"
+    Write-Host $_.ScriptStackTrace
+    if (Test-Path -LiteralPath $logs) {
+        foreach ($log in Get-ChildItem -LiteralPath $logs -File | Sort-Object LastWriteTime | Select-Object -Last 6) {
+            Write-Host "--- $($log.Name)"
+            Write-Host ([IO.File]::ReadAllText($log.FullName))
+        }
+    }
+    throw
+}
+finally {
+    # Best-effort cleanup of the disposable machine; a failure here never hides the result above.
+    try {
+        if (Test-Path -LiteralPath $installRoot) {
+            $leftover = Join-Path $installRoot 'Uninstall-ResticBackuper.ps1'
+            if ((Test-Path -LiteralPath $leftover) -and $null -ne $administratorUser) {
+                $sid = $administratorUser.Sid
+                $cleanup = Invoke-AsUser -User $administratorUser -Name 'cleanup-uninstall' -TimeoutSeconds 600 -Values @{ SCRIPT = $leftover; SID = $sid; POWERSHELL = $windowsPowerShell } -Template @'
+& '{{POWERSHELL}}' -NoProfile -ExecutionPolicy Bypass -File '{{SCRIPT}}' -Unattended -ExpectedUserSid '{{SID}}'
+exit $LASTEXITCODE
+'@
+                if ($cleanup.ExitCode -ne 0) { Write-Host 'The cleanup uninstall did not succeed.'; Show-Run $cleanup }
+            }
+        }
+        foreach ($name in $taskNames) { Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue }
+        foreach ($path in @($installRoot, $stateRoot, $cloudToolsRoot, $shortcutPath)) {
+            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+        if (Test-Path -LiteralPath $registryKey) { Remove-Item -LiteralPath $registryKey -Recurse -Force -ErrorAction SilentlyContinue }
+        foreach ($user in $createdUsers) {
+            $account = Get-LocalUser -Name $user -ErrorAction SilentlyContinue
+            if ($account) {
+                $profileSid = $account.SID.Value
+                Remove-LocalUser -Name $user -ErrorAction SilentlyContinue
+                Get-CimInstance Win32_UserProfile -Filter "SID='$profileSid'" -ErrorAction SilentlyContinue | Remove-CimInstance -ErrorAction SilentlyContinue
+            }
+        }
+        if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    catch { Write-Host "Cleanup problem: $($_.Exception.Message)" }
+}
+if (-not $succeeded) { exit 1 }
