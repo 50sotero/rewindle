@@ -33,6 +33,10 @@ $version = Get-RewindleVersion -ProjectRoot $projectRoot
 if (-not (Test-Path -LiteralPath $BundleArchive -PathType Leaf)) {
     throw "The release bundle to embed is missing: $BundleArchive"
 }
+# Paths are made absolute from PowerShell's own location: the compiler and [IO.Path] work from the process's directory, which is not it.
+$bundlePath = (Resolve-Path -LiteralPath $BundleArchive).ProviderPath
+$outputPath = if ([IO.Path]::IsPathRooted($Output)) { $Output } else { Join-Path (Get-Location).ProviderPath $Output }
+$outputPath = [IO.Path]::GetFullPath($outputPath)
 if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
     throw "The .NET Framework 4.8 C# compiler is unavailable: $compiler"
 }
@@ -139,7 +143,6 @@ if ($sources.Count -eq 0) {
     throw "Rewindle Setup's sources are missing: $project"
 }
 
-$outputPath = [IO.Path]::GetFullPath($Output)
 New-Item -ItemType Directory -Path (Split-Path -Parent $outputPath) -Force | Out-Null
 
 # The sources are UTF-8 without a byte-order mark and hold typographic apostrophes, so the encoding is pinned here instead of being
@@ -156,7 +159,7 @@ $arguments = @(
     ('/win32manifest:' + $manifest),
     # The release bundle, the wizard's pages, the application icon and the three WebView2 libraries travel inside the program and
     # are unpacked to a temporary folder when it runs (installer\setup\SetupWorkspace.cs names them the same way).
-    ('/resource:' + [IO.Path]::GetFullPath($BundleArchive) + ',REWINDLE_BUNDLE'),
+    ('/resource:' + $bundlePath + ',REWINDLE_BUNDLE'),
     ('/resource:' + $webArchive + ',REWINDLE_SETUP_WEB'),
     ('/resource:' + $icon + ',REWINDLE_ICON'),
     ('/resource:' + $webView.CoreAssembly + ',REWINDLE_WEBVIEW2_CORE'),

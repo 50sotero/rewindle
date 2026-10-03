@@ -43,8 +43,17 @@ export function Location({ wizard }: { wizard: Wizard }) {
 
   return (
     <div className="screen-stack">
-      <fieldset className="drive-group">
-        <legend className="section-label">Drives on this PC</legend>
+      <div className="section-row drives-row">
+        <span id="drives-label" className="section-label">Drives on this PC</span>
+        <span className="refresh-inline">
+          {wizard.refreshing && <Spinner size={12} />}
+          {wizard.refreshNote && !wizard.refreshing && <span className="refresh-note" aria-hidden="true">{wizard.refreshNote}</span>}
+          <button type="button" className="text-link" disabled={wizard.refreshing} onClick={() => void wizard.actions.refreshDrives()}
+            title="Connected a drive just now? It shows up here after you look again.">Look for drives again</button>
+          <span className="sr-only" role="status" aria-live="polite">{wizard.refreshNote ?? ''}</span>
+        </span>
+      </div>
+      <fieldset className="drive-group" aria-labelledby="drives-label">
         {volumes.map(volume => {
           const selected = !cloud && samePath(volume.root, choices.driveRoot);
           const free = `${formatBytes(volume.freeBytes, locale)} free of ${formatBytes(volume.sizeBytes, locale)}`;
@@ -85,14 +94,6 @@ export function Location({ wizard }: { wizard: Wizard }) {
           </>
         )}
       </fieldset>
-
-      <p className="fine-print refresh-line">
-        <button type="button" className="text-link" disabled={wizard.refreshing} onClick={() => void wizard.actions.refreshDrives()}>Look for drives again</button>
-        <span>Connected a drive just now? It shows up here after you look again.</span>
-        {wizard.refreshing && <Spinner size={12} />}
-        <span className="sr-only" role="status" aria-live="polite">{wizard.refreshNote ?? ''}</span>
-        {wizard.refreshNote && !wizard.refreshing && <span className="refresh-note" aria-hidden="true">{wizard.refreshNote}</span>}
-      </p>
 
       {!anyEligible && (
         <Callout tone="error" title="No drive here can hold backups">

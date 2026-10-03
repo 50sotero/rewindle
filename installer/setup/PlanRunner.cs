@@ -83,11 +83,11 @@ namespace Rewindle.Setup
             catch (Win32Exception error)
             {
                 SetupLog.Write("Plan mode did not start: " + error.Message);
-                throw new SetupFailure("plan_start_failed", "Setup couldn’t start Windows PowerShell to check this PC.");
+                throw new SetupFailure("plan_start_failed", "Windows PowerShell didn’t start.");
             }
             if (process == null)
             {
-                throw new SetupFailure("plan_start_failed", "Setup couldn’t start Windows PowerShell to check this PC.");
+                throw new SetupFailure("plan_start_failed", "Windows PowerShell didn’t start.");
             }
 
             using (process)
@@ -121,7 +121,7 @@ namespace Rewindle.Setup
                         SetupLog.Write("Plan mode timed out. Output: " + Tail(diagnostics));
                         throw new SetupFailure(
                             "plan_timeout",
-                            "Checking this PC took too long, so Setup stopped it. Close other programs and try again.");
+                            "The check took too long, so Setup stopped it. Close other programs and try again.");
                     }
                 }
                 // Lets the asynchronous readers finish with the last lines.
@@ -134,7 +134,7 @@ namespace Rewindle.Setup
                     SetupLog.Write("Plan mode exited with code " + exitCode + " and wrote no plan. Output: " + Tail(diagnostics));
                     throw new SetupFailure(
                         "plan_failed",
-                        "Setup couldn’t check this PC (the installer stopped with code " + exitCode + " and gave no plan).");
+                        "The installer stopped (code " + exitCode + ") without describing this PC.");
                 }
                 IDictionary<string, object> plan;
                 string problem;

@@ -202,7 +202,9 @@ trust boundaries.
   protected for your account (DPAPI), so the installer refuses an approval from
   a different administrator account.
 - Microsoft Edge WebView2 Runtime. If it is missing, the installer downloads
-  Microsoft's bootstrapper, checks its Microsoft signature and installs it.
+  Microsoft's bootstrapper, checks its Microsoft signature and installs it. The
+  setup wizard draws its pages with the same runtime, so before they open it
+  shows a small screen that offers to do this first.
 - A repository folder on a local NTFS drive, new or empty, with at least
   10 GiB free. A separate physical drive is strongly recommended; the installer
   warns if you pick the Windows drive.
@@ -219,8 +221,9 @@ pinned, checksum-verified builds of both.
 From the [Releases page](https://github.com/50sotero/rewindle/releases),
 download either the setup program or the ZIP, plus its `.sha256` file:
 
-- `Rewindle-v0.2.0-alpha.1-windows-x64-setup.exe`: a small bootstrapper that
-  unpacks the same ZIP to a temporary folder and runs its `Install.cmd`.
+- `Rewindle-v0.2.0-alpha.1-windows-x64-setup.exe`: the setup wizard, a window
+  that asks a few questions and runs the installer from the same ZIP for you
+  (see below). It unpacks to a temporary folder and cleans up when it closes.
 - `Rewindle-v0.2.0-alpha.1-windows-x64.zip`: extract it, review the scripts if
   you like, then double-click `Install.cmd`.
 
@@ -235,9 +238,44 @@ The two values must match. A checksum shows the file is the one published; it
 does not prove who published it. Do not turn off SmartScreen or antivirus
 protection globally to run the installer.
 
+### The setup wizard
+
+Rewindle Setup is a window with eight pages: **Welcome**, **What to protect**,
+**Backup location**, **Schedule**, **Review**, **Install**, **Recovery key** and
+**Done**. The suggestions on each page suit most people, so you can just choose
+**Next**. Back and Next are in the same place on every page, `Enter` means Next
+and `Esc` means Back, and it follows Windows' light or dark theme and
+High Contrast.
+
+- **What to protect** lists your Windows folders with their sizes, measured
+  while you look. Add any other folder; a folder that is missing, inside another
+  chosen folder, or full of online-only OneDrive files is explained in plain
+  words.
+- **Backup location** shows each drive with its free space and says which one
+  is the Windows drive, which is on the same disk as Windows, and which can't
+  hold backups and why. It checks that your folders fit, and offers Google
+  Drive for desktop when it is running.
+- **Schedule** sets the daily time. Under *Advanced* you can turn off backing up
+  open files.
+- **Review** shows every choice with an Edit link and whether to run the first
+  backup right away. Nothing on your PC has changed up to here: the pages only
+  ask the installer to describe the PC and check your choices (without
+  administrator rights).
+- **Install** asks Windows for permission once, then shows the installer's
+  progress. You can cancel until Windows asks. If something fails, it says what
+  was and wasn't changed and lets you copy the details.
+- **Recovery key** explains the key and lets you save a copy, for example to a
+  USB drive. Finish waits until you confirm you've saved it.
+
+If Rewindle is already installed, Setup opens a maintenance page instead (open
+it, reinstall or repair, or uninstall). The wizard is built from
+[installer/setup](installer/setup/README.md).
+
 ### What the installer does
 
-The installer opens a console window, asks for UAC approval, and then:
+The wizard runs the installer unattended with your choices. Started from
+`Install.cmd`, the installer instead opens a console window, asks for UAC
+approval, and then:
 
 1. Checks every file in the package against its SHA-256 manifest.
 2. Asks for the **repository folder**. It suggests a folder on the non-system
@@ -414,7 +452,9 @@ The full list of differences is in [docs/engine-contract.md](docs/engine-contrac
 ## Uninstall
 
 Open **Settings > Apps > Installed apps**, find **Rewindle** and choose
-**Uninstall**, then confirm in the console window. Uninstalling stops a running
+**Uninstall**, then confirm in the console window. (Running Rewindle Setup again
+and choosing **Uninstall** removes the same things without a console.)
+Uninstalling stops a running
 backup, so let it finish first. It removes:
 
 - `C:\Program Files\ResticBackuper`,
@@ -474,6 +514,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File src\dashboard\tests\rest
 # One of the PowerShell suites in tests\*.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Test-ManageSources.ps1
 
+# The setup wizard's host logic (compiles installer\setup without its window)
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Test-SetupHost.ps1
+
 # Two real backups and an independent restore from the built release ZIP
 pwsh .\tests\Test-ReleaseArtifact.ps1
 ```
@@ -489,7 +532,8 @@ an installed copy. CI runs most of them on every pull request; see
 | `src/` | The engine: `backup.py`, `restore.py`, shared Python modules, the `Manage-*.ps1` managers, recovery helpers, the Google Drive verifier, `RECOVERY.md`, default `excludes.txt` and example configurations |
 | `src/task_launcher/` | `ResticBackuperTaskLauncher.exe`, the native supervisor the backup task starts |
 | `src/dashboard/` | The Rewindle dashboard: WPF host (C#) and React interface (`web/`); see its [README](src/dashboard/README.md) |
-| `installer/` | `Install.cmd`, `Install-ResticBackuper.ps1`, `Uninstall-ResticBackuper.ps1` and the setup bootstrapper |
+| `installer/` | `Install.cmd`, `Install-ResticBackuper.ps1` and `Uninstall-ResticBackuper.ps1` |
+| `installer/setup/` | Rewindle Setup, the graphical wizard: WPF and WebView2 host (C#); its pages are `src/dashboard/web/src/setup/`; see its [README](installer/setup/README.md) |
 | `build/` | `Build-Release.ps1` and the `VERSION` helper |
 | `tests/` | Python and PowerShell test suites and fixtures |
 | `docs/` | Architecture, the dashboard and engine contract, Google Drive verification, release notes |

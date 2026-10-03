@@ -35,6 +35,10 @@ namespace Rewindle.Setup.Smoke
         {
             Thread.Sleep(350);
             cancel.ThrowIfCancellationRequested();
+            if (Smoke.PlansFail)
+            {
+                throw new SetupFailure("plan_failed", "Setup couldn’t check this PC (the installer stopped with code 1 and gave no plan).");
+            }
             string[] keys = { "Desktop", "Documents", "Pictures", "Music", "Videos", "Downloads", "Favorites" };
             List<object> folders = new List<object>();
             List<object> sources = new List<object>();
@@ -126,8 +130,11 @@ namespace Rewindle.Setup.Smoke
     {
         private readonly ManualResetEvent finished = new ManualResetEvent(false);
 
-        public ScriptedProcess(string progressPath, string keyPath)
+        private readonly int exitCode;
+
+        public ScriptedProcess(string progressPath, string keyPath, bool fail)
         {
+            exitCode = fail ? 1 : 0;
             Task.Factory.StartNew(delegate
             {
                 string[][] phases =
@@ -154,6 +161,30 @@ namespace Rewindle.Setup.Smoke
                         {
                             Append(progressPath, Line(++seq, phase[0], "skipped", phase[1]));
                             break;
+                        }
+                        if (fail && phase[0] == "repository" && state == "completed")
+                        {
+                            string message = "The drive E: stopped responding while the backup location was being prepared.";
+                            Dictionary<string, object> failedLine = new Dictionary<string, object>();
+                            failedLine["schema"] = "Rewindle.InstallProgress.v1";
+                            failedLine["seq"] = ++seq;
+                            failedLine["time"] = DateTime.UtcNow.ToString("o");
+                            failedLine["type"] = "phase";
+                            failedLine["phase"] = "repository";
+                            failedLine["state"] = "failed";
+                            failedLine["title"] = phase[1];
+                            failedLine["detail"] = message;
+                            Append(progressPath, Json.Serialize(failedLine));
+                            Dictionary<string, object> error = new Dictionary<string, object>();
+                            error["code"] = "repository_prepare_failed";
+                            error["message"] = message;
+                            Dictionary<string, object> failure = new Dictionary<string, object>();
+                            failure["type"] = "result";
+                            failure["ok"] = false;
+                            failure["error"] = error;
+                            Append(progressPath, Json.Serialize(failure));
+                            finished.Set();
+                            return;
                         }
                         Append(progressPath, Line(++seq, phase[0], state, phase[1]));
                         Thread.Sleep(280);
@@ -199,7 +230,7 @@ namespace Rewindle.Setup.Smoke
 
         public int ExitCode
         {
-            get { return 0; }
+            get { return exitCode; }
         }
 
         public void Dispose()
@@ -210,16 +241,25 @@ namespace Rewindle.Setup.Smoke
     internal sealed class ScriptedLauncher : IElevatedLauncher
     {
         private readonly string keyPath;
+        private readonly string mode;
+        private int starts;
 
-        public ScriptedLauncher(string keyPath)
+        public ScriptedLauncher(string keyPath, string mode)
         {
             this.keyPath = keyPath;
+            this.mode = mode;
         }
 
         public IElevatedProcess Start(IList<string> powershellArguments)
         {
             Thread.Sleep(900);
-            return new ScriptedProcess(powershellArguments[powershellArguments.IndexOf("-ProgressPath") + 1], keyPath);
+            starts++;
+            // The first Windows prompt is declined in the "declined" case; trying again goes through.
+            if (mode == "declined" && starts == 1)
+            {
+                throw new ElevationDeclinedException();
+            }
+            return new ScriptedProcess(powershellArguments[powershellArguments.IndexOf("-ProgressPath") + 1], keyPath, mode == "install-failure");
         }
     }
 
@@ -227,6 +267,10 @@ namespace Rewindle.Setup.Smoke
     {
         private static string outputFolder;
         private static string theme = "light";
+        // happy, plan-failure (the first check of the PC fails), install-failure or declined (the first Windows prompt is declined).
+        private static string scenario = "happy";
+        // While true, every check of the PC fails; the plan-failure case turns it off before choosing "Try again".
+        internal static volatile bool PlansFail;
         private static readonly List<string> log = new List<string>();
         private static int shot;
 
@@ -247,6 +291,7 @@ namespace Rewindle.Setup.Smoke
                     case "--icon": icon = args[index + 1]; break;
                     case "--out": outputFolder = args[index + 1]; break;
                     case "--theme": theme = args[index + 1]; break;
+                    case "--case": scenario = args[index + 1]; break;
                     case "--width": width = double.Parse(args[index + 1]); break;
                     case "--height": height = double.Parse(args[index + 1]); break;
                 }
@@ -279,7 +324,7 @@ namespace Rewindle.Setup.Smoke
             }
             finally
             {
-                File.WriteAllLines(Path.Combine(outputFolder, "smoke-" + theme + ".log"), log.ToArray());
+                File.WriteAllLines(Path.Combine(outputFolder, "smoke-" + scenario + "-" + theme + ".log"), log.ToArray());
                 if (workspace != null) { workspace.Dispose(); }
                 try { Directory.Delete(root, true); } catch (Exception) { }
             }
@@ -308,7 +353,7 @@ namespace Rewindle.Setup.Smoke
             environment.ProgramFilesFolder = Path.Combine(root, "Program Files");
             environment.CommonDataFolder = Path.Combine(root, "ProgramData");
             environment.Plans = new ScriptedPlans(home);
-            environment.Launcher = new ScriptedLauncher(keyFile);
+            environment.Launcher = new ScriptedLauncher(keyFile, scenario);
             environment.EnsureBundle = delegate { return Task.Factory.StartNew(delegate { }); };
             environment.InstallScriptPath = Path.Combine(root, "Install-ResticBackuper.ps1");
             File.WriteAllText(environment.InstallScriptPath, "# stand-in");
@@ -369,7 +414,8 @@ namespace Rewindle.Setup.Smoke
                 }
                 await Task.Delay(120);
             }
-            throw new TimeoutException("Timed out waiting for " + what);
+            string where = await Eval(view, "JSON.stringify({text: document.body.innerText.slice(0, 400), errors: window.__errors || null, href: location.href})");
+            throw new TimeoutException("Timed out waiting for " + what + ". The page says: " + where);
         }
 
         private static async Task Click(WebView2 view, string text)
@@ -385,7 +431,7 @@ namespace Rewindle.Setup.Smoke
             using (MemoryStream stream = new MemoryStream())
             {
                 await view.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, stream);
-                string file = Path.Combine(outputFolder, "smoke-" + theme + "-" + (++shot).ToString("00") + "-" + name + ".png");
+                string file = Path.Combine(outputFolder, "smoke-" + scenario + "-" + theme + "-" + (++shot).ToString("00") + "-" + name + ".png");
                 File.WriteAllBytes(file, stream.ToArray());
                 log.Add("shot: " + file);
                 Console.WriteLine("Wrote " + file);
@@ -394,6 +440,7 @@ namespace Rewindle.Setup.Smoke
 
         private static async Task Drive(SetupWindow window)
         {
+            PlansFail = scenario == "plan-failure";
             DateTime until = DateTime.UtcNow.AddSeconds(60);
             WebView2 view = null;
             while (DateTime.UtcNow < until)
@@ -404,6 +451,14 @@ namespace Rewindle.Setup.Smoke
             }
             if (view == null || view.CoreWebView2 == null) { throw new TimeoutException("The web view did not start."); }
             log.Add("ok: the web view started");
+            // The window navigates to the wizard right after the control starts; reloading before that would cancel it.
+            until = DateTime.UtcNow.AddSeconds(30);
+            while (DateTime.UtcNow < until && !WebPolicy.IsAllowedUri(view.CoreWebView2.Source))
+            {
+                await Task.Delay(100);
+            }
+            if (!WebPolicy.IsAllowedUri(view.CoreWebView2.Source)) { throw new TimeoutException("The window did not navigate to the wizard: " + view.CoreWebView2.Source); }
+            log.Add("ok: the window navigated to the wizard");
 
             // Collect script errors from the start of the page.
             await view.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
@@ -415,7 +470,30 @@ namespace Rewindle.Setup.Smoke
             await WaitUntil(view, "document.getElementById('screen-title') && document.getElementById('screen-title').textContent.length > 0", "the first screen", 45000);
             string title = await Eval(view, "document.getElementById('screen-title').textContent");
             log.Add("first screen: " + title);
+            if (scenario == "plan-failure")
+            {
+                // The installer could not describe the PC: the wizard says so, and trying again goes through.
+                await WaitUntil(view, "document.getElementById('screen-title').textContent.indexOf('couldn') >= 0", "the screen that says the PC could not be checked", 15000);
+                await Shot(view, "plan-failed");
+                PlansFail = false;
+                await Click(view, "Try again");
+                await WaitUntil(view, "document.getElementById('screen-title').textContent.indexOf('verify') >= 0", "the welcome screen after trying again", 15000);
+                await Shot(view, "welcome-after-retry");
+                await CheckErrors(view);
+                return;
+            }
             await Shot(view, "welcome");
+
+            // Ctrl+= and Ctrl+0 reach the host as setZoom commands, and the host changes the page's size.
+            await Eval(view, "window.dispatchEvent(new KeyboardEvent('keydown',{key:'=',ctrlKey:true,bubbles:true,cancelable:true}))");
+            await Task.Delay(700);
+            if (Math.Abs(view.ZoomFactor - 1.1) > 0.001) { throw new InvalidOperationException("Ctrl+= did not zoom to 110% (it is " + view.ZoomFactor + ")."); }
+            log.Add("ok: Ctrl+= zoomed the page to 110%");
+            await Shot(view, "welcome-zoomed");
+            await Eval(view, "window.dispatchEvent(new KeyboardEvent('keydown',{key:'0',ctrlKey:true,bubbles:true,cancelable:true}))");
+            await Task.Delay(700);
+            if (Math.Abs(view.ZoomFactor - 1.0) > 0.001) { throw new InvalidOperationException("Ctrl+0 did not return to 100% (it is " + view.ZoomFactor + ")."); }
+            log.Add("ok: Ctrl+0 returned the page to 100%");
 
             await Click(view, "Next");
             await WaitUntil(view, "document.getElementById('screen-title').textContent.indexOf('protect') >= 0", "What to protect", 10000);
@@ -436,9 +514,27 @@ namespace Rewindle.Setup.Smoke
             await Shot(view, "review");
 
             await Click(view, "Install");
+            if (scenario == "declined")
+            {
+                await WaitUntil(view, "document.getElementById('screen-title').textContent.indexOf('wasn') >= 0", "the screen that says Windows permission was not given", 20000);
+                await Shot(view, "declined");
+                await Click(view, "Try again");
+                await WaitUntil(view, "document.querySelector('.phase-list')", "the install after trying again", 20000);
+                await WaitUntil(view, "document.getElementById('screen-title').textContent.indexOf('is installed') >= 0", "the install finishing", 60000);
+                await Shot(view, "installed-after-retry");
+                await CheckErrors(view);
+                return;
+            }
             await WaitUntil(view, "document.querySelector('.phase-list')", "the install steps", 15000);
             await Task.Delay(1500);
             await Shot(view, "installing");
+            if (scenario == "install-failure")
+            {
+                await WaitUntil(view, "document.getElementById('screen-title').textContent.indexOf('finish') >= 0", "the screen that says setup could not finish", 60000);
+                await Shot(view, "failed");
+                await CheckErrors(view);
+                return;
+            }
             await WaitUntil(view, "document.getElementById('screen-title').textContent.indexOf('is installed') >= 0", "the install finishing", 60000);
             await Shot(view, "installed");
 
@@ -455,6 +551,11 @@ namespace Rewindle.Setup.Smoke
             await WaitUntil(view, "document.querySelector('.callout.is-error')", "the answer when Rewindle is not installed where the host looks", 10000);
             await Shot(view, "done-not-found");
 
+            await CheckErrors(view);
+        }
+
+        private static async Task CheckErrors(WebView2 view)
+        {
             string errors = await Eval(view, "JSON.stringify(window.__errors||[])");
             log.Add("script errors: " + errors);
             if (errors != "\"[]\"") { throw new InvalidOperationException("The page reported script errors: " + errors); }

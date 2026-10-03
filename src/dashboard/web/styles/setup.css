@@ -33,7 +33,7 @@ button.rail-link:hover .rail-label { color: var(--ink); text-decoration: underli
 
 .setup-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .setup-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; padding: 34px var(--page-pad) 28px; }
-.setup-page { max-width: 700px; display: flex; flex-direction: column; gap: 26px; outline: none; }
+.setup-page { max-width: 700px; display: flex; flex-direction: column; gap: 22px; outline: none; }
 .screen-header { display: flex; flex-direction: column; gap: 8px; }
 .screen-eyebrow { margin: 0; font-size: var(--type-xs); font-weight: 600; letter-spacing: 1.1px; text-transform: uppercase; color: var(--accent-ink); }
 .screen-title { margin: 0; font-size: 28px; line-height: 1.2; font-weight: 640; letter-spacing: -.9px; }
@@ -154,8 +154,9 @@ button.rail-link:hover .rail-label { color: var(--ink); text-decoration: underli
 .radio-dot { flex-shrink: 0; width: 20px; height: 20px; border-radius: 50%; background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--line-strong); transition: box-shadow .15s; }
 .drive-card[data-selected="true"] .radio-dot { box-shadow: inset 0 0 0 6px var(--accent); }
 .drive-card[data-disabled="true"] .radio-dot { visibility: hidden; }
-.refresh-line { align-items: center; flex-wrap: wrap; gap: 6px 10px; }
-.refresh-line > .text-link:disabled { opacity: .6; text-decoration: none; cursor: default; }
+.drives-row { margin-bottom: -4px; }
+.refresh-inline { display: inline-flex; align-items: center; gap: 8px; font-size: var(--type-sm); }
+.refresh-inline > .text-link:disabled { opacity: .6; text-decoration: none; cursor: default; }
 .refresh-note { color: var(--ink-2); font-weight: 550; }
 .group-divider { margin: 10px 0 2px; font-size: var(--type-sm); font-weight: 600; color: var(--ink-2); }
 
@@ -247,7 +248,7 @@ button.rail-link:hover .rail-label { color: var(--ink); text-decoration: underli
 .setup-progress-fill { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: var(--accent); overflow: hidden; }
 .setup-progress-fill::after { content: ''; position: absolute; inset: 0; background: linear-gradient(90deg, transparent 0%, #ffffff55 50%, transparent 100%); animation: backup-sweep 1.8s ease-in-out infinite; }
 .phase-list { list-style: none; margin: 0; padding: 4px 0; border-radius: var(--r-card); background: var(--surface); box-shadow: var(--shadow-card); }
-.phase { display: flex; align-items: flex-start; gap: 12px; padding: 5px 16px; scroll-margin-block: 56px; font-size: var(--type-base); color: var(--ink-3); }
+.phase { display: flex; align-items: flex-start; gap: 12px; padding: 4px 16px; scroll-margin-block: 56px; font-size: var(--type-base); color: var(--ink-3); }
 .phase[data-state="completed"], .phase[data-state="failed"] { color: var(--ink); }
 .phase[data-state="started"] { color: var(--ink); font-weight: 600; }
 .phase[data-state="skipped"] { color: var(--ink-3); }
@@ -350,6 +351,17 @@ button.rail-link:hover .rail-label { color: var(--ink); text-decoration: underli
   .rail-link { padding-top: 4px; padding-bottom: 4px; }
   .rail-license, .sample-badge { display: none; }
   .rail-step + .rail-step::before { top: -6px; height: 12px; }
+}
+
+/* A window this short is a 960 by 680 one at 200% (or one that was dragged small): the header gives up room so the content has it. */
+@media (max-height: 420px) {
+  :root { --footer-height: 56px; }
+  .screen-eyebrow { display: none; }
+  .screen-title { font-size: 21px; letter-spacing: -.4px; }
+  .screen-lead { font-size: var(--type-sm); line-height: 1.5; }
+  .setup-page { gap: 14px; }
+  .setup-scroll { padding-top: 14px; padding-bottom: 16px; }
+  .setup-button { height: 34px; }
 }
 
 /* ── motion and contrast ──────────────────────────────── */

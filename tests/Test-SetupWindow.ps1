@@ -3,6 +3,9 @@ param(
     # Where the screenshots and the step log go.
     [Parameter(Mandatory = $true)][string]$Output,
     [ValidateSet('light', 'dark')][string[]]$Theme = @('light', 'dark'),
+    # happy: a whole install. plan-failure: the first check of the PC fails and "Try again" goes through. install-failure: the installer
+    # reports a failure part-way. declined: the first Windows prompt is declined and "Try again" goes through. all: the four.
+    [ValidateSet('happy', 'plan-failure', 'install-failure', 'declined', 'all')][string[]]$Case = @('happy'),
     # The window's size in device-independent pixels.
     [double]$Width = 960,
     [double]$Height = 680,
@@ -78,6 +81,8 @@ try {
     Copy-Item -LiteralPath $webView.CoreAssembly, $webView.WpfAssembly, $webView.LoaderDll -Destination $libraries
 
     New-Item -ItemType Directory -Path $Output -Force | Out-Null
+    $cases = if ($Case -contains 'all') { @('happy', 'plan-failure', 'install-failure', 'declined') } else { $Case }
+    foreach ($caseName in $cases) {
     foreach ($name in $Theme) {
         $process = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @(
             '--web', ('"' + $web + '"'),
@@ -85,11 +90,13 @@ try {
             '--icon', ('"' + (Join-Path $projectRoot 'src\dashboard\assets\dashboard-icon.ico') + '"'),
             '--out', ('"' + [IO.Path]::GetFullPath($Output) + '"'),
             '--theme', $name,
+            '--case', $caseName,
             '--width', $Width.ToString([Globalization.CultureInfo]::InvariantCulture),
             '--height', $Height.ToString([Globalization.CultureInfo]::InvariantCulture)
         )
-        Get-Content -LiteralPath (Join-Path $Output "smoke-$name.log") -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
-        if ($process.ExitCode -ne 0) { throw "The $name window test failed (exit code $($process.ExitCode))." }
+        Get-Content -LiteralPath (Join-Path $Output "smoke-$caseName-$name.log") -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+        if ($process.ExitCode -ne 0) { throw "The $caseName window test ($name theme) failed (exit code $($process.ExitCode))." }
+    }
     }
 }
 finally {

@@ -2,7 +2,11 @@
 param(
     # Instead of running the checks, draw Setup's native screens (the missing-runtime screen and its progress and failure states,
     # light and dark) to PNG files in this folder, for a look at them. Nothing else runs.
-    [string]$RenderScreens
+    [string]$RenderScreens,
+    # A built setup program (artifacts\Rewindle-v<VERSION>-windows-x64-setup.exe by default, when it exists): its embedded resources are
+    # read (nothing in it is started) and unpacked the way Setup does it. -SkipBuiltProgram leaves this out.
+    [string]$SetupExecutable,
+    [switch]$SkipBuiltProgram
 )
 
 # Compiles installer\setup\*.cs, except the two files that need the WebView2 libraries and a screen (Program.cs, SetupWindow.cs) and
@@ -55,6 +59,17 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "The setup host tests did not compile (exit code $LASTEXITCODE)." }
 
     $runArguments = @()
+    if (-not $SkipBuiltProgram -and -not $RenderScreens) {
+        if (-not $SetupExecutable) {
+            $version = (Get-Content -LiteralPath (Join-Path $projectRoot 'VERSION') -Raw).Trim()
+            $SetupExecutable = Join-Path $projectRoot "artifacts\Rewindle-v$version-windows-x64-setup.exe"
+        }
+        if (Test-Path -LiteralPath $SetupExecutable -PathType Leaf) {
+            $runArguments += @('--built', [IO.Path]::GetFullPath($SetupExecutable), '--project', $projectRoot)
+        } else {
+            Write-Host "No built setup program at $SetupExecutable; its resources are not checked."
+        }
+    }
     if ($RenderScreens) {
         $runArguments = @('--render', [IO.Path]::GetFullPath($RenderScreens), '--icon', (Join-Path $projectRoot 'src\dashboard\assets\dashboard-icon.ico'))
     }

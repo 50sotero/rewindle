@@ -34,10 +34,14 @@ namespace Rewindle.Setup.Tests
             {
                 string renderTo = null;
                 string iconPath = null;
+                string builtProgram = null;
+                string projectRoot = null;
                 for (int index = 0; index < args.Length - 1; index++)
                 {
                     if (args[index] == "--render") { renderTo = args[index + 1]; }
                     if (args[index] == "--icon") { iconPath = args[index + 1]; }
+                    if (args[index] == "--built") { builtProgram = args[index + 1]; }
+                    if (args[index] == "--project") { projectRoot = args[index + 1]; }
                 }
                 if (renderTo != null)
                 {
@@ -60,6 +64,12 @@ namespace Rewindle.Setup.Tests
                 Run("Web policy", WebPolicyBehaviour);
                 Run("Microsoft signature check", SignatureCheck);
                 Run("Native screen palette", PaletteBehaviour);
+                if (builtProgram != null)
+                {
+                    string program = builtProgram;
+                    string project = projectRoot;
+                    Run("The built setup program's resources", delegate { BuiltProgramResources(program, project); });
+                }
             }
             finally
             {
@@ -1321,6 +1331,70 @@ switch ($mode) {
             Check(WebViewRuntime.BootstrapperAddress.StartsWith("https://go.microsoft.com/"), "the bootstrapper's address is Microsoft's, over https");
             string version = WebViewRuntime.InstalledVersion();
             Check(version == null || version.Contains("."), "the installed runtime version is null or a version number (" + (version ?? "none") + ")");
+        }
+
+        // ---- the program the build made ---------------------------------------------------------------------------------
+
+        // Reads the embedded resources of the real setup program (its metadata only: nothing in it is started or run) and unpacks them the
+        // way Setup does, so a bundle the program's own unpacker would refuse, or a missing or wrong library, is found by the build's CI.
+        private static void BuiltProgramResources(string program, string project)
+        {
+            System.Reflection.Assembly built = System.Reflection.Assembly.LoadFrom(program);
+            string[] names = built.GetManifestResourceNames();
+            foreach (string expected in new string[] { SetupWorkspace.BundleResource, SetupWorkspace.WebResource, "REWINDLE_ICON", "REWINDLE_WEBVIEW2_CORE", "REWINDLE_WEBVIEW2_WPF", "REWINDLE_WEBVIEW2_LOADER" })
+            {
+                Check(names.Contains(expected), "the program embeds " + expected);
+            }
+            Equal(6, names.Length, "and nothing else");
+
+            string version = File.ReadAllText(Path.Combine(project, "VERSION")).Trim();
+            object[] informational = built.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false);
+            Equal(version, ((System.Reflection.AssemblyInformationalVersionAttribute)informational[0]).InformationalVersion, "the program carries the version in VERSION");
+
+            string parent = NewFolder("built");
+            using (SetupWorkspace workspace = new SetupWorkspace(delegate(string name) { return built.GetManifestResourceStream(name); }, parent))
+            {
+                workspace.ExtractLibraries();
+                workspace.ExtractWeb();
+                workspace.EnsureBundleExtracted().Wait();
+                foreach (string relative in new string[]
+                {
+                    "Install.cmd", "Install-ResticBackuper.ps1", "payload-manifest.json", "BUILD-INFO.json", @"payload\Uninstall-ResticBackuper.ps1",
+                    @"payload\ResticBackuperDashboard.exe", @"payload\restic.exe", @"payload\web\index.html", @"payload\dashboard-assets.json",
+                })
+                {
+                    Check(File.Exists(Path.Combine(workspace.BundleFolder, relative)), "the bundle holds " + relative);
+                }
+                Check(!Directory.EnumerateFiles(Path.Combine(workspace.BundleFolder, "payload", "web"), "setup*", SearchOption.AllDirectories).Any(), "and none of the wizard's files are in the dashboard's");
+                Check(File.Exists(Path.Combine(workspace.WebFolder, "setup.html")) && Directory.EnumerateFiles(workspace.WebFolder, "*.js", SearchOption.AllDirectories).Any(), "the wizard's pages are there");
+                string page = File.ReadAllText(Path.Combine(workspace.WebFolder, "setup.html"));
+                Check(page.Contains("Content-Security-Policy"), "with their content security policy");
+
+                // The three libraries are the pinned package's own files.
+                string package = Path.Combine(project, "src", "dashboard", ".packages", "webview2.1.0.4191.47");
+                if (Directory.Exists(package))
+                {
+                    Equal(Sha(Path.Combine(package, "lib", "net462", "Microsoft.Web.WebView2.Core.dll")), Sha(Path.Combine(workspace.LibraryFolder, "Microsoft.Web.WebView2.Core.dll")), "the managed core library is the pinned SDK's");
+                    Equal(Sha(Path.Combine(package, "lib", "net462", "Microsoft.Web.WebView2.Wpf.dll")), Sha(Path.Combine(workspace.LibraryFolder, "Microsoft.Web.WebView2.Wpf.dll")), "the WPF library is the pinned SDK's");
+                    Equal(Sha(Path.Combine(package, "runtimes", "win-x64", "native", "WebView2Loader.dll")), Sha(Path.Combine(workspace.LibraryFolder, "WebView2Loader.dll")), "the loader is the pinned SDK's");
+                }
+                // The installer script in the bundle is the repository's.
+                Equal(Sha(Path.Combine(project, "installer", "Install-ResticBackuper.ps1")), Sha(workspace.InstallScriptPath), "the bundled installer script is the repository's");
+            }
+            using (System.IO.Stream icon = built.GetManifestResourceStream("REWINDLE_ICON"))
+            {
+                System.Windows.Media.Imaging.BitmapDecoder decoder = System.Windows.Media.Imaging.BitmapDecoder.Create(icon, System.Windows.Media.Imaging.BitmapCreateOptions.None, System.Windows.Media.Imaging.BitmapCacheOption.OnLoad);
+                Check(decoder.Frames.Count >= 3, "the icon has several sizes (" + decoder.Frames.Count + ")");
+            }
+        }
+
+        private static string Sha(string path)
+        {
+            using (System.Security.Cryptography.SHA256 sha = System.Security.Cryptography.SHA256.Create())
+            using (FileStream stream = File.OpenRead(path))
+            {
+                return BitConverter.ToString(sha.ComputeHash(stream));
+            }
         }
 
         // ---- the native screens --------------------------------------------------------------------------------------------
