@@ -1,0 +1,67 @@
+name: Feature request
+description: Suggest an improvement or a new capability for Rewindle.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea. Rewindle is a small, Windows-only pet project, so requests are weighed against what they would do to backup safety and to the Windows approval (UAC) boundary. Explaining the problem you want solved helps more than describing a specific design.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and what gets in the way today?
+      placeholder: When I restore files, I would like to ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How would you like Rewindle to handle it?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Other approaches or workarounds, including doing it with Restic directly.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Installer or uninstaller
+        - Scheduled backup and verification
+        - Protection page
+        - Activity page
+        - Restore or recovery readiness
+        - Settings page
+        - Off-site copy
+        - Documentation
+        - Build, tests or CI
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety considerations
+      description: Could this change delete or overwrite data, need administrator rights, change what runs elevated, or send data off the computer? Say so if you are not sure.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and did not find this request.
+          required: true

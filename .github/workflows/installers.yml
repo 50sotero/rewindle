@@ -1,0 +1,60 @@
+name: Windows installers
+
+# This release is Windows-only: the macOS desktop host is not part of this repository.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: src/dashboard/web/package-lock.json
+      - name: Run isolated backend and hygiene checks
+        shell: pwsh
+        run: python -m unittest discover -s tests -v
+      - name: Build the Windows payload and setup installer
+        shell: pwsh
+        run: .\build\Build-Release.ps1
+      # Windows PowerShell 5.1: the checks load the .NET Framework dashboard the release build just compiled.
+      - name: Dashboard regression checks
+        shell: powershell
+        run: .\src\dashboard\tests\restore-flow-regressions.ps1 -SkipInstalledChecks
+      - name: Verify real backup and independent restore
+        shell: pwsh
+        run: .\tests\Test-ReleaseArtifact.ps1
+      - name: Package the editable brand kit
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          $name = "Rewindle-v$version-brand-kit.zip"
+          git archive --format=zip --output="artifacts/$name" HEAD brand
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $hash = (Get-FileHash -LiteralPath "artifacts/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText((Join-Path $PWD "artifacts/$name.sha256"), "$hash *$name`n")
+      - name: Upload Windows installers
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-x64
+          if-no-files-found: error
+          path: |
+            artifacts/*.exe
+            artifacts/*.zip
+            artifacts/*SHA256*
+            artifacts/*sha256*

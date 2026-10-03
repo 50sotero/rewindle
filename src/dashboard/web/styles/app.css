@@ -1,0 +1,755 @@
+:root {
+  --page: #F6F4EE;
+  --canvas: #EFEDE7;
+  --ink: #101927;
+  /* Both ramps were darkened for WCAG AA: --ink-3 was 4.2:1 on the page and 3.9:1 on the
+   * sidebar canvas. Now 5.5:1 / 5.1:1 (--ink-2 moved with it to keep two distinct tiers). */
+  --ink-2: #46535C;
+  --ink-3: #58656F;
+  --accent: #167C73;
+  --accent-ink: #10655D;
+  --accent-tint: #E3F1EB;
+  /* The rest of the light ramp is warm like the page. It used to be inherited from the upstream demo palette (cool
+   * blue-greys tuned for a near-white page), which left the hover, active-row, rail and scrollbar layers at 1.01-1.18:1
+   * against this page where the dark theme has 1.36-2.24:1. Hover is 1.11:1 on the page, hover-2 1.13:1 on the sidebar,
+   * the strong line 1.39:1. --ink-2 and --ink-3 stay above 4.5:1 on every layer, hover-2 included. The card surface stays
+   * the upstream white. The dark theme below defines every one of these itself. */
+  --inset: #FAF8F3;
+  --hover: #EBE8DF;
+  --hover-2: #E4E0D5;
+  --line: #E5E1D7;
+  --line-strong: #D6D1C4;
+  --line-soft: #EEEBE3;
+  --field: #EAE6DC;
+  --scrollbar-thumb: color-mix(in srgb, var(--ink-3) 55%, transparent);
+  /* The three dialogs (the folder chooser, run details and restore) share one scrim and one shadow, the same in either theme: a dialog is
+   * a layer over the whole window, so what lies behind it is dimmed to one dark blue-black whatever the page's own color is. */
+  --dialog-backdrop: rgb(4 10 18 / .6);
+  --dialog-shadow: var(--shadow-overlay), 0 24px 80px rgb(0 0 0 / .3);
+  --font-inter: 'Inter Variable';
+  --font-mono-face: 'JetBrains Mono Variable';
+  font-family: var(--font-inter), sans-serif;
+  color: var(--ink);
+  background: var(--page);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+.dark {
+  --page: #101927;
+  --canvas: #14202C;
+  --surface: #1A2835;
+  --inset: #17232F;
+  --hover: #233342;
+  --hover-2: #2A3D4C;
+  --ink: #F6F4EE;
+  --ink-2: #B7C2CA;
+  --ink-3: #93A5B4;
+  --line: #2D3D4A;
+  --line-strong: #405463;
+  --line-soft: #263744;
+  --field: #223342;
+  --accent: #76D6C8;
+  --accent-ink: #91E2D6;
+  --accent-tint: #213E41;
+}
+/* Until the first state message the page does not know its theme, and it used to guess dark (a hard-coded <html class="dark">), so a
+ * light profile flashed dark. The host now sets the web view's preferred color scheme to the theme it resolved, so
+ * prefers-color-scheme names it from the first frame, and the app then pins .dark or .light itself. This is the .dark block
+ * above for that first frame: keep the two the same. It is a (0,2,0) selector, so the high-contrast block below (also
+ * (0,2,0), and later) still wins. */
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) {
+    --page: #101927;
+    --canvas: #14202C;
+    --surface: #1A2835;
+    --inset: #17232F;
+    --hover: #233342;
+    --hover-2: #2A3D4C;
+    --ink: #F6F4EE;
+    --ink-2: #B7C2CA;
+    --ink-3: #93A5B4;
+    --line: #2D3D4A;
+    --line-strong: #405463;
+    --line-soft: #263744;
+    --field: #223342;
+    --accent: #76D6C8;
+    --accent-ink: #91E2D6;
+    --accent-tint: #213E41;
+  }
+}
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; overflow: hidden; }
+/* The rules in this file are deliberately unlayered, so they win over Tailwind utilities (which live
+ * in @layer utilities) whatever their specificity. Keep resets out of it: Tailwind's preflight already
+ * gives form controls `font: inherit` in @layer base, and an unlayered copy of that reset would
+ * override the font-size, weight and line-height utilities on every button. */
+button:not(:disabled) { cursor: pointer; }
+button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 3px;
+}
+/* That ring is drawn outside the element, so an overflow:hidden/auto ancestor clips it when the
+ * focusable fills the ancestor (step rows, history rows). Such rows draw the ring inside instead.
+ * Rule of thumb: any focusable inside an overflow clip needs an inset ring or >= 5px of padding. */
+.backup-tasks button:focus-visible, .restore-steps button:focus-visible { outline-offset: -2px; border-radius: inherit; }
+.history-table .filter-table-row:focus-visible { outline-offset: -2px; border-radius: 0; }
+/* The sidebar's search draws its focus ring on the field, not on the bare input inside it. The field clips its overflow, so the
+ * input's own outline (drawn outside the input) was cut off; the ring is inset for the same reason, and the field sits flush
+ * with the top of its scroller, which would clip an outer ring. */
+.sidebar-search:focus-within { box-shadow: inset 0 0 0 2px var(--accent); }
+.sidebar-search input:focus-visible { outline: 0; }
+/* The header controls sit 4px below the top of the sidebar, which clips its overflow, so the usual 3px offset put the top edge of
+ * their 2px ring outside it. The collapse and expand buttons hand focus to each other, so that ring is on show. */
+.sidebar-collapse-control:focus-visible, .sidebar-expand-control:focus-visible { outline-offset: 1px; }
+/* The page you are on keeps its mark whatever the pointer does: an accent bar on the row's left edge, the one the selected history row has,
+ * over the accent tint. The row's fill alone was not enough: it was the hover layer's color, which left it whenever the pointer was
+ * anywhere in the nav, and in the light theme that layer is barely off the sidebar's own color. The folded rail keeps the bar, and so
+ * does the footer's Settings button. */
+.sidebar-row[aria-current]::before, .sidebar-footer[aria-current]::before { content: ''; position: absolute; top: 6px; bottom: 6px; left: 0; width: 3px; border-radius: var(--r-pill); background: var(--accent); pointer-events: none; }
+::selection { background: var(--accent-tint); color: var(--accent-ink); }
+* { scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
+.app-shell { display: flex; height: 100%; background: var(--page); }
+.app-sidebar { height: 100%; flex-shrink: 0; border-right: 1px solid var(--line); background: var(--canvas); }
+/* The workspace, everything to the right of the sidebar, is the container the page's responsive rules (at the end of the "Restic integration"
+ * block) ask about. They answer to the room the page has, which is the window less the sidebar, open or folded, and not to the window
+ * alone: a viewport width said nothing about a sidebar that takes 224 of it, or 52. --page-gutter is the side padding of the page and of
+ * the header over it; the rules at each size set it for all three together. */
+.workspace { flex: 1; min-width: 0; display: flex; flex-direction: column; container: workspace / inline-size; --page-gutter: 28px; --page-width: 1190px; }
+/* Past --page-width the page is centered, and the header and the banners under it follow its column instead of the window's corners (the
+ * buttons at the far right read as belonging to another page). The header holds only the toolbar: the page's name is its title, and the
+ * product's name is in the sidebar, so a breadcrumb would only repeat them. */
+.topbar { height: 64px; min-height: 64px; padding: 0 max(var(--page-gutter), calc((100% - var(--page-width)) / 2)); border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: flex-end; gap: 12px; background: var(--page); }
+.toolbar-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; white-space: nowrap; }
+/* Where there is room the connection state is a dot and a word. Where there is not, only the dot is drawn, and the word stays for
+ * assistive technology and in the tooltip (see the 860px rule at the end). */
+.connection { display: inline-flex; align-items: center; gap: 7px; font-size: var(--type-xs); color: var(--ink-2); margin-right: 10px; }
+.connection-dot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 100%; background: var(--green); }
+.connection-dot.offline { background: var(--orange); }
+/* The stable gutter keeps the page from shifting sideways when its scrollbar comes and goes (filtering the history, a page change). */
+.page-scroll { overflow-y: auto; overflow-x: hidden; overflow-anchor: none; padding: 24px var(--page-gutter) 28px; scrollbar-gutter: stable; flex: 1; min-height: 0; }
+.page { max-width: var(--page-width); margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
+.section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.page-title { margin: 0; font-size: var(--type-3xl); font-weight: 600; letter-spacing: -1px; line-height: 1.25; }
+.page-description { margin: 7px 0 0; font-size: var(--type-base); color: var(--ink-2); line-height: 1.65; }
+.actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.eyebrow { text-transform: uppercase; letter-spacing: 1.2px; font-size: var(--type-xs); font-weight: 600; color: var(--ink-3); }
+.surface { border-radius: var(--r-card); background: var(--surface); box-shadow: var(--shadow-card); }
+.surface-pad { padding: 20px; }
+.hero-grid { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(330px, 1.05fr); gap: 28px; align-items: start; }
+.status-line { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
+.status-emblem { width: 42px; height: 42px; border-radius: var(--r-card); display: grid; place-items: center; background: var(--green-tint); color: var(--green-ink); flex-shrink: 0; }
+.status-emblem.active { background: var(--accent-tint); color: var(--accent); }
+.status-emblem.danger { background: var(--red-tint); color: var(--red-ink); }
+.status-emblem.warning { background: var(--orange-tint); color: var(--orange-ink); }
+.status-title { font-weight: 550; letter-spacing: -.5px; font-size: var(--type-2xl); line-height: 1.3; }
+.status-detail { font-size: var(--type-sm); color: var(--ink-2); line-height: 1.7; margin-top: 13px; overflow-wrap: anywhere; }
+.status-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 16px; }
+.quiet-tag { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; background: var(--inset); color: var(--ink-2); border-radius: var(--r-chip); font-size: var(--type-xs); box-shadow: var(--shadow-hairline); }
+.progress-area { margin-top: 22px; }
+.progress-copy { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.progress-copy strong { font-size: var(--type-xl); font-weight: 500; font-variant-numeric: tabular-nums; letter-spacing: -.6px; }
+.progress-rail { height: 6px; background: var(--field); border-radius: var(--r-pill); overflow: hidden; }
+.progress-bar { height: 100%; background: var(--accent); position: relative; border-radius: inherit; }
+.progress-bar::after { content: ''; position: absolute; inset: 0; background: linear-gradient(90deg, transparent 0%, #ffffff55 50%, transparent 100%); animation: backup-sweep 1.8s ease-in-out infinite; }
+@keyframes backup-sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+.backup-tasks { max-width: none !important; width: 100%; min-height: 0 !important; gap: 7px !important; }
+.backup-tasks button { height: 40px; }
+.stats-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); border-top: 1px solid var(--line); margin-top: 18px; padding-top: 14px; gap: 18px; }
+.stat-label { display: flex; align-items: center; gap: 6px; font-size: var(--type-xs); color: var(--ink-3); }
+.stat-number { display: inline-block; margin-top: 6px; font-size: var(--type-xl); font-weight: 500; letter-spacing: -.6px; color: var(--ink); font-variant-numeric: tabular-nums; }
+/* What a figure covers, in words under it ("last 400 runs"). */
+.stat-sub { display: block; margin-top: 2px; color: var(--ink-3); font-size: var(--type-xs); line-height: 1.45; }
+.two-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.info-heading { font-size: var(--type-base); font-weight: 550; display: flex; gap: 8px; align-items: center; }
+.info-main { font-size: var(--type-lg); font-weight: 500; letter-spacing: -.25px; margin: 12px 0 5px; overflow-wrap: anywhere; }
+.muted-copy { color: var(--ink-2); font-size: var(--type-sm); line-height: 1.7; overflow-wrap: anywhere; }
+.info-action { margin-top: 16px; }
+.section-title { margin: 0; font-size: var(--type-md); font-weight: 550; letter-spacing: -.2px; }
+.section-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 16px; }
+.history-table { max-width: none !important; }
+.history-table [role=region] { max-height: min(560px, 60vh); overflow-y: auto; scrollbar-width: thin !important; }
+.history-table .filter-status-todo { color: var(--red-ink); background: var(--red-tint); border-color: color-mix(in srgb, var(--red) 20%, transparent); }
+.history-table .filter-status-done { color: var(--green-ink); background: var(--green-tint); border-color: color-mix(in srgb, var(--green) 20%, transparent); }
+.history-table .filter-status-progress { color: var(--ink-2); background: var(--inset); border-color: var(--line-strong); }
+/* The dark tints are translucent, so on a hovered or selected row the pill text fell to about 4.3:1. Mixed over
+ * the surface instead, the pill is the same 5:1 on every row state. */
+.dark:not([data-high-contrast="true"]) .history-table .filter-status-todo { background: color-mix(in srgb, var(--red) 14%, var(--surface)); }
+.dark:not([data-high-contrast="true"]) .history-table .filter-status-done { background: color-mix(in srgb, var(--green) 14%, var(--surface)); }
+.history-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; }
+/* The count ("400 runs", or "Showing 37 of 400 runs" while filtered) is a polite status, so a filter that changes it is heard as well as seen. */
+.history-count { color: var(--ink-3); font-size: var(--type-sm); font-variant-numeric: tabular-nums; }
+.history-scope-note { margin: 5px 0 0; color: var(--ink-3); font-size: var(--type-xs); line-height: 1.45; }
+/* The boundary of the list, full width under the toolbar, with the way to the backups that have rolled off it. */
+.history-cap-note { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; margin: 0 0 12px; padding: 9px 12px; border-radius: var(--r-control); background: var(--inset); box-shadow: var(--shadow-hairline); color: var(--ink-2); font-size: var(--type-sm); line-height: 1.5; }
+.history-cap-note > svg { flex: 0 0 auto; color: var(--ink-3); }
+.history-cap-note > span { flex: 1 1 280px; min-width: 0; }
+.empty-state.history-empty { min-height: 220px; }
+.search-field { display: flex; align-items: center; gap: 8px; border-radius: var(--r-control); padding: 7px 10px; background: var(--surface); box-shadow: var(--shadow-hairline); color: var(--ink-3); }
+.search-field input { background: transparent; border: 0; outline: 0; min-width: 0; width: 230px; font-size: var(--type-sm); color: var(--ink); }
+.search-field:focus-within { box-shadow: 0 0 0 2px var(--accent); }
+.history-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.date-filter { display: inline-flex; align-items: center; gap: 6px; border-radius: var(--r-control); padding: 5px 8px; background: var(--surface); box-shadow: var(--shadow-hairline); color: var(--ink-3); font-size: var(--type-xs); }
+.date-filter input { min-width: 112px; border: 0; outline: 0; background: transparent; color: var(--ink-2); font-size: var(--type-xs); color-scheme: light; }
+.dark .date-filter input { color-scheme: dark; }
+.date-filter:focus-within { box-shadow: 0 0 0 2px var(--accent); }
+.sort-field { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-control); padding: 6px 8px; font-size: var(--type-xs); color: var(--ink-2); }
+.chart-card { padding: 20px 20px 10px; }
+.chart-heading { display: flex; align-items: start; justify-content: space-between; gap: 20px; }
+.chart-value { margin: 8px 0; font-size: var(--type-2xl); letter-spacing: -.8px; font-weight: 500; }
+.chart-area { height: 176px; position: relative; }
+.chart-note { margin: 2px 0 8px; color: var(--ink-3); font-size: var(--type-xs); line-height: 1.5; }
+/* The run charts are SVG drawn from tokens, so they follow the theme and Windows High Contrast; the plot is one
+ * focusable slider over the runs (arrow keys move, Enter selects) and the SVG inside it ignores the pointer. */
+.run-chart { position: relative; height: 100%; touch-action: pan-y; cursor: crosshair; border-radius: var(--r-control); }
+.run-chart svg { display: block; overflow: visible; pointer-events: none; }
+.run-chart-grid { stroke: var(--line); stroke-width: 1; }
+.run-chart-axis { stroke: var(--line-strong); stroke-width: 1; }
+.run-chart-label { fill: var(--ink-2); font-size: var(--type-xs); font-variant-numeric: tabular-nums; }
+.run-chart-line { fill: none; stroke: var(--accent); stroke-width: 2.25; stroke-linejoin: round; stroke-linecap: round; }
+.run-chart-cursor { stroke: var(--ink-3); stroke-width: 1; stroke-dasharray: 3 3; }
+.run-chart-dot { fill: var(--accent); stroke: var(--surface); stroke-width: 1.5; }
+.run-chart-dot.is-failed { fill: var(--red); }
+.run-chart-dot.is-canceled { fill: var(--surface); stroke: var(--ink-2); }
+.run-chart-selected { fill: none; stroke: var(--accent); stroke-width: 2; }
+.run-chart-tip { position: absolute; z-index: 3; transform: translateX(-50%); padding: 6px 10px; border: 1px solid var(--tooltip-border); border-radius: var(--r-control); color: var(--tooltip-fg); background: var(--tooltip-bg); box-shadow: var(--shadow-overlay); font-size: var(--type-sm); line-height: 1.45; white-space: nowrap; font-variant-numeric: tabular-nums; pointer-events: none; }
+.run-chart-tip strong { display: block; font-weight: 550; }
+.run-chart-tip span { color: var(--tooltip-muted); }
+.insights-wide > div { max-width: none; min-height: 0; }
+.activity-metrics { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 14px; }
+.activity-metrics > div { padding: 16px 18px; }
+.empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 150px; padding: 24px; color: var(--ink-2); text-align: center; font-size: var(--type-sm); }
+.empty-state strong { color: var(--ink); font-size: var(--type-md); font-weight: 500; }
+.empty-state p { margin: 0; max-width: 360px; line-height: 1.7; }
+.operation-note { display: flex; align-items: center; gap: 12px; padding: 14px 16px; background: var(--accent-tint); border-radius: var(--r-card); font-size: var(--type-sm); }
+.attention-note { border-radius: var(--r-card); padding: 18px; color: var(--ink); background: var(--orange-tint); box-shadow: var(--shadow-hairline); }
+.attention-note strong { font-size: var(--type-base); font-weight: 550; }
+.attention-note p { font-size: var(--type-sm); line-height: 1.6; margin: 7px 0 12px; }
+.settings-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; }
+.setting-row { display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start; gap: 18px; padding: 20px; }
+.setting-copy { min-width: 0; }
+/* What a row is controlled with sits at the bottom of its card, so the pickers of two cards side by side share one baseline
+ * whatever the length of the words above them. */
+.setting-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: auto; }
+.settings-grid .support-row .setting-controls { margin-top: 0; }
+.setting-row p { margin: 7px 0 0; }
+.theme-picker { display: flex; gap: 3px; background: var(--field); padding: 4px; border-radius: var(--r-pill); }
+.theme-choice { position: relative; border: 0; background: transparent; padding: 6px 12px; border-radius: var(--r-pill); font-size: var(--type-xs); color: var(--ink-2); display: flex; align-items: center; gap: 6px; }
+.theme-choice > span { position: relative; z-index: 1; display: flex; align-items: center; gap: 6px; }
+.theme-choice[aria-pressed=true] { color: var(--ink); }
+.theme-highlight { position: absolute; inset: 0; background: var(--surface); border-radius: inherit; box-shadow: var(--shadow-btn), inset 0 0 0 1px var(--accent); }
+.motion-picker { display: inline-flex; gap: 3px; background: var(--field); padding: 4px; border-radius: var(--r-pill); }
+.motion-choice { position: relative; border: 0; background: transparent; padding: 6px 13px; border-radius: var(--r-pill); font-size: var(--type-xs); color: var(--ink-2); }
+.motion-choice > span { position: relative; z-index: 1; }
+.motion-choice[aria-pressed=true] { color: var(--ink); }
+.motion-highlight { position: absolute; inset: 0; background: var(--surface); border-radius: inherit; box-shadow: var(--shadow-btn), inset 0 0 0 1px var(--accent); }
+.connection-screen { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; background: var(--page); }
+.connection-screen p { max-width: 430px; text-align: center; font-size: var(--type-sm); color: var(--ink-2); line-height: 1.7; }
+/* What replaces something that failed to draw (ErrorBoundary in App.tsx): the whole app, one page, a dialog, or a chart card.
+ * Every color is a token, so the notice follows the theme and Windows High Contrast like the rest of the page. */
+.crash-screen { height: 100%; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 32px 24px; background: var(--page); color: var(--ink); text-align: center; }
+.crash-screen h1 { margin: 0; font-size: var(--type-xl); font-weight: 500; letter-spacing: -.4px; }
+.crash-screen p { max-width: 460px; margin: 0; color: var(--ink-2); font-size: var(--type-sm); line-height: 1.7; }
+.crash-icon { display: grid; width: 52px; height: 52px; flex: 0 0 auto; place-items: center; border-radius: var(--r-panel); color: var(--orange-ink); background: var(--orange-tint); }
+.crash-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
+.crash-screen .crash-actions { justify-content: center; }
+.crash-details { width: 100%; max-width: 560px; color: var(--ink-3); font-size: var(--type-xs); text-align: left; }
+.crash-details summary { cursor: pointer; }
+.crash-screen .crash-details summary { text-align: center; }
+.crash-details pre { margin: 8px 0 0; padding: 10px 12px; max-height: 160px; overflow: auto; border-radius: var(--r-control); color: var(--ink-2); background: var(--inset); font-family: var(--font-mono-face), monospace; font-size: 11px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.crash-card { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; padding: 24px; }
+.crash-card h2 { margin: 0; font-size: var(--type-xl); font-weight: 500; letter-spacing: -.4px; color: var(--ink); }
+.crash-card p { margin: 0; max-width: 520px; color: var(--ink-2); font-size: var(--type-sm); line-height: 1.65; }
+.crash-card .crash-note { color: var(--red-ink); }
+.crash-card.is-compact { flex-direction: row; align-items: center; gap: 12px; padding: 16px 18px; }
+.crash-card.is-compact > svg { flex: 0 0 auto; color: var(--orange-ink); }
+.crash-card.is-compact > div { min-width: 0; flex: 1; }
+.crash-card.is-compact strong { color: var(--ink); font-size: var(--type-sm); font-weight: 550; }
+.crash-card.is-compact p { margin-top: 3px; font-size: var(--type-xs); }
+/* What a computer without the backup service sees in place of the pages that need it (SetupNotice in App.tsx): one explanation, where
+ * Rewindle looked, and the lines to paste into a bug report. Tokens only, so it follows the theme and Windows High Contrast. */
+.setup-notice { display: flex; align-items: flex-start; gap: 18px; padding: 26px; }
+.setup-icon { display: grid; width: 48px; height: 48px; flex: 0 0 auto; place-items: center; border-radius: var(--r-panel); color: var(--accent); background: var(--accent-tint); }
+.setup-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+.setup-copy h2 { margin: 0; font-size: var(--type-xl); font-weight: 500; letter-spacing: -.4px; color: var(--ink); }
+.setup-copy p { margin: 0; max-width: 560px; color: var(--ink-2); font-size: var(--type-sm); line-height: 1.7; }
+.setup-where { display: grid; gap: 8px; width: 100%; max-width: 640px; margin: 4px 0 2px; }
+.setup-where > div { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 12px; align-items: baseline; }
+.setup-where dt { color: var(--ink-3); font-size: var(--type-xs); }
+.setup-where dd { margin: 0; color: var(--ink); font-family: var(--font-mono-face), monospace; font-size: var(--type-xs); line-height: 1.65; overflow-wrap: anywhere; user-select: text; }
+.setup-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px; }
+.setup-copy .setup-report { margin: 4px 0 0; color: var(--ink-3); font-size: var(--type-xs); user-select: text; }
+@container workspace (max-width: 560px) {
+  .setup-notice { flex-direction: column; padding: 20px; }
+  .setup-where > div { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+}
+.crash-overlay { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; padding: 24px; background: color-mix(in srgb, var(--page) 72%, transparent); }
+.crash-overlay .crash-card { width: min(520px, 100%); max-height: calc(100vh - 48px); overflow: auto; box-shadow: var(--shadow-overlay); }
+.app-footnote { display: flex; align-items: center; justify-content: space-between; font-size: var(--type-xs); color: var(--ink-3); gap: 12px; padding-top: 3px; }
+.app-footnote span { display: flex; align-items: center; gap: 6px; }
+/* The live regions the toast is put into (see Toast in App.tsx) are fixed in the corner and are always there, empty most of the time, so
+ * they take no room; the toast sits in one of them in the normal flow. The width follows the window, which at a high zoom is narrow. */
+.toast-region { position: fixed; right: 26px; bottom: 24px; z-index: 80; max-width: min(440px, calc(100vw - 52px)); }
+.toast { display: flex; align-items: flex-start; gap: 14px; padding: 13px 18px; border-radius: var(--r-card); background: var(--surface); box-shadow: var(--shadow-overlay); font-size: var(--type-sm); color: var(--ink); }
+.toast.error { border-left: 3px solid var(--red); }
+.restore-steps { max-width: none !important; }
+.restore-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: start; }
+.restore-layout .surface { padding: 24px; }
+.restore-layout h2 { font-size: var(--type-xl); font-weight: 500; letter-spacing: -.5px; margin: 15px 0 8px; }
+.demo-label { font-size: var(--type-xs); text-transform: uppercase; letter-spacing: .7px; background: var(--orange-tint); color: var(--orange-ink); padding: 5px 8px; border-radius: var(--r-chip); }
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-motion="full"]) .progress-bar::after { animation: none; }
+}
+[data-reduced-motion="true"] *, [data-reduced-motion="true"] *::before, [data-reduced-motion="true"] *::after {
+  animation: none !important; transition: none !important;
+}
+[data-reduced-motion="true"] .page-scroll { scroll-behavior: auto !important; }
+[data-reduced-motion="true"] [style*="shimmer-text"] { background-image: none !important; color: var(--ink) !important; }
+[data-reduced-motion="true"] [style*="pixel-on"] { opacity: .7 !important; }
+[data-motion="full"] .progress-bar::after { animation: backup-sweep 1.8s ease-in-out infinite; }
+[data-high-contrast="true"] .progress-bar::after { animation: none !important; }
+/* :root[...] rather than the bare attribute, so this block (0,2,0, and after the first-frame dark block above) outranks it. */
+:root[data-high-contrast="true"] {
+  --page: Canvas; --canvas: Canvas; --surface: Canvas; --inset: Canvas; --field: Canvas;
+  --ink: CanvasText; --ink-2: CanvasText; --ink-3: GrayText;
+  --line: ButtonBorder; --line-strong: ButtonBorder; --grid-line: ButtonBorder;
+  --accent: LinkText; --accent-ink: LinkText; --accent-tint: Canvas;
+  --green: LinkText; --green-tint: Canvas; --orange: CanvasText; --orange-tint: Canvas; --red: CanvasText; --red-tint: Canvas;
+  --green-ink: LinkText; --orange-ink: CanvasText; --red-ink: CanvasText;
+  /* Hover/active rows keep CanvasText, which is unreadable on Highlight (1.4:1 in the Black and White
+   * themes). Hover is a Highlight outline and "current" is a Highlight fill, both in the block below. */
+  --hover: Canvas; --hover-2: Canvas;
+}
+@media (forced-colors: active) {
+  /* Forced colors removes box-shadow, which drew most card edges, field edges and selected states. */
+  .surface, .search-field, .date-filter, .quiet-tag, .attention-note, .history-cap-note, .toast, .theme-picker, .motion-picker, .progress-rail { outline: 1px solid CanvasText; outline-offset: -1px; }
+  /* Buttons that were bordered by a shadow only. Quiet icon buttons stay borderless on purpose. */
+  button.shadow-btn:not(:focus-visible) { outline: 1px solid ButtonText; outline-offset: -1px; }
+  button[aria-pressed="true"]:not(:focus-visible) { outline: 1px solid Highlight; outline-offset: -1px; }
+  button:hover:not(:disabled):not(:focus-visible), .history-table .filter-table-row:hover:not(:focus-visible) { outline: 1px solid Highlight; outline-offset: -1px; }
+  /* The filled primary button is CanvasText with a Canvas label, but forced colors paints a Canvas
+   * backplate behind every label, so that label disappears. Draw it as an ordinary ButtonFace button. */
+  button.bg-ink:not(:disabled) { background: ButtonFace; color: ButtonText; }
+  button.bg-ink:not(:disabled):not(:focus-visible) { outline: 1px solid ButtonText; outline-offset: -1px; }
+  /* Disabled-while-busy must stay distinguishable now that the opacity cue is gone. */
+  button:disabled { opacity: 1; color: GrayText; }
+  button.shadow-btn:disabled { outline-color: GrayText; }
+  button.bg-ink:disabled { background: Canvas; outline: 1px solid GrayText; outline-offset: -1px; }
+  /* The shadow ring that showed focus inside a field. */
+  .search-field:focus-within, .date-filter:focus-within { outline: 2px solid Highlight; outline-offset: 2px; }
+  .sidebar-search:focus-within { outline: 2px solid Highlight; outline-offset: -2px; }
+  /* Selection: a Highlight fill under HighlightText, or a Highlight bar on table rows. The labels
+   * opt out of forced colors so their HighlightText is not drawn over the Canvas backplate. */
+  .theme-highlight, .motion-highlight { forced-color-adjust: none; background: Highlight; }
+  .theme-choice[aria-pressed="true"], .motion-choice[aria-pressed="true"] { forced-color-adjust: none; color: HighlightText; }
+  button[aria-current="page"], button[aria-current="true"] { forced-color-adjust: none; background: Highlight; color: HighlightText; }
+  button[aria-current="page"] span, button[aria-current="true"] span { color: HighlightText; }
+  /* The Highlight fill is the mark of the current page here, and the accent bar (LinkText) would be drawn on top of it. */
+  .sidebar-row[aria-current]::before, .sidebar-footer[aria-current]::before { display: none; }
+  /* A background is repainted as Canvas, which would leave nothing of the connection dot now that its words can be left off. */
+  .connection-dot { forced-color-adjust: none; background: LinkText; }
+  .connection-dot.offline { background: Canvas; border: 2px solid CanvasText; }
+  .history-table .filter-table-row { position: relative; }
+  .history-table .filter-table-row[aria-selected="true"]::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 4px; forced-color-adjust: none; background: Highlight; }
+}
+
+/* Restic integration: information hierarchy and accessible state. */
+.page:focus { outline: none; }
+.skip-link { position: fixed; top: 8px; left: 240px; z-index: 100; transform: translateY(-180%); background: var(--surface); color: var(--ink); padding: 10px 16px; border-radius: var(--r-control); box-shadow: var(--shadow-overlay); }
+.skip-link:focus { transform: translateY(0); }
+.count-badge { display: inline-block; font-size: var(--type-xs); color: var(--ink-2); background: var(--field); border-radius: var(--r-chip); padding: 2px 6px; vertical-align: middle; margin-left: 5px; font-variant-numeric: tabular-nums; }
+.protection-hero .info-action:empty { display: none; }
+/* A hero the host has stopped updating (the link is down) still shows the last thing it said, so it is dimmed and nothing in it moves:
+ * a frozen page must not look busy. Forced colors would blend the dimmed text into the page, so there it keeps its colors and gets a dashed edge. */
+.protection-hero.is-stale { opacity: .6; }
+.protection-hero.is-stale, .protection-hero.is-stale *, .protection-hero.is-stale *::before, .protection-hero.is-stale *::after { animation-play-state: paused !important; }
+.protection-hero.is-stale .progress-bar::after { animation: none; }
+@media (forced-colors: active) { .protection-hero.is-stale { opacity: 1; outline-style: dashed; } }
+/* A tag that is a problem rather than a fact (a protected folder that cannot be found). */
+.quiet-tag.is-warning { color: var(--orange-ink); background: var(--orange-tint); box-shadow: none; }
+/* The storage line under the backup destination, once the drive says it is not ready. */
+.volume-line.is-unavailable { display: flex; align-items: center; gap: 6px; color: var(--orange-ink); }
+.volume-line.is-unavailable svg { flex-shrink: 0; }
+/* What the four figures describe (the run in progress, or the latest finished one and when it started), and the figure that
+ * is a problem when it is not zero. The estimate's own line and the hint under it ("Likely around 14:35") are copy on the page. */
+.stat-bad .stat-number { color: var(--red-ink); }
+.stats-caption { margin: 12px 0 0; font-size: var(--type-xs); line-height: 1.5; color: var(--ink-3); }
+.eta-line { margin-top: 9px; }
+.eta-hint { margin-top: 2px; font-size: var(--type-xs); color: var(--ink-3); }
+.backup-destinations .surface { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 0 14px; }
+.backup-destinations .info-heading, .backup-destinations .info-main, .backup-destinations .muted-copy { grid-column: 1; }
+.backup-destinations .info-action { grid-column: 2; grid-row: 1/4; align-self: center; margin: 0; }
+.backup-destinations .info-main { font-size: var(--type-md); margin: 8px 0 4px; }
+.folder-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.source-warning { font-size: var(--type-sm); color: var(--ink); background: var(--orange-tint); border-radius: var(--r-control); padding: 12px 14px; margin: 0 0 14px; }
+.source-notice { display: flex; align-items: flex-start; gap: 9px; font-size: var(--type-sm); line-height: 1.55; color: var(--ink); background: var(--inset); box-shadow: var(--shadow-hairline); border-radius: var(--r-control); padding: 11px 14px; margin: 0 0 14px; }
+.source-notice svg { flex-shrink: 0; margin-top: 2px; }
+.source-notice.info { background: var(--accent-tint); box-shadow: none; }
+.source-notice.info svg { color: var(--accent-ink); }
+.source-notice.success { background: var(--green-tint); box-shadow: none; }
+.source-notice.success svg { color: var(--green-ink); }
+.source-notice.warning { background: var(--orange-tint); box-shadow: none; }
+.source-notice.warning svg { color: var(--orange-ink); }
+.source-notice.error { background: var(--red-tint); box-shadow: none; }
+.source-notice.error svg { color: var(--red-ink); }
+/* The outcome of a schedule change sits under the schedule it concerns (the Protection card and the Settings row), in the
+ * same look as a folder notice. On Protection the card is a grid, and the slot spans both of its columns. */
+.setting-row .schedule-notice, .backup-destinations .schedule-notice { margin: 12px 0 0; }
+.backup-destinations .schedule-notice-slot { grid-column: 1 / -1; }
+.schedule-problem { margin-top: 12px; }
+.schedule-problem .inline-details { margin: 8px 0 12px; }
+.folder-lock-note { margin: -6px 0 14px; font-size: var(--type-sm); }
+.protected-folders .operation-note, .protected-folders .attention-note { margin: 0 0 14px; }
+.protected-folders .missing-folders p:last-child { margin-bottom: 0; }
+.busy-note { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; font-size: var(--type-sm); line-height: 1.55; color: var(--ink-2); }
+.busy-note svg { flex-shrink: 0; color: var(--ink-3); }
+.repair-progress { margin-top: 12px; }
+.folder-toolbar > .muted-copy { margin-left: auto; }
+.folder-toolbar button[aria-pressed=true] { background: var(--accent-tint); color: var(--accent-ink); }
+.folder-filter-tabs { display: flex; padding: 3px; gap: 2px; border: 1px solid var(--line); border-radius: var(--r-control); }
+.folder-filter-tabs button { display: flex; align-items: center; gap: 6px; padding: 6px 9px; border: 0; border-radius: var(--r-chip); background: transparent; color: var(--ink-2); font-size: var(--type-xs); transition: background-color .18s, color .18s; }
+.folder-filter-tabs button span { opacity: .75; font-variant-numeric: tabular-nums; }
+.protected-folder-list { overflow: hidden; }
+.protected-folder-row { display: flex; gap: 13px; align-items: center; padding: 15px 17px; border-bottom: 1px solid var(--line-soft); }
+.protected-folder-row:last-child { border: 0; }
+.protected-folder-row:hover { background: var(--inset); }
+.protected-folder-icon { width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: var(--r-card); color: var(--accent); background: var(--canvas); flex-shrink: 0; }
+.protected-folder-icon.is-unavailable { color: var(--orange-ink); }
+.protected-folder-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+.protected-folder-copy strong { font-size: var(--type-sm); font-weight: 550; overflow-wrap: anywhere; }
+.protected-folder-copy > span { font-size: var(--type-xs); color: var(--ink-3); overflow-wrap: anywhere; user-select: text; }
+.protected-folder-copy small { color: var(--ink-3); font-size: var(--type-xs); }
+.folder-row-lock { width: 79px; display: flex; justify-content: center; color: var(--ink-3); }
+.folder-list-footnote { display: flex; align-items: center; gap: 6px; font-size: var(--type-xs); color: var(--ink-3); margin: 12px 0 0; }
+.folder-full-path { display: block; overflow-wrap: anywhere; user-select: text; font-family: var(--font-mono-face), monospace; font-size: var(--type-xs); line-height: 1.65; }
+/* One scrim for the three dialogs (the folder chooser, run details and restore). Each puts .app-dialog on its <dialog>, and .is-closing while
+ * its panel leaves (none of them closes the dialog before 160ms are up), so the scrim leaves with it. Their panels share --dialog-shadow
+ * and the panel radius; what else they hold is their own. */
+dialog.app-dialog::backdrop { background: var(--dialog-backdrop, rgb(4 10 18 / .6)); backdrop-filter: blur(6px) saturate(.9); animation: dialog-backdrop-in .2s ease both; }
+dialog.app-dialog.is-closing::backdrop { animation: dialog-backdrop-out .16s ease both; }
+@keyframes dialog-backdrop-in { from { opacity: 0; backdrop-filter: blur(0); } }
+@keyframes dialog-backdrop-out { to { opacity: 0; backdrop-filter: blur(0); } }
+@media (prefers-reduced-motion: reduce) { html:not([data-motion="full"]) dialog.app-dialog::backdrop { animation: none; } }
+html[data-reduced-motion=true] dialog.app-dialog::backdrop { animation: none; backdrop-filter: none; }
+.folder-picker-dialog { width: 680px; max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); padding: 0; border: 0; margin: auto; overflow: visible; background: transparent; color: var(--ink); }
+.folder-picker-panel { display: flex; flex-direction: column; max-height: calc(100vh - 32px); background: var(--page); border: 1px solid var(--line-strong); border-radius: var(--r-panel); box-shadow: var(--dialog-shadow); overflow: hidden; }
+.folder-picker-heading { display: flex; align-items: flex-start; gap: 14px; padding: 25px 25px 21px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
+.folder-picker-heading > div { flex: 1; min-width: 0; }
+.folder-picker-heading h2 { font-size: var(--type-xl); letter-spacing: -.6px; font-weight: 600; margin: 6px 0; line-height: 1.3; }
+.folder-picker-heading p { font-size: var(--type-sm); color: var(--ink-2); line-height: 1.65; margin: 0; }
+.folder-picker-emblem { display: grid; place-items: center; width: 47px; height: 47px; border-radius: var(--r-panel); background: var(--accent-tint); color: var(--accent); flex-shrink: 0; }
+.folder-picker-body { overflow-y: auto; padding: 22px 25px; min-height: 0; }
+.folder-picker-section-label { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 12px; }
+.folder-picker-section-label h3 { font-size: var(--type-sm); margin: 0; font-weight: 550; }
+.folder-picker-section-label span { color: var(--ink-3); font-size: var(--type-xs); }
+.folder-shortcuts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.folder-shortcut { display: flex; align-items: center; gap: 9px; min-width: 0; text-align: left; border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); padding: 12px 10px; border-radius: var(--r-card); transition: background .16s, border-color .16s, transform .16s; }
+.folder-shortcut > span { flex: 1; min-width: 0; }
+.folder-shortcut strong { display: block; font-size: var(--type-xs); font-weight: 550; overflow-wrap: anywhere; }
+.folder-shortcut small { display: block; margin-top: 4px; font-size: var(--type-xs); color: var(--ink-3); }
+.folder-shortcut > svg { flex-shrink: 0; }
+.folder-shortcut > svg:last-child { width: 12px; color: var(--ink-3); }
+.folder-shortcut:disabled { opacity: .62; }
+.folder-shortcut:hover:not(:disabled), .folder-shortcut.is-selected { background: var(--accent-tint); border-color: var(--accent); }
+.folder-shortcut:active:not(:disabled) { transform: scale(.975); }
+.folder-picker-divider { display: flex; align-items: center; gap: 12px; color: var(--ink-3); font-size: var(--type-xs); margin: 24px 0 20px; }
+.folder-picker-divider::before, .folder-picker-divider::after { content: ''; height: 1px; flex: 1; background: var(--line); }
+.folder-path-label { display: block; font-size: var(--type-sm); font-weight: 550; margin-bottom: 8px; }
+.folder-path-entry { display: flex; align-items: center; gap: 10px; padding: 0 12px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-card); color: var(--ink-3); }
+.folder-path-entry:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent); }
+.folder-path-entry input { border: 0; outline: 0; width: 100%; min-width: 0; background: transparent; color: var(--ink); padding: 13px 0; font-size: var(--type-sm); }
+.folder-path-entry input:focus-visible { outline: 0; }
+/* The clear button is at least 24px square (its glyph is 14px, which with this padding was 22). The negative margin takes the extra 2px back, so
+ * the field is as wide and as tall as it was. */
+.folder-path-entry button { display: grid; place-items: center; min-width: 24px; min-height: 24px; margin: -1px; padding: 4px; background: transparent; border: 0; color: var(--ink-3); }
+.folder-path-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; }
+.folder-path-actions > span { font-size: var(--type-xs); color: var(--ink-3); }
+.folder-path-actions > div { display: flex; gap: 7px; flex-shrink: 0; }
+.folder-selection-review { margin-top: 21px; display: flex; align-items: flex-start; gap: 11px; padding: 15px; border: 1px solid var(--line); background: var(--canvas); border-radius: var(--r-card); min-height: 86px; }
+.folder-selection-review.is-ready { background: var(--accent-tint); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+.folder-review-icon { padding-top: 1px; color: var(--ink-3); flex-shrink: 0; }
+.folder-selection-review.is-ready .folder-review-icon { color: var(--accent); }
+.folder-selection-review.is-error .folder-review-icon { color: var(--orange-ink); }
+.folder-selection-review strong { font-size: var(--type-sm); font-weight: 550; }
+.folder-selection-review p { font-size: var(--type-xs); line-height: 1.65; margin: 5px 0 0; color: var(--ink-2); }
+.folder-selection-review .folder-full-path { margin-top: 7px; }
+.folder-review-retry { margin-top: 10px; }
+.folder-picker-error { display: flex; align-items: flex-start; gap: 10px; color: var(--orange-ink); font-size: var(--type-xs); line-height: 1.6; margin-top: 10px; }
+/* The dismiss button is a 24px square, up from its 14px glyph. The negative margins keep it from adding height to the message or moving the glyph
+ * (it sits in the dialog body's padding), and it keeps its size beside a long message. */
+.folder-picker-error button { display: grid; place-items: center; flex: 0 0 auto; min-width: 24px; min-height: 24px; margin: -4px -5px -4px auto; background: transparent; color: inherit; border: 0; }
+.folder-picker-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 17px 25px; background: var(--canvas); border-top: 1px solid var(--line); flex-shrink: 0; }
+.folder-picker-footer > span { display: flex; align-items: center; gap: 7px; color: var(--ink-3); font-size: var(--type-xs); }
+.folder-picker-footer > div { display: flex; gap: 8px; }
+.folder-picker-success { padding: 24px 5px; text-align: center; }
+.folder-picker-success-icon { display: inline-grid; place-items: center; border-radius: 50%; width: 62px; height: 62px; color: var(--accent); background: var(--accent-tint); }
+.folder-picker-success h3 { font-size: var(--type-xl); margin: 18px 0 12px; }
+.folder-picker-success > strong { font-size: var(--type-base); }
+.folder-picker-success p { font-size: var(--type-sm); line-height: 1.6; color: var(--ink-2); }
+/* The dialog only: its width is the window's. The rows of the protected folder list answer to the page's width (see the 560px rule below). */
+@media (max-width: 620px) {
+  .folder-shortcuts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .folder-picker-heading, .folder-picker-body { padding: 18px; }
+  .folder-picker-footer { padding: 15px 18px; flex-wrap: wrap; }
+  .folder-path-actions { align-items: flex-start; flex-direction: column; }
+  .folder-picker-emblem { display: none; }
+  .folder-picker-section-label { align-items: flex-start; flex-direction: column; gap: 5px; }
+}
+@media (forced-colors: active) {
+  .folder-picker-panel, .folder-shortcut, .folder-selection-review, .protected-folder-list { border: 1px solid CanvasText; }
+  .folder-shortcut:disabled { opacity: 1; color: GrayText; }
+}
+/* The clear button is at least 24px square (its 13px glyph with this padding was 17). The negative margins give the extra size back, so the field
+ * keeps its height, and its width to within a pixel, when the button appears. */
+.search-field button { display: grid; place-items: center; min-width: 24px; min-height: 24px; margin: -3px -4px; border: 0; background: transparent; color: var(--ink-2); padding: 2px; border-radius: var(--r-chip); }
+/* The focus ring of a button this small sits against it: at the usual 3px offset it would be taller than the field it is in. */
+.search-field button:focus-visible, .folder-path-entry button:focus-visible, .folder-picker-error button:focus-visible { outline-offset: 0; }
+/* Docked to the bottom of the page (inside its padding) while the table is taller than the window, so "Open details"
+ * is always on screen. */
+.selection-bar { position: sticky; bottom: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 14px 16px; margin-top: 12px; border: 1px solid var(--line); border-radius: var(--r-card); background: var(--surface); box-shadow: 0 10px 28px -14px rgb(0 0 0 / .45); }
+.page-scroll:has(.selection-bar) { scroll-padding-bottom: 84px; }
+.selection-bar strong { display: block; font-size: var(--type-sm); font-weight: 550; }
+.selection-bar span { display: block; font-size: var(--type-xs); color: var(--ink-2); margin-top: 4px; }
+.history-table .filter-table-row[aria-selected=true] { background: var(--accent-tint); box-shadow: inset 3px 0 var(--accent); }
+.history-table .filter-table-row > span { padding-top: 12px; padding-bottom: 12px; }
+.first-run-summary { display: flex; align-items: center; gap: 14px; padding: 22px; color: var(--ink-2); }
+.first-run-summary strong { font-size: var(--type-base); color: var(--ink); font-weight: 550; }
+.first-run-summary p { margin: 6px 0 0; font-size: var(--type-sm); line-height: 1.65; }
+/* The pieces of a section (its title, a grid of cards, the health cards) keep one gap whatever they are, so the health cards no longer
+ * touch the card under them. The title's own bottom margin takes 2px of it back, which keeps the title 12px above what it names. */
+.settings-section { display: flex; flex-direction: column; gap: 14px; }
+.settings-section > h2 { margin-bottom: -2px; }
+.settings-grid .support-row { grid-column: 1/-1; flex-direction: row; align-items: center; justify-content: space-between; }
+/* The reassurance under the backup plan: one quiet line with the lock the footer uses. */
+.settings-note { display: flex; align-items: flex-start; gap: 7px; margin: 0; font-size: var(--type-xs); line-height: 1.6; }
+.settings-note svg { flex-shrink: 0; margin-top: 3px; }
+/* About Rewindle: the facts as label and value pairs, the licenses button beside them where there is room. */
+.about-row { flex-direction: row; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; }
+.about-row .setting-controls { margin-top: 0; }
+.about-facts { display: grid; gap: 6px; margin: 0; min-width: 0; }
+.about-facts > div { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 12px; align-items: baseline; }
+.about-facts dt { color: var(--ink-3); font-size: var(--type-xs); }
+.about-facts dd { margin: 0; color: var(--ink); font-size: var(--type-sm); overflow-wrap: anywhere; }
+.path-copy { font-family: var(--font-mono-face), monospace; font-size: var(--type-xs); user-select: text; }
+.inline-details { font-size: var(--type-xs); color: var(--ink-2); margin-top: 10px; }
+.inline-details summary { cursor: pointer; padding: 3px 0; color: var(--ink); }
+.inline-details[open] { animation: fade-in 180ms ease both; }
+.connection-warning { display: flex; gap: 10px; align-items: center; padding: 10px max(var(--page-gutter), calc((100% - var(--page-width)) / 2)); font-size: var(--type-sm); background: var(--orange-tint); color: var(--ink); }
+.connection-warning span { flex: 1; }
+.sidebar-view-all { border: 1px solid var(--line); }
+.restore-steps button { min-height: 50px; }
+/* The page's breakpoints, asked of the workspace (see .workspace) and not of the window: the width each one names is what is left once
+ * the sidebar has taken its share, so the layout answers to the room it has whether the sidebar is open (224px) or folded (52px), or
+ * the window is zoomed. With the sidebar open they come where the window widths they replace did, less its 224px (1180, 1080 and 980
+ * are 956, 860 and 760). The 850px and 740px rules are one set at 680px: neither could fire at the desktop window's smallest size
+ * (884px wide), where the page has about 610px, and this one does. Dialogs take the window's width, and keep their own media queries. */
+@container workspace (max-width: 956px) {
+  .backup-destinations .surface { display: block; }
+  .backup-destinations .info-action { margin-top: 12px; }
+}
+@container workspace (max-width: 860px) {
+  .topbar, .connection-warning, .page-scroll { --page-gutter: 24px; }
+  .page-scroll { padding-bottom: 24px; }
+  /* Only the dot stays; the words are still there for assistive technology. */
+  .connection { margin-right: 4px; }
+  .connection-dot { width: 8px; height: 8px; }
+  .connection-label { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  .backup-tasks button > span:nth-child(3) { display: none; }
+  .section-head { flex-wrap: wrap; gap: 12px; }
+  .stats-grid { gap: 10px; }
+}
+@container workspace (max-width: 760px) {
+  .hero-grid, .restore-layout { grid-template-columns: 1fr; }
+  .hero-grid { gap: 22px; }
+  .backup-tasks { gap: 5px !important; }
+  .backup-tasks button > span:nth-child(3) { display: block; }
+  .search-field input { width: 180px; }
+  .history-tools { width: 100%; }
+  .history-tools .search-field { flex: 1; }
+  .section-toolbar { flex-wrap: wrap; }
+}
+@container workspace (max-width: 680px) {
+  .topbar, .connection-warning, .page-scroll { --page-gutter: 20px; }
+  .page-scroll { padding-top: 20px; padding-bottom: 20px; }
+  .two-columns { grid-template-columns: 1fr; gap: 20px; }
+  .settings-grid { grid-template-columns: 1fr; }
+  .section-toolbar { align-items: flex-start; }
+  .setting-row { flex-wrap: wrap; }
+  .settings-grid .support-row, .selection-bar { flex-wrap: wrap; }
+  .activity-metrics { gap: 8px; }
+  .activity-metrics > div { padding: 12px; }
+  .activity-metrics .stat-number { font-size: var(--type-lg); }
+}
+@container workspace (max-width: 560px) {
+  .folder-remove-label { display: none; }
+  .folder-row-lock { width: 35px; }
+  .protected-folder-row { padding: 12px; gap: 9px; }
+}
+
+/* Run details — an in-app native dialog using the same Beautiful UI surface
+ * rhythm as the dashboard. The dialog owns its focus and scroll region so the
+ * native WPF window can stay compact at its minimum size. */
+.run-details-dialog {
+  width: min(940px, calc(100% - 32px));
+  min-width: min(620px, calc(100% - 32px));
+  max-width: calc(100% - 32px);
+  max-height: calc(100% - 32px);
+  margin: auto;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  color: var(--ink);
+  background: transparent;
+}
+.run-details-dialog:not([open]) { display: none; }
+.run-details-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-height: calc(100vh - 32px);
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-panel);
+  background: var(--page);
+  box-shadow: var(--dialog-shadow);
+  /* Lets the body switch to two columns on the width of the dialog itself (see the @container rule below). */
+  container: run-details / inline-size;
+}
+.run-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  flex-shrink: 0;
+  padding: 20px 26px 16px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 78%, var(--page));
+}
+.run-detail-heading { display: flex; min-width: 0; align-items: flex-start; gap: 13px; }
+.run-detail-status-icon {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  place-items: center;
+  margin-top: 1px;
+  border-radius: var(--r-card);
+}
+.run-detail-status-icon.green { color: var(--green-ink); background: var(--green-tint); }
+.run-detail-status-icon.orange { color: var(--orange-ink); background: var(--orange-tint); }
+.run-detail-status-icon.red { color: var(--red-ink); background: var(--red-tint); }
+.run-detail-status-icon.accent { color: var(--accent-ink); background: var(--accent-tint); }
+.run-detail-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-3);
+  font-size: var(--type-xs);
+  font-weight: 600;
+  letter-spacing: 1.1px;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+.run-detail-eyebrow-status { color: var(--accent-ink); }
+.run-detail-heading h2 { margin: 7px 0 3px; font-size: var(--type-2xl); font-weight: 600; letter-spacing: -.7px; line-height: 1.2; }
+.run-detail-subtitle { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; color: var(--ink-2); font-size: var(--type-sm); line-height: 1.6; }
+.run-detail-id {
+  display: block;
+  max-width: min(620px, 70vw);
+  margin-top: 7px;
+  overflow-wrap: anywhere;
+  color: var(--ink-3);
+  font-family: var(--font-mono-face), monospace;
+  font-size: var(--type-xs);
+  line-height: 1.5;
+  user-select: text;
+}
+/* The body is the dialog's scroll region. The event timeline is the point of the dialog, so it takes the height
+ * the summary above it leaves (at least 340px), and sits beside the summary when the dialog is wide enough. */
+.run-detail-scroll { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; min-height: 0; overflow-y: auto; padding: 18px 26px 16px; scrollbar-gutter: stable; }
+.run-detail-summary { min-width: 0; }
+@container run-details (min-width: 860px) {
+  .run-detail-scroll { grid-template-columns: 320px minmax(0, 1fr); grid-template-rows: 1fr; column-gap: 14px; }
+  .run-detail-summary > :last-child { margin-bottom: 0; }
+}
+.run-detail-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.run-detail-stat { min-width: 0; padding: 12px 13px; border: 1px solid var(--line); border-radius: var(--r-card); background: var(--surface); box-shadow: var(--shadow-hairline); }
+.run-detail-stat-label { display: flex; align-items: center; gap: 6px; color: var(--ink-3); font-size: var(--type-xs); }
+.run-detail-stat-label svg { flex: 0 0 auto; }
+.run-detail-stat strong { display: block; margin-top: 6px; overflow-wrap: anywhere; color: var(--ink); font-size: var(--type-lg); font-weight: 550; font-variant-numeric: tabular-nums; line-height: 1.25; }
+.run-detail-snapshot { padding: 16px; margin-bottom: 14px; }
+.run-detail-section-heading, .run-detail-events-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.run-detail-section-heading h3, .run-detail-events-heading h3 { margin: 4px 0 0; font-size: var(--type-lg); font-weight: 550; letter-spacing: -.2px; }
+.run-detail-snapshot-row { display: flex; align-items: flex-start; gap: 12px; margin-top: 13px; }
+.run-detail-snapshot-row code { min-width: 0; flex: 1; overflow-wrap: anywhere; color: var(--ink-2); font-family: var(--font-mono-face), monospace; font-size: var(--type-xs); line-height: 1.65; user-select: text; }
+.run-detail-snapshot-row button { flex: 0 0 auto; }
+.run-detail-issue { padding: 14px 16px; margin-bottom: 14px; border: 1px solid; border-radius: var(--r-card); }
+.run-detail-issue.warning { color: var(--ink); border-color: color-mix(in srgb, var(--orange) 34%, var(--line)); background: var(--orange-tint); }
+.run-detail-issue.error { color: var(--ink); border-color: color-mix(in srgb, var(--red) 34%, var(--line)); background: var(--red-tint); }
+.run-detail-issue-title { display: flex; align-items: center; gap: 7px; font-size: var(--type-sm); }
+.run-detail-issue-title svg { color: currentColor; }
+.run-detail-issue p { margin: 8px 0 0; color: var(--ink-2); font-size: var(--type-sm); line-height: 1.65; overflow-wrap: anywhere; }
+.run-detail-issue p strong, .run-detail-paths > strong { display: block; margin-bottom: 2px; color: var(--ink); font-size: var(--type-xs); letter-spacing: .4px; text-transform: uppercase; }
+.run-detail-paths { margin-top: 10px; }
+.run-detail-paths ul { max-height: 160px; margin: 0; padding: 0 0 0 17px; overflow-y: auto; }
+.run-detail-paths li { margin-top: 4px; color: var(--ink-2); }
+.run-detail-paths code { overflow-wrap: anywhere; font-family: var(--font-mono-face), monospace; font-size: var(--type-xs); }
+.run-detail-technical { margin-bottom: 14px; border: 1px solid var(--line); border-radius: var(--r-card); background: var(--surface); box-shadow: var(--shadow-hairline); }
+.run-detail-technical summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; color: var(--ink); cursor: pointer; font-size: var(--type-sm); font-weight: 550; list-style: none; }
+.run-detail-technical summary::-webkit-details-marker { display: none; }
+.run-detail-technical summary > span:first-child { display: inline-flex; align-items: center; gap: 7px; }
+.run-detail-technical summary > span:first-child svg { color: var(--ink-3); }
+.run-detail-summary-hint { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-3); font-size: var(--type-xs); font-weight: 400; }
+.run-detail-technical[open] .run-detail-summary-hint svg { transform: rotate(180deg); }
+.run-detail-technical summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: var(--r-card); }
+.run-detail-technical[open] summary { border-bottom: 1px solid var(--line); }
+.run-detail-technical-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 13px 14px 14px; }
+.run-detail-technical-grid > div { min-width: 0; }
+.run-detail-technical-grid span { display: block; margin-bottom: 5px; color: var(--ink-3); font-size: var(--type-xs); }
+.run-detail-technical-grid code { display: block; overflow-wrap: anywhere; color: var(--ink); font-family: var(--font-mono-face), monospace; font-size: var(--type-xs); }
+.run-detail-technical > p { margin: 0; padding: 0 14px 14px; color: var(--ink-2); font-size: var(--type-xs); }
+.run-detail-events { display: flex; flex-direction: column; min-height: 340px; padding: 16px; }
+.run-detail-events-heading { align-items: center; }
+.run-detail-events-heading p { margin: 5px 0 0; color: var(--ink-2); font-size: var(--type-xs); }
+.run-detail-events-heading .run-detail-events-note { display: flex; align-items: center; gap: 6px; color: var(--orange-ink); }
+.run-detail-events-note svg { flex: 0 0 auto; }
+.run-detail-event-count { flex: 0 0 auto; }
+.run-detail-filter-row { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin: 14px 0 10px; }
+.run-detail-filter { display: flex; min-width: min(320px, 100%); flex: 1; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--r-control); color: var(--ink-3); background: var(--inset); box-shadow: var(--shadow-hairline); }
+.run-detail-filter:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 24%, transparent); }
+.run-detail-filter input { min-width: 0; flex: 1; border: 0; outline: 0; color: var(--ink); background: transparent; font-size: var(--type-xs); }
+.run-detail-filter kbd { flex: 0 0 auto; padding: 2px 5px; border: 1px solid var(--line-strong); border-radius: var(--r-chip); color: var(--ink-3); font-size: var(--type-xs); line-height: 1.2; }
+.run-detail-event-list { flex: 1 1 auto; min-height: 180px; overflow-y: auto; border: 1px solid var(--line); border-radius: var(--r-control); background: var(--inset); scrollbar-gutter: stable; }
+.run-detail-event { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--line-soft); }
+.run-detail-event:last-child { border-bottom: 0; }
+.run-detail-event > span { color: var(--ink-3); font-family: var(--font-mono-face), monospace; font-size: var(--type-xs); line-height: 1.5; text-align: right; user-select: none; }
+.run-detail-event code { min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; color: var(--ink-2); font-family: var(--font-mono-face), monospace; font-size: var(--type-sm); line-height: 1.5; user-select: text; }
+.run-detail-event-empty { display: flex; min-height: 110px; height: 100%; flex-direction: column; align-items: center; justify-content: center; gap: 7px; padding: 14px; color: var(--ink-3); text-align: center; }
+.run-detail-event-empty strong { color: var(--ink); font-size: var(--type-sm); font-weight: 550; }
+.run-detail-event-empty p { max-width: 360px; margin: 0; color: var(--ink-2); font-size: var(--type-xs); line-height: 1.6; }
+.run-detail-footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-shrink: 0; padding: 14px 26px; border-top: 1px solid var(--line); background: var(--surface); }
+.run-detail-footer-actions { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.run-detail-action { gap: 6px; white-space: nowrap; }
+.run-detail-notice { position: absolute; right: 22px; bottom: 70px; z-index: 3; display: flex; max-width: min(430px, calc(100% - 44px)); align-items: flex-start; gap: 10px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: var(--r-control); color: var(--ink); background: var(--surface); box-shadow: var(--shadow-raised); font-size: var(--type-xs); line-height: 1.45; }
+.run-detail-notice span { flex: 1; }
+.run-detail-notice.error { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+@media (max-width: 700px) {
+  .run-details-dialog { width: calc(100% - 18px); min-width: 0; max-width: calc(100% - 18px); max-height: calc(100% - 18px); }
+  .run-details-panel { max-height: calc(100vh - 18px); border-radius: var(--r-card); }
+  .run-detail-header, .run-detail-scroll { padding-left: 17px; padding-right: 17px; }
+  .run-detail-heading h2 { font-size: var(--type-xl); }
+  .run-detail-technical-grid { grid-template-columns: 1fr; gap: 9px; }
+  .run-detail-footer { align-items: flex-end; flex-direction: column; padding-left: 17px; padding-right: 17px; }
+  .run-detail-footer-actions { width: 100%; }
+}
+@media (max-height: 700px) {
+  .run-detail-header { padding-top: 17px; padding-bottom: 14px; }
+  .run-detail-scroll { padding-top: 13px; padding-bottom: 16px; }
+  .run-detail-footer { padding-top: 10px; padding-bottom: 10px; }
+}

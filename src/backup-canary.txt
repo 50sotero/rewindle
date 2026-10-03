@@ -1,0 +1,2 @@
+ResticBackuper restore canary, schema 1.
+This stable file is restored and SHA-256 checked after successful snapshots.

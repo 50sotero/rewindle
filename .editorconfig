@@ -1,0 +1,19 @@
+# Editor defaults for Rewindle. Line endings are deliberately not set here: some tests and
+# manifests depend on exact bytes, so editors must keep whatever a file already uses.
+root = true
+
+[*]
+charset = utf-8
+trim_trailing_whitespace = true
+
+[*.{cs,ps1,psm1,psd1,py}]
+indent_style = space
+indent_size = 4
+
+[*.{ts,tsx,css,json,yml,yaml,md}]
+indent_style = space
+indent_size = 2
+
+[*.md]
+# Two trailing spaces are a Markdown line break.
+trim_trailing_whitespace = false

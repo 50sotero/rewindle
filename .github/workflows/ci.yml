@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-safety-tests:
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      # The dashboard interface is bundled with Node.js; .node-version pins the release line that
+      # src/dashboard/web/package.json accepts.
+      - name: Set up Node.js for the dashboard interface
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: src/dashboard/web/package-lock.json
+
+      - name: Compile Python sources
+        shell: pwsh
+        run: python -m compileall -q src tests
+
+      - name: Parse PowerShell without executing it
+        shell: pwsh
+        run: |
+          $hadErrors = $false
+          Get-ChildItem -LiteralPath $env:GITHUB_WORKSPACE -Recurse -File -Filter '*.ps1' |
+            Where-Object { $_.FullName -notmatch '[\\/]node_modules[\\/]' } |
+            ForEach-Object {
+              $tokens = $null
+              $errors = $null
+              [void][System.Management.Automation.Language.Parser]::ParseFile(
+                $_.FullName,
+                [ref]$tokens,
+                [ref]$errors
+              )
+              foreach ($parseError in $errors) {
+                Write-Error "$($_.FullName):$($parseError.Extent.StartLineNumber): $($parseError.Message)" -ErrorAction Continue
+                $hadErrors = $true
+              }
+            }
+          if ($hadErrors) { exit 1 }
+
+      # Includes the dashboard source and harness checks under tests/; none of them reads a real
+      # installation (the harnesses move every engine folder into a disposable temp root).
+      - name: Run isolated unit and repository-hygiene tests
+        shell: pwsh
+        run: python -m unittest discover -s tests -v
+
+      - name: Exercise protected source-management transactions
+        shell: powershell
+        run: .\tests\Test-ManageSources.ps1
+
+      # Installs the locked web dependencies, type-checks and bundles the dashboard interface, downloads
+      # and verifies the pinned WebView2 SDK, compiles the dashboard host and the task launcher with the
+      # .NET Framework compiler, and assembles the checksum-pinned payload and setup executable.
+      - name: Build checksum-pinned Windows release
+        shell: pwsh
+        run: .\build\Build-Release.ps1
+
+      # Windows PowerShell 5.1 on purpose: the checks load the .NET Framework dashboard just built.
+      # -SkipInstalledChecks keeps them from reading any installed backup configuration.
+      - name: Dashboard regression checks
+        shell: powershell
+        run: .\src\dashboard\tests\restore-flow-regressions.ps1 -SkipInstalledChecks
+
+      # Single protected restore requests and restore approval sessions in the disposable mode (non-elevated), including the
+      # dashboard just built talking to the session broker. -SkipInstalledChecks keeps it from reading any installation.
+      - name: Exercise protected restore requests and restore sessions
+        shell: powershell
+        run: .\tests\Test-ManageRestore.ps1 -SkipInstalledChecks
+
+      - name: Exercise two real snapshots and an independent restore
+        shell: pwsh
+        run: .\tests\Test-ReleaseArtifact.ps1

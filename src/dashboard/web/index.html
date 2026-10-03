@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; media-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'" />
+    <!-- No theme class on <html>. The first frame follows prefers-color-scheme: the desktop host sets the web view's preferred
+         color scheme to the theme it resolved, app.css carries the dark tokens for it, and the app then pins .dark or .light. -->
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#101927" />
+    <meta name="description" content="Rewindle — Backup you can verify. Encrypted snapshots and guided recovery, powered by Restic." />
+    <link rel="icon" href="./rewindle-icon.svg" type="image/svg+xml" />
+    <title>Rewindle</title>
+  </head>
+  <body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body>
+</html>

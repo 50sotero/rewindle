@@ -1,0 +1,127 @@
+name: Bug report
+description: Something in Rewindle does not work as it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Rewindle is an alpha, and bug reports are how it gets better.
+
+        **Security problems** (exposed credentials, privilege escalation, unsafe file permissions, path tricks, repository corruption) must not be reported here. Use a [private security advisory](https://github.com/50sotero/rewindle/security/advisories/new) instead.
+
+        **Never paste** a repository password, a recovery key, a DPAPI envelope (`repository-password.dpapi.json`), private files, or real folder paths you do not want to make public.
+
+  - type: input
+    id: rewindle-version
+    attributes:
+      label: Rewindle version
+      description: Shown in **Settings > About Rewindle**, or run `ResticBackuperDashboard.exe --version` from `C:\Program Files\ResticBackuper`.
+      placeholder: 0.2.0-alpha.1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Engine
+      description: Shown in **Settings > About Rewindle** under Engine.
+      options:
+        - Rewindle engine (installed by the Rewindle installer)
+        - Legacy personal edition
+        - Engine not installed
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: windows-build
+    attributes:
+      label: Windows version and build
+      description: Run `winver`, and copy the version and OS build.
+      placeholder: Windows 11 24H2, OS build 26100.xxxx
+    validations:
+      required: true
+
+  - type: input
+    id: webview2-version
+    attributes:
+      label: WebView2 Runtime version
+      description: |
+        Settings > Apps > Installed apps > Microsoft Edge WebView2 Runtime, or run this in PowerShell:
+        `(Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}').pv`
+      placeholder: 129.0.2792.65
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where did it happen?
+      options:
+        - Installer or uninstaller
+        - Scheduled backup
+        - Protection page
+        - Activity page
+        - Restore or recovery readiness
+        - Settings page
+        - Off-site copy (Google Drive verification)
+        - Recovery tools without the app
+        - Building from source
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: What did you do, starting from a known state?
+      placeholder: |
+        1. Open Rewindle from the notification area
+        2. Go to Restore > Open Restore Center
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead? Include the exact text of any message. Screenshots are welcome; crop or blur folder names you do not want to share.
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ### Diagnostics (optional, but very helpful)
+
+        In Rewindle, open **Activity** and choose **Export diagnostics**. This writes a ZIP with paths, Windows user and computer names, account IDs, email addresses and long tokens redacted, and a `manifest.json` that lists anything it left out.
+
+        **Review the ZIP before attaching it.** Redaction is automatic, and you are the last check: open each file and make sure nothing in it is something you would not post publicly. Do not attach `crash.log`, run logs or the run-details **Copy summary** text directly; they can contain file and folder names.
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics and other context
+      description: Attach the reviewed diagnostics ZIP by dragging it here, and add anything else that might help (storage type, VSS on or off, recent changes).
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues for this problem.
+          required: true
+        - label: This report contains no passwords, recovery keys, DPAPI envelopes or private files.
+          required: true

@@ -1,0 +1,40 @@
+.protection-health { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+/* Two cards when the off-site copy is not set up: it is one quiet line under them (.health-row) instead of a third card. */
+.protection-health.is-two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.health-row { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; padding: 0 4px; font-size: var(--type-xs); line-height: 1.6; color: var(--ink-3); }
+.health-row svg { flex-shrink: 0; }
+.health-row-label { color: var(--ink-2); font-weight: 500; }
+.health-card { display: flex; flex-direction: column; min-width: 0; padding: 18px; }
+.health-card-label { display: flex; gap: 8px; align-items: center; color: var(--ink-3); font-size: var(--type-xs); }
+.health-card-status { display: flex; align-items: flex-start; gap: 8px; margin: 13px 0 7px; }
+.health-card-status svg { flex-shrink: 0; margin-top: 2px; }
+.health-card-status h3 { margin: 0; font-size: var(--type-base); line-height: 1.5; font-weight: 550; color: var(--ink); }
+.health-success .health-card-status { color: var(--green-ink); }
+.health-warning .health-card-status { color: var(--orange-ink); }
+.health-danger .health-card-status { color: var(--red-ink); }
+.health-active .health-card-status { color: var(--accent); }
+.health-neutral .health-card-status { color: var(--ink-3); }
+.health-card p { overflow-wrap: anywhere; }
+.health-description { margin: 0; color: var(--ink-2); font-size: var(--type-sm); line-height: 1.65; }
+/* What the host itself reported for a problem, under the card's own wording of it. The tint follows the card's tone. */
+.health-reason { margin: 10px 0 0; padding: 8px 10px; border-radius: var(--r-control); background: var(--inset); color: var(--ink); font-size: var(--type-xs); line-height: 1.6; }
+.health-warning .health-reason { background: var(--orange-tint); }
+.health-danger .health-reason { background: var(--red-tint); }
+.health-time { margin: 10px 0 0; font-size: var(--type-xs); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.health-time time { color: var(--ink-2); }
+.health-next-step { border-top: 1px solid var(--line); padding-top: 12px; margin: 13px 0 0; font-size: var(--type-xs); color: var(--ink-2); line-height: 1.65; }
+.health-evidence { margin-top: 12px; font-size: var(--type-xs); color: var(--ink-2); }
+.health-evidence summary { cursor: pointer; display: flex; gap: 8px; align-items: center; width: fit-content; color: var(--ink); border-radius: var(--r-chip); }
+.health-evidence summary::-webkit-details-marker { display: none; }
+.health-evidence summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.health-evidence summary svg { transition: transform .18s; }
+.health-evidence[open] summary svg { transform: rotate(180deg); }
+.health-evidence p { white-space: pre-line; line-height: 1.7; padding: 10px; background: var(--inset); border-radius: var(--r-control); margin: 10px 0 0; }
+.health-action { margin-top: auto; padding-top: 14px; }
+.context-action { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 7px; max-width: 290px; }
+.action-disabled-reason { display: block; max-width: 290px; color: var(--ink-2); font-size: var(--type-xs); line-height: 1.6; overflow-wrap: anywhere; }
+.health-action .action-disabled-reason { margin: 7px 0 0; }
+.health-reread { animation: fade-in 180ms ease both; }
+/* The cards stack where the page's hero does (760px of workspace, which is the window's old 980px with the sidebar open). The query is asked of the
+ * workspace, not the window: see .workspace in app.css. */
+@container workspace (max-width: 760px) { .protection-health, .protection-health.is-two { grid-template-columns: 1fr; } }

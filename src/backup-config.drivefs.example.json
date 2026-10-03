@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "plan_id": "00000000-0000-4000-8000-000000000000",
+  "config_generation": 1,
+  "repository": "G:\\My Drive\\ResticBackups\\Personal",
+  "repository_storage_mode": "google_drivefs_stream",
+  "drivefs_my_drive_root": "G:\\My Drive",
+  "drivefs_cache_directory": "C:\\Users\\YOUR-USER\\AppData\\Local\\Google\\DriveFS",
+  "repository_volume_serial": "00000000",
+  "restic_executable": "C:\\Program Files\\ResticBackuper\\restic.exe",
+  "recovery_tools_directory": "C:\\ProgramData\\ResticBackuperRecoveryTools",
+  "python_executable": "C:\\Program Files\\ResticBackuper\\Python\\python.exe",
+  "state_directory": "C:\\ProgramData\\ResticBackuper",
+  "secret_file": "C:\\ProgramData\\ResticBackuper\\repository-password.dpapi.json",
+  "recovery_key_file": "C:\\Users\\YOUR-USER\\ResticBackuper-RecoveryKey.txt",
+  "exclude_file": "C:\\Program Files\\ResticBackuper\\excludes.txt",
+  "canary_file": "C:\\ProgramData\\ResticBackuper\\Canary\\backup-canary.txt",
+  "hostname": "YOUR-COMPUTER",
+  "scheduled_tag": "scheduled",
+  "minimum_free_gib": 10,
+  "read_concurrency": 4,
+  "use_vss": true,
+  "structural_check_after_backup": true,
+  "read_data_subset_weekday": "Sunday",
+  "read_data_subset_parts": 30,
+  "cloud_placeholder_policy": "strict",
+  "change_anomaly": {
+    "enabled": true,
+    "file_change_ratio": 0.35,
+    "deletion_ratio": 0.15,
+    "data_added_ratio": 0.5,
+    "minimum_changed_files": 1000
+  },
+  "sources": [
+    "C:\\Users\\YOUR-USER\\Documents",
+    "C:\\Users\\YOUR-USER\\Pictures",
+    "C:\\ProgramData\\ResticBackuper\\Canary"
+  ],
+  "source_identities": {
+    "C:\\Users\\YOUR-USER\\Documents": {
+      "expected_volume_serial": "00000000"
+    },
+    "C:\\Users\\YOUR-USER\\Pictures": {
+      "expected_volume_serial": "00000000"
+    },
+    "C:\\ProgramData\\ResticBackuper\\Canary": {
+      "expected_volume_serial": "00000000"
+    }
+  }
+}

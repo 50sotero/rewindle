@@ -1,0 +1,54 @@
+# Machine-generated configuration and secret material
+backup-config.json
+excludes.txt
+repository-password*.json
+*RecoveryKey*.txt
+scheduled-task.xml
+runtime-manifest.json
+payload-manifest.json
+
+# Runtime telemetry and logs
+*.log
+status.json
+last-success.json
+dry-run-*.json
+run-history.json
+live-samples.json
+heartbeat.json
+
+# Downloaded and compiled artifacts
+.cache/
+artifacts/
+tools/
+node_modules/
+desktop/vendor/
+**/dist/
+**/build-output/
+# Version sources and manifests the builds generate from VERSION
+**/obj/
+**/node_modules/
+**/.packages/
+*.dmg
+*.pkg
+*.blockmap
+*.exe
+*.dll
+*.pdb
+*.zip
+*.msi
+*.msix
+
+# Python/editor caches
+**/__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.idea/
+.vs/
+.vscode/
+
+# Keep the checked-in examples and source assets.
+!src/backup-config.example.json
+!src/excludes.txt
+!src/dashboard/assets/*.ico
+!src/dashboard/assets/*.png

@@ -1,0 +1,9 @@
+{
+  "schema": "ResticBackuper.EngineCapabilities.v1",
+  "schema_version": 1,
+  "restore_session": {
+    "protocol": "ResticBackuper.RestoreSession.v1",
+    "request_domain": "ResticBackuper.RestoreRequest.v3",
+    "manager": "Manage-Restore.ps1"
+  }
+}
