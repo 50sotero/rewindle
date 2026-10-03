@@ -136,7 +136,7 @@ export function installSetupSampleBridge(): void {
       errors,
       warnings,
       resolved: {
-        repository: mode === 'google_drivefs_stream' ? (repository ?? `${sample.drivefs.my_drive_root}\\Rewindle Backups`) : repository,
+        repository: mode === 'google_drivefs_stream' ? (repository ?? `${sample.drivefs.my_drive_root}\\Rewindle\\Backups`) : repository,
         storage_mode: mode,
         drivefs_my_drive_root: mode === 'google_drivefs_stream' ? sample.drivefs.my_drive_root : null,
         sources,

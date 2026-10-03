@@ -65,7 +65,8 @@ export interface OperationState {
 
 export interface Validation { plan: InstallPlan | null; checking: boolean; error: string | null }
 
-const DEFAULT_FOLDER_NAME = 'Rewindle Backups';
+// A parent folder of its own: the installer creates RecoveryTools beside the backup folder, so both stay inside <drive>\Rewindle.
+const DEFAULT_FOLDER_NAME = 'Rewindle\\Backups';
 const VALIDATE_AFTER_MS = 450;
 const MAX_SOURCES = 64;
 
@@ -84,7 +85,7 @@ export function inputsOf(choices: Choices, plan: InstallPlan | null): PlanInputs
 }
 
 /**
- * The folder a drive card stands for: "<drive>\Rewindle Backups". (The installer's own suggestion, ResticBackups\Personal, is only
+ * The folder a drive card stands for: "<drive>\Rewindle\Backups". (The installer's own suggestion, ResticBackups\Personal, is only
  * used to pick the drive; a reinstall goes back to the folder the removed copy kept, see initialChoices.)
  */
 export function defaultRepositoryFor(root: string, _plan: InstallPlan | null): string {

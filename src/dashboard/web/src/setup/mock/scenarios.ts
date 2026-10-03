@@ -102,7 +102,7 @@ const base: Scenario = {
   existing: { rewindle: null, legacy_personal_edition: false },
   knownFolders: knownFolders(),
   defaultSources: [...KNOWN.map(key => `${HOME}\\${key}`), `${HOME}\\Saved Games`],
-  defaultRepository: 'E:\\Rewindle Backups',
+  defaultRepository: 'E:\\Rewindle\\Backups',
   sizes: SIZES,
   missing: [],
   nonEmpty: ['d:\\backups', 'e:\\backups'],
@@ -116,12 +116,12 @@ export function scenario(name: ScenarioName): Scenario {
     case 'no-second-drive':
       return {
         ...base, name, volumes: [volume('C:\\', 'Windows', 476, 141, { is_system: true, same_physical_disk_as_system: true }), OPTICAL],
-        defaultRepository: 'C:\\Rewindle Backups', browseFolders: [`${HOME}\\Projects`], browseRepositories: ['C:\\Backups\\Rewindle'],
+        defaultRepository: 'C:\\Rewindle\\Backups', browseFolders: [`${HOME}\\Projects`], browseRepositories: ['C:\\Backups\\Rewindle'],
       };
     case 'drivefs':
       return {
         ...base, name, volumes: [SYSTEM, DATA, DRIVEFS], drivefs: { detected: true, my_drive_root: 'G:\\My Drive' },
-        defaultRepository: 'D:\\Rewindle Backups', browseRepositories: ['D:\\Backups\\Rewindle'],
+        defaultRepository: 'D:\\Rewindle\\Backups', browseRepositories: ['D:\\Backups\\Rewindle'],
       };
     case 'existing-install':
       return { ...base, name, existing: { rewindle: { version: '0.2.0-alpha.1', install_root: 'C:\\Program Files\\ResticBackuper' }, legacy_personal_edition: false } };
