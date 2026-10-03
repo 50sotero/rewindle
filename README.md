@@ -290,6 +290,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-ResticBackuper
 | `-StartBackup` | Start the first backup when installation finishes. |
 | `-Unattended` | No prompts. |
 | `-RepositoryStorageMode google_drivefs_stream` | Keep the repository in Google Drive for desktop (see below), with `-DriveFsMyDriveRoot 'G:\My Drive'` and `-DriveFsCacheDirectory "$env:LOCALAPPDATA\Google\DriveFS"`. |
+| `-PlanOnly -PlanOutput <file.json>` | Check your choices without changing anything, and write the findings, defaults and a description of this PC (drives, Windows version, WebView2) to a new JSON file in your temporary folder. Needs no elevation. |
+| `-ProgressPath <file.jsonl>` | With `-Unattended -ExpectedUserSid <sid>`: append one JSON line per installation step to a new file in your temporary folder, ending with a result line. Uninstall takes the same option. |
+
+`-PlanOnly` and `-ProgressPath` are the machine-readable interface a setup
+program uses to drive these scripts; their exact output, the error and warning
+codes and the installation phases are specified in
+[docs/setup-contract.md](docs/setup-contract.md). The console behaviour above
+is unchanged.
 
 </details>
 
@@ -492,7 +500,7 @@ an installed copy. CI runs most of them on every pull request; see
 | `installer/` | `Install.cmd`, `Install-ResticBackuper.ps1`, `Uninstall-ResticBackuper.ps1` and the setup bootstrapper |
 | `build/` | `Build-Release.ps1` and the `VERSION` helper |
 | `tests/` | Python and PowerShell test suites and fixtures |
-| `docs/` | Architecture, the dashboard and engine contract, Google Drive verification, release notes |
+| `docs/` | Architecture, the dashboard and engine contract, the installer's machine-readable [setup contract](docs/setup-contract.md), Google Drive verification, release notes |
 | `brand/` | Logo, icons and brand tokens |
 | `licenses/` | Third-party license texts (Python's is added by the build) |
 | `dependencies.json` | Pinned download URLs and SHA-256 values for Python and Restic |

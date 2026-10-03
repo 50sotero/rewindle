@@ -308,6 +308,16 @@ shortcut, and uninstall registration. It preserves the repository, ProgramData
 state, DPAPI envelope, recovery key, recovery tools, and protected cloud
 verification assets/evidence.
 
+A setup program can drive the same scripts without a console. `-PlanOnly` validates
+the choices with the installer's own functions and describes the PC in one JSON
+document without changing anything or elevating; `-ProgressPath` makes the
+elevated install or uninstall append one JSON line per phase to a file in the
+user's temporary folder (checked for ownership, links and create-new), ending with
+a result line that is written even on failure. The recovery key is created with an
+explicit entry for the installing user, so the unelevated user can read it; the
+install reports whether that holds. The contract, with every code and phase, is in
+[setup-contract.md](setup-contract.md).
+
 The backup task uses an interactive logon token so CurrentUser DPAPI and the
 user profile are available. Scheduled runs therefore require the installing
 user to be signed in.
