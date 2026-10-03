@@ -111,7 +111,7 @@ export function OperationView({ wizard, operation }: { wizard: Wizard; operation
               <PhaseIcon state={phase.state} />
               <span className="phase-text">
                 <span className="phase-title">{phase.title}</span>
-                {phase.detail && (phase.state === 'failed' || phase.state === 'completed') && <span className="phase-detail">{phase.detail}</span>}
+                {phase.detail && (phase.state === 'failed' || phase.state === 'completed') && phase.detail !== operation.result?.error?.message && <span className="phase-detail">{phase.detail}</span>}
               </span>
               <span className="sr-only">, {STATE_WORDS[phase.state]}</span>
             </li>
