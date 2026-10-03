@@ -86,11 +86,43 @@ jobs:
         shell: powershell
         run: .\src\dashboard\tests\restore-flow-regressions.ps1 -SkipInstalledChecks
 
-      # Single protected restore requests and restore approval sessions in the disposable mode (non-elevated), including the
-      # dashboard just built talking to the session broker. -SkipInstalledChecks keeps it from reading any installation.
+      # Single protected restore requests and restore approval sessions in the disposable mode, including the dashboard
+      # just built talking to the session broker. -SkipInstalledChecks keeps it from reading any installation. The manager
+      # refuses its disposable mode under an elevated token, and hosted Windows runners execute every step as an
+      # administrator with UAC off, so the suite runs as a temporary standard user with its own temp folder. It only reads
+      # the checkout and writes below that temp folder.
       - name: Exercise protected restore requests and restore sessions
         shell: powershell
-        run: .\tests\Test-ManageRestore.ps1 -SkipInstalledChecks
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $user = 'rewindle-ci'
+          $password = 'Rw!' + [Guid]::NewGuid().ToString('N') + 'a9'
+          & net.exe user $user $password /add /expires:never | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Could not create the standard test user.' }
+          $tempRoot = 'C:\rewindle-ci-temp'
+          New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+          $pythonDirectory = Split-Path -Parent (Get-Command python -ErrorAction Stop).Source
+          foreach ($grant in @(@($tempRoot, 'F'), @($env:GITHUB_WORKSPACE, 'RX'), @($pythonDirectory, 'RX'))) {
+            & icacls.exe $grant[0] /grant ('{0}:(OI)(CI){1}' -f $user, $grant[1]) /Q | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Could not grant the test user access to $($grant[0])." }
+          }
+          Start-Service -Name seclogon
+          $script = Join-Path $env:GITHUB_WORKSPACE 'tests\Test-ManageRestore.ps1'
+          $command = @"
+          `$env:TEMP = '$tempRoot'; `$env:TMP = '$tempRoot'; `$env:PATH = '$pythonDirectory;' + `$env:PATH
+          try { & '$script' -SkipInstalledChecks; exit 0 } catch { Write-Output (`$_ | Out-String); exit 1 }
+          "@
+          $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+          $credential = New-Object System.Management.Automation.PSCredential(
+            $user, (ConvertTo-SecureString -String $password -AsPlainText -Force))
+          $stdout = Join-Path $tempRoot 'suite.stdout.log'
+          $stderr = Join-Path $tempRoot 'suite.stderr.log'
+          $process = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') `
+            -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded `
+            -Credential $credential -LoadUserProfile -WorkingDirectory $env:GITHUB_WORKSPACE `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr -Wait -PassThru
+          Get-Content -LiteralPath $stdout, $stderr -ErrorAction SilentlyContinue
+          if ($process.ExitCode -ne 0) { throw "Test-ManageRestore.ps1 failed as a standard user (exit $($process.ExitCode))." }
 
       - name: Exercise two real snapshots and an independent restore
         shell: pwsh
