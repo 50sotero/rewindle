@@ -76,6 +76,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File src\dashboard\tests\rest
 # PowerShell suites for the managers and helpers you touched, for example:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Test-ManageSources.ps1
 
+# The installer's machine-readable backend (plan mode, progress feed): hermetic, installs nothing
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Test-InstallPlan.ps1
+
 # After a release build: two real backups and an independent restore from the ZIP
 pwsh .\tests\Test-ReleaseArtifact.ps1
 ```
@@ -90,8 +93,12 @@ Notes:
   installed backup plan.
 - CI (`.github/workflows/ci.yml`) compiles the Python sources, parses every
   `.ps1` file with the PowerShell parser, and runs the Python tests,
-  `Test-ManageSources.ps1`, the release build, the dashboard regressions and
-  `Test-ReleaseArtifact.ps1`.
+  `Test-ManageSources.ps1`, the release build, the dashboard regressions,
+  `Test-ReleaseArtifact.ps1` and `Test-InstallPlan.ps1`.
+- `tests\Test-InstallerContract.ps1` really installs and uninstalls Rewindle. It
+  refuses to run anywhere but a GitHub-hosted runner (it checks
+  `GITHUB_ACTIONS` and `RUNNER_ENVIRONMENT` and needs `-AllowSystemInstall`),
+  so CI runs it after the release build and you never run it yourself.
 
 To check that your PowerShell parses, as CI does:
 

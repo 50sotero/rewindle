@@ -7,6 +7,34 @@ labels. Releases before 0.2.0 were published under the name ResticBackuper.
 
 ## [Unreleased]
 
+### Added
+
+- A machine-readable backend for setup programs, specified in
+  `docs/setup-contract.md`:
+  - `Install-ResticBackuper.ps1 -PlanOnly -PlanOutput <file>` validates the
+    choices with the same functions a real install uses, changes nothing, needs
+    no elevation and writes one JSON document: errors and warnings with stable
+    codes and plain-language messages, the resolved configuration, defaults,
+    and a description of the PC (drives with an eligibility verdict and a
+    recommended backup drive, Windows and .NET versions, WebView2, Google Drive,
+    an existing installation, the standard folders).
+  - `-Unattended -ExpectedUserSid <sid> -ProgressPath <file>` on the installer
+    and the uninstaller append one JSON line per phase and always end with a
+    result line, including on failure. The installer reports whether the user
+    can read the recovery key, and its new verification phase checks the
+    finished installation.
+- Tests: a hermetic suite for plan mode, the progress feed and the decision
+  functions (`tests/Test-InstallPlan.ps1`), static checks that tie the scripts to
+  the contract (`tests/test_setup_contract.py`), and an end-to-end CI test that
+  really installs and uninstalls on the hosted runner
+  (`tests/Test-InstallerContract.ps1`).
+
+### Changed
+
+- `-Schedule` is checked in the script body instead of by a parameter attribute,
+  so a plan can report a bad time; a real install still checks it first. A
+  network repository path is now refused before any probe reaches the network.
+
 ## [0.2.0-alpha.1] - 2026-10-03
 
 The first Rewindle release from this repository: the engine and the Rewindle
