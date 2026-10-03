@@ -260,14 +260,15 @@ example `NTFS`, `exFAT`, `FAT32`, `ReFS`), `drive_type` (`fixed`, `removable`, `
 | `ram_disk` | A RAM disk. |
 | `unknown_drive_type` | Windows does not say what it is. |
 | `not_ready` | No media, locked or disconnected. |
-| `not_ntfs` | Formatted as something else. A Google Drive streaming drive is FAT32, so it is never a local repository. |
+| `not_ntfs` | Formatted as something else. Google Drive for desktop's streaming drive is listed here as a FAT32 fixed drive (with the size of a local disk), so it is never a local repository; use `environment.drivefs` for it. |
 | `low_free_space` | Less than the minimum is free. |
 
 ### 2.6 What a plan does not do
 
 A plan does not read your files to size them (`estimated_source_bytes` stays null), does not run Restic, and does not
 look inside a repository except to see whether it is empty, already a Restic repository, or (in Google Drive mode) holds an
-object of 4 GiB or more.
+object of 4 GiB or more. That last scan walks every file of an existing repository, which can take a while for a large one on
+Google Drive; plan Google Drive installs onto an existing repository sparingly.
 
 ### 2.7 Checked at install time
 
