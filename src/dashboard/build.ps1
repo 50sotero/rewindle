@@ -9,6 +9,7 @@ $projectRoot = Split-Path -Parent (Split-Path -Parent $project)
 # The repository's VERSION file is the only version: the executable's version resources, its manifest and web\package.json
 # follow it (see build\RewindleVersion.ps1).
 . (Join-Path $projectRoot 'build\RewindleVersion.ps1')
+. (Join-Path $projectRoot 'build\RewindleWebView2.ps1')
 $version = Get-RewindleVersion -ProjectRoot $projectRoot
 $generatedDirectory = Join-Path $project 'obj'
 $framework = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319'
@@ -17,9 +18,6 @@ $outputDirectory = Join-Path $project 'dist'
 # The name the release build (build\Build-Release.ps1), the installer and the uninstaller expect.
 $output = Join-Path $outputDirectory 'ResticBackuperDashboard.exe'
 $icon = Join-Path $project 'assets\dashboard-icon.ico'
-$webViewVersion = '1.0.4191.47'
-$webViewPackage = Join-Path $project ('.packages\webview2.' + $webViewVersion)
-$webViewAssembly = Join-Path $webViewPackage 'lib\net462\Microsoft.Web.WebView2.Wpf.dll'
 
 # Node.js bundles the interface and npm reads its dependency license notices, so both must be here before anything is downloaded or
 # compiled. The accepted versions are the range web\package.json declares, which is Vite 7's own.
@@ -37,16 +35,10 @@ if (-not $SkipWeb) {
     }
 }
 
-if (-not (Test-Path -LiteralPath $webViewAssembly)) {
-    $archive = $webViewPackage + '.zip'
-    New-Item -ItemType Directory -Path (Split-Path -Parent $archive) -Force | Out-Null
-    Invoke-WebRequest -UseBasicParsing -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$webViewVersion/microsoft.web.webview2.$webViewVersion.nupkg" -OutFile $archive
-    $expectedHash = 'F492BBF547D0DA329553B6727435B677579B1E9F91CC9E4A1AD029366D5F23D0'
-    if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $expectedHash) {
-        throw 'WebView2 package checksum does not match the pinned SDK.'
-    }
-    Expand-Archive -LiteralPath $archive -DestinationPath $webViewPackage -Force
-}
+# The pinned WebView2 SDK, shared with Rewindle Setup (build\RewindleWebView2.ps1): fetched and hash-checked here when it is not unpacked yet.
+$webView = Get-RewindleWebView2Sdk -ProjectRoot $projectRoot
+$webViewPackage = $webView.PackageRoot
+$webViewAssembly = $webView.WpfAssembly
 
 if (-not (Test-Path -LiteralPath $compiler)) {
     throw "The .NET Framework 4.8 C# compiler is unavailable: $compiler"
