@@ -1383,10 +1383,55 @@ switch ($mode) {
                 // The installer script in the bundle is the repository's.
                 Equal(Sha(Path.Combine(project, "installer", "Install-ResticBackuper.ps1")), Sha(workspace.InstallScriptPath), "the bundled installer script is the repository's");
             }
+            // The program's embedded application manifest: it runs as the person who started it (the installer it starts is the only elevated
+            // process), is DPI aware per monitor, and carries the release version.
+            string manifest = ReadManifest(program);
+            Check(manifest.Contains("level=\"asInvoker\"") && !manifest.Contains("requireAdministrator") && !manifest.Contains("highestAvailable"), "the program asks for no elevation");
+            Check(manifest.Contains("PerMonitorV2") && manifest.Contains("longPathAware"), "and is per-monitor DPI aware and long-path aware");
+            Check(manifest.Contains("Rewindle.Setup") && System.Text.RegularExpressions.Regex.IsMatch(manifest, "assemblyIdentity version=\"" + System.Text.RegularExpressions.Regex.Escape(version.Split('-')[0]) + @"\.[0-9]+"""), "and its manifest carries the version");
             using (System.IO.Stream icon = built.GetManifestResourceStream("REWINDLE_ICON"))
             {
                 System.Windows.Media.Imaging.BitmapDecoder decoder = System.Windows.Media.Imaging.BitmapDecoder.Create(icon, System.Windows.Media.Imaging.BitmapCreateOptions.None, System.Windows.Media.Imaging.BitmapCacheOption.OnLoad);
                 Check(decoder.Frames.Count >= 3, "the icon has several sizes (" + decoder.Frames.Count + ")");
+            }
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern IntPtr LoadLibraryEx(string file, IntPtr handle, uint flags);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr FindResource(IntPtr module, IntPtr name, IntPtr type);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr LoadResource(IntPtr module, IntPtr resource);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr LockResource(IntPtr resource);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint SizeofResource(IntPtr module, IntPtr resource);
+
+        [DllImport("kernel32.dll")]
+        private static extern bool FreeLibrary(IntPtr module);
+
+        // Reads the manifest resource out of a program's file without running anything in it (it is loaded as data).
+        private static string ReadManifest(string program)
+        {
+            IntPtr module = LoadLibraryEx(program, IntPtr.Zero, 0x22);
+            if (module == IntPtr.Zero) { return string.Empty; }
+            try
+            {
+                IntPtr resource = FindResource(module, (IntPtr)1, (IntPtr)24);
+                if (resource == IntPtr.Zero) { return string.Empty; }
+                uint size = SizeofResource(module, resource);
+                IntPtr pointer = LockResource(LoadResource(module, resource));
+                byte[] bytes = new byte[size];
+                Marshal.Copy(pointer, bytes, 0, (int)size);
+                return Encoding.UTF8.GetString(bytes);
+            }
+            finally
+            {
+                FreeLibrary(module);
             }
         }
 

@@ -264,6 +264,8 @@ namespace Rewindle.Setup
             }
             finally
             {
+                // Frees the path string the structure copy holds, then the structure's own memory.
+                Marshal.DestroyStructure(fileInfoPointer, typeof(WintrustFileInfo));
                 Marshal.FreeHGlobal(fileInfoPointer);
             }
         }
