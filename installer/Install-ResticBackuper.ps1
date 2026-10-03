@@ -717,14 +717,12 @@ function Stop-PayloadFinding {
     Stop-InstallValidation -Code $Code -Field 'environment' -Message $message -Console $Console
 }
 
-# -Quick compares sizes but not SHA-256 values; -PlanOnly uses it so a plan stays fast. A real install hashes every file.
 function Assert-TreeMatchesManifest {
     param(
         [string]$Root,
         [object]$Manifest,
         [string]$Label,
-        [string]$Code = 'payload_corrupt',
-        [switch]$Quick
+        [string]$Code = 'payload_corrupt'
     )
     Assert-NormalDirectory -Path $Root
     Assert-NoReparsePath -Path $Root -Recurse
@@ -746,13 +744,8 @@ function Assert-TreeMatchesManifest {
         if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             Stop-PayloadFinding -Code $Code -Console "$Label entry is not a regular file: $relative"
         }
-        $sizeMatches = $item.Length -eq [long]$entry.bytes
-        $hashMatches = $true
-        if (-not $Quick -and $sizeMatches) {
-            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-            $hashMatches = $hash -eq [string]$entry.sha256
-        }
-        if (-not $sizeMatches -or -not $hashMatches) {
+        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($item.Length -ne [long]$entry.bytes -or $hash -ne [string]$entry.sha256) {
             Stop-PayloadFinding -Code $Code -Console "$Label integrity check failed: $relative"
         }
     }
@@ -771,8 +764,7 @@ function Assert-TreeMatchesManifest {
 function Assert-DashboardAssetsManifest {
     param(
         [string]$Root,
-        [string]$ManifestPath,
-        [switch]$Quick
+        [string]$ManifestPath
     )
 
     if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
@@ -817,17 +809,13 @@ function Assert-DashboardAssetsManifest {
         if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             Stop-PayloadFinding -Console "Dashboard assets manifest member is not a regular file: $relative"
         }
+        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
         [long]$bytes = 0
-        $hashMatches = $true
-        if (-not $Quick) {
-            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-            $hashMatches = $hash -eq [string]$entry.sha256
-        }
         if (
             -not [long]::TryParse([string]$entry.bytes, [ref]$bytes) -or
             $bytes -lt 0 -or
             $item.Length -ne $bytes -or
-            -not $hashMatches
+            $hash -ne [string]$entry.sha256
         ) {
             Stop-PayloadFinding -Console "Dashboard assets manifest integrity check failed: $relative"
         }
@@ -898,10 +886,7 @@ function Ensure-WebView2Runtime {
     }
 }
 
-# -Quick (used by -PlanOnly) checks that the payload is present and sized as its manifest says; the SHA-256 comparison of every
-# file is left to the real install.
 function Assert-Payload {
-    param([switch]$Quick)
     if (-not (Test-Path -LiteralPath $payloadRoot -PathType Container)) {
         Stop-PayloadFinding -Code 'payload_missing' -Console "Installer payload is missing: $payloadRoot"
     }
@@ -912,7 +897,7 @@ function Assert-Payload {
     if ($manifest.schema_version -ne 1 -or $manifest.file_count -ne @($manifest.files).Count) {
         Stop-PayloadFinding -Console 'Installer payload manifest header/count is invalid.'
     }
-    Assert-TreeMatchesManifest -Root $payloadRoot -Manifest $manifest -Label 'Installer payload' -Quick:$Quick
+    Assert-TreeMatchesManifest -Root $payloadRoot -Manifest $manifest -Label 'Installer payload'
     $required = @(
         'VERSION',
         'Python\python.exe',
@@ -969,8 +954,7 @@ function Assert-Payload {
     if (-not $SkipDashboard) {
         $script:dashboardAssetsManifest = Assert-DashboardAssetsManifest `
             -Root $payloadRoot `
-            -ManifestPath (Join-Path $payloadRoot 'dashboard-assets.json') `
-            -Quick:$Quick
+            -ManifestPath (Join-Path $payloadRoot 'dashboard-assets.json')
     }
     return $manifest
 }
@@ -2345,7 +2329,7 @@ function Invoke-PlanMode {
     [void](Invoke-PlanStage { Assert-MicrosoftSignedExecutable -Path $icacls })
     [void](Invoke-PlanStage { Assert-DotNetFramework48 })
     [void](Invoke-PlanStage { Import-TrustedScheduledTasksModule })
-    if (Invoke-PlanStage { $script:payloadManifest = Assert-Payload -Quick }) {
+    if (Invoke-PlanStage { $script:payloadManifest = Assert-Payload }) {
         [void](Invoke-PlanStage { Read-PayloadVersion })
     }
     $scheduleOk = Invoke-PlanStage -Field 'schedule' { Assert-ScheduleValue }

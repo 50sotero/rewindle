@@ -172,7 +172,7 @@ below, and the console shows the text the installer has always shown for it.
 | `dotnet_framework_missing` | environment | .NET Framework 4.8 is missing or older. |
 | `scheduled_tasks_module_missing` | environment | The Windows ScheduledTasks module is missing. |
 | `payload_missing` | environment | `payload\` or `payload-manifest.json` is not next to the script. |
-| `payload_corrupt` | environment | The manifest is invalid, or a file is missing, unexpected, unsafe or has the wrong size. A real install also compares SHA-256 values. |
+| `payload_corrupt` | environment | The manifest is invalid, or a file is missing, unexpected, unsafe, or has the wrong size or SHA-256 value. |
 | `payload_incomplete` | environment | A required program file is absent from the payload. Dashboard files are required unless `-SkipDashboard`. |
 | `payload_version_invalid` | environment | `payload\VERSION` is not a version number. |
 | `already_installed` | environment | `C:\Program Files\ResticBackuper` exists. This alpha does not upgrade in place. |
@@ -274,7 +274,6 @@ object of 4 GiB or more.
 These need elevation, or change something, so a plan cannot say whether they will pass. Each reports its own result
 code if it fails:
 
-* The SHA-256 value of every payload file (a plan checks presence and size) — `payload_corrupt`.
 * That the elevated account is the one in `-ExpectedUserSid` — `expected_user_mismatch`.
 * That a scheduled task name is free, for tasks the plan's account cannot see — `task_name_in_use`.
 * Google Drive mode: a test file written and renamed in the backup folder's parent — `drivefs_provider_failed`.
@@ -376,7 +375,7 @@ protected folders first, and sealing them is the last step that touches them). R
 
 | # | Phase | Title | What runs | `skipped` when |
 | --- | --- | --- | --- | --- |
-| 1 | `preflight` | Checking your PC and the choices you made | Elevation and account checks, every validation of section 2 (with full payload hashing), the summary printed on the console, and (interactively) the confirmation | never |
+| 1 | `preflight` | Checking your PC and the choices you made | Elevation and account checks, every validation of section 2, the summary printed on the console, and (interactively) the confirmation | never |
 | 2 | `webview2` | Making sure Microsoft Edge WebView2 is available | Look for the runtime; if missing, download Microsoft's installer, check its signature and run it. `detail` says "Already installed" or "Installed" with the version | `-SkipDashboard` |
 | 3 | `payload` | Copying Rewindle onto this PC | Create the repository's parent folder (Google Drive mode: write and rename a test file there), copy the program files to Program Files, check them against the manifest, write the engine configuration and the runtime manifest | never |
 | 4 | `canary` | Preparing the restore test file | Create the ProgramData state folder and the protected restore canary the engine backs up and restores | never |
@@ -516,8 +515,8 @@ saves and a printout are the supported ways to keep it.
   planned with. A plan with `ok: false` would fail the real install at the same place.
 * **A repository path.** Any new or empty folder on an eligible volume. `RecoveryTools` is created beside it, so prefer a
   folder with a parent that is not a drive root if the drive's top level should stay tidy.
-* **Plan again after the user changes a choice.** A plan takes a few seconds; most of it is reading drives, signatures
-  and the payload's file list.
+* **Plan again after the user changes a choice.** A plan takes a few seconds (about three on a development machine); most of
+  it is reading drives, checking signatures and hashing the payload.
 * **The progress folder.** Create `%TEMP%\RewindleSetup-<guid>\` as the unelevated user, pass
   `-ProgressPath %TEMP%\RewindleSetup-<guid>\progress.jsonl`, read with `FileShare.ReadWrite`, and delete the folder when
   the process has exited. Use the same long or short spelling of `%TEMP%` the process sees; both are accepted.
@@ -533,7 +532,6 @@ saves and a printout are the supported ways to keep it.
 * **Extra properties** (additive): `path` and `detail` on findings; `ineligible_message` on volumes; `schema`, `seq`, `time`
   and `warnings` on the result line; `operation`, `removed` and `kept` on the uninstall result.
 * **Extra plan parameters**: `-MinimumFreeGiB`, `-DriveFsCacheDirectory` and `-SkipDashboard` are accepted by `-PlanOnly`.
-* **Payload hashing**: a plan checks presence and size of the payload; the SHA-256 check stays in the real install.
 * **`-Schedule`** is validated in the script body instead of by a parameter attribute, so that a plan can report it; the
   rule is the same and a real install checks it before anything else.
 * **Early network check**: a network repository is refused before any probe, in the console path as well. The message is

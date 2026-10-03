@@ -458,7 +458,15 @@ try {
     # The same-drive warning must appear exactly when the repository volume is the system volume.
     $systemRoot = [IO.Path]::GetPathRoot([Environment]::SystemDirectory)
     $repositoryOnSystemVolume = [string]::Equals([IO.Path]::GetPathRoot($goodRepository), $systemRoot, [StringComparison]::OrdinalIgnoreCase)
-    Assert-Equal $repositoryOnSystemVolume ((Get-WarningCodes $plan) -contains 'repository_on_system_disk') 'repository_on_system_disk is reported exactly when the repository is on the Windows drive'
+    if ($repositoryOnSystemVolume) {
+        Assert-True ((Get-WarningCodes $plan) -contains 'repository_on_system_disk') 'a repository on the Windows drive is warned about'
+    }
+    # (On another partition of the same physical disk the plan warns too; whether this machine's temp folder is on one is not known.)
+    $planVolume = @($plan.environment.volumes | Where-Object { $_.root -ieq [IO.Path]::GetPathRoot($goodRepository) })[0]
+    Assert-True ($null -ne $planVolume) 'the repository volume is among the listed volumes'
+    if ($planVolume.same_physical_disk_as_system -eq $false) {
+        Assert-True ((Get-WarningCodes $plan) -notcontains 'repository_on_system_disk') 'a repository on a different physical disk is not warned about'
+    }
 
     # --- a second run with the same output path must refuse (create-new) and must not touch the first plan ---
     $firstHash = Get-Sha256 $run.PlanPath
@@ -593,7 +601,7 @@ try {
     New-Junction -Link (Join-Path $linkRoots.ProgramData 'ResticBackuper') -Target $realFolder
     [void](Test-Invalid 'state folder that is a junction' @{} 'protected_path_reparse_point' 'environment' $linkRoots)
 
-    # the payload (a quick check: present, complete and sized as the manifest says; hashes are checked by the real install)
+    # the payload (the same integrity check as a real install: manifest, sizes, SHA-256 values and no unlisted files)
     $noPayload = New-Bundle -Name 'no-payload' -NoPayload
     [void](Test-Invalid 'no payload' @{} 'payload_missing' 'environment' $roots $noPayload)
     $incomplete = New-Bundle -Name 'incomplete' -OmitFromManifestAndDisk @('restic.exe')
@@ -605,8 +613,13 @@ try {
     [void](Test-Invalid 'payload file of the wrong size' @{} 'payload_corrupt' 'environment' $roots $resized)
     $retouched = New-Bundle -Name 'retouched'
     [IO.File]::WriteAllText((Join-Path $retouched 'payload\restic.exe'), 'fixture payload file restic.EXE', $utf8)
-    $retouchedRun = Invoke-Plan -Bundle $retouched -Roots $roots -Temp $temp -Arguments $baseArguments
-    Assert-True ((Get-ErrorCodes $retouchedRun.Plan) -notcontains 'payload_corrupt') 'plan mode does not hash the payload (a same-sized change is left to the real install)'
+    [void](Test-Invalid 'payload file changed without changing its size' @{} 'payload_corrupt' 'environment' $roots $retouched)
+    $unlisted = New-Bundle -Name 'unlisted'
+    Write-Text -Path (Join-Path $unlisted 'payload\extra-file.txt') -Text 'not in the manifest'
+    [void](Test-Invalid 'payload with a file the manifest does not list' @{} 'payload_corrupt' 'environment' $roots $unlisted)
+    $missingFile = New-Bundle -Name 'missing-file'
+    Remove-Item -LiteralPath (Join-Path $missingFile 'payload\restic.exe') -Force
+    [void](Test-Invalid 'payload missing a file the manifest lists' @{} 'payload_corrupt' 'environment' $roots $missingFile)
     $noDashboardBundle = New-Bundle -Name 'no-dashboard' -WithoutDashboard
     $withoutDashboardFlag = Invoke-Plan -Bundle $noDashboardBundle -Roots $roots -Temp $temp -Arguments ($baseArguments + @('-SkipDashboard'))
     Assert-True ($withoutDashboardFlag.Plan.ok -eq $true) "with -SkipDashboard the dashboard files are not required (errors: $((Get-ErrorCodes $withoutDashboardFlag.Plan) -join ', '))"
