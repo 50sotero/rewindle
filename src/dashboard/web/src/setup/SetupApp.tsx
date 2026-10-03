@@ -26,13 +26,14 @@ interface FooterAction { label: string; onClick: () => void; disabled?: boolean;
 interface Footer { back?: FooterAction | null; next?: FooterAction | null; hint?: ReactNode }
 interface Header { eyebrow?: string; title: string; lead?: ReactNode }
 
-const NUMBERED: Partial<Record<Screen, number>> = { folders: 1, location: 2, schedule: 3, review: 4 };
+// Numbered like the rail, which counts Welcome through Done.
+const NUMBERED: Partial<Record<Screen, number>> = { folders: 2, location: 3, schedule: 4, review: 5 };
 
 function headerFor(wizard: Wizard): Header {
   const operation = wizard.operation;
   const outcome = operation?.finished?.outcome;
   const step = NUMBERED[wizard.screen];
-  const eyebrow = step ? `Step ${step} of 4` : undefined;
+  const eyebrow = step ? `Step ${step} of 8` : undefined;
   switch (wizard.screen) {
     case 'hostError': return { title: 'Setup couldn’t start' };
     case 'unsupported': return { title: 'Rewindle can’t be installed on this PC', lead: 'This PC is missing something Rewindle needs to run.' };

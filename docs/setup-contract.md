@@ -387,7 +387,7 @@ protected folders first, and sealing them is the last step that touches them). R
 | 3 | `payload` | Copying Rewindle onto this PC | Create the repository's parent folder (Google Drive mode: write and rename a test file there), copy the program files to Program Files, check them against the manifest, write the engine configuration and the runtime manifest | never |
 | 4 | `canary` | Preparing the restore test file | Create the ProgramData state folder and the protected restore canary the engine backs up and restores | never |
 | 5 | `credential` | Creating the backup password and storing it for your account | Generate the repository password and protect it for the account (DPAPI) | never |
-| 6 | `repository` | Creating the encrypted backup repository | Initialize the Restic repository, or reuse an existing one (`detail` says so) | never |
+| 6 | `repository` | Creating the encrypted backup location | Initialize the Restic repository, or reuse an existing one (`detail` says so) | never |
 | 7 | `recovery_key` | Writing your recovery key | Write the plain-text recovery key to the user's profile folder and fill the recovery-tools folder | never |
 | 8 | `permissions` | Locking the Rewindle folders so only administrators can change them | Protect Program Files\ResticBackuper, the ProgramData state, the repository (local mode) and the recovery tools | never |
 | 9 | `tasks` | Scheduling the daily backup and registering Rewindle with Windows | Register the daily backup task and the entry in Installed apps | never |

@@ -116,7 +116,7 @@ export function Location({ wizard }: { wizard: Wizard }) {
 
       <IssueList errors={errors} warnings={warnings} />
 
-      {!cloud && (
+      {!cloud && !warnings.some(warning => warning.code === 'repository_on_system_disk') && (
         <p className="fine-print">
           <Info size={14} aria-hidden="true" />
           <span>A backup on a separate physical drive survives if the drive Windows runs from fails.</span>

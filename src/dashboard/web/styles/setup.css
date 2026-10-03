@@ -240,7 +240,7 @@ button.rail-link:hover .rail-label { color: var(--ink); text-decoration: underli
 
 /* ── installing ───────────────────────────────────────── */
 .stage-card { display: flex; align-items: center; gap: 16px; padding: 18px 20px; border-radius: var(--r-card); background: var(--surface); box-shadow: var(--shadow-card); }
-.stage-card strong { display: block; font-size: var(--type-md); font-weight: 600; }
+.stage-card > div > strong { display: block; font-size: var(--type-md); font-weight: 600; }
 .stage-card p { margin: 3px 0 0; color: var(--ink-2); font-size: var(--type-base); line-height: 1.55; }
 .stage-card .spin { color: var(--accent); }
 .stage-shield { flex-shrink: 0; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 12px; background: var(--inset); box-shadow: var(--shadow-hairline); animation: setup-pulse 1.8s ease-in-out infinite; }

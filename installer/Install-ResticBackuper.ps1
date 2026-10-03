@@ -2452,7 +2452,7 @@ $installPhaseTitles = @{
     payload = 'Copying Rewindle onto this PC'
     canary = 'Preparing the restore test file'
     credential = 'Creating the backup password and storing it for your account'
-    repository = 'Creating the encrypted backup repository'
+    repository = 'Creating the encrypted backup location'
     recovery_key = 'Writing your recovery key'
     permissions = 'Locking the Rewindle folders so only administrators can change them'
     tasks = 'Scheduling the daily backup and registering Rewindle with Windows'
@@ -2547,7 +2547,7 @@ function Write-InstallFailure {
         $message = 'Setup could not finish.'
     }
     if ($RolledBack) {
-        $message += ' Setup undid its changes. A backup repository and recovery key it had already created were kept.'
+        $message += ' Setup undid its changes. Backups and the recovery key it had already created were kept.'
     }
     if ($phase) {
         Write-FeedPhase -Phase $phase -State 'failed' -Title $installPhaseTitles[$phase] -Detail $message
@@ -2818,7 +2818,7 @@ try {
     }
     Complete-InstallPhase 'credential'
     Start-InstallPhase 'repository'
-    Complete-InstallPhase 'repository' $(if ($repositoryPreviouslyInitialized) { 'An existing backup repository was reused.' })
+    Complete-InstallPhase 'repository' $(if ($repositoryPreviouslyInitialized) { 'Your existing backups in this location were kept and reused.' })
     Start-InstallPhase 'recovery_key'
     Complete-InstallPhase 'recovery_key'
 

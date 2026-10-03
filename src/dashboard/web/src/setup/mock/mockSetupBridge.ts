@@ -230,7 +230,7 @@ export function installSetupSampleBridge(): void {
       ['canary', 'Preparing the restore test file', 500],
       ['credential', 'Creating the backup password and storing it for your account', 500],
       ['repository', 'Creating the encrypted backup repository', 1500, sample.install === 'failure' ? 'fail' : undefined,
-        'The drive E: stopped responding while the backup location was being prepared. Setup removed what it had installed and kept the repository and recovery key.'],
+        'The drive E: stopped responding while the backup location was being prepared. Setup removed what it had installed and kept your backups and recovery key.'],
       ['recovery_key', 'Writing your recovery key', 500],
       ['permissions', 'Locking the Rewindle folders so only administrators can change them', 600],
       ['tasks', 'Scheduling the daily backup and registering Rewindle with Windows', 800],
@@ -260,7 +260,7 @@ export function installSetupSampleBridge(): void {
       }
       line({
         phase, state: 'completed', title,
-        detail: phase === 'webview2' ? 'Already installed' : phase === 'repository' ? 'Created a new repository' : phase === 'first_backup' ? 'Your first backup is running in the background.' : null,
+        detail: phase === 'webview2' ? 'Already installed' : phase === 'repository' ? 'Created a new, empty backup location' : phase === 'first_backup' ? 'Your first backup is running in the background.' : null,
       });
     }
     const result = kind === 'install' ? {
