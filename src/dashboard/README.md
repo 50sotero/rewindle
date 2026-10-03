@@ -349,6 +349,7 @@ logon task and the shortcut, and leaves that folder in place. A launch with
 | `DashboardTheme.cs` / `DashboardMotion.cs` / `DashboardVisualStyle.cs` | Appearance, motion and Windows accessibility preferences. |
 | `web/src/` | Application shell (`App.tsx`), bridge types, state hook, and `project.ts` (the project address, written once). |
 | `web/src/demo/` | Sample data and a stand-in bridge. Dev server and demo build only. |
+| `web/src/setup/`, `web/setup.html` | The setup wizard's pages (its own Vite entry, built by `installer/setup/build.ps1` and never part of this app's bundle) and their sample-data bridge. See [installer/setup](../../installer/setup/README.md). |
 | `web/components/` | Beautiful UI components and Rewindle's folder, health, run-details and restore views. |
 | `web/styles/` | Shared appearance, layout and motion. |
 | `web/vendor/` | Beautiful UI provenance and license. |

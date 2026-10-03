@@ -10,8 +10,11 @@
     "typecheck": "node ./node_modules/typescript/lib/tsc.js --noEmit",
     "build": "node ./node_modules/typescript/lib/tsc.js --noEmit && node ./node_modules/vite/bin/vite.js build",
     "build:demo": "node ./node_modules/typescript/lib/tsc.js --noEmit && node ./node_modules/vite/bin/vite.js build --mode demo --outDir ../build-output/demo --emptyOutDir",
+    "build:setup": "node ./node_modules/typescript/lib/tsc.js --noEmit && node ./node_modules/vite/bin/vite.js build --config vite.setup.config.ts",
+    "build:setup-demo": "node ./node_modules/typescript/lib/tsc.js --noEmit && node ./node_modules/vite/bin/vite.js build --config vite.setup.config.ts --mode setup-demo --outDir ../build-output/setup-demo --emptyOutDir",
     "dev": "vite --host 127.0.0.1",
-    "dev:demo": "vite --host 127.0.0.1 --mode demo"
+    "dev:demo": "vite --host 127.0.0.1 --mode demo",
+    "dev:setup": "vite --config vite.setup.config.ts --host 127.0.0.1"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.3.0",
