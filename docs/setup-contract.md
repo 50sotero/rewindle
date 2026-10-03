@@ -82,13 +82,11 @@ ignored. `-ProgressPath` is refused.
 {
   "schema": "Rewindle.InstallPlan.v1",
   "ok": true,
-  "errors": [
-    { "code": "repository_not_ntfs", "field": "repository",
-      "message": "The drive for the backup folder is formatted as exFAT. Rewindle needs a drive formatted as NTFS.",
-      "path": "E:\\", "detail": null }
-  ],
+  "errors": [],
   "warnings": [
-    { "code": "repository_on_system_disk", "field": "repository", "message": "...", "path": "C:\\Backups\\Rewindle", "detail": null }
+    { "code": "webview2_missing", "field": "environment",
+      "message": "The Microsoft Edge WebView2 component that the dashboard needs isn't installed. Setup will download it from Microsoft.",
+      "path": null, "detail": null }
   ],
   "resolved": {
     "repository": "D:\\Backups\\Rewindle", "storage_mode": "local_ntfs", "drivefs_my_drive_root": null,
@@ -148,7 +146,15 @@ Property by property:
 
 ### 2.4 Findings: errors and warnings
 
-Every finding is `{ "code", "field", "message", "path", "detail" }`:
+Every finding is `{ "code", "field", "message", "path", "detail" }`. For example, an error:
+
+```
+{ "code": "repository_not_ntfs", "field": "repository",
+  "message": "The drive for the backup folder is formatted as exFAT. Rewindle needs a drive formatted as NTFS.",
+  "path": "E:\\", "detail": null }
+```
+
+The properties are:
 
 * `code`: a stable snake_case identifier. Code on it, not on the text.
 * `field`: where to show it: `repository`, `sources`, `schedule`, `storage_mode` or `environment`.
@@ -165,7 +171,7 @@ below, and the console shows the text the installer has always shown for it.
 
 | Code | Field | When |
 | --- | --- | --- |
-| `plan_internal_error` | any | A check failed unexpectedly (a bug or an odd PC). `detail` holds the technical text. |
+| `plan_internal_error` | the stage's own | A check failed unexpectedly (a bug or an odd PC). `detail` holds the technical text. |
 | `os_not_64bit` | environment | Not 64-bit Windows with 64-bit Windows PowerShell. |
 | `system_tool_missing` | environment | `powershell.exe` or `icacls.exe` is missing from System32. |
 | `system_tool_untrusted` | environment | One of them does not carry a valid Microsoft signature. |
