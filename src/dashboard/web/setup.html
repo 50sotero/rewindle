@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; media-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'" />
+    <!-- Rewindle Setup's wizard. Built on its own (vite.setup.config.ts) and embedded in the setup program, never in the
+         dashboard's bundle. The first frame follows prefers-color-scheme, which the setup host sets from Windows' theme. -->
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="Rewindle Setup — install Rewindle, backup you can verify." />
+    <link rel="icon" href="./rewindle-icon.svg" type="image/svg+xml" />
+    <title>Rewindle Setup</title>
+  </head>
+  <body><div id="root"></div><script type="module" src="/src/setup/main.tsx"></script></body>
+</html>
