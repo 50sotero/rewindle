@@ -96,9 +96,11 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $user = 'rewindle-ci'
-          $password = 'Rw!' + [Guid]::NewGuid().ToString('N') + 'a9'
-          & net.exe user $user $password /add /expires:never | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'Could not create the standard test user.' }
+          $password = ConvertTo-SecureString -String ('Rw!' + [Guid]::NewGuid().ToString('N') + 'a9') -AsPlainText -Force
+          # New-LocalUser never prompts (net.exe asks to confirm passwords longer than 14 characters). The account joins only
+          # BUILTIN\Users, which holds the local logon right the secondary-logon service needs.
+          New-LocalUser -Name $user -Password $password -PasswordNeverExpires -AccountNeverExpires | Out-Null
+          Add-LocalGroupMember -SID 'S-1-5-32-545' -Member $user
           $tempRoot = 'C:\rewindle-ci-temp'
           New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
           $pythonDirectory = Split-Path -Parent (Get-Command python -ErrorAction Stop).Source
@@ -113,8 +115,7 @@ jobs:
           try { & '$script' -SkipInstalledChecks; exit 0 } catch { Write-Output (`$_ | Out-String); exit 1 }
           "@
           $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
-          $credential = New-Object System.Management.Automation.PSCredential(
-            $user, (ConvertTo-SecureString -String $password -AsPlainText -Force))
+          $credential = New-Object System.Management.Automation.PSCredential($user, $password)
           $stdout = Join-Path $tempRoot 'suite.stdout.log'
           $stderr = Join-Path $tempRoot 'suite.stderr.log'
           $process = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') `
