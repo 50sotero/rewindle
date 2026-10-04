@@ -54,6 +54,12 @@ export interface FolderSize {
  * Whether a folder holds online-only (cloud placeholder) files. The installed engine refuses such a folder on every backup
  * (cloud_placeholder_policy "strict"), so setup does not go on while one is chosen.
  */
+// The folders reach the installer as one ';'-joined argument, which Setup keeps under this many characters so the command line
+// stays within Windows' limit (InstallerContract.MaximumSourceListLength).
+const MAX_SOURCE_LIST_LENGTH = 16384;
+const SOURCE_LIST_TOO_LONG = 'Together, the protected folders’ paths would be too long for Windows to hand to the installer. Untick a folder, or choose one with a shorter path.';
+const tooLongTogether = (paths: string[]) => paths.join(';').length > MAX_SOURCE_LIST_LENGTH;
+
 // The host measures at most this many folders per request (SetupBridge.MaximumMeasuredPaths); the wizard allows 64.
 const MEASURE_BATCH = 32;
 
@@ -412,6 +418,10 @@ export function useWizard() {
         setNotice({ screen: 'folders', text: `Rewindle can protect up to ${MAX_SOURCES} folders. Untick or remove one before adding another.` });
         return;
       }
+      if (choices && folder && !folder.selected && tooLongTogether([...selectedPaths(choices), folder.path])) {
+        setNotice({ screen: 'folders', text: SOURCE_LIST_TOO_LONG });
+        return;
+      }
       setNotice(null);
       update(current => ({
         ...current, folders: current.folders.map(item => samePath(item.path, path) && item.exists ? { ...item, selected: !item.selected } : item),
@@ -430,6 +440,10 @@ export function useWizard() {
         const alreadyProtected = !!choices && choices.folders.some(folder => samePath(folder.path, path) && folder.selected && folder.exists);
         if (choices && !alreadyProtected && selectedPaths(choices).length >= MAX_SOURCES) {
           setNotice({ screen: 'folders', text: `Rewindle can protect up to ${MAX_SOURCES} folders. Untick or remove one before adding another.` });
+          return;
+        }
+        if (choices && !alreadyProtected && tooLongTogether([...selectedPaths(choices), path])) {
+          setNotice({ screen: 'folders', text: SOURCE_LIST_TOO_LONG });
           return;
         }
         update(current => {

@@ -539,6 +539,17 @@ namespace Rewindle.Setup.Tests
 
         private static void InstallerArguments()
         {
+            // Folders whose paths are too long together are refused: one -SourceList over Windows' command-line limit can't start.
+            List<string> longPaths = new List<string>();
+            for (int index = 0; index < 20; index++)
+            {
+                longPaths.Add("\"C:\\\\" + new string('a', 900) + index + "\"");
+            }
+            InstallerInputs tooLong;
+            string tooLongError;
+            Check(!InstallerContract.TryReadInputs(Obj("{\"sources\":[" + string.Join(",", longPaths.ToArray()) + "]}"), false, out tooLong, out tooLongError) &&
+                tooLongError.Contains("too long"), "folders whose paths are too long together are refused");
+
             InstallerInputs inputs = new InstallerInputs();
             inputs.Repository = @"E:\Rewindle Backups";
             inputs.Sources.Add(@"C:\Users\you\Desktop");

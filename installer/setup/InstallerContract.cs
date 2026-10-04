@@ -50,6 +50,9 @@ namespace Rewindle.Setup
         public const string StorageDriveFs = "google_drivefs_stream";
         public const int MaximumPathLength = 1024;
         public const int MaximumSources = 64;
+        // The folders travel as one -SourceList argument (joined with ';'). Windows starts no process whose command line is over
+        // 32,767 characters, so the list is held well under that, leaving room for the rest of the installer's arguments.
+        public const int MaximumSourceListLength = 16384;
         public const int MaximumPlanBytes = 4 * 1024 * 1024;
         public const int MaximumProgressLineBytes = 256 * 1024;
 
@@ -177,6 +180,11 @@ namespace Rewindle.Setup
                         return false;
                     }
                     inputs.Sources.Add(text);
+                }
+                if (string.Join(";", inputs.Sources.ToArray()).Length > MaximumSourceListLength)
+                {
+                    error = "Together, the chosen folders' paths are too long for Windows to hand to the installer. Choose fewer folders, or folders with shorter paths.";
+                    return false;
                 }
             }
 
