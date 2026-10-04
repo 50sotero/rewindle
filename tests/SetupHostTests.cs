@@ -62,6 +62,7 @@ namespace Rewindle.Setup.Tests
                 Run("Bridge protocol", ProtocolBehaviour);
                 Run("Bridge commands", BridgeCommands);
                 Run("Uninstaller compatibility", UninstallerCompatibility);
+                Run("Elevated bootstrap", ElevatedBootstrapBehaviour);
                 Run("Web policy", WebPolicyBehaviour);
                 Run("Microsoft signature check", SignatureCheck);
                 Run("Native screen palette", PaletteBehaviour);
@@ -83,6 +84,113 @@ namespace Rewindle.Setup.Tests
                 Console.WriteLine("  FAILED: " + failure);
             }
             return failures.Count == 0 ? 0 : 1;
+        }
+
+        // An elevated run of a script from the unpacked bundle goes through ElevatedBootstrap. Its pieces are checked everywhere;
+        // the bootstrap itself runs only when these checks run elevated (CI), against a stub bundle, never a real installer.
+        private static void ElevatedBootstrapBehaviour()
+        {
+            Equal("'it''s'", ElevatedBootstrap.Literal("it's"), "a single quote is doubled");
+            Equal("'a\u2019\u2019b'", ElevatedBootstrap.Literal("a\u2019b"), "a typographic single quote is doubled too");
+
+            string folder = Path.Combine(Path.GetTempPath(), "rewindle-bootstrap-" + Guid.NewGuid().ToString("N"));
+            string bundle = Path.Combine(folder, "bundle");
+            Directory.CreateDirectory(Path.Combine(bundle, "payload"));
+            try
+            {
+                string stub = Path.Combine(bundle, "stub.ps1");
+                string result = Path.Combine(folder, "result.txt");
+                File.WriteAllText(stub, "param([string]$ProgressPath, [string]$Name)\r\n[IO.File]::WriteAllText('" + result.Replace("'", "''") + "', $Name + '|' + $PSScriptRoot)\r\nexit 7\r\n");
+                File.WriteAllText(Path.Combine(bundle, "payload", "data.txt"), "payload");
+                Dictionary<string, string> hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                hashes["stub.ps1"] = ElevatedBootstrap.Sha256(File.ReadAllBytes(stub));
+                Func<BundleLaunch> launchFor = delegate
+                {
+                    BundleLaunch launch = new BundleLaunch();
+                    launch.SourceRoot = bundle;
+                    launch.StagedItems = new string[] { "stub.ps1", "payload" };
+                    launch.CheckedFiles = new string[] { "stub.ps1" };
+                    launch.ScriptRelativePath = "stub.ps1";
+                    launch.ExpectedSha256 = delegate(string relative) { return hashes[relative]; };
+                    return launch;
+                };
+                Func<string, List<string>> wrap = delegate(string attempt)
+                {
+                    string progressFolder = Path.Combine(folder, attempt);
+                    Directory.CreateDirectory(progressFolder);
+                    List<string> plain = new List<string> { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", stub,
+                        "-ProgressPath", Path.Combine(progressFolder, "progress.jsonl"), "-Name", "a b;E:\\" };
+                    return ElevatedBootstrap.Wrap(plain, launchFor());
+                };
+
+                List<string> wrapped = wrap("one");
+                Check(wrapped.Count == 6 && wrapped[4] == "-EncodedCommand" && !wrapped.Contains("-File"), "the elevated arguments carry only the encoded bootstrap");
+                string script = Encoding.Unicode.GetString(Convert.FromBase64String(wrapped[5]));
+                string argumentFile = Path.Combine(folder, "one", ElevatedBootstrap.ArgumentFileName);
+                byte[] argumentBytes = File.ReadAllBytes(argumentFile);
+                Equal(CommandLine.Join(new string[] { "-ProgressPath", Path.Combine(folder, "one", "progress.jsonl"), "-Name", "a b;E:\\" }),
+                    Encoding.UTF8.GetString(argumentBytes), "the argument file holds the script's own arguments as one command line");
+                Check(script.Contains(ElevatedBootstrap.Literal(hashes["stub.ps1"])) && script.Contains(ElevatedBootstrap.Literal(ElevatedBootstrap.Sha256(argumentBytes))),
+                    "the bootstrap carries the unpacked hash of the script and the hash of the argument file");
+                Check(script.Length < 12000, "the bootstrap stays small enough for a command line");
+
+                string scriptFile = Path.Combine(folder, "bootstrap.ps1");
+                File.WriteAllText(scriptFile, script);
+                Equal("0", RunPowerShell("$e = $null; [void][Management.Automation.Language.Parser]::ParseFile('" + scriptFile.Replace("'", "''") + "', [ref]$null, [ref]$e); $e.Count").Trim(),
+                    "the bootstrap is valid PowerShell");
+
+                if (!new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator))
+                {
+                    Console.WriteLine("    (not elevated: the bootstrap itself runs only where these checks run as an administrator, as in CI)");
+                    return;
+                }
+                string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+                Func<int> stages = delegate { return Directory.GetDirectories(programData, ElevatedBootstrap.StagingPrefix + "*").Length; };
+                int before = stages();
+
+                Equal(7, RunPowerShellExit(wrapped), "the bootstrap runs the staged script and returns its exit code");
+                string[] written = File.ReadAllText(result).Split('|');
+                Equal("a b;E:\\", written[0], "an argument with a space and a trailing backslash arrives unchanged");
+                Check(written[1].StartsWith(Path.Combine(programData, ElevatedBootstrap.StagingPrefix), StringComparison.OrdinalIgnoreCase),
+                    "the script ran from the protected folder, not from the bundle");
+                Equal(before, stages(), "the protected folder is removed afterwards");
+
+                File.Delete(result);
+                List<string> tamperedRun = wrap("two");
+                File.AppendAllText(stub, "\r\n# changed after unpacking\r\n");
+                Equal(ElevatedBootstrap.BootstrapRefused, RunPowerShellExit(tamperedRun), "a script changed after unpacking is refused");
+                Check(!File.Exists(result), "and nothing of it ran");
+                Equal(before, stages(), "and the protected folder is removed");
+            }
+            finally
+            {
+                try { Directory.Delete(folder, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            }
+        }
+
+        private static string RunPowerShell(string command)
+        {
+            System.Diagnostics.ProcessStartInfo start = new System.Diagnostics.ProcessStartInfo(PlanRunner.WindowsPowerShellPath(),
+                CommandLine.Join(new string[] { "-NoProfile", "-NonInteractive", "-Command", command }));
+            start.UseShellExecute = false;
+            start.RedirectStandardOutput = true;
+            using (System.Diagnostics.Process process = System.Diagnostics.Process.Start(start))
+            {
+                string output = process.StandardOutput.ReadToEnd();
+                process.WaitForExit();
+                return output;
+            }
+        }
+
+        private static int RunPowerShellExit(IList<string> arguments)
+        {
+            System.Diagnostics.ProcessStartInfo start = new System.Diagnostics.ProcessStartInfo(PlanRunner.WindowsPowerShellPath(), CommandLine.Join(arguments));
+            start.UseShellExecute = false;
+            using (System.Diagnostics.Process process = System.Diagnostics.Process.Start(start))
+            {
+                process.WaitForExit();
+                return process.ExitCode;
+            }
         }
 
         // An uninstaller from an earlier release has no -ProgressPath; setup then uses its own bundled copy.
@@ -817,12 +925,14 @@ switch ($mode) {
             public string[] Lines = new string[0];
             public ManualResetEvent Hold;
             public List<string> Arguments;
+            public BundleLaunch Bundle;
             public int Starts;
 
-            public IElevatedProcess Start(IList<string> powershellArguments)
+            public IElevatedProcess Start(IList<string> powershellArguments, BundleLaunch bundle)
             {
                 Starts++;
                 Arguments = new List<string>(powershellArguments);
+                Bundle = bundle;
                 if (Decline)
                 {
                     throw new ElevationDeclinedException();
@@ -878,7 +988,7 @@ switch ($mode) {
 
             Func<string, FakePlans, FakeLauncher, Events, Action, SetupOperation> make = delegate(string kind, FakePlans plans, FakeLauncher launcher, Events events, Action prepare)
             {
-                return new SetupOperation(kind, plans, launcher, "S-1-5-21-1-2-3-1001", script, delegate
+                return new SetupOperation(kind, plans, launcher, "S-1-5-21-1-2-3-1001", script, null, delegate
                 {
                     string progress = Path.Combine(folder, "attempt-" + Guid.NewGuid().ToString("N").Substring(0, 6));
                     Directory.CreateDirectory(progress);

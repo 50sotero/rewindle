@@ -2,18 +2,21 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
+using System.Security.Cryptography;
 
 namespace Rewindle.Setup
 {
     // Unpacks a ZIP that is embedded in the setup program (the release bundle, the wizard's web files) into a folder, refusing
     // anything that is not a plain file or folder below that folder: rooted or drive-qualified names, "..", duplicates, names
-    // that differ only by case, and archives that are far bigger than anything Rewindle ships.
+    // that differ only by case, and archives that are far bigger than anything Rewindle ships. Returns the SHA-256 of every file
+    // as it was written (keyed by its relative path, with backslashes), taken from the archive's own bytes: an elevated run of an
+    // unpacked script checks its copy against these, since the unpacked folder belongs to the person and can change afterwards.
     internal static class SafeZip
     {
         private const int MaximumEntries = 20000;
         private const long MaximumTotalBytes = 1024L * 1024L * 1024L;
 
-        public static void Extract(Stream archiveStream, string destinationRoot)
+        public static Dictionary<string, string> Extract(Stream archiveStream, string destinationRoot)
         {
             if (archiveStream == null)
             {
@@ -22,6 +25,7 @@ namespace Rewindle.Setup
             Directory.CreateDirectory(destinationRoot);
             string root = Path.GetFullPath(destinationRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
             HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, string> hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             long total = 0;
 
             using (ZipArchive archive = new ZipArchive(archiveStream, ZipArchiveMode.Read, false))
@@ -66,13 +70,23 @@ namespace Rewindle.Setup
                     {
                         Directory.CreateDirectory(parent);
                     }
+                    using (SHA256 sha = SHA256.Create())
                     using (Stream source = entry.Open())
                     using (FileStream target = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                     {
-                        source.CopyTo(target);
+                        byte[] buffer = new byte[81920];
+                        int read;
+                        while ((read = source.Read(buffer, 0, buffer.Length)) > 0)
+                        {
+                            sha.TransformBlock(buffer, 0, read, null, 0);
+                            target.Write(buffer, 0, read);
+                        }
+                        sha.TransformFinalBlock(new byte[0], 0, 0);
+                        hashes[relative] = ElevatedBootstrap.Hex(sha.Hash);
                     }
                 }
             }
+            return hashes;
         }
     }
 }

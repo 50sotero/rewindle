@@ -92,9 +92,15 @@ dropped unless it comes from the page's own address, is a JSON object under 256 
 - The WebView2 bootstrapper is downloaded only from Microsoft's fixed address, and run only after a valid Authenticode
   signature naming Microsoft (the check `Install-ResticBackuper.ps1` makes).
 - The log (`%TEMP%\Rewindle-Setup.log`) holds what Setup did, never file contents, passwords or the recovery key.
-- Known limit, shared with the console installer: the elevated installer runs a script from a folder the user owns, so
-  the user can alter it between unpacking and running. The installer verifies its payload against a manifest; a
-  hardened copy into a protected folder before elevation is future work.
+- The unpacked bundle sits in the user's temp folder, which any program the user runs can change, also while Windows'
+  permission prompt is showing. So an elevated run of the installer (or of the bundled uninstaller) never runs it from
+  there: `ElevatedBootstrap.cs` passes a short bootstrap as `-EncodedCommand` that creates a new folder under ProgramData
+  with an access list only Administrators and SYSTEM can change (set as the folder is created), copies the script, the
+  payload manifest and the payload into it (refusing links), checks the copies of the script and manifest against the
+  SHA-256 values Setup took while unpacking its own resources, checks the argument file the same way, and only then runs
+  the script from there; the installer verifies every payload file against that manifest. Anything that doesn't match
+  ends the run with exit code 70 before the script starts. The uninstaller installed in Program Files is run where it is.
+  The console path (`Install.cmd` from the ZIP) still runs from wherever the ZIP was extracted.
 
 ## Build and test
 

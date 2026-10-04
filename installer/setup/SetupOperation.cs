@@ -25,7 +25,8 @@ namespace Rewindle.Setup
     internal interface IElevatedLauncher
     {
         // Starts Windows PowerShell with the arguments, elevated. Throws ElevationDeclinedException when the prompt is declined.
-        IElevatedProcess Start(IList<string> powershellArguments);
+        // When the script comes from this setup's own unpacked bundle, bundle says so, and the run goes through ElevatedBootstrap.
+        IElevatedProcess Start(IList<string> powershellArguments, BundleLaunch bundle);
     }
 
     // The real launcher: ShellExecute's "runas" verb, which is the one thing that makes Windows show the permission prompt (once).
@@ -59,11 +60,14 @@ namespace Rewindle.Setup
             }
         }
 
-        public IElevatedProcess Start(IList<string> powershellArguments)
+        public IElevatedProcess Start(IList<string> powershellArguments, BundleLaunch bundle)
         {
+            // A script from the person's temp folder is never run from there elevated: the bootstrap copies it into a folder only
+            // administrators can change and checks it against what this program unpacked, before running it.
+            IList<string> arguments = bundle == null ? powershellArguments : ElevatedBootstrap.Wrap(powershellArguments, bundle);
             ProcessStartInfo startInfo = new ProcessStartInfo();
             startInfo.FileName = PlanRunner.WindowsPowerShellPath();
-            startInfo.Arguments = CommandLine.Join(powershellArguments);
+            startInfo.Arguments = CommandLine.Join(arguments);
             // Not the temp folder the program was unpacked into: nothing the elevated process starts should look there first.
             startInfo.WorkingDirectory = Environment.SystemDirectory;
             startInfo.UseShellExecute = true;
@@ -110,6 +114,7 @@ namespace Rewindle.Setup
         private readonly IElevatedLauncher launcher;
         private readonly string userSid;
         private readonly string scriptPath;
+        private readonly BundleLaunch bundle;
         private readonly Func<string> createProgressFolder;
         private readonly Action<string, Dictionary<string, object>> emit;
         private readonly Action prepare;
@@ -124,6 +129,7 @@ namespace Rewindle.Setup
             IElevatedLauncher launcher,
             string userSid,
             string scriptPath,
+            BundleLaunch bundle,
             Func<string> createProgressFolder,
             Action<string, Dictionary<string, object>> emit,
             Action prepare)
@@ -133,6 +139,7 @@ namespace Rewindle.Setup
             this.launcher = launcher;
             this.userSid = userSid;
             this.scriptPath = scriptPath;
+            this.bundle = bundle;
             this.createProgressFolder = createProgressFolder;
             this.emit = emit;
             this.prepare = prepare;
@@ -264,7 +271,7 @@ namespace Rewindle.Setup
             IElevatedProcess process;
             try
             {
-                process = launcher.Start(arguments);
+                process = launcher.Start(arguments, bundle);
             }
             catch (ElevationDeclinedException)
             {

@@ -43,6 +43,10 @@ namespace Rewindle.Setup
         public Func<Task> EnsureBundle;
         public string InstallScriptPath;
         public string BundledUninstallScriptPath;
+        // The unpacked bundle, and the SHA-256 each of its files had when this program unpacked it. A script from there is run
+        // elevated only through ElevatedBootstrap, which checks its copy against these.
+        public string BundleFolder;
+        public Func<string, string> BundleSha256;
         public Func<string> CreateProgressFolder;
     }
 
@@ -55,6 +59,7 @@ namespace Rewindle.Setup
         private const string InstalledProductFolder = "ResticBackuper";
         private const string DashboardExecutableName = "ResticBackuperDashboard.exe";
         private const int MaximumMeasuredPaths = 32;
+        private const string PayloadManifest = "payload-manifest.json";
         private const int MaximumClipboardText = 64 * 1024;
 
         private readonly IBridgeServices ui;
@@ -543,6 +548,7 @@ namespace Rewindle.Setup
                     environment.Launcher,
                     environment.UserSid,
                     script,
+                    BundleLaunchFor(script),
                     environment.CreateProgressFolder,
                     delegate(string name, Dictionary<string, object> data) { OnOperationEvent(name, data); },
                     delegate { WaitForBundle(CancellationToken.None); });
@@ -571,6 +577,40 @@ namespace Rewindle.Setup
         {
             string installed = Path.Combine(environment.ProgramFilesFolder, InstalledProductFolder, InstallerContract.UninstallScript);
             return File.Exists(installed) && SupportsProgressFeed(installed) ? installed : environment.BundledUninstallScriptPath;
+        }
+
+        // How to run a script elevated when it comes from this setup's own unpacked bundle; null for the uninstaller installed in
+        // Program Files, which only administrators can change and which is run where it is. The installer's copy brings the
+        // payload, which the installer itself verifies file by file against payload-manifest.json; that manifest and the script
+        // are checked against what this program unpacked.
+        private BundleLaunch BundleLaunchFor(string script)
+        {
+            if (string.IsNullOrEmpty(environment.BundleFolder) || environment.BundleSha256 == null)
+            {
+                return null;
+            }
+            string root = Path.GetFullPath(environment.BundleFolder).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            string full = Path.GetFullPath(script);
+            if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+            string relative = full.Substring(root.Length);
+            BundleLaunch launch = new BundleLaunch();
+            launch.SourceRoot = environment.BundleFolder;
+            launch.ScriptRelativePath = relative;
+            launch.ExpectedSha256 = environment.BundleSha256;
+            if (string.Equals(relative, InstallerContract.InstallScript, StringComparison.OrdinalIgnoreCase))
+            {
+                launch.StagedItems = new string[] { relative, PayloadManifest, "payload" };
+                launch.CheckedFiles = new string[] { relative, PayloadManifest };
+            }
+            else
+            {
+                launch.StagedItems = new string[] { relative };
+                launch.CheckedFiles = new string[] { relative };
+            }
+            return launch;
         }
 
         // Whether an uninstaller script declares the -ProgressPath parameter and writes the progress schema this setup reads.

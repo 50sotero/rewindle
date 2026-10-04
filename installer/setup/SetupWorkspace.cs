@@ -35,6 +35,7 @@ namespace Rewindle.Setup
         private readonly object gate = new object();
         private readonly List<string> extraFolders = new List<string>();
         private Task bundleTask;
+        private Dictionary<string, string> bundleHashes;
 
         public readonly string Root;
 
@@ -141,14 +142,34 @@ namespace Rewindle.Setup
         private void ExtractBundle()
         {
             DeleteTree(BundleFolder);
+            Dictionary<string, string> hashes;
             using (Stream resource = OpenRequired(BundleResource))
             {
-                SafeZip.Extract(resource, BundleFolder);
+                hashes = SafeZip.Extract(resource, BundleFolder);
             }
             if (!File.Exists(InstallScriptPath))
             {
                 throw new InvalidDataException("The embedded Rewindle installer is incomplete.");
             }
+            lock (gate)
+            {
+                bundleHashes = hashes;
+            }
+        }
+
+        // The SHA-256 a bundle file had when this program unpacked it from its own resources (relative path, backslashes).
+        // The unpacked copy sits in the person's temp folder and can change afterwards; an elevated run checks against this.
+        public string BundleSha256(string relativePath)
+        {
+            string hash;
+            lock (gate)
+            {
+                if (bundleHashes == null || !bundleHashes.TryGetValue(relativePath, out hash))
+                {
+                    throw new InvalidOperationException("Setup has no record of " + relativePath + " from its own files.");
+                }
+            }
+            return hash;
         }
 
         // A new folder for one install attempt's progress file, named like this one and owned by the same person: the installer
