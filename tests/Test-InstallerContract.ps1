@@ -418,9 +418,12 @@ function Invoke-InstallCycle {
         # Only a backup records the plan in the state folder (backup.py calls validate_and_record_plan_state first); without one
         # there is no plan to continue and a reinstall rightly starts a new one. Recorded here the way a backup does, without
         # running one, so the reinstall below is the one that matters: over the state a backed-up installation leaves.
-        $recorded = @(& (Join-Path $installRoot 'Python\python.exe') -I -c "import json, sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import restic_common; config = json.loads(Path(sys.argv[1], 'backup-config.json').read_text(encoding='utf-8')); restic_common.validate_and_record_plan_state(config, Path(config['state_directory'])); print('recorded')" $installRoot 2>&1)
+        $recorded = @(& (Join-Path $installRoot 'Python\python.exe') -I -S -B -c "import json, sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import restic_common; config = json.loads(Path(sys.argv[1], 'backup-config.json').read_text(encoding='utf-8')); restic_common.validate_and_record_plan_state(config, Path(config['state_directory'])); print('recorded')" $installRoot 2>&1)
         Write-Host ($recorded -join [Environment]::NewLine)
         Assert-Equal 'recorded' ([string]$recorded[-1]).Trim() "$Label : the plan is recorded the way a backup records it"
+        # -B, as the engine always runs: a bytecode cache in the program folder is a file the uninstaller didn't install, and it
+        # rightly refuses to remove a folder that holds one.
+        Assert-Equal 0 @(Get-ChildItem -LiteralPath $installRoot -Recurse -Force -Filter '__pycache__' -Directory).Count "$Label : running the engine leaves no bytecode cache in the program folder"
         Assert-True (Test-Path -LiteralPath (Join-Path $stateRoot 'plan-state.json') -PathType Leaf) "$Label : the plan state is in the state folder the uninstall keeps"
     }
 
@@ -475,7 +478,7 @@ function Invoke-InstallCycle {
         $reconfigured = [IO.File]::ReadAllText((Join-Path $installRoot 'backup-config.json')) | ConvertFrom-Json
         Assert-Equal $configuration.plan_id $reconfigured.plan_id "$Label : the reinstall continues the kept backup plan"
         Assert-True ([long]$reconfigured.config_generation -gt [long]$configuration.config_generation) "$Label : with a newer configuration generation"
-        $engineCheck = @(& (Join-Path $installRoot 'Python\python.exe') -I -c "import json, sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import restic_common; config = json.loads(Path(sys.argv[1], 'backup-config.json').read_text(encoding='utf-8')); restic_common.validate_and_record_plan_state(config, Path(config['state_directory'])); print('accepted')" $installRoot 2>&1)
+        $engineCheck = @(& (Join-Path $installRoot 'Python\python.exe') -I -S -B -c "import json, sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import restic_common; config = json.loads(Path(sys.argv[1], 'backup-config.json').read_text(encoding='utf-8')); restic_common.validate_and_record_plan_state(config, Path(config['state_directory'])); print('accepted')" $installRoot 2>&1)
         Write-Host ($engineCheck -join [Environment]::NewLine)
         Assert-Equal 'accepted' ([string]$engineCheck[-1]).Trim() "$Label : the engine accepts the reinstalled plan against the kept state"
         $run = Invoke-AsUserElevated -User $AdministratorUser -Name 'uninstall-after-reinstall' -Template $progressTemplate -TimeoutSeconds 900 -Values @{
