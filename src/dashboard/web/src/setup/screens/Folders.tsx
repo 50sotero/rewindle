@@ -3,7 +3,7 @@ import { useId, type ComponentType } from 'react';
 import { Button } from '@/components/atoms/Button';
 import { issuesFor, type KnownFolderKey } from '../contract';
 import { folderName, formatBytes, formatCount, plural, samePath } from '../format';
-import { IssueList, Spinner } from '../ui';
+import { Callout, IssueList, Spinner } from '../ui';
 import { hasOnlineOnlyFiles, selectedTotal, type FolderChoice, type FolderSize, type Wizard } from '../useWizard';
 
 const ICONS: Record<KnownFolderKey, ComponentType<{ size?: number; 'aria-hidden'?: boolean }>> = {
@@ -53,6 +53,8 @@ export function Folders({ wizard }: { wizard: Wizard }) {
   const sizeOf = (folder: FolderChoice) => wizard.sizes[folder.path.toLowerCase()];
   const placeholders = choices.folders.filter(folder => folder.selected && hasOnlineOnlyFiles(sizeOf(folder)));
   const checking = placeholders.some(folder => sizeOf(folder)?.placeholderPending);
+  // A re-check that could not open every folder inside keeps the files it found before (see useWizard).
+  const partlyChecked = !checking && placeholders.some(folder => { const size = sizeOf(folder); return !!size && size.done && (!!size.error || size.skippedFolders > 0); });
   const denied = choices.folders.filter(folder => folder.selected && (sizeOf(folder)?.skippedFolders ?? 0) > 0);
   const selectedCount = choices.folders.filter(folder => folder.selected && folder.exists).length;
 
@@ -95,6 +97,9 @@ export function Folders({ wizard }: { wizard: Wizard }) {
               ))}
             </ul>
           )}
+        {wizard.notice?.screen === 'folders' && (
+          <div role="alert"><Callout tone="error" title="That folder wasn’t added">{wizard.notice.text}</Callout></div>
+        )}
       </section>
 
       {placeholders.length > 0 && (
@@ -106,6 +111,7 @@ export function Folders({ wizard }: { wizard: Wizard }) {
             {placeholders.map(folder => folder.key ?? folderName(folder.path)).join(', ')} {placeholders.length === 1 ? 'has' : 'have'}{' '}
             {checking ? 'online-only files. Checking again…' : `${plural(placeholders.reduce((sum, folder) => sum + (sizeOf(folder)?.placeholderFiles ?? 0), 0), 'online-only file', 'online-only files')}.`}
             {' '}Rewindle can only back up files stored on this PC, so backups of {placeholders.length === 1 ? 'that folder' : 'those folders'} would fail.
+            {partlyChecked && ' Setup couldn’t open every folder inside to check again, so it still counts the online-only files it found before.'}
             {' '}In OneDrive, right-click {placeholders.length === 1 ? 'the folder' : 'each folder'}, choose “Always keep on this device”, wait for the files to download, then choose Check again.
           </span>
           <div className="issue-action issue-action-group">

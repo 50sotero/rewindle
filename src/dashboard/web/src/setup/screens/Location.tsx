@@ -112,6 +112,10 @@ export function Location({ wizard }: { wizard: Wizard }) {
         </div>
       )}
 
+      {wizard.notice?.screen === 'location' && (
+        <div role="alert"><Callout tone="error" title="That folder can’t be used">{wizard.notice.text}</Callout></div>
+      )}
+
       <FitCheck bytes={total.bytes} measuring={total.measuring} volume={chosen} minimumFree={minimumFree} cloud={cloud} locale={locale} />
 
       <IssueList errors={errors} warnings={warnings} />

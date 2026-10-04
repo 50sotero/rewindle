@@ -80,6 +80,9 @@ export interface OperationState {
 
 export interface Validation { plan: InstallPlan | null; checking: boolean; error: string | null }
 
+/** A message shown on one page only. */
+export interface Notice { screen: Screen; text: string }
+
 // A parent folder of its own: the installer creates RecoveryTools beside the backup folder, so both stay inside <drive>\Rewindle.
 const DEFAULT_FOLDER_NAME = 'Rewindle\\Backups';
 const VALIDATE_AFTER_MS = 450;
@@ -220,7 +223,8 @@ export function useWizard() {
   const [validation, setValidation] = useState<Validation>({ plan: null, checking: false, error: null });
   const [sizes, setSizes] = useState<Record<string, FolderSize>>({});
   const [operation, setOperation] = useState<OperationState | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  // A message for one page: what went wrong with something the person just did there (or why the install did not start).
+  const [notice, setNotice] = useState<Notice | null>(null);
   const [maintenance, setMaintenance] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshNote, setRefreshNote] = useState<string | null>(null);
@@ -246,13 +250,17 @@ export function useWizard() {
       setSizes(current => {
         const key = update.path.toLowerCase();
         const before = current[key];
-        // Until a re-check finishes, a folder that had online-only files keeps counting as having them.
-        const pending = !update.done && !!before && (before.placeholderFiles > 0 || before.placeholderPending);
+        // A folder that had online-only files keeps counting as having them until a complete re-check shows otherwise: while
+        // the re-check runs (its streamed count starts again from zero), and when it ends with an error or with folders it
+        // could not open, since those may still hold online-only files.
+        const hadOnlineOnly = !!before && (before.placeholderFiles > 0 || before.placeholderPending);
+        const pending = !update.done && hadOnlineOnly;
+        const incomplete = update.done && (!!update.error || update.skippedFolders > 0);
+        const keep = hadOnlineOnly && (pending || incomplete);
         return { ...current, [key]: {
           bytes: update.bytes, files: update.files,
-          // The last known count stays until the re-check's own count is final, so evidence is never lost mid-way.
-          placeholderFiles: pending ? Math.max(update.placeholderFiles, before.placeholderFiles) : update.placeholderFiles,
-          placeholderBytes: pending ? Math.max(update.placeholderBytes, before.placeholderBytes) : update.placeholderBytes,
+          placeholderFiles: keep ? Math.max(update.placeholderFiles, before!.placeholderFiles, 1) : update.placeholderFiles,
+          placeholderBytes: keep ? Math.max(update.placeholderBytes, before!.placeholderBytes) : update.placeholderBytes,
           skippedFolders: update.skippedFolders, done: update.done, error: update.error, placeholderPending: pending,
         } };
       });
@@ -285,7 +293,7 @@ export function useWizard() {
         try {
           setValidation({ plan: parsePlan(finished.plan), checking: false, error: null });
         } catch { /* the review screen still shows the host's message */ }
-        setNotice(finished.message || 'Setup found a problem with your choices. Nothing was changed.');
+        setNotice({ screen: 'review', text: finished.message || 'Setup found a problem with your choices. Nothing was changed.' });
         setScreen('review');
         setOperation(null);
       } else if (finished.outcome === 'succeeded' && finished.operation === 'uninstall') {
@@ -381,7 +389,7 @@ export function useWizard() {
 
   const actions = useMemo(() => ({
     retry: () => void start(),
-    goTo: (next: Screen) => setScreen(next),
+    goTo: (next: Screen) => { setNotice(null); setScreen(next); },
     toggleFolder: (path: string) => update(current => ({
       ...current, folders: current.folders.map(folder => samePath(folder.path, path) && folder.exists ? { ...folder, selected: !folder.selected } : folder),
     })),
@@ -392,10 +400,10 @@ export function useWizard() {
         const answer = await bridge.request<{ path: string | null }>('browseFolder');
         const path = answer?.path;
         if (!path) return;
-        if (!isUsablePath(path)) { setNotice('That folder can’t be backed up. Choose a folder on a drive with a letter, like C: or D:.'); return; }
-        if (path.includes(';')) { setNotice('Folders with a semicolon (;) in their name can’t be backed up yet.'); return; }
+        if (!isUsablePath(path)) { setNotice({ screen: 'folders', text: 'That folder can’t be backed up. Choose a folder on a drive with a letter, like C: or D:.' }); return; }
+        if (path.includes(';')) { setNotice({ screen: 'folders', text: 'Folders with a semicolon (;) in their name can’t be backed up yet.' }); return; }
         if (choices && !choices.folders.some(folder => samePath(folder.path, path)) && choices.folders.length >= MAX_SOURCES) {
-          setNotice(`Rewindle can protect up to ${MAX_SOURCES} folders. Remove one before adding another.`);
+          setNotice({ screen: 'folders', text: `Rewindle can protect up to ${MAX_SOURCES} folders. Remove one before adding another.` });
           return;
         }
         update(current => {
@@ -405,7 +413,7 @@ export function useWizard() {
         });
         // Measured once per path; asking again for one already measured does nothing.
         measure([path]);
-      } catch (error) { setNotice(messageOf(error)); }
+      } catch (error) { setNotice({ screen: 'folders', text: messageOf(error) }); }
     },
     chooseDrive: (root: string) => update(current => ({
       ...current, storageMode: 'local_ntfs', driveRoot: root, customRepository: false, repository: defaultRepositoryFor(root, base),
@@ -443,14 +451,14 @@ export function useWizard() {
         const answer = await bridge.request<{ path: string | null }>('browseRepositoryFolder');
         const path = answer?.path;
         if (!path) return;
-        if (!isUsablePath(path)) { setNotice('Choose a folder on a drive with a letter, like D: or E:.'); return; }
+        if (!isUsablePath(path)) { setNotice({ screen: 'location', text: 'Choose a folder on a drive with a letter, like D: or E:.' }); return; }
         const myDrive = base?.environment.drivefs.myDriveRoot;
         if (myDrive && isWithin(path, myDrive) && !samePath(path, myDrive)) {
           update(current => ({ ...current, storageMode: 'google_drivefs_stream', driveRoot: '', repository: path, customRepository: true }));
         } else {
           update(current => ({ ...current, storageMode: 'local_ntfs', driveRoot: driveRoot(path), repository: path, customRepository: true }));
         }
-      } catch (error) { setNotice(messageOf(error)); }
+      } catch (error) { setNotice({ screen: 'location', text: messageOf(error) }); }
     },
     setSchedule: (schedule: string) => update(current => ({ ...current, schedule })),
     setScheduleDraftValid,
@@ -507,7 +515,7 @@ export function useWizard() {
   return {
     host, theme, screen, furthest, base, hostError, choices, validation, sizes, operation, notice, maintenance, refreshing, refreshNote,
     scheduleDraftValid,
-    actions, setNotice,
+    actions,
     goTo: setScreen,
     install: () => runOperation('install'),
     uninstall: () => runOperation('uninstall'),

@@ -38,7 +38,7 @@ export function Review({ wizard }: { wizard: Wizard }) {
 
   return (
     <div className="screen-stack">
-      {wizard.notice && <Callout tone="error" title="Nothing was installed">{wizard.notice}</Callout>}
+      {wizard.notice?.screen === 'review' && <Callout tone="error" title="Nothing was installed">{wizard.notice.text}</Callout>}
       <div className="review-card">
         <Row icon={<FolderCheck size={18} aria-hidden="true" />} title="What to protect" edit="Edit what to protect" onEdit={go('folders')}>
           <p className="review-main">
