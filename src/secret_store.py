@@ -113,7 +113,7 @@ def unprotect(ciphertext: bytes) -> bytes:
         kernel32.LocalFree(output_blob.pbData)
 
 
-def _atomic_create(path: Path, data: bytes) -> None:
+def _atomic_create(path: Path, data: bytes, *, replace: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
     descriptor: int | None = None
@@ -128,9 +128,13 @@ def _atomic_create(path: Path, data: bytes) -> None:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        if path.exists():
-            raise FileExistsError(f"refusing to replace existing secret material: {path}")
-        os.rename(temporary, path)
+        if replace:
+            # Only for material the caller has checked; the private DACL above comes with the new file.
+            os.replace(temporary, path)
+        else:
+            if path.exists():
+                raise FileExistsError(f"refusing to replace existing secret material: {path}")
+            os.rename(temporary, path)
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -457,7 +461,10 @@ def load_secret(path: Path) -> str:
     return password
 
 
-def write_recovery_key(path: Path, repository: Path, password: str) -> None:
+def write_recovery_key(
+    path: Path, repository: Path, password: str, *, replace: bool = False
+) -> None:
+    """Writes the recovery key. `replace` is only for a key whose password the caller has checked to be this one."""
     content = (
         "RESTIC PERSONAL BACKUP RECOVERY KEY\r\n"
         "===================================\r\n\r\n"
@@ -466,7 +473,7 @@ def write_recovery_key(path: Path, repository: Path, password: str) -> None:
         "Store a printed or password-manager copy away from this computer.\r\n"
         "Anyone with this password and the repository can read the backup.\r\n"
     ).encode("utf-8")
-    _atomic_create(path, content)
+    _atomic_create(path, content, replace=replace)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:

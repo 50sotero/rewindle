@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import ntpath
 from pathlib import Path
 import re
 import secrets
@@ -17,6 +18,7 @@ from restic_common import (
     DEFAULT_CONFIG,
     RunLock,
     atomic_write_json,
+    canonical_windows_path,
     ensure_free_space,
     load_config,
     repository_storage_mode,
@@ -115,6 +117,46 @@ def recovery_password(path: Path) -> str:
     return matches[0]
 
 
+def recovery_repository(path: Path) -> str | None:
+    """The repository a recovery key names, or None when it doesn't name exactly one."""
+    text = path.read_text(encoding="utf-8-sig")
+    matches = re.findall(r"^Repository:\s*(.+?)\s*$", text, flags=re.MULTILINE)
+    return matches[0] if len(matches) == 1 else None
+
+
+def same_repository(left: str | Path, right: str | Path) -> bool:
+    """The comparison the recovery check makes (recovery_health.parse_recovery_key)."""
+    try:
+        return ntpath.normcase(canonical_windows_path(left)) == ntpath.normcase(
+            canonical_windows_path(right)
+        )
+    except (OSError, ValueError):
+        return False
+
+
+def reconcile_recovery_key(
+    recovery_file: Path, repository: Path, password: str
+) -> tuple[bool, bool]:
+    """Writes the recovery key, or checks the one already there. Returns (created, updated).
+
+    A key kept by an uninstall holds this password (checked here) but names the repository of that installation. When a
+    reinstall chose another one, the key is rewritten to name it: the recovery check and a restore from the key go by that
+    line, and the password, which opens both repositories, is unchanged.
+    """
+    if not recovery_file.exists():
+        write_recovery_key(recovery_file, repository, password)
+        return True, False
+    if not secrets.compare_digest(recovery_password(recovery_file), password):
+        raise RuntimeError(
+            "existing recovery key does not match the DPAPI repository password"
+        )
+    named = recovery_repository(recovery_file)
+    if named is not None and same_repository(named, repository):
+        return False, False
+    write_recovery_key(recovery_file, repository, password, replace=True)
+    return False, True
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     config = load_config(args.config, require_repository=False)
@@ -181,17 +223,11 @@ def main(argv: list[str] | None = None) -> int:
                 volume_validated=True,
             )
 
-        recovery_created = False
         if password is None:
             password = load_secret(secret_file)
-        if recovery_file.exists():
-            if not secrets.compare_digest(recovery_password(recovery_file), password):
-                raise RuntimeError(
-                    "existing recovery key does not match the DPAPI repository password"
-                )
-        else:
-            write_recovery_key(recovery_file, repository, password)
-            recovery_created = True
+        recovery_created, recovery_updated = reconcile_recovery_key(
+            recovery_file, repository, password
+        )
         del password
 
         recovery_tools = install_recovery_tools(config, args.config)
@@ -206,6 +242,7 @@ def main(argv: list[str] | None = None) -> int:
             "repository_storage_mode": storage_mode,
             "secret_created": secret_created,
             "recovery_key_created": recovery_created,
+            "recovery_key_updated": recovery_updated,
             "recovery_tools_directory": config["recovery_tools_directory"],
             "recovery_tools_manifest": recovery_tools,
         }
@@ -227,6 +264,7 @@ def main(argv: list[str] | None = None) -> int:
                 "recovery_key_file": str(recovery_file),
                 "secret_created": secret_created,
                 "recovery_key_created": recovery_created,
+                "recovery_key_updated": recovery_updated,
                 "recovery_tools_directory": config["recovery_tools_directory"],
             },
             indent=2,
