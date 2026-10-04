@@ -138,7 +138,7 @@ Property by property:
 | `environment.dotnet_framework_48` | boolean | .NET Framework 4.8 or later is installed (release 528040+). |
 | `environment.elevated` | boolean | The plan process is elevated. |
 | `environment.webview2` | string or null | Version of the Microsoft Edge WebView2 Runtime, null when missing. |
-| `environment.existing_install.rewindle` | object or null | `{ "version": string or null, "install_root": string }` when Rewindle's program folder or its entry in Installed apps exists, otherwise null. |
+| `environment.existing_install.rewindle` | object or null | `{ "version": string or null, "install_root": string }` when Rewindle's program folder, its entry in Installed apps, its Start menu shortcut or its backup or dashboard task exists, otherwise null. Without the program folder (no `already_installed` error) these are leftovers, which the uninstaller clears. |
 | `environment.existing_install.legacy_personal_edition` | boolean | The earlier personal edition (`ResticPersonalBackup`) is installed. An unreadable folder counts as installed. Informational: it does not block Rewindle. |
 | `environment.volumes[]` | array | Every drive letter Windows reports, in letter order (section 2.5). Strings are never null (`label` and `filesystem` are `""` when unknown). |
 | `environment.drivefs` | object | `detected` is true only for a running Google Drive for desktop with its streaming drive at `G:\My Drive`, which is the only arrangement the installer accepts. |
@@ -184,7 +184,7 @@ below, and the console shows the text the installer has always shown for it.
 | `already_installed` | environment | `C:\Program Files\ResticBackuper` exists. This alpha does not upgrade in place. |
 | `stale_registration` | environment | Rewindle's entry in Installed apps exists. |
 | `start_menu_shortcut_exists` | environment | `ResticBackuper.lnk` exists in the Start menu (only matters with the dashboard). |
-| `task_name_in_use` | environment | A scheduled task named `ResticBackuper` or `ResticBackuperDashboard` exists. `path` is the task name. Without elevation, tasks of other accounts may be invisible; the install checks again. |
+| `task_name_in_use` | environment | A scheduled task named `ResticBackuper`, `ResticBackuperDashboard` or `ResticBackuperGoogleDriveSync` (a Google Drive verification task an earlier installation left behind) exists. `path` is the task name. Without elevation, tasks of other accounts may be invisible; the install checks again. |
 | `recovery_key_stale` | environment | `%USERPROFILE%\ResticBackuper-RecoveryKey.txt` exists but the stored password it belongs to does not. |
 | `recovery_key_path_unsafe` | environment | The recovery key path is a link or a folder. |
 | `protected_path_reparse_point` | environment | A link or junction sits in Rewindle's own folders (Program Files, ProgramData, the recovery-tools folder). |

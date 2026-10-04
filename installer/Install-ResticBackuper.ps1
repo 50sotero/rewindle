@@ -88,6 +88,9 @@ function Get-InstallerRoots {
 $productName = 'ResticBackuper'
 $backupTaskName = 'ResticBackuper'
 $dashboardTaskName = 'ResticBackuperDashboard'
+# Registered separately (install_google_drive_sync_task.ps1) for Google Drive mode; the uninstaller protects it, so setup must
+# not install next to a stale one.
+$cloudVerificationTaskName = 'ResticBackuperGoogleDriveSync'
 $primaryTaskEvidenceName = 'scheduled-task.xml'
 $cloudTaskEvidenceName = 'google-drive-verification-task.xml'
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -1585,7 +1588,15 @@ function Test-LegacyEngineInstalled {
 function Get-RewindleInstallInfo {
     $rootExists = Test-Path -LiteralPath $installRoot
     $registered = Test-Path -LiteralPath $installRegistry
-    if (-not $rootExists -and -not $registered) {
+    # A Start menu shortcut or a backup or dashboard task left behind by a removed program folder counts too: setup refuses to
+    # install over them, and the uninstaller (run from setup's maintenance page) removes them after its ownership checks.
+    $leftovers = (Test-Path -LiteralPath $startMenuShortcut -PathType Leaf)
+    foreach ($taskName in @($backupTaskName, $dashboardTaskName)) {
+        if (-not $leftovers) {
+            try { $leftovers = $null -ne (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) } catch { }
+        }
+    }
+    if (-not $rootExists -and -not $registered -and -not $leftovers) {
         return $null
     }
     $installedVersion = $null
@@ -2146,7 +2157,7 @@ function Get-InstallationConflicts {
             -Message 'A Start menu item named ResticBackuper already exists, so setup will not overwrite it.' `
             -Console "A Start Menu item already occupies the ResticBackuper shortcut path: $startMenuShortcut" -Path $startMenuShortcut
     }
-    foreach ($taskName in @($backupTaskName, $dashboardTaskName)) {
+    foreach ($taskName in @($backupTaskName, $dashboardTaskName, $cloudVerificationTaskName)) {
         $existingTask = $null
         try { $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue } catch { }
         if ($existingTask) {
