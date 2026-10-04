@@ -128,6 +128,7 @@ namespace Rewindle.Setup
             environment.BundledUninstallScriptPath = workspace.BundledUninstallScriptPath;
             environment.BundleFolder = workspace.BundleFolder;
             environment.BundleSha256 = workspace.BundleSha256;
+            environment.MeasureExclusions = workspace.ReadExclusions;
             environment.CreateProgressFolder = workspace.CreateProgressFolder;
 
             window = new SetupWindow(workspace, environment, LoadIcon());

@@ -48,6 +48,16 @@ namespace Rewindle.Setup
             CancellationToken cancel,
             Action<FolderTotals, bool, string> report)
         {
+            Measure(path, ExclusionRules.None, cancel, report);
+        }
+
+        // Folders the backup leaves out (exclusions) are neither counted nor walked, as in its own preflight.
+        public static void Measure(
+            string path,
+            ExclusionRules exclusions,
+            CancellationToken cancel,
+            Action<FolderTotals, bool, string> report)
+        {
             FolderTotals totals = new FolderTotals();
             DirectoryInfo root;
             try
@@ -101,6 +111,12 @@ namespace Rewindle.Setup
                         FileAttributes attributes = entry.Attributes;
                         if ((attributes & FileAttributes.Directory) != 0)
                         {
+                            // Left out of every backup, so neither its size nor its online-only files matter: the engine's
+                            // preflight prunes these before it classifies anything in them.
+                            if (exclusions.IsDefinitelyExcluded(entry.FullName))
+                            {
+                                continue;
+                            }
                             // A folder can be online-only too (OneDrive marks it as a reparse point as well), and the engine's
                             // preflight classifies every entry, folders included, before it decides not to walk one, so it is
                             // counted here before the link check below skips it.

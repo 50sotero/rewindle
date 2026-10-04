@@ -57,6 +57,7 @@ namespace Rewindle.Setup.Tests
                 Run("Safe ZIP extraction", SafeZipBehaviour);
                 Run("Workspace", WorkspaceBehaviour);
                 Run("Folder measurement", FolderMeasurement);
+                Run("Exclusion rules", ExclusionRuleBehaviour);
                 Run("Plan runner (stub installer)", PlanRunnerBehaviour);
                 Run("Install and uninstall flow", OperationFlow);
                 Run("Bridge protocol", ProtocolBehaviour);
@@ -71,6 +72,7 @@ namespace Rewindle.Setup.Tests
                     string program = builtProgram;
                     string project = projectRoot;
                     Run("The built setup program's resources", delegate { BuiltProgramResources(program, project); });
+                    Run("Exclusion rules agree with the engine", delegate { ExclusionRuleParity(project); });
                 }
             }
             finally
@@ -84,6 +86,98 @@ namespace Rewindle.Setup.Tests
                 Console.WriteLine("  FAILED: " + failure);
             }
             return failures.Count == 0 ? 0 : 1;
+        }
+
+        // The folders the backup leaves out, as the engine's preflight prunes them (a port of its literal-rule compiler).
+        private static void ExclusionRuleBehaviour()
+        {
+            ExclusionRules rules = ExclusionRules.Parse(new string[]
+            {
+                "# a comment", "", "**/node_modules", "**/.gradle/caches", "C:/Windows/Temp", "E:\\code\\**\\target",
+                "**/*.pyc", "!**/keep", "**/a/*/b", "**", "**/x/**/y",
+            });
+            Check(rules.IsDefinitelyExcluded(@"C:\Users\you\Projects\app\node_modules"), "a **/name rule prunes that folder anywhere");
+            Check(rules.IsDefinitelyExcluded(@"C:\Users\you\Projects\App\NODE_MODULES"), "case does not matter");
+            Check(!rules.IsDefinitelyExcluded(@"C:\Users\you\node_modules_backup"), "a different name is not pruned");
+            Check(rules.IsDefinitelyExcluded(@"D:\work\.gradle\caches"), "a multi-part **/a/b rule prunes a/b");
+            Check(!rules.IsDefinitelyExcluded(@"D:\work\.gradle"), "but not a alone");
+            Check(rules.IsDefinitelyExcluded(@"C:\Windows\Temp"), "an absolute rule prunes exactly that folder");
+            Check(!rules.IsDefinitelyExcluded(@"C:\Windows\Temp\sub"), "and not a folder below it");
+            Check(rules.IsDefinitelyExcluded(@"E:\code\rust\target"), "a prefix/**/suffix rule prunes the suffix below the prefix");
+            Check(!rules.IsDefinitelyExcluded(@"D:\code\rust\target"), "and not below another prefix");
+            Check(!rules.IsDefinitelyExcluded(@"C:\Users\you\file.pyc"), "a rule with a wildcard in a component is not used for pruning");
+            Check(!rules.IsDefinitelyExcluded(@"C:\Users\you\keep"), "a ! rule is not used for pruning");
+            Check(!rules.IsDefinitelyExcluded(@"C:\a\x\b"), "a * component makes the rule unusable");
+            Check(!rules.IsDefinitelyExcluded(@"C:\x\m\y"), "two ** wildcards make the rule unusable");
+            Check(!ExclusionRules.None.IsDefinitelyExcluded(@"C:\Users\you\Projects\app\node_modules"), "no rules prune nothing");
+
+            // Measuring leaves an excluded folder out entirely: its size and its online-only files.
+            string folder = NewFolder("excluded");
+            File.WriteAllBytes(Path.Combine(folder, "kept.txt"), new byte[10]);
+            string modules = Path.Combine(folder, "node_modules");
+            Directory.CreateDirectory(modules);
+            string cached = Path.Combine(modules, "cached.bin");
+            File.WriteAllBytes(cached, new byte[500]);
+            File.SetAttributes(cached, FileAttributes.Offline);
+            FolderTotals last = null;
+            FolderMeasurer.Measure(folder, ExclusionRules.Parse(new string[] { "**/node_modules" }), CancellationToken.None,
+                delegate(FolderTotals totals, bool done, string error) { if (done) { last = totals; } });
+            Check(last != null && last.Files == 1 && last.Bytes == 10 && last.PlaceholderFiles == 0,
+                "an excluded folder's size and online-only files are not counted");
+            FolderMeasurer.Measure(folder, ExclusionRules.None, CancellationToken.None,
+                delegate(FolderTotals totals, bool done, string error) { if (done) { last = totals; } });
+            Check(last != null && last.Files == 2 && last.PlaceholderFiles == 1, "without the rule the same folder is counted");
+            File.SetAttributes(cached, FileAttributes.Normal);
+        }
+
+        // The port gives the engine's answer for the shipped excludes.txt (run with the engine's own Python code).
+        private static void ExclusionRuleParity(string project)
+        {
+            string excludes = Path.Combine(project, "src", "excludes.txt");
+            string[] samples = new string[]
+            {
+                @"C:\Users\you\Projects\web\node_modules", @"C:\Users\you\Projects\py\.venv", @"C:\Users\you\Projects\py\venv",
+                @"C:\Users\you\Projects\py\__pycache__", @"D:\work\.gradle\caches", @"D:\work\.gradle", @"C:\Users\you\.cache",
+                @"C:\Users\you\Documents", @"C:\Users\you\Projects\app\target", @"C:\Users\you\Projects\site\.next\cache",
+                @"C:\Users\you\Projects\site\.next", @"C:\Users\you\coverage", @"C:\Users\you\Pictures\node_modules_photos",
+            };
+            ExclusionRules rules = ExclusionRules.Parse(File.ReadAllLines(excludes));
+            string sampleFile = Path.Combine(NewFolder("parity"), "samples.txt");
+            File.WriteAllLines(sampleFile, samples);
+            string code = "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); " +
+                "import restic_common as c; r = c._literal_directory_exclusion_rules(Path(sys.argv[2])); " +
+                "print(''.join('1' if c._directory_is_definitely_excluded(p, r) else '0' for p in Path(sys.argv[3]).read_text(encoding='utf-8').splitlines()))";
+            System.Diagnostics.ProcessStartInfo start = new System.Diagnostics.ProcessStartInfo("python",
+                CommandLine.Join(new string[] { "-c", code, Path.Combine(project, "src"), excludes, sampleFile }));
+            start.UseShellExecute = false;
+            start.RedirectStandardOutput = true;
+            start.RedirectStandardError = true;
+            string expected;
+            try
+            {
+                using (System.Diagnostics.Process process = System.Diagnostics.Process.Start(start))
+                {
+                    expected = process.StandardOutput.ReadToEnd().Trim();
+                    string problems = process.StandardError.ReadToEnd();
+                    process.WaitForExit();
+                    if (process.ExitCode != 0)
+                    {
+                        Check(false, "the engine's exclusion functions ran: " + problems.Trim());
+                        return;
+                    }
+                }
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                Console.WriteLine("    (python is not on PATH: the comparison with the engine runs where it is, as in CI)");
+                return;
+            }
+            StringBuilder actual = new StringBuilder();
+            foreach (string sample in samples)
+            {
+                actual.Append(rules.IsDefinitelyExcluded(sample) ? '1' : '0');
+            }
+            Equal(expected, actual.ToString(), "the port prunes exactly the folders the engine prunes for the shipped excludes.txt");
         }
 
         // An elevated run of a script from the unpacked bundle goes through ElevatedBootstrap. Its pieces are checked everywhere;

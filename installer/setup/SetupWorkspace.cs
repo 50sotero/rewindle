@@ -36,6 +36,7 @@ namespace Rewindle.Setup
         private readonly List<string> extraFolders = new List<string>();
         private Task bundleTask;
         private Dictionary<string, string> bundleHashes;
+        private ExclusionRules exclusions;
 
         public readonly string Root;
 
@@ -155,6 +156,43 @@ namespace Rewindle.Setup
             {
                 bundleHashes = hashes;
             }
+        }
+
+        // The folders the backup leaves out, from the excludes.txt in this program's own bundle (read from the embedded ZIP, so it
+        // doesn't wait for the bundle to be unpacked). Read once.
+        public ExclusionRules ReadExclusions()
+        {
+            lock (gate)
+            {
+                if (exclusions != null)
+                {
+                    return exclusions;
+                }
+            }
+            ExclusionRules rules = ExclusionRules.None;
+            using (Stream resource = OpenRequired(BundleResource))
+            using (System.IO.Compression.ZipArchive archive = new System.IO.Compression.ZipArchive(resource, System.IO.Compression.ZipArchiveMode.Read, false))
+            {
+                System.IO.Compression.ZipArchiveEntry entry = archive.GetEntry("payload/excludes.txt");
+                if (entry != null && entry.Length < 1024 * 1024)
+                {
+                    List<string> lines = new List<string>();
+                    using (StreamReader reader = new StreamReader(entry.Open(), new System.Text.UTF8Encoding(false)))
+                    {
+                        string line;
+                        while ((line = reader.ReadLine()) != null)
+                        {
+                            lines.Add(line);
+                        }
+                    }
+                    rules = ExclusionRules.Parse(lines);
+                }
+            }
+            lock (gate)
+            {
+                exclusions = rules;
+            }
+            return rules;
         }
 
         // The SHA-256 a bundle file had when this program unpacked it from its own resources (relative path, backslashes).

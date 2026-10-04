@@ -47,6 +47,8 @@ namespace Rewindle.Setup
         // elevated only through ElevatedBootstrap, which checks its copy against these.
         public string BundleFolder;
         public Func<string, string> BundleSha256;
+        // The folders the installed backup leaves out (its excludes.txt), so that measuring agrees with its preflight.
+        public Func<ExclusionRules> MeasureExclusions;
         public Func<string> CreateProgressFolder;
     }
 
@@ -441,11 +443,23 @@ namespace Rewindle.Setup
                         ParallelOptions options = new ParallelOptions();
                         options.MaxDegreeOfParallelism = 2;
                         options.CancellationToken = source.Token;
+                        ExclusionRules exclusions = ExclusionRules.None;
+                        try
+                        {
+                            if (environment.MeasureExclusions != null)
+                            {
+                                exclusions = environment.MeasureExclusions();
+                            }
+                        }
+                        catch (Exception error)
+                        {
+                            SetupLog.Write("The backup's exclusions could not be read; folders are measured whole", error);
+                        }
                         Parallel.ForEach(paths, options, delegate(string path)
                         {
                             try
                             {
-                                FolderMeasurer.Measure(path, source.Token, delegate(FolderTotals totals, bool done, string error)
+                                FolderMeasurer.Measure(path, exclusions, source.Token, delegate(FolderTotals totals, bool done, string error)
                                 {
                                     Emit("measure", MeasureFields(token, path, totals, done, error));
                                 });
