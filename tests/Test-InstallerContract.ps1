@@ -414,6 +414,14 @@ function Invoke-InstallCycle {
         Assert-Equal @('preflight:started', 'preflight:failed') @(Get-PhaseSequence $again) "$Label : the second install stops in the preflight"
         Assert-Equal 'already_installed' $again[$again.Count - 1].error.code "$Label : the second install says Rewindle is already installed"
         Assert-Equal $manifestBefore (Get-FileHash -LiteralPath (Join-Path $installRoot 'runtime-manifest.json') -Algorithm SHA256).Hash "$Label : the refused install did not touch the installation"
+
+        # Only a backup records the plan in the state folder (backup.py calls validate_and_record_plan_state first); without one
+        # there is no plan to continue and a reinstall rightly starts a new one. Recorded here the way a backup does, without
+        # running one, so the reinstall below is the one that matters: over the state a backed-up installation leaves.
+        $recorded = @(& (Join-Path $installRoot 'Python\python.exe') -I -c "import json, sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import restic_common; config = json.loads(Path(sys.argv[1], 'backup-config.json').read_text(encoding='utf-8')); restic_common.validate_and_record_plan_state(config, Path(config['state_directory'])); print('recorded')" $installRoot 2>&1)
+        Write-Host ($recorded -join [Environment]::NewLine)
+        Assert-Equal 'recorded' ([string]$recorded[-1]).Trim() "$Label : the plan is recorded the way a backup records it"
+        Assert-True (Test-Path -LiteralPath (Join-Path $stateRoot 'plan-state.json') -PathType Leaf) "$Label : the plan state is in the state folder the uninstall keeps"
     }
 
     Write-Section "$Label : uninstall with a progress feed"
@@ -456,8 +464,8 @@ function Invoke-InstallCycle {
     Assert-Equal @($stateRoot) @(Get-InstallationFootprint) "$Label : only the state folder remains of the Rewindle footprint (the repository and recovery key live elsewhere)"
 
     if ($Extras) {
-        # A reinstall over the state the uninstall kept continues the same backup plan, which the engine requires: it refuses
-        # every backup whose plan_id differs from the kept plan-state.json or whose generation is lower.
+        # A reinstall over the state the uninstall kept (with the plan recorded above) continues the same backup plan, which the
+        # engine requires: it refuses every backup whose plan_id differs from the kept plan-state.json or whose generation is lower.
         $run = Invoke-AsUserElevated -User $AdministratorUser -Name 'reinstall-kept-state' -Template $progressTemplate -TimeoutSeconds 1800 -Values @{
             HANDOFF = Join-Path $handoff 'reinstall-kept-state.txt'; SCRIPT = $InstallerScript; POWERSHELL = $windowsPowerShell
             ARGUMENTS = (ConvertTo-LiteralList $arguments)
