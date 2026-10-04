@@ -826,6 +826,7 @@ switch ($mode) {
     'badjson' { [IO.File]::WriteAllText($PlanOutput, 'this is not json'); exit 0 }
     'otherschema' { [IO.File]::WriteAllText($PlanOutput, '{""schema"":""Something.Else.v1""}'); exit 0 }
     'sleep' { Start-Sleep -Seconds 60; exit 0 }
+    'nap' { Start-Sleep -Seconds 5; [IO.File]::WriteAllText($PlanOutput, '{""schema"":""Rewindle.InstallPlan.v1"",""ok"":true,""errors"":[],""warnings"":[]}', [Text.UTF8Encoding]::new($true)); exit 0 }
 }
 ", new UTF8Encoding(true));
             return script;
@@ -873,6 +874,19 @@ switch ($mode) {
             System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
             try { impatient.GetPlan(inputs, CancellationToken.None); Check(false, "a slow installer times out"); }
             catch (SetupFailure failure) { Check(failure.Code == "plan_timeout" && clock.Elapsed < TimeSpan.FromSeconds(30), "a slow installer is stopped: plan_timeout after " + clock.Elapsed.TotalSeconds.ToString("0.0") + " s"); }
+
+            // Google Drive mode gets its own, longer limit: plan mode checks every file of an existing repository there.
+            File.WriteAllText(modeFile, "nap");
+            PlanRunner patientForDrive = new PlanRunner(script, Path.Combine(folder, "plans"), TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(60));
+            try { patientForDrive.GetPlan(inputs, CancellationToken.None); Check(false, "a local check over the local limit times out"); }
+            catch (SetupFailure failure) { Equal("plan_timeout", failure.Code, "a local check is held to the local limit"); }
+            InstallerInputs driveInputs = new InstallerInputs();
+            driveInputs.Repository = @"G:\My Drive\Rewindle\Backups";
+            driveInputs.StorageMode = InstallerContract.StorageDriveFs;
+            driveInputs.DriveFsMyDriveRoot = @"G:\My Drive";
+            driveInputs.Sources.Add(@"C:\Users\you\Documents");
+            Check(patientForDrive.GetPlan(driveInputs, CancellationToken.None) != null, "a Google Drive check may take longer than the local limit");
+            File.WriteAllText(modeFile, "sleep");
 
             CancellationTokenSource cancel = new CancellationTokenSource();
             cancel.CancelAfter(1500);

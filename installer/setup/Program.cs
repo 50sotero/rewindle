@@ -121,7 +121,7 @@ namespace Rewindle.Setup
             }
             environment.ProgramFilesFolder = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
             environment.CommonDataFolder = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-            environment.Plans = new PlanRunner(workspace.InstallScriptPath, workspace.PlansFolder, TimeSpan.FromSeconds(90));
+            environment.Plans = new PlanRunner(workspace.InstallScriptPath, workspace.PlansFolder, TimeSpan.FromSeconds(90), TimeSpan.FromMinutes(30));
             environment.Launcher = new ShellElevatedLauncher();
             environment.EnsureBundle = workspace.EnsureBundleExtracted;
             environment.InstallScriptPath = workspace.InstallScriptPath;

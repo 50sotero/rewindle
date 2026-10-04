@@ -35,12 +35,22 @@ namespace Rewindle.Setup
         private readonly string scriptPath;
         private readonly string plansFolder;
         private readonly TimeSpan timeout;
+        private readonly TimeSpan driveFsTimeout;
 
         public PlanRunner(string scriptPath, string plansFolder, TimeSpan timeout)
+            : this(scriptPath, plansFolder, timeout, timeout)
+        {
+        }
+
+        // driveFsTimeout applies in Google Drive mode, where plan mode checks every file of an existing repository (for 4 GB
+        // objects) through the Google Drive for desktop drive, which can take far longer than a local check. The request stays
+        // cancellable by the page and by closing the window.
+        public PlanRunner(string scriptPath, string plansFolder, TimeSpan timeout, TimeSpan driveFsTimeout)
         {
             this.scriptPath = scriptPath;
             this.plansFolder = plansFolder;
             this.timeout = timeout;
+            this.driveFsTimeout = driveFsTimeout;
         }
 
         // The 64-bit Windows PowerShell the installer requires. This program is 64-bit, so SystemDirectory is System32.
@@ -105,6 +115,7 @@ namespace Rewindle.Setup
                 process.BeginOutputReadLine();
                 process.BeginErrorReadLine();
 
+                TimeSpan limit = inputs != null && inputs.StorageMode == InstallerContract.StorageDriveFs ? driveFsTimeout : timeout;
                 Stopwatch clock = Stopwatch.StartNew();
                 while (!process.WaitForExit(100))
                 {
@@ -114,7 +125,7 @@ namespace Rewindle.Setup
                         TryDelete(planPath);
                         throw new OperationCanceledException(cancel);
                     }
-                    if (clock.Elapsed > timeout)
+                    if (clock.Elapsed > limit)
                     {
                         Stop(process);
                         TryDelete(planPath);

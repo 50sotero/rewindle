@@ -400,9 +400,18 @@ export function useWizard() {
   const actions = useMemo(() => ({
     retry: () => void start(),
     goTo: (next: Screen) => { setNotice(null); setScreen(next); },
-    toggleFolder: (path: string) => update(current => ({
-      ...current, folders: current.folders.map(folder => samePath(folder.path, path) && folder.exists ? { ...folder, selected: !folder.selected } : folder),
-    })),
+    toggleFolder: (path: string) => {
+      // The limit is on the folders that are protected (ticked), the same count the installer checks.
+      const folder = choices?.folders.find(item => samePath(item.path, path) && item.exists);
+      if (choices && folder && !folder.selected && selectedPaths(choices).length >= MAX_SOURCES) {
+        setNotice({ screen: 'folders', text: `Rewindle can protect up to ${MAX_SOURCES} folders. Untick or remove one before adding another.` });
+        return;
+      }
+      setNotice(null);
+      update(current => ({
+        ...current, folders: current.folders.map(item => samePath(item.path, path) && item.exists ? { ...item, selected: !item.selected } : item),
+      }));
+    },
     removeFolder: (path: string) => update(current => ({ ...current, folders: current.folders.filter(folder => !samePath(folder.path, path)) })),
     addFolder: async () => {
       setNotice(null);
@@ -412,8 +421,10 @@ export function useWizard() {
         if (!path) return;
         if (!isUsablePath(path)) { setNotice({ screen: 'folders', text: 'That folder can’t be backed up. Choose a folder on a drive with a letter, like C: or D:.' }); return; }
         if (path.includes(';')) { setNotice({ screen: 'folders', text: 'Folders with a semicolon (;) in their name can’t be backed up yet.' }); return; }
-        if (choices && !choices.folders.some(folder => samePath(folder.path, path)) && choices.folders.length >= MAX_SOURCES) {
-          setNotice({ screen: 'folders', text: `Rewindle can protect up to ${MAX_SOURCES} folders. Remove one before adding another.` });
+        // Counted on the protected (ticked) folders, not on every card: an unticked Windows folder doesn't use up the limit.
+        const alreadyProtected = !!choices && choices.folders.some(folder => samePath(folder.path, path) && folder.selected && folder.exists);
+        if (choices && !alreadyProtected && selectedPaths(choices).length >= MAX_SOURCES) {
+          setNotice({ screen: 'folders', text: `Rewindle can protect up to ${MAX_SOURCES} folders. Untick or remove one before adding another.` });
           return;
         }
         update(current => {
