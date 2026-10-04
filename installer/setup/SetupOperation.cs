@@ -27,6 +27,10 @@ namespace Rewindle.Setup
         // Starts Windows PowerShell with the arguments, elevated. Throws ElevationDeclinedException when the prompt is declined.
         // When the script comes from this setup's own unpacked bundle, bundle says so, and the run goes through ElevatedBootstrap.
         IElevatedProcess Start(IList<string> powershellArguments, BundleLaunch bundle);
+
+        // Whether the progress file is written by an elevated installer (owned by Administrators, changeable only by them and
+        // SYSTEM), so that a file owned by anyone else is not trusted.
+        bool FeedOwnedByAdministrators { get; }
     }
 
     // The real launcher: ShellExecute's "runas" verb, which is the one thing that makes Windows show the permission prompt (once).
@@ -58,6 +62,11 @@ namespace Rewindle.Setup
             {
                 process.Dispose();
             }
+        }
+
+        public bool FeedOwnedByAdministrators
+        {
+            get { return true; }
         }
 
         public IElevatedProcess Start(IList<string> powershellArguments, BundleLaunch bundle)
@@ -283,7 +292,7 @@ namespace Rewindle.Setup
             {
                 SetStage(Stage.Running);
                 Emit("operationStage", "stage", "running");
-                ProgressTail tail = new ProgressTail(progressPath);
+                ProgressTail tail = new ProgressTail(progressPath, launcher.FeedOwnedByAdministrators);
                 while (!process.WaitForExit(250))
                 {
                     Forward(tail.ReadNewLines());
@@ -295,13 +304,32 @@ namespace Rewindle.Setup
 
                 int exitCode = process.ExitCode;
                 ProgressLine finalResult = Result;
-                if (finalResult != null && finalResult.ResultOk)
+                if (tail.Untrusted)
                 {
-                    if (exitCode != 0)
-                    {
-                        SetupLog.Write("The installer reported success but exited with code " + exitCode + ".");
-                    }
+                    // Not the file the elevated installer wrote: nothing in it is believed, not even a failure.
+                    SetupLog.Write("The progress file was not owned by Administrators; its report was not trusted. Exit code " + exitCode + ".");
+                    Finish(
+                        "failed",
+                        "Setup couldn’t confirm the installer’s report, because another program changed its progress file. " +
+                            "Open Rewindle to check whether it is installed, or run Setup again.",
+                        null,
+                        exitCode,
+                        null);
+                }
+                else if (finalResult != null && finalResult.ResultOk && exitCode == 0)
+                {
                     Finish("succeeded", string.Empty, finalResult.Fields, exitCode, null);
+                }
+                else if (finalResult != null && finalResult.ResultOk)
+                {
+                    // A success line from a process that then failed is not a success.
+                    SetupLog.Write("The installer reported success but exited with code " + exitCode + ".");
+                    Finish(
+                        "failed",
+                        "The installer reported success but ended with an error (exit code " + exitCode + "). Open Rewindle to check, or run Setup again.",
+                        finalResult.Fields,
+                        exitCode,
+                        null);
                 }
                 else if (finalResult != null)
                 {

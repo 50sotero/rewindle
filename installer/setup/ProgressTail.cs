@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 
 namespace Rewindle.Setup
@@ -12,18 +14,31 @@ namespace Rewindle.Setup
     internal sealed class ProgressTail
     {
         private readonly string path;
+        private readonly bool requireProtectedOwner;
         private long position;
         private readonly List<byte> pending = new List<byte>();
         private bool discardingOversizedLine;
 
         public ProgressTail(string path)
+            : this(path, false)
+        {
+        }
+
+        // requireProtectedOwner: the file is written by an elevated installer, which makes Administrators its owner and lets only
+        // Administrators and SYSTEM change it. Its folder belongs to the person, so another program running as them could swap
+        // the file; one not owned that way is never read, and Untrusted says so.
+        public ProgressTail(string path, bool requireProtectedOwner)
         {
             if (string.IsNullOrEmpty(path))
             {
                 throw new ArgumentException("A progress file path is required.", "path");
             }
             this.path = path;
+            this.requireProtectedOwner = requireProtectedOwner;
         }
+
+        // True once the file was found not to be owned by Administrators or SYSTEM: nothing more is read from it.
+        public bool Untrusted { get; private set; }
 
         // The whole lines written since the last call. An empty list when the file is not there yet or nothing new was added.
         public List<string> ReadNewLines()
@@ -116,7 +131,7 @@ namespace Rewindle.Setup
 
         private byte[] ReadAvailable()
         {
-            if (!File.Exists(path))
+            if (Untrusted || !File.Exists(path))
             {
                 return null;
             }
@@ -126,6 +141,16 @@ namespace Rewindle.Setup
                 FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete))
             {
+                if (requireProtectedOwner)
+                {
+                    IdentityReference owner = stream.GetAccessControl().GetOwner(typeof(SecurityIdentifier));
+                    string sid = owner == null ? string.Empty : owner.Value;
+                    if (sid != "S-1-5-32-544" && sid != "S-1-5-18")
+                    {
+                        Untrusted = true;
+                        return null;
+                    }
+                }
                 long length = stream.Length;
                 if (length < position)
                 {

@@ -399,8 +399,10 @@ function Open-ProgressFeed {
     }
     $full = Resolve-SafeOutputPath -Path $Path -Label '-ProgressPath' -Extension '.jsonl' `
         -AllowedRoots $roots -RequireStrictlyBelow -RequiredOwnerSid $expected.Value
-    # The file takes the access rules of its folder, which lies in the expected user's own temporary folder, so that user can read
-    # it and delete it afterwards whichever account (an administrator, for example) creates it.
+    # Created in the expected user's own temporary folder, which that user can always clean up. When elevated (always, for an
+    # install), the file itself is then owned by Administrators and may be changed only by Administrators and SYSTEM; the user
+    # may read it. Setup trusts the feed only when it is owned that way, so another program running as the user can't write
+    # or swap in a result.
     $rights = [Security.AccessControl.FileSystemRights]::WriteData -bor
         [Security.AccessControl.FileSystemRights]::AppendData -bor
         [Security.AccessControl.FileSystemRights]::ReadAttributes -bor
@@ -409,6 +411,16 @@ function Open-ProgressFeed {
     $stream = [IO.FileStream]::new($full, [IO.FileMode]::CreateNew, $rights, [IO.FileShare]::Read, 4096, [IO.FileOptions]::WriteThrough)
     try {
         Assert-FeedNoReparse -Path $full -Label '-ProgressPath'
+        if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            $administrators = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+            $security = [Security.AccessControl.FileSecurity]::new()
+            $security.SetOwner($administrators)
+            $security.SetAccessRuleProtection($true, $false)
+            $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($administrators, 'FullControl', 'Allow'))
+            $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-18'), 'FullControl', 'Allow'))
+            $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($expected, 'Read', 'Allow'))
+            [IO.File]::SetAccessControl($full, $security)
+        }
     }
     catch {
         $stream.Dispose()

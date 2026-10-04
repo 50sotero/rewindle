@@ -252,7 +252,12 @@ namespace Rewindle.Setup.Smoke
             this.mode = mode;
         }
 
-        public IElevatedProcess Start(IList<string> powershellArguments)
+        public bool FeedOwnedByAdministrators
+        {
+            get { return false; }
+        }
+
+        public IElevatedProcess Start(IList<string> powershellArguments, BundleLaunch bundle)
         {
             Thread.Sleep(900);
             starts++;

@@ -1078,6 +1078,13 @@ switch ($mode) {
             public List<string> Arguments;
             public BundleLaunch Bundle;
             public int Starts;
+            public bool ProtectedFeed;
+
+            // The fake writes the feed as the current user; ProtectedFeed asks the operation to require Administrators' ownership.
+            public bool FeedOwnedByAdministrators
+            {
+                get { return ProtectedFeed; }
+            }
 
             public IElevatedProcess Start(IList<string> powershellArguments, BundleLaunch bundle)
             {
@@ -1201,6 +1208,30 @@ switch ($mode) {
                 operation.Run(SampleInputs());
                 Check(events.Names().Last() == "finished:failed" && (string)events.Finished()["message"] == "The folder is not empty.", "a failed result line is a failure with the installer's own message");
                 Equal(1, (int)events.Finished()["exitCode"], "and its exit code");
+            }
+
+            // 4b. A success line from an installer that then exits with an error is not a success.
+            {
+                Events events = new Events();
+                FakeLauncher launcher = new FakeLauncher();
+                launcher.Exit = 3;
+                launcher.Lines = new string[] { PhaseLine, OkResult };
+                SetupOperation operation = make(SetupOperation.Install, new FakePlans(), launcher, events, null);
+                operation.Run(SampleInputs());
+                Check(events.Names().Last() == "finished:failed" && ((string)events.Finished()["message"]).Contains("exit code 3"),
+                    "a success line with a failing exit code is a failure");
+            }
+
+            // 4c. A feed not owned by Administrators (here: written as the current user) is not trusted, whatever it says.
+            {
+                Events events = new Events();
+                FakeLauncher launcher = new FakeLauncher();
+                launcher.ProtectedFeed = true;
+                launcher.Lines = new string[] { PhaseLine, OkResult };
+                SetupOperation operation = make(SetupOperation.Install, new FakePlans(), launcher, events, null);
+                operation.Run(SampleInputs());
+                Check(events.Names().Last() == "finished:failed" && ((string)events.Finished()["message"]).Contains("couldn’t confirm") &&
+                    !events.Names().Contains("operationLine"), "a feed another account owns is neither shown nor believed");
             }
 
             // 5. The installer ends without a result line.
