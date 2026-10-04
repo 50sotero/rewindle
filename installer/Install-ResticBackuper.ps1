@@ -2979,6 +2979,18 @@ try {
 
     Start-InstallPhase 'verification'
     Assert-InstallationVerified
+    # A recovery key kept from an installation that used another backup location is made to name this one only now, when
+    # nothing is left that rolls the installation back: a reinstall that fails leaves it naming the backups it was made for.
+    Push-Location $installRoot
+    try {
+        & $python -I -S -B $initializer --config $configPath --commit-recovery-key
+        if ($LASTEXITCODE -ne 0) {
+            throw "Updating the recovery key failed with exit code $LASTEXITCODE."
+        }
+    }
+    finally {
+        Pop-Location
+    }
     $recoveryKeyReadable = Test-FileReadableByUser -Path $recoveryKey
     $verificationDetail = $null
     if ($recoveryKeyReadable -ne $true) {
