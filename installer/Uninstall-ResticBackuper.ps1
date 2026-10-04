@@ -451,13 +451,20 @@ function Import-TrustedScheduledTasksModule {
     }
 }
 
+# Returns the runtime manifest when the program folder is there and provably Rewindle's. With -AllowMissing, a missing folder
+# returns $false instead of stopping, so the leftovers of a removed program folder can still be cleaned up
+# (see Test-UninstallLeftovers).
 function Assert-OwnedRuntime {
+    param([switch]$AllowMissing)
     $expected = Get-NormalizedPath (Join-Path $programFilesRoot $productName)
     $actual = Get-NormalizedPath $installRoot
     if ($actual -ne $expected) {
         throw "Refusing unexpected install path: $actual"
     }
     if (-not (Test-Path -LiteralPath $actual)) {
+        if ($AllowMissing) {
+            return $false
+        }
         Stop-UninstallValidation -Code 'not_installed' `
             -Message "Rewindle's program files were not found on this PC, so there is nothing to remove." `
             -Console "Rewindle is not installed: $actual does not exist."
@@ -502,6 +509,19 @@ function Assert-OwnedRuntime {
         }
     }
     return $manifest
+}
+
+# True when the program folder is gone but something that names Rewindle remains: the Installed apps entry, the Start menu
+# shortcut, or a scheduled task under its names. Setup would refuse to install over them, and Windows' own uninstall entry
+# points at the missing uninstaller, so this script removes them. Each one is still checked for ownership before removal,
+# exactly as in a full uninstall; a leftover that is not provably Rewindle's is kept and reported.
+function Test-UninstallLeftovers {
+    if (Test-Path -LiteralPath $installRegistry) { return $true }
+    if (Test-Path -LiteralPath $startMenuShortcut -PathType Leaf) { return $true }
+    foreach ($taskName in @($backupTaskName, $dashboardTaskName, $cloudVerificationTaskName)) {
+        if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) { return $true }
+    }
+    return $false
 }
 
 function Assert-OwnedTask {
@@ -723,7 +743,13 @@ try {
     }
     Import-TrustedScheduledTasksModule
 
-    $null = Assert-OwnedRuntime
+    $runtimePresent = [bool](Assert-OwnedRuntime -AllowMissing)
+    if (-not $runtimePresent -and -not (Test-UninstallLeftovers)) {
+        $null = Assert-OwnedRuntime
+    }
+    if (-not $runtimePresent) {
+        Write-Warning "The program folder $installRoot is already gone; removing the Installed apps entry, shortcut and tasks it left behind."
+    }
     $configurationPath = Join-Path $installRoot 'backup-config.json'
     if (Test-Path -LiteralPath $configurationPath -PathType Leaf) {
         try {
@@ -848,15 +874,20 @@ try {
     }
     Complete-UninstallPhase 'tasks'
 
-    Start-UninstallPhase 'program_files'
-    $resolved = Get-NormalizedPath $installRoot
-    $expected = Get-NormalizedPath (Join-Path $programFilesRoot $productName)
-    if ($resolved -ne $expected) {
-        throw "Install path changed during uninstall: $resolved"
+    if ($runtimePresent) {
+        Start-UninstallPhase 'program_files'
+        $resolved = Get-NormalizedPath $installRoot
+        $expected = Get-NormalizedPath (Join-Path $programFilesRoot $productName)
+        if ($resolved -ne $expected) {
+            throw "Install path changed during uninstall: $resolved"
+        }
+        Set-Location -LiteralPath $systemDirectory
+        Remove-Item -LiteralPath $resolved -Recurse -Force
+        Complete-UninstallPhase 'program_files'
     }
-    Set-Location -LiteralPath $systemDirectory
-    Remove-Item -LiteralPath $resolved -Recurse -Force
-    Complete-UninstallPhase 'program_files'
+    else {
+        Skip-UninstallPhase 'program_files' 'The program files were already gone.'
+    }
 
     $shortcutRemoved = $false
     $shortcutKept = $false
@@ -939,7 +970,7 @@ try {
         operation = 'uninstall'
         install_root = $installRoot
         removed = [ordered]@{
-            install_root = $true
+            install_root = $runtimePresent
             scheduled_tasks = @($removedTasks)
             start_menu_shortcut = $shortcutRemoved
             installed_apps_entry = $registrationRemoved

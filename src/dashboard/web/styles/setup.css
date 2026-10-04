@@ -299,6 +299,7 @@ button.rail-link:hover .rail-label { color: var(--ink); text-decoration: underli
 .done-headline { margin: 0; font-size: var(--type-xl); font-weight: 600; letter-spacing: -.4px; line-height: 1.35; }
 .installed-card { display: flex; align-items: center; flex-wrap: wrap; gap: 14px 16px; padding: 18px; border-radius: var(--r-card); background: var(--surface); box-shadow: var(--shadow-card); }
 .installed-emblem { flex-shrink: 0; display: grid; place-items: center; width: 42px; height: 42px; border-radius: 50%; color: var(--green-ink); background: var(--green-tint); }
+.installed-emblem.is-warning { color: var(--orange-ink); background: var(--orange-tint); }
 .installed-text { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .installed-text strong { font-size: var(--type-lg); font-weight: 600; letter-spacing: -.2px; }
 .installed-text span { font-size: var(--type-sm); color: var(--ink-2); overflow-wrap: anywhere; }

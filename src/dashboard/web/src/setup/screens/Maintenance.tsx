@@ -11,16 +11,29 @@ export function Maintenance({ wizard, onReinstall, onUninstall, openDashboard }:
   const setupVersion = wizard.host?.version ?? wizard.base?.environment.version ?? '';
   const legacy = wizard.base?.environment.existingInstall.legacyPersonalEdition;
   const same = installed?.version && setupVersion && installed.version === setupVersion;
+  // Windows still lists Rewindle (or its shortcut or tasks remain) but the program folder is gone: the installer reports the
+  // program folder as `already_installed` only when it exists. Uninstall clears such leftovers, so the choices below still work.
+  const leftoversOnly = !!installed && !(wizard.base?.errors ?? []).some(issue => issue.code === 'already_installed');
   return (
     <div className="screen-stack">
-      <div className="installed-card">
-        <span className="installed-emblem"><Check size={20} strokeWidth={3} aria-hidden="true" /></span>
-        <div className="installed-text">
-          <strong>Rewindle {installed?.version ?? ''} is installed</strong>
-          <span>{installed?.installRoot ?? 'On this PC'}{same ? ' · the same version as this setup' : installed?.version && setupVersion ? ` · this setup has ${setupVersion}` : ''}</span>
+      {leftoversOnly ? (
+        <div className="installed-card">
+          <span className="installed-emblem is-warning"><TriangleAlert size={20} aria-hidden="true" /></span>
+          <div className="installed-text">
+            <strong>Rewindle’s program files are missing</strong>
+            <span>Windows still lists Rewindle, but its program files are gone. Uninstall removes what was left behind, so setup can run again.</span>
+          </div>
         </div>
-        <Button variant="primary" className="setup-button" onClick={openDashboard}><LayoutDashboard size={15} aria-hidden="true" />Open Rewindle<ArrowUpRight size={14} aria-hidden="true" /></Button>
-      </div>
+      ) : (
+        <div className="installed-card">
+          <span className="installed-emblem"><Check size={20} strokeWidth={3} aria-hidden="true" /></span>
+          <div className="installed-text">
+            <strong>Rewindle {installed?.version ?? ''} is installed</strong>
+            <span>{installed?.installRoot ?? 'On this PC'}{same ? ' · the same version as this setup' : installed?.version && setupVersion ? ` · this setup has ${setupVersion}` : ''}</span>
+          </div>
+          <Button variant="primary" className="setup-button" onClick={openDashboard}><LayoutDashboard size={15} aria-hidden="true" />Open Rewindle<ArrowUpRight size={14} aria-hidden="true" /></Button>
+        </div>
+      )}
 
       <div className="choice-list">
         <button type="button" className="choice" onClick={onReinstall}>

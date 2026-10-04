@@ -463,6 +463,24 @@ function Invoke-InstallCycle {
         $nothing = Read-ProgressFeed (Get-HandoffPath 'uninstall-again.txt')
         Assert-Equal @('preflight:started', 'preflight:failed') @(Get-PhaseSequence $nothing) "$Label : the second uninstall stops in the preflight"
         Assert-Equal 'not_installed' $nothing[$nothing.Count - 1].error.code "$Label : the second uninstall says nothing is installed"
+
+        # An Installed apps entry left behind by a removed program folder: Windows' own entry points at the missing
+        # uninstaller and setup refuses to install over it, so the uninstaller clears it after its usual ownership check.
+        New-Item -Path $registryKey -Force | Out-Null
+        New-ItemProperty -Path $registryKey -Name 'DisplayName' -Value 'ResticBackuper' -PropertyType String -Force | Out-Null
+        New-ItemProperty -Path $registryKey -Name 'InstallLocation' -Value $installRoot -PropertyType String -Force | Out-Null
+        $run = Invoke-AsUserElevated -User $AdministratorUser -Name 'uninstall-leftovers' -Template $progressTemplate -Values @{
+            HANDOFF = Join-Path $handoff 'uninstall-leftovers.txt'; SCRIPT = (Join-Path $bundle 'payload\Uninstall-ResticBackuper.ps1'); POWERSHELL = $windowsPowerShell; ARGUMENTS = ''
+        }
+        Show-Run $run
+        Assert-Equal 0 $run.ExitCode "$Label : an uninstall clears a leftover Installed apps entry"
+        $leftovers = Read-ProgressFeed (Get-HandoffPath 'uninstall-leftovers.txt')
+        $leftoverResult = $leftovers[$leftovers.Count - 1]
+        Assert-True ($leftoverResult.ok -eq $true) "$Label : the leftover cleanup ends with a successful result line"
+        Assert-True ($leftoverResult.removed.install_root -eq $false) "$Label : the leftover cleanup reports that the program files were already gone"
+        Assert-True ($leftoverResult.removed.installed_apps_entry -eq $true) "$Label : the leftover cleanup reports the Installed apps entry as removed"
+        Assert-True (@(Get-PhaseSequence $leftovers) -contains 'program_files:skipped') "$Label : the leftover cleanup skips the program files"
+        Assert-True (-not (Test-Path -LiteralPath $registryKey)) "$Label : the leftover Installed apps entry is gone"
     }
 
     # Leave a clean machine for the next cycle: the data an uninstall keeps is removed here, because this test created it.

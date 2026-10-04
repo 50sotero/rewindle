@@ -1,5 +1,5 @@
 import { ExternalLink, Trash2, WifiOff } from 'lucide-react';
-import { issuesFor } from '../contract';
+import { issuesFor, type RemovedParts } from '../contract';
 import { Callout, IssueList } from '../ui';
 import type { Wizard } from '../useWizard';
 
@@ -41,9 +41,28 @@ export function HostError({ wizard }: { wizard: Wizard }) {
   );
 }
 
+// The sentence about what an uninstall removed, from the parts it reports (older results without them get the full list).
+function removedSentence(removed: RemovedParts | null | undefined): string {
+  if (!removed) return 'The Rewindle app, its scheduled backups, the Start menu shortcut and the Installed apps entry were removed.';
+  const parts = [
+    removed.installRoot ? 'The Rewindle app' : null,
+    removed.scheduledTasks.length > 0 ? 'its scheduled backups' : null,
+    removed.startMenuShortcut ? 'the Start menu shortcut' : null,
+    removed.installedAppsEntry ? 'the Installed apps entry' : null,
+  ].filter((part): part is string => part !== null);
+  const sentence = parts.length === 0 ? '' : `${parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`} ${parts.length === 1 ? 'was' : 'were'} removed.`;
+  const lead = removed.installRoot ? '' : 'The Rewindle program files were already gone. ';
+  return (lead + (sentence ? sentence.charAt(0).toUpperCase() + sentence.slice(1) : 'There was nothing else of Rewindle to remove.')).trim();
+}
+
+// Findings about entries the uninstaller kept because they weren't provably Rewindle's: a new setup refuses to run over them.
+const KEPT_ENTRY_WARNINGS = ['shortcut_kept_unexpected_target', 'registration_kept_unexpected_owner'];
+
 /** After a successful uninstall. */
 export function Uninstalled({ wizard }: { wizard: Wizard }) {
-  const kept = wizard.operation?.result?.kept;
+  const result = wizard.operation?.result;
+  const kept = result?.kept;
+  const keptEntries = (result?.warnings ?? []).filter(warning => KEPT_ENTRY_WARNINGS.includes(warning.code));
   const places = kept ? [
     kept.repository ? { label: 'Your backups', path: kept.repository } : null,
     kept.recoveryKey ? { label: 'Your recovery key', path: kept.recoveryKey } : null,
@@ -53,10 +72,16 @@ export function Uninstalled({ wizard }: { wizard: Wizard }) {
     <div className="screen-stack">
       <div className="blocked-emblem is-neutral"><Trash2 size={26} aria-hidden="true" /></div>
       <ul className="done-facts">
-        <li><span>The Rewindle app, its scheduled backups, the Start menu shortcut and the Installed apps entry were removed.</span></li>
+        <li><span>{removedSentence(result?.removed)}</span></li>
         <li><span><strong>Your backups and recovery key were kept.</strong> Keep the recovery key: you need it to restore anything from those backups.</span></li>
         {places.length > 0 && (
           <li><span>{places.map(place => <span key={place.label} className="kept-place"><span>{place.label}</span><span className="inline-path">{place.path}</span></span>)}</span></li>
+        )}
+        {keptEntries.length > 0 && (
+          <li><span>
+            {keptEntries.map(warning => <span key={warning.code} className="kept-place"><span>{warning.message}</span></span>)}
+            Setup won’t install Rewindle again while {keptEntries.length === 1 ? 'it is' : 'they are'} there. Check {keptEntries.length === 1 ? 'it' : 'them'} and remove {keptEntries.length === 1 ? 'it' : 'them'} yourself if {keptEntries.length === 1 ? 'it isn’t' : 'they aren’t'} needed.
+          </span></li>
         )}
         <li><span>To protect this PC again, run Rewindle Setup again. <button type="button" className="text-link" onClick={() => wizard.openLink('readme')}>Read the README</button></span></li>
       </ul>

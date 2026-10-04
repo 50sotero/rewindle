@@ -452,7 +452,7 @@ process is started unelevated. Phases:
 | 1 | `preflight` | Checking what is installed | Account check; the program folder must match its manifest and every Rewindle scheduled task must be Rewindle's own | never |
 | 2 | `stop` | Stopping Rewindle | Stop a running backup, verification task, dashboard and task launcher (waits up to 20 seconds) | never |
 | 3 | `tasks` | Removing the scheduled tasks | Remove the backup, dashboard and (if present) Google Drive verification tasks | never |
-| 4 | `program_files` | Removing the Rewindle program files | Delete `C:\Program Files\ResticBackuper` | never |
+| 4 | `program_files` | Removing the Rewindle program files | Delete `C:\Program Files\ResticBackuper`; `skipped` when the folder was already gone | when the folder was already gone |
 | 5 | `shortcut` | Removing the Start menu shortcut | Delete the shortcut if it points at Rewindle's dashboard | there is no shortcut |
 | 6 | `registration` | Removing Rewindle from Installed apps | Delete the entry if it is Rewindle's | there is no entry |
 | 7 | `verification` | Checking that Rewindle was removed | The program folder, the tasks and the entry are gone | never |
@@ -463,9 +463,11 @@ The result line has `type: "result"`, `ok`, `error` and:
 | --- | --- |
 | `operation` | `"uninstall"`. |
 | `install_root` | The program folder. |
-| `removed` | `{ "install_root": true, "scheduled_tasks": [names], "start_menu_shortcut": bool, "installed_apps_entry": bool }`; null on failure. |
+| `removed` | `{ "install_root": bool, "scheduled_tasks": [names], "start_menu_shortcut": bool, "installed_apps_entry": bool }`; null on failure. `install_root` is false when the program folder was already gone (see below); `start_menu_shortcut` and `installed_apps_entry` are false when there was none or when it did not belong to Rewindle and was kept (with a warning). |
 | `kept` | What an uninstall never deletes, so a wizard can tell the user: `state_root` (`C:\ProgramData\ResticBackuper`: settings, history, restore canary), `repository`, `recovery_key`, `recovery_tools` (paths from the installed configuration; null when it could not be read) and `cloud_verification_root` (null unless it exists). |
 | `warnings` | `uninstall_metadata_unreadable`, `shortcut_kept_unexpected_target`, `registration_kept_unexpected_owner`. |
+
+**Leftovers of a removed program folder.** When `C:\Program Files\ResticBackuper` no longer exists but the Installed apps entry, the Start menu shortcut or a scheduled task under Rewindle's names remains, the uninstaller removes those instead of stopping with `not_installed` (which it still reports when nothing at all remains). Each leftover goes through the same ownership check as in a full uninstall, and one that is not provably Rewindle's is kept with a warning. This is what lets setup clear a `stale_registration` that would otherwise block a new install, since Windows' own uninstall entry points at the missing uninstaller.
 
 Uninstall removes the **application**, not the backups. Tell the user so: the repository, its snapshots, the recovery key and
 the recovery tools stay, and a later install can reuse them.

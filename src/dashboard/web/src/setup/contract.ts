@@ -111,7 +111,11 @@ export interface InstallResult {
   warnings: { code: string; message: string }[];
   /** After an uninstall: what it deliberately kept, so the person can be told where. */
   kept: KeptPaths | null;
+  /** After an uninstall: what it actually removed. A shortcut or Installed apps entry that wasn't Rewindle's is kept (with a warning). */
+  removed: RemovedParts | null;
 }
+
+export interface RemovedParts { installRoot: boolean; scheduledTasks: string[]; startMenuShortcut: boolean; installedAppsEntry: boolean }
 
 export interface KeptPaths { stateRoot: string | null; repository: string | null; recoveryKey: string | null; recoveryTools: string | null }
 
@@ -301,6 +305,14 @@ export function parseProgressLine(raw: unknown): ProgressLine | null {
         warnings: list(raw.warnings).filter(isObject).map(item => ({ code: text(item.code, 'unknown'), message: text(item.message) })),
         kept: isObject(raw.kept)
           ? { stateRoot: textOrNull(raw.kept.state_root), repository: textOrNull(raw.kept.repository), recoveryKey: textOrNull(raw.kept.recovery_key), recoveryTools: textOrNull(raw.kept.recovery_tools) }
+          : null,
+        removed: isObject(raw.removed)
+          ? {
+            installRoot: bool(raw.removed.install_root),
+            scheduledTasks: list(raw.removed.scheduled_tasks).filter((name): name is string => typeof name === 'string'),
+            startMenuShortcut: bool(raw.removed.start_menu_shortcut),
+            installedAppsEntry: bool(raw.removed.installed_apps_entry),
+          }
           : null,
       },
     };
