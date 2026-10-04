@@ -481,6 +481,23 @@ function Invoke-InstallCycle {
         Assert-True ($leftoverResult.removed.installed_apps_entry -eq $true) "$Label : the leftover cleanup reports the Installed apps entry as removed"
         Assert-True (@(Get-PhaseSequence $leftovers) -contains 'program_files:skipped') "$Label : the leftover cleanup skips the program files"
         Assert-True (-not (Test-Path -LiteralPath $registryKey)) "$Label : the leftover Installed apps entry is gone"
+
+        # A Google Drive verification task left behind on its own: matched without the deleted configuration (verifier and
+        # configuration paths, evidence folder, a well-formed repository ID, this account) and removed.
+        $cloudArguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' +
+            (Join-Path $installRoot 'verify_my_drive_cloud_repository.ps1') + '" -ConfigPath "' + (Join-Path $installRoot 'backup-config.json') +
+            '" -CloudVerificationRoot "' + (Join-Path $programData 'ResticBackuperCloudVerification') + '" -ExpectedRepositoryId "' + ('ab' * 32) + '"'
+        Register-ScheduledTask -TaskName 'ResticBackuperGoogleDriveSync' -TaskPath '\' `
+            -Action (New-ScheduledTaskAction -Execute $windowsPowerShell -Argument $cloudArguments -WorkingDirectory $installRoot) `
+            -Principal (New-ScheduledTaskPrincipal -UserId $AdministratorUser.Name -LogonType Interactive) | Out-Null
+        $run = Invoke-AsUserElevated -User $AdministratorUser -Name 'uninstall-cloud-leftover' -Template $progressTemplate -Values @{
+            HANDOFF = Join-Path $handoff 'uninstall-cloud-leftover.txt'; SCRIPT = (Join-Path $bundle 'payload\Uninstall-ResticBackuper.ps1'); POWERSHELL = $windowsPowerShell; ARGUMENTS = ''
+        }
+        Show-Run $run
+        Assert-Equal 0 $run.ExitCode "$Label : an uninstall clears a leftover Google Drive verification task"
+        $cloudLeftover = Read-ProgressFeed (Get-HandoffPath 'uninstall-cloud-leftover.txt')
+        Assert-True (@($cloudLeftover[$cloudLeftover.Count - 1].removed.scheduled_tasks) -contains 'ResticBackuperGoogleDriveSync') "$Label : the leftover cleanup reports the Google Drive task as removed"
+        Assert-True ($null -eq (Get-ScheduledTask -TaskName 'ResticBackuperGoogleDriveSync' -ErrorAction SilentlyContinue)) "$Label : the leftover Google Drive task is gone"
     }
 
     # Leave a clean machine for the next cycle: the data an uninstall keeps is removed here, because this test created it.

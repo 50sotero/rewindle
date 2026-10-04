@@ -61,6 +61,7 @@ namespace Rewindle.Setup.Tests
                 Run("Install and uninstall flow", OperationFlow);
                 Run("Bridge protocol", ProtocolBehaviour);
                 Run("Bridge commands", BridgeCommands);
+                Run("Uninstaller compatibility", UninstallerCompatibility);
                 Run("Web policy", WebPolicyBehaviour);
                 Run("Microsoft signature check", SignatureCheck);
                 Run("Native screen palette", PaletteBehaviour);
@@ -82,6 +83,27 @@ namespace Rewindle.Setup.Tests
                 Console.WriteLine("  FAILED: " + failure);
             }
             return failures.Count == 0 ? 0 : 1;
+        }
+
+        // An uninstaller from an earlier release has no -ProgressPath; setup then uses its own bundled copy.
+        private static void UninstallerCompatibility()
+        {
+            string folder = Path.Combine(Path.GetTempPath(), "rewindle-setup-uninstaller-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(folder);
+            try
+            {
+                string current = Path.Combine(folder, "current.ps1");
+                File.WriteAllText(current, "[CmdletBinding()]\r\nparam(\r\n    [switch]$Unattended,\r\n    [string]$ExpectedUserSid,\r\n\r\n    [string]$ProgressPath\r\n)\r\n");
+                string released = Path.Combine(folder, "released.ps1");
+                File.WriteAllText(released, "[CmdletBinding()]\r\nparam(\r\n    [switch]$Unattended,\r\n    [string]$ExpectedUserSid\r\n)\r\n# mentions $ProgressPath only in a comment\r\n");
+                Check(SetupBridge.SupportsProgressFeed(current), "an uninstaller that declares -ProgressPath speaks the progress contract");
+                Check(!SetupBridge.SupportsProgressFeed(released), "the 0.2.0-alpha.1 uninstaller (no -ProgressPath parameter) does not");
+                Check(!SetupBridge.SupportsProgressFeed(Path.Combine(folder, "missing.ps1")), "a missing uninstaller does not");
+            }
+            finally
+            {
+                Directory.Delete(folder, true);
+            }
         }
 
         private static void Run(string name, Action body)

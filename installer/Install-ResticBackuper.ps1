@@ -1588,10 +1588,11 @@ function Test-LegacyEngineInstalled {
 function Get-RewindleInstallInfo {
     $rootExists = Test-Path -LiteralPath $installRoot
     $registered = Test-Path -LiteralPath $installRegistry
-    # A Start menu shortcut or a backup or dashboard task left behind by a removed program folder counts too: setup refuses to
-    # install over them, and the uninstaller (run from setup's maintenance page) removes them after its ownership checks.
+    # A Start menu shortcut or a backup, dashboard or Google Drive verification task left behind by a removed program folder
+    # counts too: setup refuses to install over them, and the uninstaller (run from setup's maintenance page) removes them after
+    # its ownership checks.
     $leftovers = (Test-Path -LiteralPath $startMenuShortcut -PathType Leaf)
-    foreach ($taskName in @($backupTaskName, $dashboardTaskName)) {
+    foreach ($taskName in @($backupTaskName, $dashboardTaskName, $cloudVerificationTaskName)) {
         if (-not $leftovers) {
             try { $leftovers = $null -ne (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) } catch { }
         }

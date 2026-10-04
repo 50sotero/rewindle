@@ -528,7 +528,9 @@ function Assert-OwnedTask {
     param(
         [string]$TaskName,
         [string]$ExpectedExecutable,
-        [string]$ExpectedArguments = ''
+        [string]$ExpectedArguments = '',
+        # Instead of exact arguments: a case-sensitive pattern the whole argument string must match.
+        [string]$ExpectedArgumentsPattern = ''
     )
     $notOwned = "A Windows scheduled task named $TaskName exists but was not created by Rewindle, so nothing was removed."
     $tasks = @(Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)
@@ -551,7 +553,7 @@ function Assert-OwnedTask {
         $task.TaskPath -ne '\' -or
         (Get-NormalizedPath ([Environment]::ExpandEnvironmentVariables([string]$actions[0].Execute))) -ne $expected -or
         $workingDirectory -ne (Get-NormalizedPath $installRoot) -or
-        ([string]$actions[0].Arguments) -ne $ExpectedArguments
+        -not $(if ($ExpectedArgumentsPattern) { ([string]$actions[0].Arguments) -cmatch $ExpectedArgumentsPattern } else { ([string]$actions[0].Arguments) -eq $ExpectedArguments })
     ) {
         Stop-UninstallValidation -Code 'task_not_owned' -Message $notOwned `
             -Console "Scheduled task '$TaskName' is not owned by this installation."
@@ -775,7 +777,29 @@ try {
     $cloudTaskCandidate = Get-ScheduledTask `
         -TaskName $cloudVerificationTaskName `
         -ErrorAction SilentlyContinue
-    if ($null -ne $cloudTaskCandidate) {
+    if ($null -ne $cloudTaskCandidate -and -not $runtimePresent) {
+        # Leftovers of a removed program folder: the configuration that names the repository went with it, so the task is
+        # matched on everything else it must hold: this product's verifier and configuration paths, the protected evidence
+        # folder, a well-formed repository ID, and this account as its principal.
+        $cloudArgumentsPattern = '^' + [regex]::Escape(
+            '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass ' +
+            '-WindowStyle Hidden -File "' +
+            (Join-Path $installRoot 'verify_my_drive_cloud_repository.ps1') +
+            '" -ConfigPath "' + $configurationPath +
+            '" -CloudVerificationRoot "' + $cloudVerificationRoot +
+            '" -ExpectedRepositoryId "') + '[0-9a-f]{64}"$'
+        $cloudTask = Assert-OwnedTask `
+            -TaskName $cloudVerificationTaskName `
+            -ExpectedExecutable $windowsPowerShell `
+            -ExpectedArgumentsPattern $cloudArgumentsPattern
+        if ($null -eq $cloudTask -or
+            (Convert-TaskPrincipalToSid -UserId ([string]$cloudTask.Principal.UserId)) -cne $currentSid) {
+            Stop-UninstallValidation -Code 'cloud_task_not_owned' `
+                -Message 'The Google Drive verification task belongs to a different Windows account, so nothing was removed.' `
+                -Console 'The Google Drive verification task belongs to another account.'
+        }
+    }
+    elseif ($null -ne $cloudTaskCandidate) {
         $cloudNotOwned = 'The Google Drive verification task does not belong to this Rewindle installation, so nothing was removed.'
         if ($null -eq $configuration -or
             [string]$configuration.repository_storage_mode -cne

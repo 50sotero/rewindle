@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -546,11 +548,33 @@ namespace Rewindle.Setup
         }
 
         // The installed uninstaller sits in the protected install folder, where only administrators can change it, so it is the
-        // one to run elevated. Only when there is none (a broken install) is the copy in this setup's own bundle used.
+        // one to run elevated, as long as it speaks the progress contract this setup reads. An uninstaller installed by an earlier
+        // release (0.2.0-alpha.1) has no -ProgressPath and would refuse the call; then, as when there is none (a broken install),
+        // the copy in this setup's own bundle is used.
         private string UninstallScriptPath()
         {
             string installed = Path.Combine(environment.ProgramFilesFolder, InstalledProductFolder, InstallerContract.UninstallScript);
-            return File.Exists(installed) ? installed : environment.BundledUninstallScriptPath;
+            return File.Exists(installed) && SupportsProgressFeed(installed) ? installed : environment.BundledUninstallScriptPath;
+        }
+
+        // Whether an uninstaller script declares the -ProgressPath parameter. Reads at most 512 KB; a file that can't be read
+        // counts as not supporting it.
+        internal static bool SupportsProgressFeed(string scriptPath)
+        {
+            try
+            {
+                using (FileStream stream = new FileStream(scriptPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                using (StreamReader reader = new StreamReader(stream, Encoding.UTF8, true))
+                {
+                    char[] buffer = new char[512 * 1024];
+                    int read = reader.ReadBlock(buffer, 0, buffer.Length);
+                    return Regex.IsMatch(new string(buffer, 0, read), @"\[string\]\s*\$ProgressPath\b", RegexOptions.IgnoreCase);
+                }
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
 
         private void OnOperationEvent(string name, Dictionary<string, object> data)

@@ -1,4 +1,4 @@
-import { Check, Clapperboard, CloudOff, Download, FileText, Folder, FolderPlus, Image, Monitor, Music, Star, X } from 'lucide-react';
+import { AlertTriangle, Check, Clapperboard, CloudOff, Download, FileText, Folder, FolderPlus, Image, Monitor, Music, Star, X } from 'lucide-react';
 import { useId, type ComponentType } from 'react';
 import { Button } from '@/components/atoms/Button';
 import { issuesFor, type KnownFolderKey } from '../contract';
@@ -126,9 +126,14 @@ export function Folders({ wizard }: { wizard: Wizard }) {
         </div>
       )}
       {denied.length > 0 && (
-        <p className="callout is-info">
-          <span className="callout-dot" aria-hidden="true" />
-          <span>Some folders inside {denied.map(folder => folder.key ?? folderName(folder.path)).join(', ')} couldn’t be opened to measure them, so the size shown may be a little low.</span>
+        // A warning, not a block: setup measures without administrator rights, while the backup task runs with the highest
+        // privileges of this account, so it can usually open these. If it can't either, its preflight stops each backup.
+        <p className="callout is-warning">
+          <AlertTriangle size={16} aria-hidden="true" />
+          <span>
+            Setup couldn’t open some folders inside {denied.map(folder => folder.key ?? folderName(folder.path)).join(', ')}, so the size shown may be a little low.
+            {' '}Backups run with your administrator rights and can usually open them. If they can’t either, backups of {denied.length === 1 ? 'that folder' : 'those folders'} stop with an error that Rewindle shows you; then check the folder’s permissions or stop protecting it.
+          </span>
         </p>
       )}
 
