@@ -127,7 +127,7 @@ namespace Rewindle.Setup
                 }
                 ConfigureWeb(core);
                 ApplyWebBackground();
-                core.SetVirtualHostNameToFolderMapping(WebPolicy.HostName, workspace.WebFolder, CoreWebView2HostResourceAccessKind.DenyCors);
+                // The pages come from memory (OnResourceRequested): no folder is mapped to the page's origin.
                 core.Navigate(WebPolicy.PageAddress);
             }
             catch (Exception error)
@@ -276,22 +276,37 @@ namespace Rewindle.Setup
                 "Status: " + args.WebErrorStatus);
         }
 
+        // Every request the page makes is answered here: the wizard's own pages from memory (WebContent), and nothing else.
         private void OnResourceRequested(object sender, CoreWebView2WebResourceRequestedEventArgs args)
         {
-            string address = args.Request == null ? string.Empty : args.Request.Uri;
-            if (WebPolicy.IsAllowedUri(address))
+            CoreWebView2 core = sender as CoreWebView2;
+            if (core == null)
             {
                 return;
             }
-            CoreWebView2 core = sender as CoreWebView2;
-            if (core != null)
+            string address = args.Request == null ? string.Empty : args.Request.Uri;
+            if (!WebPolicy.IsAllowedUri(address))
             {
-                args.Response = core.Environment.CreateWebResourceResponse(
-                    new MemoryStream(),
-                    403,
-                    "Blocked",
-                    "Content-Type: text/plain");
+                args.Response = core.Environment.CreateWebResourceResponse(new MemoryStream(), 403, "Blocked", "Content-Type: text/plain");
+                return;
             }
+            if (!string.Equals(args.Request.Method, "GET", StringComparison.OrdinalIgnoreCase))
+            {
+                args.Response = core.Environment.CreateWebResourceResponse(new MemoryStream(), 405, "Method Not Allowed", "Content-Type: text/plain");
+                return;
+            }
+            byte[] content;
+            string contentType;
+            if (!workspace.Web.TryGet(new Uri(address).AbsolutePath, out content, out contentType))
+            {
+                args.Response = core.Environment.CreateWebResourceResponse(new MemoryStream(), 404, "Not Found", "Content-Type: text/plain");
+                return;
+            }
+            args.Response = core.Environment.CreateWebResourceResponse(
+                new MemoryStream(content, false),
+                200,
+                "OK",
+                "Content-Type: " + contentType + "\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store");
         }
 
         private void OnWebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs args)

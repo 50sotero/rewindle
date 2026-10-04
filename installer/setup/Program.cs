@@ -74,7 +74,7 @@ namespace Rewindle.Setup
                 // The WebView2 libraries are unpacked and made findable before any code that mentions a WebView2 type runs.
                 workspace.ExtractLibraries();
                 WebViewLibraries.Install(workspace.ResolvedLibraryFolder);
-                workspace.ExtractWeb();
+                workspace.ReadWeb();
                 // The release bundle is large; it unpacks in the background while the first page opens.
                 workspace.EnsureBundleExtracted();
 

@@ -10,9 +10,9 @@ using System.Threading.Tasks;
 namespace Rewindle.Setup
 {
     // The folders Setup works in: %TEMP%\RewindleSetup-<guid>, made by this (normal, not elevated) process and so owned by the
-    // person running it. The release bundle (the installer script and the payload it copies), the wizard's web files and the
-    // WebView2 libraries are unpacked from the program's own resources into it, the installer's progress files go in sibling
-    // folders of the same kind, and everything is deleted when Setup exits.
+    // person running it. The release bundle (the installer script and the payload it copies) and the WebView2 libraries are
+    // unpacked from the program's own resources into it (the wizard's pages are not: see WebContent), the installer's progress
+    // files go in sibling folders of the same kind, and everything is deleted when Setup exits.
     internal sealed class SetupWorkspace : IDisposable
     {
         public const string BundleResource = "REWINDLE_BUNDLE";
@@ -38,6 +38,7 @@ namespace Rewindle.Setup
         private Task bundleTask;
         private Dictionary<string, string> bundleHashes;
         private ExclusionRules exclusions;
+        private WebContent web;
         // The unpacked WebView2 libraries, held open from just after they are written until this workspace is disposed.
         private readonly List<FileStream> heldLibraries = new List<FileStream>();
         private string resolvedLibraryFolder;
@@ -69,11 +70,6 @@ namespace Rewindle.Setup
         public string BundleFolder
         {
             get { return Path.Combine(Root, "bundle"); }
-        }
-
-        public string WebFolder
-        {
-            get { return Path.Combine(Root, "web"); }
         }
 
         public string LibraryFolder
@@ -192,16 +188,32 @@ namespace Rewindle.Setup
             }
         }
 
-        // The wizard's web files, to be served to the web view from this folder.
-        public void ExtractWeb()
+        // The wizard's pages, read into memory from this program's own resources, to be served to the web view from there.
+        public void ReadWeb()
         {
+            WebContent content;
             using (Stream resource = OpenRequired(WebResource))
             {
-                SafeZip.Extract(resource, WebFolder);
+                content = WebContent.Read(resource);
             }
-            if (!File.Exists(Path.Combine(WebFolder, "setup.html")))
+            lock (gate)
             {
-                throw new InvalidDataException("The embedded wizard pages are incomplete.");
+                web = content;
+            }
+        }
+
+        public WebContent Web
+        {
+            get
+            {
+                lock (gate)
+                {
+                    if (web == null)
+                    {
+                        throw new InvalidOperationException("The wizard's pages have not been read.");
+                    }
+                    return web;
+                }
             }
         }
 

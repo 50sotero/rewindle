@@ -208,7 +208,6 @@ class HostHardeningTests(unittest.TestCase):
             "AreBrowserAcceleratorKeysEnabled = false",
             "IsGeneralAutofillEnabled = false",
             "IsPasswordAutosaveEnabled = false",
-            "CoreWebView2HostResourceAccessKind.DenyCors",
             "NewWindowRequested",
             "DownloadStarting",
             "PermissionRequested",
@@ -227,6 +226,16 @@ class HostHardeningTests(unittest.TestCase):
         self.assertNotIn("DevToolsProtocol", self.window)
         for path in SETUP.glob("*.cs"):
             self.assertNotIn("OpenDevToolsWindow", read(path))
+
+    def test_the_wizard_pages_are_served_from_memory(self) -> None:
+        # No folder in the person's temporary folder is mapped to the origin the bridge trusts: every request is answered from
+        # the copy read into memory from this program's own resources.
+        self.assertNotIn("SetVirtualHostNameToFolderMapping", self.window)
+        self.assertIn("workspace.Web.TryGet(new Uri(address).AbsolutePath, out content, out contentType)", self.window)
+        workspace = read(SETUP / "SetupWorkspace.cs")
+        self.assertIn("content = WebContent.Read(resource);", workspace)
+        self.assertNotIn("SafeZip.Extract(resource, WebFolder)", workspace)
+        self.assertIn("workspace.ReadWeb();", read(SETUP / "Program.cs"))
 
     def test_the_wizard_page_has_a_strict_content_security_policy(self) -> None:
         page = read(WEB / "setup.html")

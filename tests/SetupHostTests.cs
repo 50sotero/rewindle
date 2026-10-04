@@ -754,7 +754,7 @@ namespace Rewindle.Setup.Tests
                 rootPath = workspace.Root;
                 Check(Path.GetFileName(rootPath).StartsWith("RewindleSetup-") && Path.GetFileName(rootPath).Length == "RewindleSetup-".Length + 32, "the folder is named RewindleSetup-<guid>");
                 workspace.ExtractLibraries();
-                workspace.ExtractWeb();
+                workspace.ReadWeb();
                 workspace.EnsureBundleExtracted().Wait();
                 Check(File.Exists(Path.Combine(workspace.LibraryFolder, "WebView2Loader.dll")) && File.Exists(Path.Combine(workspace.LibraryFolder, "x64", "WebView2Loader.dll")) &&
                       File.Exists(Path.Combine(workspace.LibraryFolder, "runtimes", "win-x64", "native", "WebView2Loader.dll")) &&
@@ -765,12 +765,26 @@ namespace Rewindle.Setup.Tests
                 Throws<Exception>(delegate { File.OpenWrite(core).Dispose(); }, "an unpacked library can't be changed while Setup runs");
                 Throws<Exception>(delegate { File.Delete(Path.Combine(workspace.ResolvedLibraryFolder, "runtimes", "win-x64", "native", "WebView2Loader.dll")); }, "nor deleted, in any layout");
                 Throws<Exception>(delegate { Directory.Move(workspace.LibraryFolder, workspace.LibraryFolder + "-old"); }, "nor its folder renamed");
-                Check(File.Exists(workspace.InstallScriptPath) && File.Exists(workspace.BundledUninstallScriptPath) && File.Exists(Path.Combine(workspace.WebFolder, "setup.html")), "the bundle and the web files are unpacked");
+                Check(File.Exists(workspace.InstallScriptPath) && File.Exists(workspace.BundledUninstallScriptPath), "the bundle is unpacked");
+                byte[] served;
+                string servedType;
+                Check(workspace.Web.TryGet("/setup.html", out served, out servedType) && Encoding.UTF8.GetString(served) == "content of setup.html" && servedType == "text/html; charset=utf-8" &&
+                      workspace.Web.TryGet("/", out served, out servedType) && Encoding.UTF8.GetString(served) == "content of setup.html" &&
+                      workspace.Web.TryGet("/assets/a.js", out served, out servedType) && servedType.StartsWith("text/javascript"), "the wizard's pages are served from memory, by their paths");
+                Check(!workspace.Web.TryGet("/missing.js", out served, out servedType) && !workspace.Web.TryGet("/assets/../setup.html", out served, out servedType),
+                      "and nothing else");
+                Check(!Directory.EnumerateFiles(rootPath, "setup.html", SearchOption.AllDirectories).Any() && !Directory.Exists(Path.Combine(rootPath, "web")), "the wizard's pages are never written to disk");
                 Check(object.ReferenceEquals(workspace.EnsureBundleExtracted(), workspace.EnsureBundleExtracted()), "the bundle is unpacked once");
                 progress = workspace.CreateProgressFolder();
                 Check(Directory.Exists(progress) && Path.GetFileName(progress).StartsWith("RewindleSetup-") && progress != rootPath, "a progress folder of its own, named the same way");
             }
             Check(!Directory.Exists(rootPath) && !Directory.Exists(progress), "everything is removed when the workspace is disposed");
+
+            // Wizard pages with an unsafe or missing name are refused, like the bundle's.
+            foreach (string[] names in new string[][] { new string[] { "setup.html", "../x.js" }, new string[] { "setup.html", "C:/x.js" }, new string[] { "setup.html", "a//b.js" }, new string[] { "setup.html", "A.js", "a.js" }, new string[] { "index.html" } })
+            {
+                Throws<InvalidDataException>(delegate { WebContent.Read(Zip(names)); }, "wizard pages named " + string.Join(", ", names) + " are refused");
+            }
 
             // A library changed between its unpacking and its check is refused, and Setup doesn't start.
             using (SetupWorkspace tampered = new SetupWorkspace(open, parent))
@@ -1775,7 +1789,7 @@ switch ($mode) {
             using (SetupWorkspace workspace = new SetupWorkspace(delegate(string name) { return built.GetManifestResourceStream(name); }, parent))
             {
                 workspace.ExtractLibraries();
-                workspace.ExtractWeb();
+                workspace.ReadWeb();
                 workspace.EnsureBundleExtracted().Wait();
                 foreach (string relative in new string[]
                 {
@@ -1786,9 +1800,17 @@ switch ($mode) {
                     Check(File.Exists(Path.Combine(workspace.BundleFolder, relative)), "the bundle holds " + relative);
                 }
                 Check(!Directory.EnumerateFiles(Path.Combine(workspace.BundleFolder, "payload", "web"), "setup*", SearchOption.AllDirectories).Any(), "and none of the wizard's files are in the dashboard's");
-                Check(File.Exists(Path.Combine(workspace.WebFolder, "setup.html")) && Directory.EnumerateFiles(workspace.WebFolder, "*.js", SearchOption.AllDirectories).Any(), "the wizard's pages are there");
-                string page = File.ReadAllText(Path.Combine(workspace.WebFolder, "setup.html"));
+                byte[] pageBytes;
+                string pageType;
+                Check(workspace.Web.TryGet("/setup.html", out pageBytes, out pageType) && workspace.Web.Names.Any(name => name.EndsWith(".js", StringComparison.Ordinal)), "the wizard's pages are there");
+                string page = Encoding.UTF8.GetString(pageBytes ?? new byte[0]);
                 Check(page.Contains("Content-Security-Policy"), "with their content security policy");
+                foreach (string script in workspace.Web.Names.Where(name => name.EndsWith(".js", StringComparison.Ordinal)).Take(3))
+                {
+                    byte[] scriptBytes;
+                    string scriptType;
+                    Check(workspace.Web.TryGet("/" + script, out scriptBytes, out scriptType) && scriptType.StartsWith("text/javascript"), "a script is served as JavaScript: " + script);
+                }
 
                 // The three libraries are the pinned package's own files.
                 string package = Path.Combine(project, "src", "dashboard", ".packages", "webview2.1.0.4191.47");
