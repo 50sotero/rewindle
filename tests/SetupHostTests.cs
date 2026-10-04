@@ -1326,6 +1326,21 @@ switch ($mode) {
             Check(WaitFor(() => slowUi.Events("operationFinished").Count == 1, 10000) &&
                   Json.String(Json.AsObject(Json.Get(slowUi.Events("operationFinished")[0], "data")), "outcome", 32) == "cancelled" && never.Starts == 0, "and ends as cancelled with nothing started");
             slowBridge.Shutdown();
+
+            // The page crashes while an install is still preparing: it is cancelled, so the reload can't leave it running unseen.
+            FakeLauncher neverAfterCrash = new FakeLauncher();
+            FakePlans slowAfterCrash = new FakePlans();
+            slowAfterCrash.Block = new ManualResetEvent(false);
+            FakeUi crashUi = new FakeUi();
+            SetupBridge crashBridge = new SetupBridge(crashUi, NewEnvironment(NewFolder("crash"), slowAfterCrash, neverAfterCrash));
+            Check(!crashBridge.StopForLostPage(), "with nothing running, a lost page may simply be reloaded");
+            crashBridge.Receive(Request("c1", "install", choices));
+            Thread.Sleep(200);
+            Check(!crashBridge.StopForLostPage(), "an install still preparing is cancelled when the page is lost, so the page may be reloaded");
+            Check(WaitFor(() => crashUi.Events("operationFinished").Count == 1, 10000) &&
+                  Json.String(Json.AsObject(Json.Get(crashUi.Events("operationFinished")[0], "data")), "outcome", 32) == "cancelled" && neverAfterCrash.Starts == 0,
+                  "and it ends as cancelled with nothing started");
+            crashBridge.Shutdown();
         }
 
         private static void WebPolicyBehaviour()

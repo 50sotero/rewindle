@@ -89,6 +89,22 @@ namespace Rewindle.Setup
             }
         }
 
+        // The page is gone (its renderer failed). An install or uninstall still preparing is cancelled, since a reloaded page
+        // could not follow it; returns whether one is still running anyway (Windows was already asked, or it is working).
+        public bool StopForLostPage()
+        {
+            SetupOperation current;
+            lock (gate)
+            {
+                current = operation;
+            }
+            if (current == null || !current.IsRunning)
+            {
+                return false;
+            }
+            return !current.Cancel();
+        }
+
         // The window is closing: nothing more is answered, and whatever can still be stopped is stopped.
         public void Shutdown()
         {

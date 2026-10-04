@@ -233,6 +233,8 @@ export function useWizard() {
   const measureSequence = useRef(0);
   const planSequence = useRef(0);
   const measured = useRef(new Set<string>());
+  // The measurement requests of this run of the wizard; updates from any other (an earlier run's, cancelled) are ignored.
+  const activeMeasures = useRef(new Set<string>());
   // Set when the uninstall under way is the first half of a reinstall (read in the host's events, so a ref).
   const reinstalling = useRef(false);
 
@@ -247,6 +249,7 @@ export function useWizard() {
     if (message.event === 'theme') setTheme(message.data);
     else if (message.event === 'measure') {
       const update: MeasureUpdate = message.data;
+      if (!activeMeasures.current.has(update.request)) return;
       setSizes(current => {
         const key = update.path.toLowerCase();
         const before = current[key];
@@ -319,6 +322,7 @@ export function useWizard() {
     for (let start = 0; start < fresh.length; start += MEASURE_BATCH) {
       const batch = fresh.slice(start, start + MEASURE_BATCH);
       const request = `m${++measureSequence.current}`;
+      activeMeasures.current.add(request);
       bridge.request('measureFolders', { request, paths: batch }).catch(() => {
         // Sizes are a convenience: a folder that cannot be measured just shows no size. Online-only files it was already found
         // to hold stay counted, though, because they keep setup from going on.
@@ -351,6 +355,12 @@ export function useWizard() {
       const plan = parsePlan(await bridge.request('getPlan', { inputs: {} }));
       setBase(plan);
       const initial = initialChoices(plan, preferredRepository);
+      // A new run (after the removal half of a reinstall, say) measures every folder again: what was measured before may be
+      // out of date, for example files OneDrive has since made online-only.
+      for (const request of activeMeasures.current) void bridge.request('cancelMeasure', { request }).catch(() => undefined);
+      activeMeasures.current.clear();
+      measured.current.clear();
+      setSizes({});
       setChoices(initial);
       setValidation({ plan, checking: false, error: null });
       setScreen(firstScreen(plan));

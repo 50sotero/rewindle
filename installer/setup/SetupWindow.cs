@@ -316,7 +316,9 @@ namespace Rewindle.Setup
             {
                 return;
             }
-            bool busy = bridge.IsBusyPastCancel;
+            // An install or uninstall that hasn't asked Windows yet is cancelled first: the reloaded page has no record of it and
+            // would ignore its later prompt and progress.
+            bool busy = bridge.StopForLostPage();
             // A page that crashed is reloaded once, on its own, unless an install is running (the reload would lose the page
             // that shows it, and the person could start a second one).
             if (kind == CoreWebView2ProcessFailedKind.RenderProcessExited && renderRecoveries == 0 && !busy)
