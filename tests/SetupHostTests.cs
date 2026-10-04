@@ -93,11 +93,14 @@ namespace Rewindle.Setup.Tests
             try
             {
                 string current = Path.Combine(folder, "current.ps1");
-                File.WriteAllText(current, "[CmdletBinding()]\r\nparam(\r\n    [switch]$Unattended,\r\n    [string]$ExpectedUserSid,\r\n\r\n    [string]$ProgressPath\r\n)\r\n");
+                File.WriteAllText(current, "[CmdletBinding()]\r\nparam(\r\n    [switch]$Unattended,\r\n    [string]$ExpectedUserSid,\r\n\r\n    [string]$ProgressPath\r\n)\r\n$schema = 'Rewindle.InstallProgress.v1'\r\n");
+                string otherFeed = Path.Combine(folder, "other-feed.ps1");
+                File.WriteAllText(otherFeed, "param([string]$ProgressPath)\r\n$schema = 'Rewindle.InstallProgress.v2'\r\n");
                 string released = Path.Combine(folder, "released.ps1");
                 File.WriteAllText(released, "[CmdletBinding()]\r\nparam(\r\n    [switch]$Unattended,\r\n    [string]$ExpectedUserSid\r\n)\r\n# mentions $ProgressPath only in a comment\r\n");
                 Check(SetupBridge.SupportsProgressFeed(current), "an uninstaller that declares -ProgressPath speaks the progress contract");
                 Check(!SetupBridge.SupportsProgressFeed(released), "the 0.2.0-alpha.1 uninstaller (no -ProgressPath parameter) does not");
+                Check(!SetupBridge.SupportsProgressFeed(otherFeed), "an uninstaller with -ProgressPath that writes another progress schema does not");
                 Check(!SetupBridge.SupportsProgressFeed(Path.Combine(folder, "missing.ps1")), "a missing uninstaller does not");
             }
             finally
@@ -375,13 +378,15 @@ namespace Rewindle.Setup.Tests
 
             ProgressLine phase = InstallerContract.ReadProgressLine("{\"schema\":\"Rewindle.InstallProgress.v1\",\"seq\":1,\"type\":\"phase\",\"phase\":\"payload\",\"state\":\"started\"}");
             Check(phase.Fields != null && !phase.IsResult, "a phase line is an object, not a result");
-            ProgressLine ok = InstallerContract.ReadProgressLine("{\"type\":\"result\",\"ok\":true,\"error\":null,\"recovery_key_path\":\"C:\\\\Users\\\\you\\\\key.txt\",\"recovery_key_readable_by_user\":true,\"dashboard_executable\":\"C:\\\\Program Files\\\\ResticBackuper\\\\ResticBackuperDashboard.exe\",\"install_root\":\"C:\\\\Program Files\\\\ResticBackuper\"}");
+            ProgressLine ok = InstallerContract.ReadProgressLine("{\"schema\":\"Rewindle.InstallProgress.v1\",\"type\":\"result\",\"ok\":true,\"error\":null,\"recovery_key_path\":\"C:\\\\Users\\\\you\\\\key.txt\",\"recovery_key_readable_by_user\":true,\"dashboard_executable\":\"C:\\\\Program Files\\\\ResticBackuper\\\\ResticBackuperDashboard.exe\",\"install_root\":\"C:\\\\Program Files\\\\ResticBackuper\"}");
             Check(ok.IsResult && ok.ResultOk && ok.RecoveryKeyReadableByUser == true && ok.RecoveryKeyPath == @"C:\Users\you\key.txt", "a successful result line");
-            ProgressLine failed = InstallerContract.ReadProgressLine("{\"type\":\"result\",\"ok\":false,\"error\":{\"code\":\"x\",\"message\":\"It broke.\"}}");
+            ProgressLine failed = InstallerContract.ReadProgressLine("{\"schema\":\"Rewindle.InstallProgress.v1\",\"type\":\"result\",\"ok\":false,\"error\":{\"code\":\"x\",\"message\":\"It broke.\"}}");
             Check(failed.IsResult && !failed.ResultOk && failed.ResultErrorMessage == "It broke.", "a failed result line");
-            ProgressLine unknown = InstallerContract.ReadProgressLine("{\"type\":\"result\",\"ok\":true,\"error\":null,\"recovery_key_path\":\"C:\\\\k.txt\",\"recovery_key_readable_by_user\":null}");
+            ProgressLine unknown = InstallerContract.ReadProgressLine("{\"schema\":\"Rewindle.InstallProgress.v1\",\"type\":\"result\",\"ok\":true,\"error\":null,\"recovery_key_path\":\"C:\\\\k.txt\",\"recovery_key_readable_by_user\":null}");
             Check(unknown.ResultOk && unknown.RecoveryKeyReadableByUser == null, "a readable-by-user answer of null stays unknown, not false");
-            ProgressLine contradictory = InstallerContract.ReadProgressLine("{\"type\":\"result\",\"ok\":true,\"error\":{\"code\":\"x\",\"message\":\"no\"}}");
+            Check(!InstallerContract.ReadProgressLine("{\"type\":\"result\",\"ok\":true,\"error\":null}").IsResult, "a result line without the progress schema decides nothing");
+            Check(!InstallerContract.ReadProgressLine("{\"schema\":\"Rewindle.InstallProgress.v2\",\"type\":\"result\",\"ok\":true,\"error\":null}").IsResult, "a result line in an unknown schema decides nothing");
+            ProgressLine contradictory = InstallerContract.ReadProgressLine("{\"schema\":\"Rewindle.InstallProgress.v1\",\"type\":\"result\",\"ok\":true,\"error\":{\"code\":\"x\",\"message\":\"no\"}}");
             Check(!contradictory.ResultOk, "ok:true with an error object is a failure");
             ProgressLine junk = InstallerContract.ReadProgressLine("WARNING: something printed text into the file");
             Check(junk.Fields == null && !junk.IsResult && junk.Raw.StartsWith("WARNING"), "a line that is not JSON is kept as text");
@@ -852,7 +857,7 @@ switch ($mode) {
         }
 
         private const string PhaseLine = "{\"schema\":\"Rewindle.InstallProgress.v1\",\"seq\":1,\"time\":\"t\",\"type\":\"phase\",\"phase\":\"payload\",\"state\":\"started\",\"title\":\"Copying\",\"detail\":null}";
-        private const string OkResult = "{\"type\":\"result\",\"ok\":true,\"error\":null,\"install_root\":\"C:\\\\Program Files\\\\ResticBackuper\",\"recovery_key_path\":\"C:\\\\Users\\\\you\\\\key.txt\",\"recovery_key_readable_by_user\":true,\"dashboard_executable\":\"C:\\\\Program Files\\\\ResticBackuper\\\\ResticBackuperDashboard.exe\",\"version\":\"0.2.0\"}";
+        private const string OkResult = "{\"schema\":\"Rewindle.InstallProgress.v1\",\"type\":\"result\",\"ok\":true,\"error\":null,\"install_root\":\"C:\\\\Program Files\\\\ResticBackuper\",\"recovery_key_path\":\"C:\\\\Users\\\\you\\\\key.txt\",\"recovery_key_readable_by_user\":true,\"dashboard_executable\":\"C:\\\\Program Files\\\\ResticBackuper\\\\ResticBackuperDashboard.exe\",\"version\":\"0.2.0\"}";
 
         private static InstallerInputs SampleInputs()
         {
@@ -930,7 +935,7 @@ switch ($mode) {
                 Events events = new Events();
                 FakeLauncher launcher = new FakeLauncher();
                 launcher.Exit = 1;
-                launcher.Lines = new string[] { PhaseLine, "{\"type\":\"result\",\"ok\":false,\"error\":{\"code\":\"repository_not_empty\",\"message\":\"The folder is not empty.\"}}" };
+                launcher.Lines = new string[] { PhaseLine, "{\"schema\":\"Rewindle.InstallProgress.v1\",\"type\":\"result\",\"ok\":false,\"error\":{\"code\":\"repository_not_empty\",\"message\":\"The folder is not empty.\"}}" };
                 SetupOperation operation = make(SetupOperation.Install, new FakePlans(), launcher, events, null);
                 operation.Run(SampleInputs());
                 Check(events.Names().Last() == "finished:failed" && (string)events.Finished()["message"] == "The folder is not empty.", "a failed result line is a failure with the installer's own message");
@@ -1001,7 +1006,7 @@ switch ($mode) {
             {
                 Events events = new Events();
                 FakeLauncher launcher = new FakeLauncher();
-                launcher.Lines = new string[] { "{\"type\":\"result\",\"ok\":true,\"error\":null}" };
+                launcher.Lines = new string[] { "{\"schema\":\"Rewindle.InstallProgress.v1\",\"type\":\"result\",\"ok\":true,\"error\":null}" };
                 FakePlans plans = new FakePlans();
                 SetupOperation operation = make(SetupOperation.Uninstall, plans, launcher, events, null);
                 operation.Run(null);
@@ -1250,7 +1255,7 @@ switch ($mode) {
             launcher.Lines = new string[]
             {
                 PhaseLine,
-                "{\"type\":\"result\",\"ok\":true,\"error\":null,\"install_root\":" + Json.Serialize(installRoot) + ",\"recovery_key_path\":" + Json.Serialize(keyFile) +
+                "{\"schema\":\"Rewindle.InstallProgress.v1\",\"type\":\"result\",\"ok\":true,\"error\":null,\"install_root\":" + Json.Serialize(installRoot) + ",\"recovery_key_path\":" + Json.Serialize(keyFile) +
                     ",\"recovery_key_readable_by_user\":true,\"dashboard_executable\":\"C:\\\\Windows\\\\notepad.exe\"}"
             };
             string choices = "{\"choices\":{\"repository\":\"E:\\\\Rewindle Backups\",\"storageMode\":\"local_ntfs\",\"sources\":[\"C:\\\\Users\\\\you\\\\Documents\"],\"schedule\":\"02:00\",\"vss\":true,\"startBackup\":false}}";
@@ -1288,7 +1293,7 @@ switch ($mode) {
 
             // Uninstall; and a second operation is allowed once the first is over.
             launcher.Hold = null;
-            launcher.Lines = new string[] { "{\"type\":\"result\",\"ok\":true,\"error\":null}" };
+            launcher.Lines = new string[] { "{\"schema\":\"Rewindle.InstallProgress.v1\",\"type\":\"result\",\"ok\":true,\"error\":null}" };
             bridge.Receive(Request("n1", "uninstall", null));
             Check(Ok(ui.Response("n1")) && WaitFor(() => ui.Events("operationFinished").Count == 2, 10000), "an uninstall can follow");
 
@@ -1296,7 +1301,7 @@ switch ($mode) {
             FakeLauncher locked = new FakeLauncher();
             FakeUi lockedUi = new FakeUi();
             SetupBridge lockedBridge = new SetupBridge(lockedUi, NewEnvironment(NewFolder("locked"), new FakePlans(), locked));
-            locked.Lines = new string[] { "{\"type\":\"result\",\"ok\":true,\"error\":null,\"recovery_key_path\":\"C:\\\\ProgramData\\\\Rewindle\\\\key.txt\",\"recovery_key_readable_by_user\":false}" };
+            locked.Lines = new string[] { "{\"schema\":\"Rewindle.InstallProgress.v1\",\"type\":\"result\",\"ok\":true,\"error\":null,\"recovery_key_path\":\"C:\\\\ProgramData\\\\Rewindle\\\\key.txt\",\"recovery_key_readable_by_user\":false}" };
             lockedBridge.Receive(Request("l1", "install", choices));
             Check(lockedUi.WaitResponse("l1") && WaitFor(() => lockedUi.Events("operationFinished").Count == 1, 10000), "an install whose key only administrators can read finishes");
             lockedBridge.Receive(Request("l2", "saveRecoveryKeyCopy", null));

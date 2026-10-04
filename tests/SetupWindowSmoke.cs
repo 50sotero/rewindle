@@ -179,6 +179,7 @@ namespace Rewindle.Setup.Smoke
                             error["code"] = "repository_prepare_failed";
                             error["message"] = message;
                             Dictionary<string, object> failure = new Dictionary<string, object>();
+                            failure["schema"] = "Rewindle.InstallProgress.v1";
                             failure["type"] = "result";
                             failure["ok"] = false;
                             failure["error"] = error;
@@ -191,6 +192,7 @@ namespace Rewindle.Setup.Smoke
                     }
                 }
                 Dictionary<string, object> result = new Dictionary<string, object>();
+                result["schema"] = "Rewindle.InstallProgress.v1";
                 result["type"] = "result";
                 result["ok"] = true;
                 result["error"] = null;

@@ -290,7 +290,7 @@ export function parsePlan(raw: unknown): InstallPlan {
 /** Reads one progress line the host forwarded (already JSON-decoded). Returns null for a line this wizard does not understand. */
 export function parseProgressLine(raw: unknown): ProgressLine | null {
   if (!isObject(raw)) return null;
-  if (raw.type === 'result') {
+  if (raw.type === 'result' && raw.schema === PROGRESS_SCHEMA) {
     const error = isObject(raw.error) ? { code: text(raw.error.code, 'unknown'), message: text(raw.error.message, 'Setup could not finish.') } : null;
     return {
       kind: 'result',

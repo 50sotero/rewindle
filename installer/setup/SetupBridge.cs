@@ -557,8 +557,8 @@ namespace Rewindle.Setup
             return File.Exists(installed) && SupportsProgressFeed(installed) ? installed : environment.BundledUninstallScriptPath;
         }
 
-        // Whether an uninstaller script declares the -ProgressPath parameter. Reads at most 512 KB; a file that can't be read
-        // counts as not supporting it.
+        // Whether an uninstaller script declares the -ProgressPath parameter and writes the progress schema this setup reads.
+        // Reads at most 512 KB; a file that can't be read counts as not supporting it.
         internal static bool SupportsProgressFeed(string scriptPath)
         {
             try
@@ -568,7 +568,9 @@ namespace Rewindle.Setup
                 {
                     char[] buffer = new char[512 * 1024];
                     int read = reader.ReadBlock(buffer, 0, buffer.Length);
-                    return Regex.IsMatch(new string(buffer, 0, read), @"\[string\]\s*\$ProgressPath\b", RegexOptions.IgnoreCase);
+                    string text = new string(buffer, 0, read);
+                    return Regex.IsMatch(text, @"\[string\]\s*\$ProgressPath\b", RegexOptions.IgnoreCase) &&
+                        text.IndexOf(InstallerContract.ProgressSchema, StringComparison.Ordinal) >= 0;
                 }
             }
             catch (Exception)

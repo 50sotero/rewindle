@@ -377,7 +377,9 @@ namespace Rewindle.Setup
             {
                 return line;
             }
-            if (string.Equals(Json.String(line.Fields, "type", 32), "result", StringComparison.Ordinal))
+            // Only a result in the schema this setup understands decides the outcome; anything else is kept as a line for Details.
+            if (string.Equals(Json.String(line.Fields, "type", 32), "result", StringComparison.Ordinal) &&
+                string.Equals(Json.String(line.Fields, "schema", 64), ProgressSchema, StringComparison.Ordinal))
             {
                 line.IsResult = true;
                 IDictionary<string, object> failure = Json.AsObject(Json.Get(line.Fields, "error"));

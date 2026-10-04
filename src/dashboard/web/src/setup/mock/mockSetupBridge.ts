@@ -200,7 +200,7 @@ export function installSetupSampleBridge(): void {
     };
     let seq = 0;
     const line = (value: Record<string, unknown>) => {
-      const full = value.type === 'result' ? value : { schema: 'Rewindle.InstallProgress.v1', seq: ++seq, time: new Date().toISOString(), type: 'phase', detail: null, ...value };
+      const full = value.type === 'result' ? { schema: 'Rewindle.InstallProgress.v1', seq: ++seq, time: new Date().toISOString(), ...value } : { schema: 'Rewindle.InstallProgress.v1', seq: ++seq, time: new Date().toISOString(), type: 'phase', detail: null, ...value };
       const raw = JSON.stringify(full);
       event('operationLine', { operation: kind, raw, line: full });
     };
