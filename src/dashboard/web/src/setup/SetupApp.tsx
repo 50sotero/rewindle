@@ -145,7 +145,9 @@ export default function SetupApp() {
       case 'installing':
       case 'uninstalling': {
         const outcome = operation?.finished?.outcome;
-        const retry = screen === 'installing' ? () => void wizard.install() : () => void wizard.uninstall();
+        // Retrying the removal half of a reinstall keeps going on to the setup steps afterwards.
+        const retry = screen === 'installing' ? () => void wizard.install()
+          : operation?.reinstall ? () => void wizard.reinstall() : () => void wizard.uninstall();
         const returnTo: Screen = screen === 'installing' ? 'review' : 'maintenance';
         if (outcome === 'succeeded') {
           return screen === 'installing'

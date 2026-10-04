@@ -566,12 +566,28 @@ namespace Rewindle.Setup
                 args.Cancel = true;
                 return;
             }
-            bridge.Shutdown();
+            // Microsoft's WebView2 installer can't be stopped once it has started, and it runs from the folder Setup deletes
+            // on exit. Cancel what hasn't started yet, then look again: if it started meanwhile, the window waits for it.
             CancellationTokenSource install = runtimeInstall;
             if (install != null)
             {
-                install.Cancel();
+                if (!WebViewRuntime.BootstrapperRunning)
+                {
+                    install.Cancel();
+                }
+                if (WebViewRuntime.BootstrapperRunning)
+                {
+                    MessageBox.Show(
+                        this,
+                        "Microsoft’s installer for the display component is still running. Please wait until it has finished, then close this window.",
+                        "Rewindle Setup",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                    args.Cancel = true;
+                    return;
+                }
             }
+            bridge.Shutdown();
         }
 
         private void OnClosed(object sender, EventArgs args)

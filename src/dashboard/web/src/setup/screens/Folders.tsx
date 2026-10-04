@@ -119,9 +119,15 @@ export function Folders({ wizard }: { wizard: Wizard }) {
           const folder = issue.path ? choices.folders.find(item => samePath(item.path, issue.path as string)) : undefined;
           if (!folder || !folder.selected && folder.exists) return null;
           const name = folder.key ?? folderName(folder.path);
-          return folder.custom
+          const drop = folder.custom
             ? <Button size="sm" className="issue-action" onClick={() => wizard.actions.removeFolder(folder.path)}>Remove {name}</Button>
             : <Button size="sm" className="issue-action" onClick={() => wizard.actions.toggleFolder(folder.path)}>Don’t protect {name}</Button>;
+          // A folder on a removable or non-NTFS drive can be kept by backing up without open-file snapshots, which the installer
+          // supports. This page blocks Next while the finding stands, so the switch (also under Schedule > Advanced) is offered here.
+          if (issue.code === 'source_vss_unsupported' && choices.vss) {
+            return <div className="issue-action issue-action-group">{drop}<Button size="sm" className="issue-action" onClick={() => wizard.actions.setVss(false)}>Turn off open-file backup</Button></div>;
+          }
+          return drop;
         }} />
 
       <p className="sr-only" role="status" aria-live="polite">

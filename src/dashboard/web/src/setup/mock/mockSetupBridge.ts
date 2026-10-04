@@ -126,7 +126,7 @@ export function installSetupSampleBridge(): void {
       }
       const volume = volumeOf(source);
       if (vss && volume && (volume.drive_type !== 'fixed' || volume.filesystem !== 'NTFS')) {
-        errors.push(finding('source_vss_unsupported', 'sources', `“${name}” is on a removable drive. To include it, turn off “Back up files that are open” under When to back up › Advanced.`, source));
+        errors.push(finding('source_vss_unsupported', 'sources', `The folder ${source} is on a drive that can’t be backed up while files are open (it must be a fixed NTFS drive). Choose a folder on your main drives, or turn off open-file backup.`, source));
       }
     });
 

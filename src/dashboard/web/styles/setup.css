@@ -92,7 +92,12 @@ button.rail-link:hover .rail-label { color: var(--ink); text-decoration: underli
 .callout-dot { flex-shrink: 0; width: 6px; height: 6px; margin: 8px 4px 0; border-radius: 50%; background: var(--ink-3); }
 .issue-list { display: flex; flex-direction: column; gap: 8px; }
 .issue-action { margin-left: auto; flex-shrink: 0; align-self: center; }
-.callout:has(.issue-action) { align-items: center; }
+/* Two ways out of one finding move together, and wrap under each other only when even their own line is too narrow. */
+.issue-action-group { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.issue-action-group > .issue-action { margin-left: 0; }
+.callout:has(.issue-action) { align-items: center; flex-wrap: wrap; }
+/* The message keeps a readable width; its buttons move to their own line when the window is narrow. */
+.callout:has(.issue-action) > span { flex: 1 1 240px; min-width: 0; }
 .kept-place { display: flex; flex-direction: column; gap: 1px; margin-bottom: 8px; }
 .kept-place > span:first-child { font-weight: 600; color: var(--ink); }
 .kept-place .inline-path { color: var(--ink-2); font-size: var(--type-sm); }

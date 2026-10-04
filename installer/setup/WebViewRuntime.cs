@@ -59,6 +59,14 @@ namespace Rewindle.Setup
             return null;
         }
 
+        private static int bootstrapperRunning;
+
+        // True while Microsoft's installer may be running: Setup can't stop it once started, so the window must not close then.
+        public static bool BootstrapperRunning
+        {
+            get { return Volatile.Read(ref bootstrapperRunning) != 0; }
+        }
+
         // Downloads, verifies and installs the runtime. `report` gets a plain sentence and, while the size is known, a fraction
         // from 0 to 1 (negative when there is nothing to measure). Blocks; run it off the UI thread. Throws SetupFailure with a
         // sentence for the person, and ElevationDeclinedException when Windows asked for permission and was refused.
@@ -80,9 +88,19 @@ namespace Rewindle.Setup
                         "The download didn’t pass Microsoft’s signature check, so Setup did not run it. " + signerProblem);
                 }
 
-                cancel.ThrowIfCancellationRequested();
-                report("Installing the runtime… this can take a minute.", -1);
-                Run(bootstrapper);
+                // Raised before the last cancellation check, so a window that cancels and then looks at BootstrapperRunning
+                // either stops this before Microsoft's installer starts or sees that it has started.
+                Interlocked.Exchange(ref bootstrapperRunning, 1);
+                try
+                {
+                    cancel.ThrowIfCancellationRequested();
+                    report("Installing the runtime… this can take a minute.", -1);
+                    Run(bootstrapper);
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref bootstrapperRunning, 0);
+                }
 
                 if (InstalledVersion() == null)
                 {
