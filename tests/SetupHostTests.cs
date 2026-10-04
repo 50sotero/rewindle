@@ -1079,6 +1079,8 @@ switch ($mode) {
             public BundleLaunch Bundle;
             public int Starts;
             public bool ProtectedFeed;
+            // When set, the feed is created first and given this owner (the real installer's is Administrators when elevated).
+            public SecurityIdentifier FeedOwner;
 
             // The fake writes the feed as the current user; ProtectedFeed asks the operation to require Administrators' ownership.
             public bool FeedOwnedByAdministrators
@@ -1098,28 +1100,40 @@ switch ($mode) {
                 string progress = powershellArguments[powershellArguments.IndexOf("-ProgressPath") + 1];
                 FakeProcess process = new FakeProcess();
                 process.Exit = Exit;
-                if (Hold != null)
-                {
-                    process.Release = new ManualResetEvent(false);
-                }
+                // Like the real installer, the fake ends only once its last line is written (and, with Hold, once released), so a
+                // busy test machine can't make it end before its lines are on disk.
+                process.Release = new ManualResetEvent(false);
                 ManualResetEvent hold = Hold;
                 ManualResetEvent release = process.Release;
                 string[] lines = Lines;
-                Task.Factory.StartNew(delegate
-                {
-                    // Written like the real installer writes: after the process has started, one line at a time, the file created on the first.
-                    Thread.Sleep(60);
-                    foreach (string line in lines)
+                SecurityIdentifier owner = FeedOwner;
+                Task.Factory.StartNew(
+                    delegate
                     {
-                        File.AppendAllText(progress, line + "\r\n", new UTF8Encoding(false));
-                        Thread.Sleep(30);
-                    }
-                    if (hold != null)
-                    {
-                        hold.WaitOne(10000);
+                        // Written like the real installer writes: after the process has started, one line at a time, the file created on
+                        // the first (or, with an owner, created empty with that owner first).
+                        Thread.Sleep(60);
+                        if (owner != null)
+                        {
+                            File.WriteAllText(progress, string.Empty);
+                            FileSecurity security = File.GetAccessControl(progress);
+                            security.SetOwner(owner);
+                            File.SetAccessControl(progress, security);
+                        }
+                        foreach (string line in lines)
+                        {
+                            File.AppendAllText(progress, line + "\r\n", new UTF8Encoding(false));
+                            Thread.Sleep(30);
+                        }
+                        if (hold != null)
+                        {
+                            hold.WaitOne(10000);
+                        }
                         release.Set();
-                    }
-                });
+                    },
+                    CancellationToken.None,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default);
                 return process;
             }
         }
@@ -1222,16 +1236,30 @@ switch ($mode) {
                     "a success line with a failing exit code is a failure");
             }
 
-            // 4c. A feed not owned by Administrators (here: written as the current user) is not trusted, whatever it says.
+            // 4c. A feed not owned by Administrators (here: owned by the current user) is not trusted, whatever it says.
             {
                 Events events = new Events();
                 FakeLauncher launcher = new FakeLauncher();
                 launcher.ProtectedFeed = true;
+                launcher.FeedOwner = WindowsIdentity.GetCurrent().User;
                 launcher.Lines = new string[] { PhaseLine, OkResult };
                 SetupOperation operation = make(SetupOperation.Install, new FakePlans(), launcher, events, null);
                 operation.Run(SampleInputs());
                 Check(events.Names().Last() == "finished:failed" && ((string)events.Finished()["message"]).Contains("couldn’t confirm") &&
                     !events.Names().Contains("operationLine"), "a feed another account owns is neither shown nor believed");
+            }
+
+            // 4d. One owned by Administrators is (it can be made only when elevated, as on the build machine).
+            if (new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator))
+            {
+                Events events = new Events();
+                FakeLauncher launcher = new FakeLauncher();
+                launcher.ProtectedFeed = true;
+                launcher.FeedOwner = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+                launcher.Lines = new string[] { PhaseLine, OkResult };
+                SetupOperation operation = make(SetupOperation.Install, new FakePlans(), launcher, events, null);
+                operation.Run(SampleInputs());
+                Check(events.Names().Last() == "finished:succeeded", "a feed owned by Administrators is believed");
             }
 
             // 5. The installer ends without a result line.
@@ -1664,6 +1692,43 @@ switch ($mode) {
             File.WriteAllBytes(unsigned, new byte[] { 0x4D, 0x5A, 0x90, 0x00 });
             Check(!WebViewRuntime.IsSignedByMicrosoft(unsigned, out problem) && !string.IsNullOrEmpty(problem), "an unsigned file is refused: " + problem);
             Check(!WebViewRuntime.IsSignedByMicrosoft(Path.Combine(root, "missing.exe"), out problem), "a missing file is refused");
+
+            // The download is held from the check until Microsoft's installer ends, and named by its resolved path: reached through a
+            // junction (which could be pointed elsewhere at any time), it is checked and started from the real folder, and while
+            // held nothing can change, delete or rename it or its folder.
+            string folder = NewFolder("bootstrapper");
+            string real = Path.Combine(folder, "real");
+            Directory.CreateDirectory(real);
+            string downloaded = Path.Combine(real, "MicrosoftEdgeWebview2Setup.exe");
+            File.Copy(File.Exists(compiler) ? compiler : unsigned, downloaded);
+            string link = Path.Combine(folder, "link");
+            System.Diagnostics.ProcessStartInfo junction = new System.Diagnostics.ProcessStartInfo("cmd.exe", "/d /c mklink /J \"" + link + "\" \"" + real + "\"");
+            junction.UseShellExecute = false;
+            junction.CreateNoWindow = true;
+            using (System.Diagnostics.Process mklink = System.Diagnostics.Process.Start(junction))
+            {
+                mklink.WaitForExit();
+                Check(mklink.ExitCode == 0, "a junction for the test is made");
+            }
+            string resolved;
+            using (FileStream held = WebViewRuntime.Hold(Path.Combine(link, "MicrosoftEdgeWebview2Setup.exe"), out resolved))
+            {
+                Check(string.Equals(resolved, Path.GetFullPath(downloaded), StringComparison.OrdinalIgnoreCase),
+                    "a file reached through a junction is named by its real path (" + resolved + ")");
+                if (File.Exists(compiler))
+                {
+                    Check(WebViewRuntime.IsSignedByMicrosoft(resolved, held.SafeFileHandle, out problem), "a held Microsoft-signed program passes (" + problem + ")");
+                }
+                Throws<Exception>(delegate { File.OpenWrite(downloaded).Dispose(); }, "a held file can't be written");
+                Throws<Exception>(delegate { File.Delete(downloaded); }, "a held file can't be deleted");
+                Throws<Exception>(delegate { File.Move(downloaded, downloaded + ".old"); }, "a held file can't be renamed");
+                Throws<Exception>(delegate { Directory.Move(real, real + "-old"); }, "the folder of a held file can't be renamed");
+                File.OpenRead(downloaded).Dispose();
+                Check(true, "a held file can still be read");
+            }
+            File.Delete(downloaded);
+            Check(!File.Exists(downloaded), "once released, the file can be deleted");
+            Throws<SetupFailure>(delegate { string ignored; WebViewRuntime.Hold(downloaded, out ignored).Dispose(); }, "a missing download is refused, not run");
             Check(WebViewRuntime.BootstrapperAddress.StartsWith("https://go.microsoft.com/"), "the bootstrapper's address is Microsoft's, over https");
             string version = WebViewRuntime.InstalledVersion();
             Check(version == null || version.Contains("."), "the installed runtime version is null or a version number (" + (version ?? "none") + ")");

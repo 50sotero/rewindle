@@ -247,7 +247,14 @@ class HostHardeningTests(unittest.TestCase):
         runtime = read(SETUP / "WebViewRuntime.cs")
         self.assertIn("https://go.microsoft.com/fwlink/p/?LinkId=2124703", runtime)
         self.assertIn("https://go.microsoft.com/fwlink/p/?LinkId=2124703", read(PROJECT / "installer" / "Install-ResticBackuper.ps1"))
-        self.assertLess(runtime.index("IsSignedByMicrosoft(bootstrapper"), runtime.index("Run(bootstrapper)"))
+        # Held open from the check to the run, and checked and run by its resolved path, so what runs is what was checked.
+        hold = runtime.index("using (FileStream held = Hold(bootstrapper, out resolved))")
+        check = runtime.index("IsSignedByMicrosoft(resolved, held.SafeFileHandle")
+        self.assertLess(hold, check)
+        self.assertLess(check, runtime.index("Run(resolved)"))
+        self.assertNotIn("Run(bootstrapper)", runtime)
+        self.assertIn("FileShare.Read)", runtime)
+        self.assertIn("GetFinalPathNameByHandle", runtime)
         self.assertIn("WinVerifyTrust", runtime)
 
     def test_project_links_are_the_projects_own(self) -> None:

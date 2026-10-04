@@ -5,15 +5,18 @@ using System.IO;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using System.Threading;
 using Microsoft.Win32;
+using Microsoft.Win32.SafeHandles;
 
 namespace Rewindle.Setup
 {
     // The Microsoft Edge WebView2 Runtime, which draws the wizard. It is not part of this program's own libraries (those are the
     // SDK), so on a PC without it Setup offers to install it, the same way the installer does (Ensure-WebView2Runtime in
     // Install-ResticBackuper.ps1): download Microsoft's Evergreen bootstrapper from its fixed address, accept it only if it carries
-    // a valid Microsoft signature, and run it silently. It touches nothing of the web view's own types, so it works without them.
+    // a valid Microsoft signature, and run it silently, holding the checked file so that what runs is exactly what was checked. It
+    // touches nothing of the web view's own types, so it works without them.
     internal static class WebViewRuntime
     {
         // The fixed address of Microsoft's bootstrapper, the one the installer and the dashboard use. Nothing the page or any file
@@ -78,28 +81,36 @@ namespace Rewindle.Setup
                 report("Downloading the runtime from Microsoft…", -1);
                 Download(bootstrapper, cancel, report);
 
+                // The download lies in the person's own temporary folder, where another program running as them could swap it
+                // between the check and the start. From the check until Microsoft's installer has finished, the file is therefore
+                // held open (nothing can change, delete or rename it, or any folder above it), and it is checked and started by
+                // its resolved path, which keeps naming this very file.
                 report("Checking Microsoft’s signature…", -1);
-                string signerProblem;
-                if (!IsSignedByMicrosoft(bootstrapper, out signerProblem))
+                string resolved;
+                using (FileStream held = Hold(bootstrapper, out resolved))
                 {
-                    SetupLog.Write("The WebView2 bootstrapper was rejected: " + signerProblem);
-                    throw new SetupFailure(
-                        "signature_rejected",
-                        "The download didn’t pass Microsoft’s signature check, so Setup did not run it. " + signerProblem);
-                }
+                    string signerProblem;
+                    if (!IsSignedByMicrosoft(resolved, held.SafeFileHandle, out signerProblem))
+                    {
+                        SetupLog.Write("The WebView2 bootstrapper was rejected: " + signerProblem);
+                        throw new SetupFailure(
+                            "signature_rejected",
+                            "The download didn’t pass Microsoft’s signature check, so Setup did not run it. " + signerProblem);
+                    }
 
-                // Raised before the last cancellation check, so a window that cancels and then looks at BootstrapperRunning
-                // either stops this before Microsoft's installer starts or sees that it has started.
-                Interlocked.Exchange(ref bootstrapperRunning, 1);
-                try
-                {
-                    cancel.ThrowIfCancellationRequested();
-                    report("Installing the runtime… this can take a minute.", -1);
-                    Run(bootstrapper);
-                }
-                finally
-                {
-                    Interlocked.Exchange(ref bootstrapperRunning, 0);
+                    // Raised before the last cancellation check, so a window that cancels and then looks at BootstrapperRunning
+                    // either stops this before Microsoft's installer starts or sees that it has started.
+                    Interlocked.Exchange(ref bootstrapperRunning, 1);
+                    try
+                    {
+                        cancel.ThrowIfCancellationRequested();
+                        report("Installing the runtime… this can take a minute.", -1);
+                        Run(resolved);
+                    }
+                    finally
+                    {
+                        Interlocked.Exchange(ref bootstrapperRunning, 0);
+                    }
                 }
 
                 if (InstalledVersion() == null)
@@ -187,6 +198,74 @@ namespace Rewindle.Setup
             }
         }
 
+        // Opens the file for reading and lets others only read it: while the returned stream is open, nothing can write, delete or
+        // rename the file, nor rename or delete any folder above it. `resolved` is the file's path with every link and junction on
+        // the way followed; a junction could be pointed elsewhere at any time, but the folders of the resolved path can't change.
+        internal static FileStream Hold(string path, out string resolved)
+        {
+            FileStream held;
+            try
+            {
+                held = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            }
+            catch (Exception error)
+            {
+                if (!(error is IOException) && !(error is UnauthorizedAccessException))
+                {
+                    throw;
+                }
+                SetupLog.Write("The WebView2 bootstrapper could not be held for checking", error);
+                throw new SetupFailure(
+                    "runtime_changed",
+                    "Another program was using or changing the download, so Setup did not run it. Try again.");
+            }
+            try
+            {
+                resolved = ResolvedPath(held.SafeFileHandle);
+                return held;
+            }
+            catch
+            {
+                held.Dispose();
+                throw;
+            }
+        }
+
+        private static string ResolvedPath(SafeFileHandle file)
+        {
+            StringBuilder buffer = new StringBuilder(1024);
+            uint length = GetFinalPathNameByHandle(file, buffer, (uint)buffer.Capacity, 0);
+            string resolved = length > 0 && length < buffer.Capacity ? buffer.ToString() : null;
+            if (resolved != null && resolved.StartsWith(@"\\?\UNC\", StringComparison.Ordinal))
+            {
+                resolved = @"\\" + resolved.Substring(8);
+            }
+            else if (resolved != null && resolved.StartsWith(@"\\?\", StringComparison.Ordinal))
+            {
+                resolved = resolved.Substring(4);
+            }
+            // Started without the \\?\ prefix, the path must still mean exactly this file.
+            bool exact;
+            try
+            {
+                exact = resolved != null && string.Equals(Path.GetFullPath(resolved), resolved, StringComparison.Ordinal);
+            }
+            catch (Exception error)
+            {
+                if (!(error is ArgumentException) && !(error is NotSupportedException) && !(error is PathTooLongException))
+                {
+                    throw;
+                }
+                exact = false;
+            }
+            if (!exact)
+            {
+                SetupLog.Write("The WebView2 bootstrapper's resolved path was unusable: " + (resolved ?? "(none)"));
+                throw new SetupFailure("runtime_path", "Setup couldn’t tell exactly where it saved the download, so it did not run it.");
+            }
+            return resolved;
+        }
+
         private static void Run(string bootstrapper)
         {
             ProcessStartInfo startInfo = new ProcessStartInfo();
@@ -257,8 +336,14 @@ namespace Rewindle.Setup
         // makes with Get-AuthenticodeSignature (status Valid, signer subject naming Microsoft).
         public static bool IsSignedByMicrosoft(string path, out string problem)
         {
+            return IsSignedByMicrosoft(path, null, out problem);
+        }
+
+        // With `file`, the signature is read through that open handle to the file at `path`.
+        internal static bool IsSignedByMicrosoft(string path, SafeFileHandle file, out string problem)
+        {
             problem = null;
-            int trust = VerifyTrust(path);
+            int trust = VerifyTrust(path, file);
             if (trust != 0)
             {
                 problem = trust == unchecked((int)0x800B0100)
@@ -285,15 +370,21 @@ namespace Rewindle.Setup
         }
 
         // WinVerifyTrust with the generic Authenticode policy and no user interface. Zero means the signature is valid and trusted.
-        private static int VerifyTrust(string path)
+        private static int VerifyTrust(string path, SafeFileHandle file)
         {
             Guid action = new Guid("00AAC56B-CD44-11d0-8CC2-00C04FC295EE");
             WintrustFileInfo fileInfo = new WintrustFileInfo();
             fileInfo.cbStruct = (uint)Marshal.SizeOf(typeof(WintrustFileInfo));
             fileInfo.pcwszFilePath = path;
+            bool referenced = false;
             IntPtr fileInfoPointer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WintrustFileInfo)));
             try
             {
+                if (file != null)
+                {
+                    file.DangerousAddRef(ref referenced);
+                    fileInfo.hFile = file.DangerousGetHandle();
+                }
                 Marshal.StructureToPtr(fileInfo, fileInfoPointer, false);
                 WintrustData data = new WintrustData();
                 data.cbStruct = (uint)Marshal.SizeOf(typeof(WintrustData));
@@ -313,6 +404,10 @@ namespace Rewindle.Setup
                 // Frees the path string the structure copy holds, then the structure's own memory.
                 Marshal.DestroyStructure(fileInfoPointer, typeof(WintrustFileInfo));
                 Marshal.FreeHGlobal(fileInfoPointer);
+                if (referenced)
+                {
+                    file.DangerousRelease();
+                }
             }
         }
 
@@ -346,5 +441,8 @@ namespace Rewindle.Setup
 
         [DllImport("wintrust.dll", ExactSpelling = true, CharSet = CharSet.Unicode)]
         private static extern int WinVerifyTrust(IntPtr window, ref Guid action, ref WintrustData data);
+
+        [DllImport("kernel32.dll", EntryPoint = "GetFinalPathNameByHandleW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, uint capacity, uint flags);
     }
 }
