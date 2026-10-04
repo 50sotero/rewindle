@@ -46,7 +46,19 @@ export interface Choices {
 
 export interface FolderSize {
   bytes: number; files: number; placeholderFiles: number; placeholderBytes: number; skippedFolders: number; done: boolean; error: string | null;
+  /** A re-check of a folder that had online-only files is still running: its streamed counts start again from zero. */
+  placeholderPending: boolean;
 }
+
+/**
+ * Whether a folder holds online-only (cloud placeholder) files. The installed engine refuses such a folder on every backup
+ * (cloud_placeholder_policy "strict"), so setup does not go on while one is chosen.
+ */
+export const hasOnlineOnlyFiles = (size: FolderSize | undefined) => !!size && (size.placeholderFiles > 0 || size.placeholderPending);
+
+/** The chosen folders that hold online-only files. */
+export const onlineOnlyPaths = (choices: Choices, sizes: Record<string, FolderSize>) =>
+  selectedPaths(choices).filter(path => hasOnlineOnlyFiles(sizes[path.toLowerCase()]));
 
 export interface OperationState {
   operation: Operation;
@@ -228,10 +240,16 @@ export function useWizard() {
     if (message.event === 'theme') setTheme(message.data);
     else if (message.event === 'measure') {
       const update: MeasureUpdate = message.data;
-      setSizes(current => ({ ...current, [update.path.toLowerCase()]: {
-        bytes: update.bytes, files: update.files, placeholderFiles: update.placeholderFiles, placeholderBytes: update.placeholderBytes,
-        skippedFolders: update.skippedFolders, done: update.done, error: update.error,
-      } }));
+      setSizes(current => {
+        const key = update.path.toLowerCase();
+        const before = current[key];
+        // Until a re-check finishes, a folder that had online-only files keeps counting as having them.
+        const pending = !update.done && !!before && (before.placeholderFiles > 0 || before.placeholderPending);
+        return { ...current, [key]: {
+          bytes: update.bytes, files: update.files, placeholderFiles: update.placeholderFiles, placeholderBytes: update.placeholderBytes,
+          skippedFolders: update.skippedFolders, done: update.done, error: update.error, placeholderPending: pending,
+        } };
+      });
     } else if (message.event === 'operationStage') {
       setOperation(current => current && current.operation === message.data.operation ? { ...current, stage: message.data.stage, cancelling: false } : current);
     } else if (message.event === 'operationLine') {
@@ -289,7 +307,7 @@ export function useWizard() {
       // Sizes are a convenience: a folder that cannot be measured just shows no size.
       setSizes(current => {
         const next = { ...current };
-        fresh.forEach(path => { next[path.toLowerCase()] = { bytes: 0, files: 0, placeholderFiles: 0, placeholderBytes: 0, skippedFolders: 0, done: true, error: 'Size unavailable' }; });
+        fresh.forEach(path => { next[path.toLowerCase()] = { bytes: 0, files: 0, placeholderFiles: 0, placeholderBytes: 0, skippedFolders: 0, done: true, error: 'Size unavailable', placeholderPending: false }; });
         return next;
       });
     });
@@ -417,6 +435,21 @@ export function useWizard() {
     },
     setSchedule: (schedule: string) => update(current => ({ ...current, schedule })),
     setScheduleDraftValid,
+    /** Measures folders again, for example after their online-only files were made available on this PC. */
+    recheckFolders: (paths: string[]) => {
+      // Show the re-check at once (the first streamed count can take a moment), keeping any online-only files counted until it ends.
+      setSizes(current => {
+        const next = { ...current };
+        for (const path of paths) {
+          const key = path.toLowerCase();
+          const before = next[key];
+          if (before) next[key] = { ...before, done: false, placeholderPending: before.placeholderFiles > 0 || before.placeholderPending };
+        }
+        return next;
+      });
+      paths.forEach(path => measured.current.delete(path.toLowerCase()));
+      measure(paths);
+    },
     setVss: (vss: boolean) => update(current => ({ ...current, vss })),
     setStartBackup: (startBackup: boolean) => update(current => ({ ...current, startBackup })),
     dismissNotice: () => setNotice(null),

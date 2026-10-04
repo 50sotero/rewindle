@@ -4,7 +4,7 @@ import { Button } from '@/components/atoms/Button';
 import { issuesFor } from '../contract';
 import { driveLetter, folderName, formatBytes, formatTime, plural, samePath } from '../format';
 import { Callout, IssueList, Spinner, Switch } from '../ui';
-import { selectedPaths, selectedTotal, type Screen, type Wizard } from '../useWizard';
+import { onlineOnlyPaths, selectedPaths, selectedTotal, type Screen, type Wizard } from '../useWizard';
 import { driveName } from './Location';
 
 function Row({ icon, title, edit, onEdit, children }: { icon: ReactNode; title: string; edit: string; onEdit: () => void; children: ReactNode }) {
@@ -33,6 +33,8 @@ export function Review({ wizard }: { wizard: Wizard }) {
   const volume = environment.volumes.find(item => samePath(item.root, choices.driveRoot));
   const go = (screen: Screen) => () => wizard.goTo(screen);
   const all = issuesFor(plan, 'environment', 'sources', 'repository', 'storage_mode', 'schedule');
+  // A folder measured after What to protect was left can turn out to hold online-only files; Install waits for them too.
+  const onlineOnly = onlineOnlyPaths(choices, wizard.sizes);
 
   return (
     <div className="screen-stack">
@@ -73,6 +75,13 @@ export function Review({ wizard }: { wizard: Wizard }) {
         </div>
       </div>
 
+      {onlineOnly.length > 0 && (
+        <Callout tone="error" title="Some folders have online-only files">
+          {onlineOnly.map(path => choices.folders.find(folder => samePath(folder.path, path))?.key ?? folderName(path)).join(', ')}{' '}
+          {onlineOnly.length === 1 ? 'has' : 'have'} files that are only in the cloud, so backups of {onlineOnly.length === 1 ? 'it' : 'them'} would fail.{' '}
+          <button type="button" className="text-link" onClick={go('folders')}>Go to What to protect</button> to fix this.
+        </Callout>
+      )}
       <IssueList errors={all.errors} warnings={all.warnings} />
       {wizard.validation.error && <Callout tone="warning" title="Setup couldn’t check your choices">{wizard.validation.error} They will be checked again when you choose Install.</Callout>}
     </div>

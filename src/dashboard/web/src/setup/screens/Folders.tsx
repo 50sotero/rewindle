@@ -4,7 +4,7 @@ import { Button } from '@/components/atoms/Button';
 import { issuesFor, type KnownFolderKey } from '../contract';
 import { folderName, formatBytes, formatCount, plural, samePath } from '../format';
 import { IssueList, Spinner } from '../ui';
-import { selectedTotal, type FolderChoice, type FolderSize, type Wizard } from '../useWizard';
+import { hasOnlineOnlyFiles, selectedTotal, type FolderChoice, type FolderSize, type Wizard } from '../useWizard';
 
 const ICONS: Record<KnownFolderKey, ComponentType<{ size?: number; 'aria-hidden'?: boolean }>> = {
   Desktop: Monitor, Documents: FileText, Pictures: Image, Music, Videos: Clapperboard, Downloads: Download, Favorites: Star,
@@ -51,7 +51,8 @@ export function Folders({ wizard }: { wizard: Wizard }) {
   const total = selectedTotal(choices, wizard.sizes);
   const { errors, warnings } = issuesFor(wizard.validation.plan, 'sources');
   const sizeOf = (folder: FolderChoice) => wizard.sizes[folder.path.toLowerCase()];
-  const placeholders = choices.folders.filter(folder => folder.selected && (sizeOf(folder)?.placeholderFiles ?? 0) > 0);
+  const placeholders = choices.folders.filter(folder => folder.selected && hasOnlineOnlyFiles(sizeOf(folder)));
+  const checking = placeholders.some(folder => sizeOf(folder)?.placeholderPending);
   const denied = choices.folders.filter(folder => folder.selected && (sizeOf(folder)?.skippedFolders ?? 0) > 0);
   const selectedCount = choices.folders.filter(folder => folder.selected && folder.exists).length;
 
@@ -97,14 +98,26 @@ export function Folders({ wizard }: { wizard: Wizard }) {
       </section>
 
       {placeholders.length > 0 && (
-        <p className="callout is-warning">
+        // Not just a warning: the installed engine refuses a folder with online-only files on every backup, so setup waits
+        // until they are on this PC (then Check again) or the folder is no longer protected.
+        <div className="callout is-error" role="alert">
           <CloudOff size={16} aria-hidden="true" />
           <span>
             {placeholders.map(folder => folder.key ?? folderName(folder.path)).join(', ')} {placeholders.length === 1 ? 'has' : 'have'}{' '}
-            {plural(placeholders.reduce((sum, folder) => sum + (sizeOf(folder)?.placeholderFiles ?? 0), 0), 'online-only file', 'online-only files')}.
-            {' '}Rewindle can only back up files that are stored on this PC. In OneDrive, choose “Always keep on this device” for {placeholders.length === 1 ? 'that folder' : 'those folders'}.
+            {checking ? 'online-only files. Checking again…' : `${plural(placeholders.reduce((sum, folder) => sum + (sizeOf(folder)?.placeholderFiles ?? 0), 0), 'online-only file', 'online-only files')}.`}
+            {' '}Rewindle can only back up files stored on this PC, so backups of {placeholders.length === 1 ? 'that folder' : 'those folders'} would fail.
+            {' '}In OneDrive, right-click {placeholders.length === 1 ? 'the folder' : 'each folder'}, choose “Always keep on this device”, wait for the files to download, then choose Check again.
           </span>
-        </p>
+          <div className="issue-action issue-action-group">
+            <Button size="sm" className="issue-action" disabled={checking} onClick={() => wizard.actions.recheckFolders(placeholders.map(folder => folder.path))}>Check again</Button>
+            {placeholders.map(folder => {
+              const name = folder.key ?? folderName(folder.path);
+              return folder.custom
+                ? <Button key={folder.path} size="sm" className="issue-action" onClick={() => wizard.actions.removeFolder(folder.path)}>Remove {name}</Button>
+                : <Button key={folder.path} size="sm" className="issue-action" onClick={() => wizard.actions.toggleFolder(folder.path)}>Don’t protect {name}</Button>;
+            })}
+          </div>
+        </div>
       )}
       {denied.length > 0 && (
         <p className="callout is-info">

@@ -10,7 +10,7 @@ import LoadingState from '@/components/primitives/LoadingState';
 import { issuesFor, SCHEDULE_PATTERN } from './contract';
 import { formatBytes, plural } from './format';
 import { ConfirmDialog, ShieldIcon, Spinner } from './ui';
-import { CHOICE_STEPS, STEPS, phaseTitle, selectedPaths, selectedTotal, useWizard, type Screen, type Wizard } from './useWizard';
+import { CHOICE_STEPS, STEPS, onlineOnlyPaths, phaseTitle, selectedPaths, selectedTotal, useWizard, type Screen, type Wizard } from './useWizard';
 import { Welcome } from './screens/Welcome';
 import { Folders } from './screens/Folders';
 import { Location } from './screens/Location';
@@ -121,9 +121,10 @@ export default function SetupApp() {
         const total = selectedTotal(choices!, wizard.sizes);
         const count = selectedPaths(choices!).length;
         const errors = issuesFor(plan, 'sources').errors.length > 0;
+        const onlineOnly = onlineOnlyPaths(choices!, wizard.sizes).length > 0;
         return {
-          back: back('welcome'), next: next('location', count === 0 || errors),
-          hint: count === 0 ? 'Choose at least one folder' : <>{total.measuring && <Spinner size={12} />}<span>{plural(count, 'folder', 'folders')} · {formatBytes(total.bytes, wizard.host?.locale)}</span></>,
+          back: back('welcome'), next: next('location', count === 0 || errors || onlineOnly),
+          hint: count === 0 ? 'Choose at least one folder' : onlineOnly ? 'Online-only files must be on this PC first' : <>{total.measuring && <Spinner size={12} />}<span>{plural(count, 'folder', 'folders')} · {formatBytes(total.bytes, wizard.host?.locale)}</span></>,
         };
       }
       case 'location': {
@@ -135,7 +136,7 @@ export default function SetupApp() {
         return { back: back('location'), next: next('review', !SCHEDULE_PATTERN.test(choices?.schedule ?? '') || !wizard.scheduleDraftValid || errors) };
       }
       case 'review': {
-        const blocked = (plan?.errors.length ?? 0) > 0 || selectedPaths(choices!).length === 0;
+        const blocked = (plan?.errors.length ?? 0) > 0 || selectedPaths(choices!).length === 0 || onlineOnlyPaths(choices!, wizard.sizes).length > 0;
         return {
           back: back('schedule'),
           next: { label: 'Install', icon: <ShieldIcon size={16} />, onClick: () => void wizard.install(), disabled: blocked, variant: 'primary' },
