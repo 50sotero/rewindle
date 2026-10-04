@@ -260,7 +260,7 @@ export function installSetupSampleBridge(): void {
       }
       line({
         phase, state: 'completed', title,
-        detail: phase === 'webview2' ? 'Already installed' : phase === 'repository' ? 'Created a new, empty backup location' : phase === 'first_backup' ? 'Your first backup is running in the background.' : null,
+        detail: phase === 'webview2' ? 'Already installed' : phase === 'repository' ? 'Created a new, empty backup location' : phase === 'first_backup' ? 'Windows started your first backup.' : null,
       });
     }
     const result = kind === 'install' ? {

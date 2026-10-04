@@ -54,6 +54,9 @@ export interface FolderSize {
  * Whether a folder holds online-only (cloud placeholder) files. The installed engine refuses such a folder on every backup
  * (cloud_placeholder_policy "strict"), so setup does not go on while one is chosen.
  */
+// The host measures at most this many folders per request (SetupBridge.MaximumMeasuredPaths); the wizard allows 64.
+const MEASURE_BATCH = 32;
+
 export const hasOnlineOnlyFiles = (size: FolderSize | undefined) => !!size && (size.placeholderFiles > 0 || size.placeholderPending);
 
 /** The chosen folders that hold online-only files. */
@@ -246,7 +249,10 @@ export function useWizard() {
         // Until a re-check finishes, a folder that had online-only files keeps counting as having them.
         const pending = !update.done && !!before && (before.placeholderFiles > 0 || before.placeholderPending);
         return { ...current, [key]: {
-          bytes: update.bytes, files: update.files, placeholderFiles: update.placeholderFiles, placeholderBytes: update.placeholderBytes,
+          bytes: update.bytes, files: update.files,
+          // The last known count stays until the re-check's own count is final, so evidence is never lost mid-way.
+          placeholderFiles: pending ? Math.max(update.placeholderFiles, before.placeholderFiles) : update.placeholderFiles,
+          placeholderBytes: pending ? Math.max(update.placeholderBytes, before.placeholderBytes) : update.placeholderBytes,
           skippedFolders: update.skippedFolders, done: update.done, error: update.error, placeholderPending: pending,
         } };
       });
@@ -302,15 +308,28 @@ export function useWizard() {
     const fresh = paths.filter(path => !measured.current.has(path.toLowerCase()));
     if (fresh.length === 0) return;
     fresh.forEach(path => measured.current.add(path.toLowerCase()));
-    const request = `m${++measureSequence.current}`;
-    bridge.request('measureFolders', { request, paths: fresh }).catch(() => {
-      // Sizes are a convenience: a folder that cannot be measured just shows no size.
-      setSizes(current => {
-        const next = { ...current };
-        fresh.forEach(path => { next[path.toLowerCase()] = { bytes: 0, files: 0, placeholderFiles: 0, placeholderBytes: 0, skippedFolders: 0, done: true, error: 'Size unavailable', placeholderPending: false }; });
-        return next;
+    for (let start = 0; start < fresh.length; start += MEASURE_BATCH) {
+      const batch = fresh.slice(start, start + MEASURE_BATCH);
+      const request = `m${++measureSequence.current}`;
+      bridge.request('measureFolders', { request, paths: batch }).catch(() => {
+        // Sizes are a convenience: a folder that cannot be measured just shows no size. Online-only files it was already found
+        // to hold stay counted, though, because they keep setup from going on.
+        setSizes(current => {
+          const next = { ...current };
+          for (const path of batch) {
+            const key = path.toLowerCase();
+            const before = current[key];
+            const onlineOnly = !!before && (before.placeholderFiles > 0 || before.placeholderPending);
+            next[key] = {
+              bytes: before?.bytes ?? 0, files: before?.files ?? 0,
+              placeholderFiles: onlineOnly ? Math.max(before!.placeholderFiles, 1) : 0, placeholderBytes: onlineOnly ? before!.placeholderBytes : 0,
+              skippedFolders: before?.skippedFolders ?? 0, done: true, error: 'Size unavailable', placeholderPending: false,
+            };
+          }
+          return next;
+        });
       });
-    });
+    }
   }, []);
 
   const startRef = useRef<(preferredRepository?: string) => Promise<void>>(async () => undefined);

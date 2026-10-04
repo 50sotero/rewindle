@@ -136,11 +136,16 @@ export default function SetupApp() {
         return { back: back('location'), next: next('review', !SCHEDULE_PATTERN.test(choices?.schedule ?? '') || !wizard.scheduleDraftValid || errors) };
       }
       case 'review': {
-        const blocked = (plan?.errors.length ?? 0) > 0 || selectedPaths(choices!).length === 0 || onlineOnlyPaths(choices!, wizard.sizes).length > 0;
+        // Install also waits for the first scan of every chosen folder: online-only files are only known once the scan reaches
+        // them, and the installed engine refuses such a folder on every backup.
+        const scanning = selectedTotal(choices!, wizard.sizes).measuring;
+        const problems = (plan?.errors.length ?? 0) > 0 || selectedPaths(choices!).length === 0 || onlineOnlyPaths(choices!, wizard.sizes).length > 0;
         return {
           back: back('schedule'),
-          next: { label: 'Install', icon: <ShieldIcon size={16} />, onClick: () => void wizard.install(), disabled: blocked, variant: 'primary' },
-          hint: blocked ? 'Fix the problems above to install' : 'Windows will ask for permission once',
+          next: { label: 'Install', icon: <ShieldIcon size={16} />, onClick: () => void wizard.install(), disabled: problems || scanning, variant: 'primary' },
+          hint: problems ? 'Fix the problems above to install'
+            : scanning ? <><Spinner size={12} /><span>Checking your folders for online-only files…</span></>
+              : 'Windows will ask for permission once',
         };
       }
       case 'installing':

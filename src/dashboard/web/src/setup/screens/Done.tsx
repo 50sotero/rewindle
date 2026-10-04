@@ -26,7 +26,7 @@ export function Done({ wizard }: { wizard: Wizard }) {
         <li>
           <span className="point-icon">{started ? <PlayCircle size={18} aria-hidden="true" /> : <CalendarClock size={18} aria-hidden="true" />}</span>
           <span>
-            {started ? <><strong>Your first backup is running.</strong> It copies everything once, so it can take a while. You can keep using your PC, and closing this window doesn’t stop it.</>
+            {started ? <><strong>Your first backup has started.</strong> It copies everything once, so it can take a while. You can keep using your PC, and closing this window doesn’t stop it. Rewindle shows its progress, and tells you if it can’t finish.</>
               : choices.startBackup ? <><strong>Your first backup didn’t start on its own.</strong> It will run at {formatTime(choices.schedule, locale)}, or open Rewindle and choose Back up now.</>
                 : <><strong>Your first backup runs at {formatTime(choices.schedule, locale)}.</strong> To start it sooner, open Rewindle and choose Back up now.</>}
           </span>
