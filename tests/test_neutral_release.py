@@ -33,7 +33,7 @@ class SingleVersionSourceTests(unittest.TestCase):
         for path in (
             DASHBOARD / "AssemblyInfo.cs",
             PROJECT / "src" / "task_launcher" / "AssemblyInfo.cs",
-            PROJECT / "installer" / "RewindleSetup.cs",
+            PROJECT / "installer" / "setup" / "AssemblyInfo.cs",
         ):
             with self.subTest(path=path.name):
                 text = read(path)
@@ -47,6 +47,7 @@ class SingleVersionSourceTests(unittest.TestCase):
         for script in (
             DASHBOARD / "build.ps1",
             PROJECT / "src" / "task_launcher" / "build.ps1",
+            PROJECT / "installer" / "setup" / "build.ps1",
             PROJECT / "build" / "Build-Release.ps1",
         ):
             with self.subTest(script=script.name):

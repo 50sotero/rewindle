@@ -7,6 +7,58 @@ labels. Releases before 0.2.0 were published under the name ResticBackuper.
 
 ## [Unreleased]
 
+### Added
+
+- A machine-readable backend for setup programs, specified in
+  `docs/setup-contract.md`:
+  - `Install-ResticBackuper.ps1 -PlanOnly -PlanOutput <file>` validates the
+    choices with the same functions a real install uses, changes nothing, needs
+    no elevation and writes one JSON document: errors and warnings with stable
+    codes and plain-language messages, the resolved configuration, defaults,
+    and a description of the PC (drives with an eligibility verdict and a
+    recommended backup drive, Windows and .NET versions, WebView2, Google Drive,
+    an existing installation, the standard folders).
+  - `-Unattended -ExpectedUserSid <sid> -ProgressPath <file>` on the installer
+    and the uninstaller append one JSON line per phase and always end with a
+    result line, including on failure. The installer reports whether the user
+    can read the recovery key, and its new verification phase checks the
+    finished installation.
+- Tests: a hermetic suite for plan mode, the progress feed and the decision
+  functions (`tests/Test-InstallPlan.ps1`), static checks that tie the scripts to
+  the contract (`tests/test_setup_contract.py`), and an end-to-end CI test that
+  really installs and uninstalls on the hosted runner
+  (`tests/Test-InstallerContract.ps1`).
+- **Rewindle Setup wizard.** The setup program is now a graphical wizard
+  (`installer/setup`: a WPF and WebView2 host; the pages are
+  `src/dashboard/web/src/setup`) in place of the console prompts: Welcome, What
+  to protect (folder cards with live sizes), Backup location (drive cards with
+  free space and plain warnings), Schedule, Review, Install, Recovery key and
+  Done, with a maintenance page when Rewindle is already installed. It runs as
+  the person who started it, asks the installer to describe the PC and check
+  the choices without elevation, asks Windows for permission once to run the
+  install, and shows the installer's progress. It offers to install a missing
+  WebView2 Runtime after checking Microsoft's signature on the download.
+- `npm run dev:setup` serves the wizard in a browser with invented sample
+  computers (`?scenario=fresh`, `no-second-drive`, `drivefs`,
+  `existing-install`, `legacy-installed`, `unsupported-os`, `plan-errors`,
+  `install-failure`, `uac-declined`, `key-unreadable`, `goes-online-only`), and
+  `npm run build:setup-demo` makes a static copy. The sample is not part of the
+  setup program; the build checks the bundle for it.
+- `tests\Test-SetupHost.ps1` checks the setup program's logic without starting
+  it or the installer, `tests\Test-SetupWindow.ps1` opens the real window against
+  fakes and takes a screenshot of every page, and CI runs the first.
+
+### Changed
+
+- `-Schedule` is checked in the script body instead of by a parameter attribute,
+  so a plan can report a bad time; a real install still checks it first. A
+  network repository path is now refused before any probe reaches the network.
+- `build\Build-Release.ps1` builds the setup program with
+  `installer\setup\build.ps1`. The ZIP still carries `Install.cmd` for console
+  installs. The WebView2 SDK pin and the deterministic ZIP helper moved to
+  `build\RewindleWebView2.ps1` and `build\RewindleZip.ps1`, shared by the
+  dashboard and setup builds.
+
 ## [0.2.0-alpha.1] - 2026-10-03
 
 The first Rewindle release from this repository: the engine and the Rewindle

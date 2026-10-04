@@ -61,6 +61,32 @@ sample lives in `src/dashboard/web/src/demo/` and is left out of the build that
 ships in the app. Use it for screenshots instead of a real installation, so no
 real folders or history end up in an image.
 
+### The setup wizard
+
+Rewindle Setup (`installer\setup`, with its pages in
+`src\dashboard\web\src\setup`) has the same kind of sample-data mode. It runs
+the wizard in a browser against invented computers and a made-up installer, so
+nothing on your PC is read or changed:
+
+```powershell
+Set-Location src\dashboard\web
+npm run dev:setup    # http://127.0.0.1:5179/?scenario=fresh
+# other computers: ?scenario=no-second-drive | drivefs | existing-install | legacy-installed |
+#   unsupported-os | plan-errors | install-failure | uac-declined | key-unreadable |
+#   goes-online-only (Documents turns online-only after its first scan)
+# also: &theme=dark|light and &motion=reduced
+npm run build:setup-demo   # static copy in src\dashboard\build-output\setup-demo
+```
+
+The sample is imported behind a build-time constant and never reaches
+`npm run build:setup`, the build the setup program embeds;
+`installer\setup\build.ps1` fails if the bundle contains it. The wizard's
+contract with the installer (the plan file and the progress lines) is read in
+`web\src\setup\contract.ts` and, for the command line, in
+`installer\setup\InstallerContract.cs`; both follow `docs\setup-contract.md`
+when it is in your tree. Details are in
+[installer/setup/README.md](installer/setup/README.md).
+
 ## Tests
 
 Run these from PowerShell in the repository root before you open a pull
@@ -76,8 +102,21 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File src\dashboard\tests\rest
 # PowerShell suites for the managers and helpers you touched, for example:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Test-ManageSources.ps1
 
+# The installer's machine-readable backend (plan mode, progress feed): hermetic, installs nothing
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Test-InstallPlan.ps1
+# The setup wizard's host logic (compiles installer\setup without its window; no installer is run)
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Test-SetupHost.ps1
+
 # After a release build: two real backups and an independent restore from the ZIP
 pwsh .\tests\Test-ReleaseArtifact.ps1
+```
+
+To see the real setup window rather than the browser sample, with a stand-in
+for the installer (it needs a desktop and the WebView2 Runtime, and takes a
+screenshot of every page):
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Test-SetupWindow.ps1 -Output "$env:TEMP\setup-shots"
 ```
 
 Notes:
@@ -90,8 +129,12 @@ Notes:
   installed backup plan.
 - CI (`.github/workflows/ci.yml`) compiles the Python sources, parses every
   `.ps1` file with the PowerShell parser, and runs the Python tests,
-  `Test-ManageSources.ps1`, the release build, the dashboard regressions and
-  `Test-ReleaseArtifact.ps1`.
+  `Test-ManageSources.ps1`, the release build, `Test-SetupHost.ps1`, the
+  dashboard regressions, `Test-ReleaseArtifact.ps1` and `Test-InstallPlan.ps1`.
+- `tests\Test-InstallerContract.ps1` really installs and uninstalls Rewindle. It
+  refuses to run anywhere but a GitHub-hosted runner (it checks
+  `GITHUB_ACTIONS` and `RUNNER_ENVIRONMENT` and needs `-AllowSystemInstall`),
+  so CI runs it after the release build and you never run it yourself.
 
 To check that your PowerShell parses, as CI does:
 

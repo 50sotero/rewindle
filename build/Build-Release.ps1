@@ -13,10 +13,9 @@ $buildOutputRoot = Join-Path $projectRoot 'build\build-output'
 $bundleRoot = Join-Path $buildOutputRoot 'ResticBackuper'
 $payloadRoot = Join-Path $bundleRoot 'payload'
 $artifactsRoot = Join-Path $projectRoot 'artifacts'
-$framework = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319'
-$compiler = Join-Path $framework 'csc.exe'
 # VERSION is the release's only version; the dashboard, task launcher and setup program take theirs from it too.
 . (Join-Path $projectRoot 'build\RewindleVersion.ps1')
+. (Join-Path $projectRoot 'build\RewindleZip.ps1')
 
 function Write-Utf8NoBom {
     param([string]$Path, [string]$Text)
@@ -173,42 +172,6 @@ function Assert-DashboardAssetsManifest {
     return $manifest
 }
 
-function New-DeterministicZip {
-    param([string]$SourceDirectory, [string]$Destination)
-    Add-Type -AssemblyName System.IO.Compression
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    if (Test-Path -LiteralPath $Destination) {
-        Remove-Item -LiteralPath $Destination -Force
-    }
-    $stream = [IO.File]::Open($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-    try {
-        $archive = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Create, $false)
-        try {
-            $fixedTimestamp = [DateTimeOffset]::new(2026, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
-            foreach ($file in Get-ChildItem -LiteralPath $SourceDirectory -Recurse -File -Force | Sort-Object FullName) {
-                $relative = $file.FullName.Substring($SourceDirectory.Length + 1).Replace('\', '/')
-                $entry = $archive.CreateEntry($relative, [IO.Compression.CompressionLevel]::Optimal)
-                $entry.LastWriteTime = $fixedTimestamp
-                $input = [IO.File]::OpenRead($file.FullName)
-                $output = $entry.Open()
-                try {
-                    $input.CopyTo($output)
-                }
-                finally {
-                    $output.Dispose()
-                    $input.Dispose()
-                }
-            }
-        }
-        finally {
-            $archive.Dispose()
-        }
-    }
-    finally {
-        $stream.Dispose()
-    }
-}
-
 if (-not (Test-Path -LiteralPath $dependenciesPath -PathType Leaf) -or -not (Test-Path -LiteralPath $versionPath -PathType Leaf)) {
     throw 'dependencies.json or VERSION is missing.'
 }
@@ -275,6 +238,13 @@ $dashboardAssetsManifestPath = Join-Path $dashboardOutputRoot 'dashboard-assets.
 $dashboardAssetsManifest = Assert-DashboardAssetsManifest `
     -Root $dashboardOutputRoot `
     -ManifestPath $dashboardAssetsManifestPath
+# The setup wizard's web files are built on their own (installer\setup\build.ps1) and live only inside the setup program, never in the
+# payload the installer deploys: nothing under web\ may be the wizard's page or one of its scripts.
+foreach ($entry in @($dashboardAssetsManifest.files)) {
+    if (([string]$entry.relative_path) -match '^web/(setup|rewindle-setup)') {
+        throw "The dashboard bundle contains a setup wizard file: $($entry.relative_path)"
+    }
+}
 
 foreach ($name in @(
     'backup.py',
@@ -377,35 +347,14 @@ $artifactHash = (Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash
 $checksumPath = $artifactPath + '.sha256'
 Write-Utf8NoBom -Path $checksumPath -Text ("$artifactHash *$artifactName`n")
 
-if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
-    throw "The .NET Framework 4.8 C# compiler is unavailable: $compiler"
-}
 $setupArtifactName = "Rewindle-v$version-windows-x64-setup.exe"
 $setupArtifactPath = Assert-PathWithinProject (Join-Path $artifactsRoot $setupArtifactName)
-$setupSource = Join-Path $projectRoot 'installer\RewindleSetup.cs'
-$setupIcon = Join-Path $projectRoot 'src\dashboard\assets\dashboard-icon.ico'
-$setupArguments = @(
-    '/nologo',
-    '/target:winexe',
-    '/platform:x64',
-    '/optimize+',
-    ('/out:' + $setupArtifactPath),
-    ('/reference:' + (Join-Path $framework 'System.dll')),
-    ('/reference:' + (Join-Path $framework 'System.IO.Compression.dll')),
-    ('/reference:' + (Join-Path $framework 'System.IO.Compression.FileSystem.dll')),
-    ('/reference:' + (Join-Path $framework 'System.Windows.Forms.dll')),
-    ('/resource:' + $artifactPath + ',REWINDLE_BUNDLE')
-)
-if (Test-Path -LiteralPath $setupIcon -PathType Leaf) {
-    $setupArguments += '/win32icon:' + $setupIcon
-}
-$setupVersionSource = Write-RewindleVersionSource -Version $releaseVersion `
-    -Path (Assert-PathWithinProject (Join-Path $buildOutputRoot 'RewindleSetup.Version.g.cs'))
-$setupArguments += $setupVersionSource
-$setupArguments += $setupSource
-& $compiler @setupArguments
+# The setup program (installer\setup) is the graphical wizard: the wizard's web files, the WPF and WebView2 host, the release ZIP just
+# made and the pinned WebView2 libraries, in one executable. It takes its version from VERSION like every other binary; the check below
+# makes sure the file that was written says so. It builds the wizard's web files from the dependencies the dashboard build installed.
+$setupBuild = & (Join-Path $projectRoot 'installer\setup\build.ps1') -BundleArchive $artifactPath -Output $setupArtifactPath
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $setupArtifactPath -PathType Leaf)) {
-    throw "Rewindle setup compilation failed with exit code $LASTEXITCODE."
+    throw "Rewindle setup build failed with exit code $LASTEXITCODE."
 }
 Assert-ReleaseBinaryVersion $setupArtifactPath
 $setupHash = (Get-FileHash -LiteralPath $setupArtifactPath -Algorithm SHA256).Hash.ToLowerInvariant()

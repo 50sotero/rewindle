@@ -16,7 +16,7 @@ concurrency:
 jobs:
   windows-safety-tests:
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
 
     steps:
       - name: Check out source
@@ -80,6 +80,13 @@ jobs:
         shell: pwsh
         run: .\build\Build-Release.ps1
 
+      # Compiles the setup program's logic (installer\setup, without its window) with the .NET Framework compiler and checks the
+      # installer contract, the progress-file reader, ZIP unpacking, folder measurement, plan mode (against a stub script), the
+      # install flow (against a fake launcher) and the message bridge's validation. It never starts the setup program or an installer.
+      - name: Setup host checks
+        shell: powershell
+        run: .\tests\Test-SetupHost.ps1
+
       # Windows PowerShell 5.1 on purpose: the checks load the .NET Framework dashboard just built.
       # -SkipInstalledChecks keeps them from reading any installed backup configuration.
       - name: Dashboard regression checks
@@ -128,3 +135,18 @@ jobs:
       - name: Exercise two real snapshots and an independent restore
         shell: pwsh
         run: .\tests\Test-ReleaseArtifact.ps1
+
+      # The installer's machine-readable backend (docs/setup-contract.md): plan mode, the progress feed writer and the
+      # decision functions. Plan mode is pointed at fixture folders and a fixture temp folder, so nothing is installed and
+      # no real Program Files, ProgramData or profile folder is read. It also runs elevated here; the local run is unelevated.
+      - name: Exercise the installer plan mode and progress feed
+        shell: powershell
+        run: .\tests\Test-InstallPlan.ps1
+
+      # A REAL install and uninstall on this disposable hosted runner, driven the way a setup wizard drives them: plan mode
+      # as a standard user, an unattended install with a progress feed (as a test administrator named by -ExpectedUserSid),
+      # a refused second install, an uninstall with a progress feed, and a check that the machine is clean afterwards. The
+      # script refuses to run anywhere but a GitHub-hosted runner; it uses the release the build step produced.
+      - name: Exercise the installer contract end to end
+        shell: powershell
+        run: .\tests\Test-InstallerContract.ps1 -AllowSystemInstall
