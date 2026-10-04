@@ -745,6 +745,17 @@ namespace Rewindle.Setup.Tests
             File.SetAttributes(cloud, FileAttributes.Normal);
             File.Delete(cloud);
 
+            // A folder that is only in the cloud counts as online-only too, as in the engine's preflight, which classifies every
+            // entry before it decides not to walk a folder.
+            string cloudFolder = Path.Combine(folder, "cloud-folder");
+            Directory.CreateDirectory(cloudFolder);
+            DirectoryInfo cloudFolderInfo = new DirectoryInfo(cloudFolder);
+            cloudFolderInfo.Attributes = FileAttributes.Directory | FileAttributes.Offline;
+            FolderMeasurer.Measure(folder, CancellationToken.None, collect);
+            Check(last.Files == 3 && last.PlaceholderFiles == 1, "an online-only folder is counted as online-only");
+            cloudFolderInfo.Attributes = FileAttributes.Directory;
+            Directory.Delete(cloudFolder);
+
             // A folder that cannot be opened is skipped and counted, and the rest is still measured.
             string denied = Path.Combine(folder, "denied");
             Directory.CreateDirectory(denied);

@@ -37,6 +37,8 @@ namespace Rewindle.Setup
     {
         private const FileAttributes RecallOnOpen = (FileAttributes)0x00040000;
         private const FileAttributes RecallOnDataAccess = (FileAttributes)0x00400000;
+        // The attributes the engine's preflight treats as online-only (CLOUD_ONLY_ATTRIBUTE_MASK in restic_common.py).
+        private const FileAttributes OnlineOnly = RecallOnOpen | RecallOnDataAccess | FileAttributes.Offline;
         private static readonly TimeSpan ReportInterval = TimeSpan.FromMilliseconds(250);
 
         // Walks `path`, calling `report` with the totals so far every quarter of a second and once more, with done = true, at the
@@ -55,6 +57,11 @@ namespace Rewindle.Setup
                 {
                     report(totals, true, "This folder can’t be found.");
                     return;
+                }
+                if ((root.Attributes & OnlineOnly) != 0)
+                {
+                    // An online-only folder itself: the engine's preflight classifies the folder first and refuses it.
+                    totals.PlaceholderFiles++;
                 }
                 if ((root.Attributes & FileAttributes.ReparsePoint) != 0)
                 {
@@ -94,6 +101,13 @@ namespace Rewindle.Setup
                         FileAttributes attributes = entry.Attributes;
                         if ((attributes & FileAttributes.Directory) != 0)
                         {
+                            // A folder can be online-only too (OneDrive marks it as a reparse point as well), and the engine's
+                            // preflight classifies every entry, folders included, before it decides not to walk one, so it is
+                            // counted here before the link check below skips it.
+                            if ((attributes & OnlineOnly) != 0)
+                            {
+                                totals.PlaceholderFiles++;
+                            }
                             // A link is not walked: its target is somewhere else, or the folder itself.
                             if ((attributes & FileAttributes.ReparsePoint) == 0)
                             {
@@ -115,7 +129,7 @@ namespace Rewindle.Setup
                         }
                         totals.Files++;
                         totals.Bytes += length;
-                        if ((attributes & (RecallOnOpen | RecallOnDataAccess | FileAttributes.Offline)) != 0)
+                        if ((attributes & OnlineOnly) != 0)
                         {
                             totals.PlaceholderFiles++;
                             totals.PlaceholderBytes += length;
