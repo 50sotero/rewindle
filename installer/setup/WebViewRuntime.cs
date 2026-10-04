@@ -5,7 +5,6 @@ using System.IO;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography.X509Certificates;
-using System.Text;
 using System.Threading;
 using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
@@ -198,15 +197,13 @@ namespace Rewindle.Setup
             }
         }
 
-        // Opens the file for reading and lets others only read it: while the returned stream is open, nothing can write, delete or
-        // rename the file, nor rename or delete any folder above it. `resolved` is the file's path with every link and junction on
-        // the way followed; a junction could be pointed elsewhere at any time, but the folders of the resolved path can't change.
+        // Holds the download (see HeldFile) and gives its resolved path, from which it is checked and started.
         internal static FileStream Hold(string path, out string resolved)
         {
             FileStream held;
             try
             {
-                held = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                held = HeldFile.Open(path);
             }
             catch (Exception error)
             {
@@ -233,34 +230,10 @@ namespace Rewindle.Setup
 
         private static string ResolvedPath(SafeFileHandle file)
         {
-            StringBuilder buffer = new StringBuilder(1024);
-            uint length = GetFinalPathNameByHandle(file, buffer, (uint)buffer.Capacity, 0);
-            string resolved = length > 0 && length < buffer.Capacity ? buffer.ToString() : null;
-            if (resolved != null && resolved.StartsWith(@"\\?\UNC\", StringComparison.Ordinal))
+            string resolved = HeldFile.ResolvedPath(file);
+            if (resolved == null)
             {
-                resolved = @"\\" + resolved.Substring(8);
-            }
-            else if (resolved != null && resolved.StartsWith(@"\\?\", StringComparison.Ordinal))
-            {
-                resolved = resolved.Substring(4);
-            }
-            // Started without the \\?\ prefix, the path must still mean exactly this file.
-            bool exact;
-            try
-            {
-                exact = resolved != null && string.Equals(Path.GetFullPath(resolved), resolved, StringComparison.Ordinal);
-            }
-            catch (Exception error)
-            {
-                if (!(error is ArgumentException) && !(error is NotSupportedException) && !(error is PathTooLongException))
-                {
-                    throw;
-                }
-                exact = false;
-            }
-            if (!exact)
-            {
-                SetupLog.Write("The WebView2 bootstrapper's resolved path was unusable: " + (resolved ?? "(none)"));
+                SetupLog.Write("The WebView2 bootstrapper's resolved path was unusable.");
                 throw new SetupFailure("runtime_path", "Setup couldn’t tell exactly where it saved the download, so it did not run it.");
             }
             return resolved;
@@ -441,8 +414,5 @@ namespace Rewindle.Setup
 
         [DllImport("wintrust.dll", ExactSpelling = true, CharSet = CharSet.Unicode)]
         private static extern int WinVerifyTrust(IntPtr window, ref Guid action, ref WintrustData data);
-
-        [DllImport("kernel32.dll", EntryPoint = "GetFinalPathNameByHandleW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, uint capacity, uint flags);
     }
 }

@@ -326,7 +326,7 @@ namespace Rewindle.Setup.Smoke
                 };
                 workspace = new SetupWorkspace(open, root);
                 workspace.ExtractLibraries();
-                WebViewLibraries.Install(workspace.LibraryFolder);
+                WebViewLibraries.Install(workspace.ResolvedLibraryFolder);
                 workspace.ExtractWeb();
                 ThemeState chosen = new ThemeState();
                 chosen.Dark = theme == "dark";

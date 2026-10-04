@@ -759,12 +759,31 @@ namespace Rewindle.Setup.Tests
                 Check(File.Exists(Path.Combine(workspace.LibraryFolder, "WebView2Loader.dll")) && File.Exists(Path.Combine(workspace.LibraryFolder, "x64", "WebView2Loader.dll")) &&
                       File.Exists(Path.Combine(workspace.LibraryFolder, "runtimes", "win-x64", "native", "WebView2Loader.dll")) &&
                       File.Exists(Path.Combine(workspace.LibraryFolder, "Microsoft.Web.WebView2.Wpf.dll")), "the WebView2 libraries are unpacked, the loader in each layout");
+                string core = Path.Combine(workspace.ResolvedLibraryFolder, "Microsoft.Web.WebView2.Core.dll");
+                Check(Directory.Exists(workspace.ResolvedLibraryFolder) && workspace.ResolvedLibraryFolder.EndsWith(Path.GetFileName(rootPath) + @"\bin", StringComparison.OrdinalIgnoreCase) &&
+                      File.ReadAllText(core) == "library Microsoft.Web.WebView2.Core.dll", "the libraries are loaded from the workspace's resolved library folder");
+                Throws<Exception>(delegate { File.OpenWrite(core).Dispose(); }, "an unpacked library can't be changed while Setup runs");
+                Throws<Exception>(delegate { File.Delete(Path.Combine(workspace.ResolvedLibraryFolder, "runtimes", "win-x64", "native", "WebView2Loader.dll")); }, "nor deleted, in any layout");
+                Throws<Exception>(delegate { Directory.Move(workspace.LibraryFolder, workspace.LibraryFolder + "-old"); }, "nor its folder renamed");
                 Check(File.Exists(workspace.InstallScriptPath) && File.Exists(workspace.BundledUninstallScriptPath) && File.Exists(Path.Combine(workspace.WebFolder, "setup.html")), "the bundle and the web files are unpacked");
                 Check(object.ReferenceEquals(workspace.EnsureBundleExtracted(), workspace.EnsureBundleExtracted()), "the bundle is unpacked once");
                 progress = workspace.CreateProgressFolder();
                 Check(Directory.Exists(progress) && Path.GetFileName(progress).StartsWith("RewindleSetup-") && progress != rootPath, "a progress folder of its own, named the same way");
             }
             Check(!Directory.Exists(rootPath) && !Directory.Exists(progress), "everything is removed when the workspace is disposed");
+
+            // A library changed between its unpacking and its check is refused, and Setup doesn't start.
+            using (SetupWorkspace tampered = new SetupWorkspace(open, parent))
+            {
+                tampered.AfterLibraryWritten = delegate(string path)
+                {
+                    if (path.EndsWith("Microsoft.Web.WebView2.Wpf.dll", StringComparison.Ordinal))
+                    {
+                        File.WriteAllText(path, "something else");
+                    }
+                };
+                Throws<InvalidDataException>(delegate { tampered.ExtractLibraries(); }, "a library changed after it was unpacked is refused");
+            }
 
             // A broken bundle: the failure is reported and a second try starts again.
             resources[SetupWorkspace.BundleResource] = Zip("something-else.txt").ToArray();

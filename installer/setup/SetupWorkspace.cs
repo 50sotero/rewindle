@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -37,6 +38,12 @@ namespace Rewindle.Setup
         private Task bundleTask;
         private Dictionary<string, string> bundleHashes;
         private ExclusionRules exclusions;
+        // The unpacked WebView2 libraries, held open from just after they are written until this workspace is disposed.
+        private readonly List<FileStream> heldLibraries = new List<FileStream>();
+        private string resolvedLibraryFolder;
+
+        // Set only by the test that changes a library between its unpacking and its check.
+        internal Action<string> AfterLibraryWritten;
 
         public readonly string Root;
 
@@ -95,21 +102,93 @@ namespace Rewindle.Setup
             get { return Path.Combine(BundleFolder, "payload", InstallerContract.UninstallScript); }
         }
 
-        // The WebView2 libraries, ready to load. Called before anything touches a WebView2 type.
+        // The folder the WebView2 libraries are loaded from: LibraryFolder's resolved path (see HeldFile), which the held libraries
+        // keep naming the same folder. Set by ExtractLibraries.
+        public string ResolvedLibraryFolder
+        {
+            get
+            {
+                lock (gate)
+                {
+                    if (resolvedLibraryFolder == null)
+                    {
+                        throw new InvalidOperationException("The WebView2 libraries have not been unpacked.");
+                    }
+                    return resolvedLibraryFolder;
+                }
+            }
+        }
+
+        // The WebView2 libraries, ready to load. Called before anything touches a WebView2 type. They are loaded later, when a
+        // WebView2 type is first needed, from the person's own temporary folder, where another program running as them could swap
+        // one meanwhile. So each is held open from just after it is written until Setup ends (see HeldFile), checked through that
+        // handle against the copy inside this program, and loaded from ResolvedLibraryFolder.
         public void ExtractLibraries()
         {
             Directory.CreateDirectory(LibraryFolder);
             foreach (string[] library in WebViewLibraries)
             {
-                ExtractResourceFile(library[0], Path.Combine(LibraryFolder, library[1]));
+                HoldLibrary(library[0], library[1]);
             }
             // The layouts of the SDK's NuGet package, for a loader lookup that is relative to the managed library.
-            string loader = Path.Combine(LibraryFolder, "WebView2Loader.dll");
             foreach (string relative in new string[] { "x64", Path.Combine("runtimes", "win-x64", "native") })
             {
-                string folder = Path.Combine(LibraryFolder, relative);
-                Directory.CreateDirectory(folder);
-                File.Copy(loader, Path.Combine(folder, "WebView2Loader.dll"), true);
+                Directory.CreateDirectory(Path.Combine(LibraryFolder, relative));
+                HoldLibrary("REWINDLE_WEBVIEW2_LOADER", Path.Combine(relative, "WebView2Loader.dll"));
+            }
+        }
+
+        private void HoldLibrary(string resource, string relative)
+        {
+            byte[] content;
+            using (Stream source = OpenRequired(resource))
+            using (MemoryStream copy = new MemoryStream())
+            {
+                source.CopyTo(copy);
+                content = copy.ToArray();
+            }
+            string destination = Path.Combine(LibraryFolder, relative);
+            // CreateNew: nothing may be waiting under that name in the folder this program has just made.
+            using (FileStream target = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                target.Write(content, 0, content.Length);
+            }
+            if (AfterLibraryWritten != null)
+            {
+                AfterLibraryWritten(destination);
+            }
+            FileStream held = HeldFile.Open(destination);
+            try
+            {
+                string resolved = HeldFile.ResolvedPath(held.SafeFileHandle);
+                bool same;
+                using (SHA256 sha = SHA256.Create())
+                {
+                    same = held.Length == content.Length &&
+                        Convert.ToBase64String(sha.ComputeHash(held)) == Convert.ToBase64String(sha.ComputeHash(content));
+                }
+                string suffix = Path.DirectorySeparatorChar + relative;
+                string folder = resolved != null && resolved.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
+                    ? resolved.Substring(0, resolved.Length - suffix.Length)
+                    : null;
+                lock (gate)
+                {
+                    if (resolvedLibraryFolder == null && folder != null)
+                    {
+                        resolvedLibraryFolder = folder;
+                    }
+                    if (!same || folder == null || !string.Equals(folder, resolvedLibraryFolder, StringComparison.OrdinalIgnoreCase))
+                    {
+                        SetupLog.Write("An unpacked WebView2 library did not match this program's copy: " + destination + " (" + (resolved ?? "no resolved path") + ")");
+                        throw new InvalidDataException("Another program changed Setup’s files while it was starting. Close other programs and run Setup again.");
+                    }
+                    heldLibraries.Add(held);
+                }
+            }
+            catch
+            {
+                held.Dispose();
+                throw;
             }
         }
 
@@ -233,22 +312,20 @@ namespace Rewindle.Setup
             return stream;
         }
 
-        private void ExtractResourceFile(string resource, string destination)
-        {
-            using (Stream source = OpenRequired(resource))
-            using (FileStream target = new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.Read))
-            {
-                source.CopyTo(target);
-            }
-        }
-
         public void Dispose()
         {
             List<string> folders = new List<string>();
+            List<FileStream> held;
             lock (gate)
             {
                 folders.AddRange(extraFolders);
                 extraFolders.Clear();
+                held = new List<FileStream>(heldLibraries);
+                heldLibraries.Clear();
+            }
+            foreach (FileStream library in held)
+            {
+                library.Dispose();
             }
             folders.Add(Root);
             foreach (string folder in folders)

@@ -277,9 +277,27 @@ class HostHardeningTests(unittest.TestCase):
         self.assertLess(hold, check)
         self.assertLess(check, runtime.index("Run(resolved)"))
         self.assertNotIn("Run(bootstrapper)", runtime)
-        self.assertIn("FileShare.Read)", runtime)
-        self.assertIn("GetFinalPathNameByHandle", runtime)
+        self.assertIn("held = HeldFile.Open(path);", runtime)
+        held = read(SETUP / "HeldFile.cs")
+        self.assertIn("new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)", held)
+        self.assertIn("GetFinalPathNameByHandle", held)
         self.assertIn("WinVerifyTrust", runtime)
+
+    def test_the_webview_libraries_are_held_and_checked_before_they_are_loaded(self) -> None:
+        workspace = read(SETUP / "SetupWorkspace.cs")
+        hold = workspace.index("private void HoldLibrary(")
+        body = workspace[hold:workspace.index("\n        }\n", workspace.index("catch\n", hold))]
+        # Written, then held, then compared with this program's own copy through the held handle.
+        self.assertLess(body.index("FileMode.CreateNew"), body.index("HeldFile.Open(destination)"))
+        self.assertLess(body.index("HeldFile.Open(destination)"), body.index("sha.ComputeHash(held)"))
+        self.assertIn("heldLibraries.Add(held)", body)
+        self.assertNotIn("File.Copy(", workspace)
+        # Loaded from the resolved folder, which is kept out of the DLL search order.
+        for caller in (SETUP / "Program.cs", PROJECT / "tests" / "SetupWindowSmoke.cs"):
+            self.assertIn("WebViewLibraries.Install(workspace.ResolvedLibraryFolder);", read(caller))
+        libraries = read(SETUP / "WebViewLibraries.cs")
+        self.assertIn("SetDllDirectory(string.Empty);", libraries)
+        self.assertNotIn("SetDllDirectory(libraryFolder)", libraries)
 
     def test_project_links_are_the_projects_own(self) -> None:
         links = read(SETUP / "ProjectLinks.cs")

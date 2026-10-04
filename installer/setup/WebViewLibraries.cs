@@ -5,11 +5,13 @@ using System.Runtime.InteropServices;
 
 namespace Rewindle.Setup
 {
-    // Makes the WebView2 libraries that travel inside the setup program loadable from the folder they were unpacked to. The
-    // managed libraries are found by an AssemblyResolve handler (nothing next to the program's own file is trusted or needed), and
-    // WebView2Loader.dll, which the managed library asks for by name, is loaded from the same folder first so that name resolves
-    // to it. It must run before the first method that mentions a WebView2 type is compiled, which is why it has no WebView2
-    // types of its own and why Program.Main calls it before anything else.
+    // Makes the WebView2 libraries that travel inside the setup program loadable from the folder they were unpacked to (its
+    // resolved path, where SetupWorkspace holds them). The managed libraries are found by an AssemblyResolve handler (nothing next
+    // to the program's own file is trusted or needed), and WebView2Loader.dll, which the managed library asks for by name, is
+    // loaded by its full path first so that name resolves to it. The folder is not added to the DLL search order: it is in the
+    // person's temporary folder, where another program could add a DLL that Windows would then find before its own. It must run
+    // before the first method that mentions a WebView2 type is compiled, which is why it has no WebView2 types of its own and why
+    // Program.Main calls it before anything else.
     internal static class WebViewLibraries
     {
         private static string folder;
@@ -23,7 +25,8 @@ namespace Rewindle.Setup
                 AppDomain.CurrentDomain.AssemblyResolve += Resolve;
                 installed = true;
             }
-            SetDllDirectory(libraryFolder);
+            // An empty string also takes the current folder out of the DLL search order.
+            SetDllDirectory(string.Empty);
             string loader = Path.Combine(libraryFolder, "WebView2Loader.dll");
             if (LoadLibrary(loader) == IntPtr.Zero)
             {
