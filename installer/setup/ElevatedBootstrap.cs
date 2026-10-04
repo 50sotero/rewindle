@@ -33,7 +33,8 @@ namespace Rewindle.Setup
     //   3. checks the copies of CheckedFiles, and of the argument file, against SHA-256 values embedded in the bootstrap;
     //   4. runs the script from the protected folder with the exact command line this program built (CommandLine.Join), and
     //      exits with its exit code; on any refusal it exits with BootstrapRefused and runs nothing;
-    //   5. removes the protected folder.
+    //   5. removes the protected folder, and, before making its own, removes ones an interrupted run left (over a day old, owned
+    //      by Administrators or SYSTEM, and not links).
     internal static class ElevatedBootstrap
     {
         public const int BootstrapRefused = 70;
@@ -127,7 +128,21 @@ try {
     foreach ($sid in @($administrators, $system)) {
         $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
     }
-    $candidate = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) ($prefix + [Guid]::NewGuid().ToString('N'))
+    # Folders an interrupted run left (a restart or a killed process skips the finally below): only this name pattern, not a
+    # link, over a day old (never a run in progress), and owned by Administrators or SYSTEM (one a user made is left alone).
+    $parent = [Environment]::GetFolderPath('CommonApplicationData')
+    foreach ($old in @(Get-ChildItem -LiteralPath $parent -Directory -Force -Filter ($prefix + '*') -ErrorAction SilentlyContinue)) {
+        try {
+            if ($old.Name -cnotmatch ('^' + [regex]::Escape($prefix) + '[0-9a-f]{32}$')) { continue }
+            if ($old.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+            if ($old.CreationTimeUtc -gt [DateTime]::UtcNow.AddDays(-1)) { continue }
+            $owner = (Get-Acl -LiteralPath $old.FullName).GetOwner([System.Security.Principal.SecurityIdentifier])
+            if (-not ($owner.Equals($administrators) -or $owner.Equals($system))) { continue }
+            Remove-Item -LiteralPath $old.FullName -Recurse -Force -ErrorAction Stop
+        }
+        catch { }
+    }
+    $candidate = Join-Path $parent ($prefix + [Guid]::NewGuid().ToString('N'))
     if (Test-Path -LiteralPath $candidate) { throw 'The protected folder name is already in use.' }
     $null = [IO.Directory]::CreateDirectory($candidate, $security)
     $stage = $candidate

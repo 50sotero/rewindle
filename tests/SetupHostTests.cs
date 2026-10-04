@@ -161,6 +161,27 @@ namespace Rewindle.Setup.Tests
                 Equal(ElevatedBootstrap.BootstrapRefused, RunPowerShellExit(tamperedRun), "a script changed after unpacking is refused");
                 Check(!File.Exists(result), "and nothing of it ran");
                 Equal(before, stages(), "and the protected folder is removed");
+
+                // Folders an interrupted run left behind: one over a day old is removed by the next run, a recent one is not.
+                string stale = Path.Combine(programData, ElevatedBootstrap.StagingPrefix + Guid.NewGuid().ToString("N"));
+                string recent = Path.Combine(programData, ElevatedBootstrap.StagingPrefix + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(Path.Combine(stale, "payload"));
+                Directory.CreateDirectory(recent);
+                Directory.SetCreationTimeUtc(stale, DateTime.UtcNow.AddDays(-2));
+                File.Delete(stub);
+                File.WriteAllText(stub, "param([string]$ProgressPath, [string]$Name)\r\n[IO.File]::WriteAllText('" + result.Replace("'", "''") + "', $Name + '|' + $PSScriptRoot)\r\nexit 7\r\n");
+                hashes["stub.ps1"] = ElevatedBootstrap.Sha256(File.ReadAllBytes(stub));
+                try
+                {
+                    Equal(7, RunPowerShellExit(wrap("three")), "a later run still works");
+                    Check(!Directory.Exists(stale), "and removes a protected folder an interrupted run left over a day ago");
+                    Check(Directory.Exists(recent), "but not a recent one, which may belong to a run in progress");
+                }
+                finally
+                {
+                    try { Directory.Delete(stale, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+                    try { Directory.Delete(recent, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+                }
             }
             finally
             {

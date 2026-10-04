@@ -183,6 +183,8 @@ below, and the console shows the text the installer has always shown for it.
 | `payload_version_invalid` | environment | `payload\VERSION` is not a version number. |
 | `already_installed` | environment | `C:\Program Files\ResticBackuper` exists. This alpha does not upgrade in place. |
 | `stale_registration` | environment | Rewindle's entry in Installed apps exists. |
+| `preserved_state_unreadable` | environment | The state folder an earlier installation left (`C:\ProgramData\ResticBackuper`) has a `plan-state.json` that can't be read, or names an invalid backup-plan identity. A reinstall continues the plan recorded there, so it can't go on. Checked at install time when plan mode can't read the folder. |
+| `preserved_state_inconsistent` | environment | That state folder names more than one backup plan. |
 | `start_menu_shortcut_exists` | environment | `ResticBackuper.lnk` exists in the Start menu (only matters with the dashboard). |
 | `task_name_in_use` | environment | A scheduled task named `ResticBackuper`, `ResticBackuperDashboard` or `ResticBackuperGoogleDriveSync` (a Google Drive verification task an earlier installation left behind) exists. `path` is the task name. Without elevation, tasks of other accounts may be invisible; the install checks again. |
 | `recovery_key_stale` | environment | `%USERPROFILE%\ResticBackuper-RecoveryKey.txt` exists but the stored password it belongs to does not. |

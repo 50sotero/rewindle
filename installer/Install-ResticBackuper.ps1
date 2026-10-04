@@ -130,6 +130,7 @@ $repositoryPath = $null
 $repositoryParent = $null
 $recoveryTools = $null
 $repositoryPreviouslyInitialized = $false
+$preservedPlan = $null
 $sources = @()
 $useVss = -not $DisableVss
 $canarySource = Join-Path $stateRoot 'Canary'
@@ -2030,6 +2031,62 @@ function Resolve-SourceSelection {
     $script:sources = @($accepted)
 }
 
+# The backup plan an earlier installation recorded in the state folder that an uninstall keeps: plan-state.json, and the plan
+# named by last-success.json and status.json. A reinstall continues that plan, because the engine refuses every backup whose
+# configured plan_id differs from it, or whose config_generation is lower than the highest one recorded
+# (validate_and_record_plan_state in restic_common.py, whose checks this mirrors). Returns $null when there is no such state,
+# or in plan mode when this account can't read the state folder (the elevated install reads it and checks again).
+function Get-PreservedPlanIdentity {
+    $planIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $highest = [long]0
+    $unreadable = 'Rewindle''s saved backup state from an earlier installation can''t be used, so setup can''t continue that backup plan. Move the folder ' + $stateRoot + ' somewhere else to start a new one, then run setup again.'
+    foreach ($name in @('plan-state.json', 'last-success.json', 'status.json')) {
+        $path = Join-Path $stateRoot $name
+        $text = $null
+        try {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+            $text = [IO.File]::ReadAllText($path, [Text.UTF8Encoding]::new($false))
+        }
+        catch [UnauthorizedAccessException] {
+            if ($PlanOnly) { return $null }
+            throw
+        }
+        $document = $null
+        try { $document = $text | ConvertFrom-Json } catch { $document = $null }
+        $required = $name -eq 'plan-state.json'
+        if ($null -eq $document -or $document -isnot [Management.Automation.PSCustomObject]) {
+            if ($required) {
+                Stop-InstallValidation -Code 'preserved_state_unreadable' -Field 'environment' -Message $unreadable `
+                    -Console "The kept backup plan state is unreadable or corrupt: $path" -Path $path
+            }
+            continue
+        }
+        $properties = $document.PSObject.Properties
+        if ($required -and ($null -eq $properties['schema_version'] -or $document.schema_version -ne 1)) {
+            Stop-InstallValidation -Code 'preserved_state_unreadable' -Field 'environment' -Message $unreadable `
+                -Console "The kept backup plan state has an unsupported schema: $path" -Path $path
+        }
+        $planId = if ($null -ne $properties['plan_id']) { $document.plan_id } else { $null }
+        $generation = if ($null -ne $properties['config_generation']) { $document.config_generation } else { $null }
+        if (-not $required -and $null -eq $planId -and $null -eq $generation) { continue }
+        if ($planId -isnot [string] -or $planId -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' -or
+            -not ($generation -is [int] -or $generation -is [long]) -or [long]$generation -le 0) {
+            Stop-InstallValidation -Code 'preserved_state_unreadable' -Field 'environment' -Message $unreadable `
+                -Console "The kept state names an invalid backup-plan identity: $path" -Path $path
+        }
+        [void]$planIds.Add($planId)
+        if ([long]$generation -gt $highest) { $highest = [long]$generation }
+    }
+    if ($planIds.Count -eq 0) {
+        return $null
+    }
+    if ($planIds.Count -gt 1) {
+        Stop-InstallValidation -Code 'preserved_state_inconsistent' -Field 'environment' -Message $unreadable `
+            -Console "The kept backup state names more than one backup plan: $stateRoot" -Path $stateRoot
+    }
+    return [pscustomobject]@{ plan_id = @($planIds)[0]; config_generation = $highest }
+}
+
 function Resolve-ProtectedBindings {
     if ((Test-IsWithin -Candidate $repositoryPath -Parent $canarySource) -or (Test-IsWithin -Candidate $canarySource -Parent $repositoryPath)) {
         Stop-InstallValidation -Code 'repository_overlaps_canary' -Field 'repository' `
@@ -2082,6 +2139,7 @@ function Resolve-ProtectedBindings {
     )) {
         Assert-NtfsProtectedPath -Path $protectedBinding[0] -Label $protectedBinding[1]
     }
+    $script:preservedPlan = Get-PreservedPlanIdentity
 }
 
 function Assert-RepositoryTarget {
@@ -2750,8 +2808,9 @@ try {
     $configPath = Join-Path $installRoot 'backup-config.json'
     $configuration = [ordered]@{
         schema_version = 1
-        plan_id = [Guid]::NewGuid().ToString('D')
-        config_generation = 1
+        # A reinstall over kept state continues its plan with a newer configuration (see Get-PreservedPlanIdentity).
+        plan_id = $(if ($null -ne $preservedPlan) { $preservedPlan.plan_id } else { [Guid]::NewGuid().ToString('D') })
+        config_generation = $(if ($null -ne $preservedPlan) { $preservedPlan.config_generation + 1 } else { 1 })
         repository = $repositoryPath
         repository_storage_mode = $RepositoryStorageMode
         repository_volume_serial = $volume.serial

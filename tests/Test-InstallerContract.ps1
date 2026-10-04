@@ -456,6 +456,25 @@ function Invoke-InstallCycle {
     Assert-Equal @($stateRoot) @(Get-InstallationFootprint) "$Label : only the state folder remains of the Rewindle footprint (the repository and recovery key live elsewhere)"
 
     if ($Extras) {
+        # A reinstall over the state the uninstall kept continues the same backup plan, which the engine requires: it refuses
+        # every backup whose plan_id differs from the kept plan-state.json or whose generation is lower.
+        $run = Invoke-AsUserElevated -User $AdministratorUser -Name 'reinstall-kept-state' -Template $progressTemplate -TimeoutSeconds 1800 -Values @{
+            HANDOFF = Join-Path $handoff 'reinstall-kept-state.txt'; SCRIPT = $InstallerScript; POWERSHELL = $windowsPowerShell
+            ARGUMENTS = (ConvertTo-LiteralList $arguments)
+        }
+        Show-Run $run
+        Assert-Equal 0 $run.ExitCode "$Label : a reinstall over the kept state exits 0"
+        $reconfigured = [IO.File]::ReadAllText((Join-Path $installRoot 'backup-config.json')) | ConvertFrom-Json
+        Assert-Equal $configuration.plan_id $reconfigured.plan_id "$Label : the reinstall continues the kept backup plan"
+        Assert-True ([long]$reconfigured.config_generation -gt [long]$configuration.config_generation) "$Label : with a newer configuration generation"
+        $engineCheck = @(& (Join-Path $installRoot 'Python\python.exe') -I -c "import json, sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import restic_common; config = json.loads(Path(sys.argv[1], 'backup-config.json').read_text(encoding='utf-8')); restic_common.validate_and_record_plan_state(config, Path(config['state_directory'])); print('accepted')" $installRoot 2>&1)
+        Write-Host ($engineCheck -join [Environment]::NewLine)
+        Assert-Equal 'accepted' ([string]$engineCheck[-1]).Trim() "$Label : the engine accepts the reinstalled plan against the kept state"
+        $run = Invoke-AsUserElevated -User $AdministratorUser -Name 'uninstall-after-reinstall' -Template $progressTemplate -TimeoutSeconds 900 -Values @{
+            HANDOFF = Join-Path $handoff 'uninstall-after-reinstall.txt'; SCRIPT = (Join-Path $installRoot 'Uninstall-ResticBackuper.ps1'); POWERSHELL = $windowsPowerShell; ARGUMENTS = ''
+        }
+        Assert-Equal 0 $run.ExitCode "$Label : the reinstalled copy uninstalls"
+
         $run = Invoke-AsUserElevated -User $AdministratorUser -Name 'uninstall-again' -Template $progressTemplate -Values @{
             HANDOFF = Join-Path $handoff 'uninstall-again.txt'; SCRIPT = (Join-Path $bundle 'payload\Uninstall-ResticBackuper.ps1'); POWERSHELL = $windowsPowerShell; ARGUMENTS = ''
         }
