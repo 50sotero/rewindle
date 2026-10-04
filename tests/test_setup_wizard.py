@@ -132,6 +132,9 @@ class InstallerContractTests(unittest.TestCase):
     def test_no_command_line_is_built_by_joining_text(self) -> None:
         for path in SETUP.glob("*.cs"):
             text = read(path)
+            if path.name == "ElevatedBootstrap.cs":
+                # The bootstrap's PowerShell body is checked on its own (test_the_bootstrap_runs_only_the_checked_command_line).
+                text = re.sub(r'private const string Body =\s*@"(?:[^"]|"")*";', "", text)
             for match in re.finditer(r"\.Arguments\s*=\s*([^;]+);", text):
                 with self.subTest(file=path.name, expression=match.group(1)[:60]):
                     expression = match.group(1)
@@ -140,6 +143,25 @@ class InstallerContractTests(unittest.TestCase):
                         "CommandLine." in expression or re.fullmatch(r'\s*"[^"+]*"\s*', expression),
                         f"{path.name}: {expression}",
                     )
+
+    def test_the_bootstrap_runs_only_the_checked_command_line(self) -> None:
+        bootstrap = read(SETUP / "ElevatedBootstrap.cs")
+        body = re.search(r'private const string Body =\s*@"((?:[^"]|"")*)";', bootstrap).group(1).replace('""', '"')
+        # The argument file holds the script's own arguments as one command line made by CommandLine.Join, never other text.
+        self.assertIn("CommandLine.Join(scriptArguments)", bootstrap)
+        # The bootstrap's command line is a fixed prefix, the staged script and that file's text, read only after its hash matched,
+        # and the script and manifest copies are checked before anything runs.
+        arguments = re.findall(r"\$start\.Arguments = (.+)", body)
+        self.assertEqual(
+            ["'-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"' + (Join-Path $stage $scriptPath) + '\" ' + "
+             "[IO.File]::ReadAllText($argumentCopy, (New-Object System.Text.UTF8Encoding($false)))"],
+            arguments,
+        )
+        self.assertLess(body.index("-cne $checks[$relative]"), body.index("$start.Arguments"))
+        self.assertLess(body.index("(Get-Sha256 $argumentCopy) -cne $argumentHash"), body.index("$start.Arguments"))
+        self.assertLess(body.index("CreateDirectory($candidate, $security)"), body.index("Copy-Staged (Join-Path $source"))
+        self.assertIn("SetAccessRuleProtection($true, $false)", body)
+        self.assertIn("ReparsePoint", body)
 
     def test_the_host_never_names_the_installer_script_from_the_page(self) -> None:
         bridge = read(SETUP / "SetupBridge.cs")
@@ -216,7 +238,9 @@ class HostHardeningTests(unittest.TestCase):
         operation = read(SETUP / "SetupOperation.cs")
         self.assertEqual(1, len(re.findall(r'Verb = "runas"', operation)))
         self.assertIn("ProcessWindowStyle.Hidden", operation)
-        self.assertIn("CommandLine.Join(powershellArguments)", operation)
+        # A script from the unpacked bundle is wrapped in the protected bootstrap; either way the line is CommandLine.Join's.
+        self.assertIn("bundle == null ? powershellArguments : ElevatedBootstrap.Wrap(powershellArguments, bundle)", operation)
+        self.assertIn("CommandLine.Join(arguments)", operation)
         self.assertIn("1223", operation)
 
     def test_the_microsoft_bootstrapper_is_checked_before_it_is_run(self) -> None:
