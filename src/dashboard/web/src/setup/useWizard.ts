@@ -2,7 +2,7 @@
 // install or uninstall that is running. The screens only read it and call its actions.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ContractError, INSTALL_PHASES, UNINSTALL_PHASES, isUnsupported, parsePlan, parseProgressLine,
+  ContractError, INSTALL_PHASES, UNINSTALL_PHASES, isUnsupported, keptEntriesOf, parsePlan, parseProgressLine,
   type InstallPlan, type InstallResult, type KnownFolderKey, type PlanInputs, type PlanVolume, type ProgressPhase, type StorageMode,
 } from './contract';
 import {
@@ -309,12 +309,18 @@ export function useWizard() {
         setScreen('review');
         setOperation(null);
       } else if (finished.outcome === 'succeeded' && finished.operation === 'uninstall') {
-        if (reinstalling.current) {
+        const parsed = finished.result ? parseProgressLine(finished.result) : null;
+        const removal = parsed?.kind === 'result' ? parsed.result : null;
+        if (reinstalling.current && keptEntriesOf(removal).length > 0) {
+          // The uninstaller kept a Start menu shortcut or Installed apps entry that wasn't provably Rewindle's, and a new setup
+          // won't run over it: stop on the removal's page, which names what was kept and what to do about it.
+          reinstalling.current = false;
+          setScreen('uninstalled');
+        } else if (reinstalling.current) {
           // The old copy is gone; ask the installer about this PC again (it reports no installation now) and start the steps.
           reinstalling.current = false;
           setOperation(null);
-          const parsed = finished.result ? parseProgressLine(finished.result) : null;
-          void startRef.current(parsed?.kind === 'result' ? parsed.result.kept?.repository ?? undefined : undefined);
+          void startRef.current(removal?.kept?.repository ?? undefined);
         } else {
           setScreen('uninstalled');
         }

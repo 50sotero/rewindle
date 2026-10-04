@@ -117,6 +117,13 @@ export interface InstallResult {
 
 export interface RemovedParts { installRoot: boolean; scheduledTasks: string[]; startMenuShortcut: boolean; installedAppsEntry: boolean }
 
+// Findings about entries an uninstall kept because they weren't provably Rewindle's: a new setup refuses to run over them.
+const KEPT_ENTRY_WARNINGS = ['shortcut_kept_unexpected_target', 'registration_kept_unexpected_owner'];
+
+/** The entries an uninstall kept that stop Rewindle from being installed again until the person removes them. */
+export const keptEntriesOf = (result: InstallResult | null | undefined) =>
+  (result?.warnings ?? []).filter(warning => KEPT_ENTRY_WARNINGS.includes(warning.code));
+
 export interface KeptPaths { stateRoot: string | null; repository: string | null; recoveryKey: string | null; recoveryTools: string | null }
 
 export type ProgressLine = { kind: 'phase'; phase: ProgressPhase } | { kind: 'result'; result: InstallResult };

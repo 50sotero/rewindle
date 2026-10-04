@@ -1,5 +1,5 @@
 import { ExternalLink, Trash2, WifiOff } from 'lucide-react';
-import { issuesFor, type RemovedParts } from '../contract';
+import { issuesFor, keptEntriesOf, type RemovedParts } from '../contract';
 import { Callout, IssueList } from '../ui';
 import type { Wizard } from '../useWizard';
 
@@ -55,14 +55,12 @@ function removedSentence(removed: RemovedParts | null | undefined): string {
   return (lead + (sentence ? sentence.charAt(0).toUpperCase() + sentence.slice(1) : 'There was nothing else of Rewindle to remove.')).trim();
 }
 
-// Findings about entries the uninstaller kept because they weren't provably Rewindle's: a new setup refuses to run over them.
-const KEPT_ENTRY_WARNINGS = ['shortcut_kept_unexpected_target', 'registration_kept_unexpected_owner'];
-
-/** After a successful uninstall. */
+/** After a successful uninstall, and after the removal half of a reinstall that stopped because entries were kept. */
 export function Uninstalled({ wizard }: { wizard: Wizard }) {
   const result = wizard.operation?.result;
   const kept = result?.kept;
-  const keptEntries = (result?.warnings ?? []).filter(warning => KEPT_ENTRY_WARNINGS.includes(warning.code));
+  const keptEntries = keptEntriesOf(result);
+  const stoppedReinstall = !!wizard.operation?.reinstall && keptEntries.length > 0;
   const places = kept ? [
     kept.repository ? { label: 'Your backups', path: kept.repository } : null,
     kept.recoveryKey ? { label: 'Your recovery key', path: kept.recoveryKey } : null,
@@ -79,6 +77,7 @@ export function Uninstalled({ wizard }: { wizard: Wizard }) {
         )}
         {keptEntries.length > 0 && (
           <li><span>
+            {stoppedReinstall && <strong>Setup stopped before setting Rewindle up again. </strong>}
             {keptEntries.map(warning => <span key={warning.code} className="kept-place"><span>{warning.message}</span></span>)}
             Setup won’t install Rewindle again while {keptEntries.length === 1 ? 'it is' : 'they are'} there. Check {keptEntries.length === 1 ? 'it' : 'them'} and remove {keptEntries.length === 1 ? 'it' : 'them'} yourself if {keptEntries.length === 1 ? 'it isn’t' : 'they aren’t'} needed.
           </span></li>

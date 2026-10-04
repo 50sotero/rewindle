@@ -129,6 +129,18 @@ class InstallerContractTests(unittest.TestCase):
             table("UNINSTALL_PHASES"),
         )
 
+    def test_a_reinstall_stops_on_entries_the_uninstaller_kept(self) -> None:
+        # The codes the wizard treats as "kept, so a new setup won't run" are the uninstaller's own.
+        codes = re.search(r"KEPT_ENTRY_WARNINGS = \[([^\]]*)\]", read(WIZARD / "contract.ts")).group(1)
+        uninstaller = read(PROJECT / "installer" / "Uninstall-ResticBackuper.ps1")
+        for code in re.findall(r"'(\w+)'", codes):
+            self.assertIn(f"-Code '{code}'", uninstaller)
+        # The removal half of a reinstall looks at them before it clears the result and starts the steps again.
+        wizard = read(WIZARD / "useWizard.ts")
+        stop = wizard.index("if (reinstalling.current && keptEntriesOf(removal).length > 0)")
+        self.assertLess(stop, wizard.index("void startRef.current(removal?.kept?.repository"))
+        self.assertIn("setScreen('uninstalled')", wizard[stop:stop + 600])
+
     def test_no_command_line_is_built_by_joining_text(self) -> None:
         for path in SETUP.glob("*.cs"):
             text = read(path)
