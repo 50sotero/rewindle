@@ -34,6 +34,11 @@ from secret_store import create_secret, load_secret, secure_directory, write_rec
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument(
+        "--commit-recovery-key",
+        action="store_true",
+        help="once the installation has succeeded: make a kept recovery key name this repository",
+    )
     return parser.parse_args(argv)
 
 
@@ -135,26 +140,40 @@ def same_repository(left: str | Path, right: str | Path) -> bool:
 
 
 def reconcile_recovery_key(
-    recovery_file: Path, repository: Path, password: str
-) -> tuple[bool, bool]:
-    """Writes the recovery key, or checks the one already there. Returns (created, updated).
+    recovery_file: Path, repository: Path, password: str, *, rewrite: bool = False
+) -> str:
+    """Writes the recovery key, or checks the one already there.
 
-    A key kept by an uninstall holds this password (checked here) but names the repository of that installation. When a
-    reinstall chose another one, the key is rewritten to name it: the recovery check and a restore from the key go by that
-    line, and the password, which opens both repositories, is unchanged.
+    Returns "created", "current", or, for a key that holds this password (checked here) but names another repository, as one
+    an uninstall kept does after a reinstall chose another location: "stale", or with `rewrite` "rewritten" (it then names
+    this repository; the password, which opens both, is unchanged). The recovery check and a restore from the key go by that
+    line. The installer asks for the rewrite only once the installation has succeeded (--commit-recovery-key), so a reinstall
+    that fails and is rolled back leaves the key naming the backups it was made for.
     """
     if not recovery_file.exists():
+        if rewrite:
+            raise RuntimeError("the recovery key is missing")
         write_recovery_key(recovery_file, repository, password)
-        return True, False
+        return "created"
     if not secrets.compare_digest(recovery_password(recovery_file), password):
         raise RuntimeError(
             "existing recovery key does not match the DPAPI repository password"
         )
     named = recovery_repository(recovery_file)
     if named is not None and same_repository(named, repository):
-        return False, False
+        return "current"
+    if not rewrite:
+        return "stale"
     write_recovery_key(recovery_file, repository, password, replace=True)
-    return False, True
+    return "rewritten"
+
+
+def commit_recovery_key(recovery_file: Path, repository: Path, secret_file: Path) -> int:
+    password = load_secret(secret_file)
+    state = reconcile_recovery_key(recovery_file, repository, password, rewrite=True)
+    del password
+    print(json.dumps({"recovery_key_file": str(recovery_file), "recovery_key": state}))
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -165,6 +184,10 @@ def main(argv: list[str] | None = None) -> int:
     secret_file = Path(config["secret_file"])
     recovery_file = Path(config["recovery_key_file"])
     storage_mode = repository_storage_mode(config)
+
+    if args.commit_recovery_key:
+        with RunLock(state / "run.lock"):
+            return commit_recovery_key(recovery_file, repository, secret_file)
 
     secure_directory(state)
     with RunLock(state / "run.lock"):
@@ -225,9 +248,8 @@ def main(argv: list[str] | None = None) -> int:
 
         if password is None:
             password = load_secret(secret_file)
-        recovery_created, recovery_updated = reconcile_recovery_key(
-            recovery_file, repository, password
-        )
+        recovery_state = reconcile_recovery_key(recovery_file, repository, password)
+        recovery_created = recovery_state == "created"
         del password
 
         recovery_tools = install_recovery_tools(config, args.config)
@@ -242,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
             "repository_storage_mode": storage_mode,
             "secret_created": secret_created,
             "recovery_key_created": recovery_created,
-            "recovery_key_updated": recovery_updated,
+            "recovery_key_names_other_repository": recovery_state == "stale",
             "recovery_tools_directory": config["recovery_tools_directory"],
             "recovery_tools_manifest": recovery_tools,
         }
@@ -264,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
                 "recovery_key_file": str(recovery_file),
                 "secret_created": secret_created,
                 "recovery_key_created": recovery_created,
-                "recovery_key_updated": recovery_updated,
+                "recovery_key_names_other_repository": recovery_state == "stale",
                 "recovery_tools_directory": config["recovery_tools_directory"],
             },
             indent=2,
