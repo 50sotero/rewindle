@@ -573,6 +573,30 @@ export function useWizard() {
     }
   }, [base, choices]);
 
+  // Install starts only after one more scan of the chosen folders: the scan the person waited for may be minutes old, OneDrive
+  // or Storage Sense can make files online-only meanwhile, and the installer's own last check doesn't look for them although
+  // the installed engine refuses such a folder on every backup. Holds the screen the check started on; leaving it stops the wait.
+  const [finalCheck, setFinalCheck] = useState<Screen | null>(null);
+  const installAfterCheck = useCallback(() => {
+    if (!choices) return;
+    setNotice(null);
+    setFinalCheck(screen);
+    actions.recheckFolders(selectedPaths(choices));
+  }, [actions, choices, screen]);
+  useEffect(() => {
+    if (!finalCheck || !choices) return;
+    if (screen !== finalCheck) { setFinalCheck(null); return; }
+    if (selectedTotal(choices, sizes).measuring) return;
+    setFinalCheck(null);
+    if (onlineOnlyPaths(choices, sizes).length > 0) {
+      setOperation(null);
+      setScreen('review');
+      setNotice({ screen: 'review', text: 'Setup looked at your folders once more and found files that are now only in the cloud.' });
+      return;
+    }
+    void runOperation('install');
+  }, [choices, finalCheck, runOperation, screen, setScreen, sizes]);
+
   const cancelOperation = useCallback(async () => {
     setOperation(current => current ? { ...current, cancelling: true } : current);
     try {
@@ -588,7 +612,10 @@ export function useWizard() {
     scheduleDraftValid,
     actions,
     goTo: setScreen,
-    install: () => runOperation('install'),
+    /** Scans the chosen folders once more, then installs unless online-only files turned up (then back to Review, saying so). */
+    install: installAfterCheck,
+    /** True while that last scan runs. */
+    checkingBeforeInstall: finalCheck !== null,
     uninstall: () => runOperation('uninstall'),
     /** Removes the installed copy (keeping backups and the recovery key), then goes through the setup steps again. */
     reinstall: () => runOperation('uninstall', { reinstall: true }),

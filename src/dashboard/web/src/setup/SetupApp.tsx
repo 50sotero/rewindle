@@ -138,21 +138,23 @@ export default function SetupApp() {
       case 'review': {
         // Install also waits for the first scan of every chosen folder: online-only files are only known once the scan reaches
         // them, and the installed engine refuses such a folder on every backup.
+        // Install itself scans them once more before the installer starts (wizard.checkingBeforeInstall meanwhile).
         const scanning = selectedTotal(choices!, wizard.sizes).measuring;
         const problems = (plan?.errors.length ?? 0) > 0 || selectedPaths(choices!).length === 0 || onlineOnlyPaths(choices!, wizard.sizes).length > 0;
         return {
           back: back('schedule'),
-          next: { label: 'Install', icon: <ShieldIcon size={16} />, onClick: () => void wizard.install(), disabled: problems || scanning, variant: 'primary' },
+          next: { label: 'Install', icon: <ShieldIcon size={16} />, onClick: () => wizard.install(), disabled: problems || scanning, variant: 'primary' },
           hint: problems ? 'Fix the problems above to install'
-            : scanning ? <><Spinner size={12} /><span>Checking your folders for online-only files…</span></>
-              : 'Windows will ask for permission once',
+            : wizard.checkingBeforeInstall ? <><Spinner size={12} /><span>Checking your folders once more…</span></>
+              : scanning ? <><Spinner size={12} /><span>Checking your folders for online-only files…</span></>
+                : 'Windows will ask for permission once',
         };
       }
       case 'installing':
       case 'uninstalling': {
         const outcome = operation?.finished?.outcome;
         // Retrying the removal half of a reinstall keeps going on to the setup steps afterwards.
-        const retry = screen === 'installing' ? () => void wizard.install()
+        const retry = screen === 'installing' ? () => wizard.install()
           : operation?.reinstall ? () => void wizard.reinstall() : () => void wizard.uninstall();
         const returnTo: Screen = screen === 'installing' ? 'review' : 'maintenance';
         if (outcome === 'succeeded') {
@@ -163,7 +165,8 @@ export default function SetupApp() {
         if (outcome === 'failed' || outcome === 'cancelled') {
           return {
             back: { label: screen === 'installing' ? 'Back to review' : 'Back', icon: <ArrowLeft size={15} aria-hidden="true" />, onClick: () => { wizard.clearOperation(); wizard.goTo(returnTo); } },
-            next: { label: 'Try again', icon: screen === 'installing' ? <ShieldIcon size={16} /> : <RotateCcw size={15} aria-hidden="true" />, onClick: retry, variant: 'primary' },
+            next: { label: 'Try again', icon: screen === 'installing' ? <ShieldIcon size={16} /> : <RotateCcw size={15} aria-hidden="true" />, onClick: retry, disabled: wizard.checkingBeforeInstall, variant: 'primary' },
+            hint: wizard.checkingBeforeInstall ? <><Spinner size={12} /><span>Checking your folders once more…</span></> : undefined,
           };
         }
         if (operation?.stage === 'preparing') {

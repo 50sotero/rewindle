@@ -7,11 +7,11 @@
 
 export type ScenarioName =
   | 'fresh' | 'no-second-drive' | 'drivefs' | 'existing-install' | 'legacy-installed'
-  | 'unsupported-os' | 'plan-errors' | 'install-failure' | 'uac-declined' | 'key-unreadable';
+  | 'unsupported-os' | 'plan-errors' | 'install-failure' | 'uac-declined' | 'key-unreadable' | 'goes-online-only';
 
 export const SCENARIOS: readonly ScenarioName[] = [
   'fresh', 'no-second-drive', 'drivefs', 'existing-install', 'legacy-installed',
-  'unsupported-os', 'plan-errors', 'install-failure', 'uac-declined', 'key-unreadable',
+  'unsupported-os', 'plan-errors', 'install-failure', 'uac-declined', 'key-unreadable', 'goes-online-only',
 ];
 
 const GB = 1024 ** 3;
@@ -38,6 +38,8 @@ export interface Scenario {
   defaultRepository: string | null;
   /** Folder sizes the sample "measures", by path (lower case). Anything else is a small folder. */
   sizes: Record<string, SampleFolder>;
+  /** What a folder reports from its second scan on, by path (lower case): OneDrive made files online-only after the first. */
+  laterSizes?: Record<string, SampleFolder>;
   /** Folders that exist only for the sample's checks; anything not listed and not under a sample folder is "missing". */
   missing: string[];
   /** Repository folders that already hold other files. */
@@ -150,6 +152,10 @@ export function scenario(name: ScenarioName): Scenario {
       return { ...base, name, install: 'declined' };
     case 'key-unreadable':
       return { ...base, name, install: 'key-unreadable' };
+    case 'goes-online-only': {
+      const documents = `${HOME}\\Documents`.toLowerCase();
+      return { ...base, name, laterSizes: { [documents]: { ...SIZES[documents], placeholderFiles: 37, placeholderBytes: Math.round(1.2 * GB) } } };
+    }
     default:
       return base;
   }

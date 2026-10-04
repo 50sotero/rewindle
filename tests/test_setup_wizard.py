@@ -141,6 +141,18 @@ class InstallerContractTests(unittest.TestCase):
         self.assertLess(stop, wizard.index("void startRef.current(removal?.kept?.repository"))
         self.assertIn("setScreen('uninstalled')", wizard[stop:stop + 600])
 
+    def test_install_scans_the_chosen_folders_once_more_first(self) -> None:
+        # The installer's own last check doesn't look for online-only files, so Install (and Try again) scans the folders again
+        # and starts the installer only when that scan found none.
+        wizard = read(WIZARD / "useWizard.ts")
+        self.assertIn("install: installAfterCheck,", wizard)
+        check = wizard.index("const installAfterCheck = useCallback(")
+        self.assertIn("actions.recheckFolders(selectedPaths(choices))", wizard[check:check + 400])
+        wait = wizard.index("if (selectedTotal(choices, sizes).measuring) return;")
+        found = wizard.index("if (onlineOnlyPaths(choices, sizes).length > 0)", wait)
+        self.assertLess(found, wizard.index("void runOperation('install');", found))
+        self.assertNotIn("install: () => runOperation('install')", wizard)
+
     def test_no_command_line_is_built_by_joining_text(self) -> None:
         for path in SETUP.glob("*.cs"):
             text = read(path)
@@ -302,7 +314,7 @@ class SampleDataTests(unittest.TestCase):
 
     def test_every_scenario_the_task_names_exists(self) -> None:
         scenarios = read(WIZARD / "mock" / "scenarios.ts")
-        for name in ("fresh", "no-second-drive", "drivefs", "existing-install", "legacy-installed", "unsupported-os", "plan-errors", "install-failure", "uac-declined", "key-unreadable"):
+        for name in ("fresh", "no-second-drive", "drivefs", "existing-install", "legacy-installed", "unsupported-os", "plan-errors", "install-failure", "uac-declined", "key-unreadable", "goes-online-only"):
             with self.subTest(scenario=name):
                 self.assertIn(f"'{name}'", scenarios)
 

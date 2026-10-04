@@ -32,6 +32,8 @@ export function installSetupSampleBridge(): void {
   const listeners = new Set<Listener>();
   const measures = new Map<string, { cancelled: boolean }>();
   let browseIndex = 0, repositoryIndex = 0;
+  // Folders whose scan has run to the end once; a later scan of one reports its laterSizes, if the sample has them.
+  const scanned = new Set<string>();
   let operation: { cancelled: boolean; elevated: boolean } | null = null;
   let recoveryKeySaved = false;
   let declinedOnce = false;
@@ -166,7 +168,7 @@ export function installSetupSampleBridge(): void {
     const job = { cancelled: false };
     measures.set(request, job);
     await Promise.all(paths.map(async (path, index) => {
-      const known = sample.sizes[lower(path)] ?? { bytes: 120 * 1024 ** 2, files: 240 };
+      const known = (scanned.has(lower(path)) ? sample.laterSizes?.[lower(path)] : undefined) ?? sample.sizes[lower(path)] ?? { bytes: 120 * 1024 ** 2, files: 240 };
       if (!exists(path)) {
         await wait(300 + index * 80);
         if (!job.cancelled) event('measure', { request, path, bytes: 0, files: 0, placeholderFiles: 0, placeholderBytes: 0, skippedFolders: 0, done: true, error: 'This folder can’t be found.' });
@@ -186,6 +188,7 @@ export function installSetupSampleBridge(): void {
           done: step === steps, error: null,
         });
       }
+      scanned.add(lower(path));
     }));
     measures.delete(request);
   }

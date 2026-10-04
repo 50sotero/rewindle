@@ -41,7 +41,7 @@ labels. Releases before 0.2.0 were published under the name ResticBackuper.
 - `npm run dev:setup` serves the wizard in a browser with invented sample
   computers (`?scenario=fresh`, `no-second-drive`, `drivefs`,
   `existing-install`, `legacy-installed`, `unsupported-os`, `plan-errors`,
-  `install-failure`, `uac-declined`, `key-unreadable`), and
+  `install-failure`, `uac-declined`, `key-unreadable`, `goes-online-only`), and
   `npm run build:setup-demo` makes a static copy. The sample is not part of the
   setup program; the build checks the bundle for it.
 - `tests\Test-SetupHost.ps1` checks the setup program's logic without starting

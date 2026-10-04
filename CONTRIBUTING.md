@@ -72,7 +72,8 @@ nothing on your PC is read or changed:
 Set-Location src\dashboard\web
 npm run dev:setup    # http://127.0.0.1:5179/?scenario=fresh
 # other computers: ?scenario=no-second-drive | drivefs | existing-install | legacy-installed |
-#   unsupported-os | plan-errors | install-failure | uac-declined | key-unreadable
+#   unsupported-os | plan-errors | install-failure | uac-declined | key-unreadable |
+#   goes-online-only (Documents turns online-only after its first scan)
 # also: &theme=dark|light and &motion=reduced
 npm run build:setup-demo   # static copy in src\dashboard\build-output\setup-demo
 ```
