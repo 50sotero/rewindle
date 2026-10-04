@@ -9,7 +9,7 @@ import {
   bridge, messageOf, type HostEvent, type HostInfo, type MeasureUpdate, type Operation, type OperationFinished,
   type OperationStage, type ProjectLink, type ThemeInfo,
 } from './bridge';
-import { driveRoot, isUsablePath, isWithin, joinPath, samePath } from './format';
+import { driveRoot, folderName, isUsablePath, isWithin, joinPath, samePath } from './format';
 
 export type Screen =
   | 'loading' | 'hostError' | 'unsupported' | 'maintenance'
@@ -346,6 +346,8 @@ export function useWizard() {
           const next = { ...current };
           for (const path of batch) {
             const key = path.toLowerCase();
+            // A newer measurement of this folder has replaced this one.
+            if (latestMeasure.current.get(key) !== request) continue;
             const before = current[key];
             const onlineOnly = !!before && (before.placeholderFiles > 0 || before.placeholderPending);
             next[key] = {
@@ -588,6 +590,19 @@ export function useWizard() {
     if (screen !== finalCheck) { setFinalCheck(null); return; }
     if (selectedTotal(choices, sizes).measuring) return;
     setFinalCheck(null);
+    // A scan that failed (its request was refused, or the folder couldn't be read) found nothing either way: it doesn't count
+    // as a clean one.
+    const unchecked = selectedPaths(choices).filter(path => sizes[path.toLowerCase()]?.error);
+    if (unchecked.length > 0) {
+      const names = unchecked.map(path => choices.folders.find(folder => samePath(folder.path, path))?.key ?? folderName(path));
+      setOperation(null);
+      setScreen('review');
+      setNotice({
+        screen: 'review',
+        text: `Setup couldn’t check ${names.join(', ')} once more for files that are only in the cloud. Choose Install to try again, or untick ${unchecked.length === 1 ? 'that folder' : 'those folders'} under What to protect.`,
+      });
+      return;
+    }
     if (onlineOnlyPaths(choices, sizes).length > 0) {
       setOperation(null);
       setScreen('review');
