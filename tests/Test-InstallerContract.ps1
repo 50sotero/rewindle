@@ -108,7 +108,8 @@ function Grant-Access {
 
 function New-TestUser {
     param([string]$Name, [switch]$Administrator)
-    $secure = ConvertTo-SecureString -String ('Rw!' + [Guid]::NewGuid().ToString('N') + 'a9') -AsPlainText -Force
+    $password = 'Rw!' + [Guid]::NewGuid().ToString('N') + 'a9'
+    $secure = ConvertTo-SecureString -String $password -AsPlainText -Force
     # New-LocalUser never prompts. BUILTIN\Users holds the local logon right the secondary-logon service needs.
     New-LocalUser -Name $Name -Password $secure -PasswordNeverExpires -AccountNeverExpires | Out-Null
     $script:createdUsers += $Name
@@ -118,6 +119,8 @@ function New-TestUser {
         Name = $Name
         Sid = (Get-LocalUser -Name $Name).SID.Value
         Credential = (New-Object System.Management.Automation.PSCredential($Name, $secure))
+        # Only for registering the one-off tasks of Invoke-AsUserElevated; the account is deleted at the end of the test.
+        Password = $password
     }
 }
 
@@ -154,6 +157,67 @@ function Invoke-AsUser {
     return [pscustomobject]@{
         Name = $Name
         ExitCode = [int]$process.ExitCode
+        Stdout = $(if (Test-Path -LiteralPath $stdout) { [IO.File]::ReadAllText($stdout) } else { '' })
+        Stderr = $(if (Test-Path -LiteralPath $stderr) { [IO.File]::ReadAllText($stderr) } else { '' })
+    }
+}
+
+# Runs a script as a test user with that user's full (elevated) token and waits for it. Hosted runners keep User Account
+# Control on, so a process started with the user's credentials (Invoke-AsUser) gets the filtered token, as the setup wizard does.
+# A task registered with the user's password at the highest run level gets the full token without a prompt: the token the
+# person approves in Windows' prompt, which the installer needs (it must run as the account that started setup).
+function Invoke-AsUserElevated {
+    param(
+        [Parameter(Mandatory)]$User,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Template,
+        [hashtable]$Values = @{},
+        [int]$TimeoutSeconds = 1200
+    )
+    $body = $Template
+    foreach ($key in $Values.Keys) { $body = $body.Replace('{{' + $key + '}}', [string]$Values[$key]) }
+    $scriptPath = Join-Path $scripts "$Name.ps1"
+    [IO.File]::WriteAllText($scriptPath, $body, [Text.UTF8Encoding]::new($true))
+    $stdout = Join-Path $logs "$Name.stdout.log"
+    $stderr = Join-Path $logs "$Name.stderr.log"
+    $exitPath = Join-Path $logs "$Name.exit.txt"
+    $quote = { param([string]$Value) "'" + $Value.Replace("'", "''") + "'" }
+    # The task has no console to read, so the wrapper redirects the streams and always leaves the exit code in a file.
+    $command = @(
+        '$code = 1'
+        ('try {{ & {0} 1> {1} 2> {2}; $code = if ($LASTEXITCODE -is [int]) {{ $LASTEXITCODE }} else {{ 0 }} }}' -f (& $quote $scriptPath), (& $quote $stdout), (& $quote $stderr))
+        ('catch {{ [IO.File]::AppendAllText({0}, ($_ | Out-String)); $code = 1 }}' -f (& $quote $stderr))
+        ('finally {{ [IO.File]::WriteAllText({0}, [string]$code) }}' -f (& $quote $exitPath))
+        'exit $code'
+    ) -join [Environment]::NewLine
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    $taskName = 'RewindleContract-' + $Name + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+    $action = New-ScheduledTaskAction -Execute $windowsPowerShell -Argument "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded" -WorkingDirectory $root
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Seconds ($TimeoutSeconds + 120))
+    Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -User $User.Name -Password $User.Password -RunLevel Highest | Out-Null
+    try {
+        $started = [DateTime]::UtcNow
+        Start-ScheduledTask -TaskName $taskName
+        while (-not (Test-Path -LiteralPath $exitPath)) {
+            if (([DateTime]::UtcNow - $started).TotalSeconds -gt $TimeoutSeconds) {
+                Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+                throw "$Name did not finish within $TimeoutSeconds seconds."
+            }
+            $info = Get-ScheduledTaskInfo -TaskName $taskName
+            # 267009: running; 267011: not run yet. Anything else with no exit file means the task could not start the script.
+            if (([DateTime]::UtcNow - $started).TotalSeconds -gt 15 -and (Test-Path -LiteralPath $exitPath) -eq $false -and
+                $info.LastTaskResult -notin @(0, 267009, 267011) -and (Get-ScheduledTask -TaskName $taskName).State -ne 'Running') {
+                throw "$Name could not be started as $($User.Name) (task result 0x$('{0:X8}' -f $info.LastTaskResult))."
+            }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    finally {
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    }
+    return [pscustomobject]@{
+        Name = $Name
+        ExitCode = [int]([IO.File]::ReadAllText($exitPath).Trim())
         Stdout = $(if (Test-Path -LiteralPath $stdout) { [IO.File]::ReadAllText($stdout) } else { '' })
         Stderr = $(if (Test-Path -LiteralPath $stderr) { [IO.File]::ReadAllText($stderr) } else { '' })
     }
@@ -286,7 +350,7 @@ function Invoke-InstallCycle {
     $arguments = @('-Repository', $Repository, '-SourceList', "$docs;$photos", '-MinimumFreeGiB', '1', '-Schedule', '03:15')
     if ($SkipDashboard) { $arguments += '-SkipDashboard' }
     $installName = "install-$Id"
-    $run = Invoke-AsUser -User $AdministratorUser -Name $installName -Template $progressTemplate -TimeoutSeconds 1800 -Values @{
+    $run = Invoke-AsUserElevated -User $AdministratorUser -Name $installName -Template $progressTemplate -TimeoutSeconds 1800 -Values @{
         HANDOFF = Join-Path $handoff "$installName.txt"; SCRIPT = $InstallerScript; POWERSHELL = $windowsPowerShell
         ARGUMENTS = (ConvertTo-LiteralList $arguments)
     }
@@ -341,7 +405,7 @@ function Invoke-InstallCycle {
         Assert-Equal 'DENIED' $keyProbe.Stdout.Trim() "$Label : another account cannot read the recovery key"
 
         Write-Section "$Label : a second install must refuse and change nothing"
-        $run = Invoke-AsUser -User $AdministratorUser -Name 'install-again' -Template $progressTemplate -Values @{
+        $run = Invoke-AsUserElevated -User $AdministratorUser -Name 'install-again' -Template $progressTemplate -Values @{
             HANDOFF = Join-Path $handoff 'install-again.txt'; SCRIPT = $InstallerScript; POWERSHELL = $windowsPowerShell
             ARGUMENTS = (ConvertTo-LiteralList $arguments)
         }
@@ -354,7 +418,7 @@ function Invoke-InstallCycle {
 
     Write-Section "$Label : uninstall with a progress feed"
     $uninstallName = "uninstall-$Id"
-    $run = Invoke-AsUser -User $AdministratorUser -Name $uninstallName -Template $progressTemplate -TimeoutSeconds 900 -Values @{
+    $run = Invoke-AsUserElevated -User $AdministratorUser -Name $uninstallName -Template $progressTemplate -TimeoutSeconds 900 -Values @{
         HANDOFF = Join-Path $handoff "$uninstallName.txt"; SCRIPT = (Join-Path $installRoot 'Uninstall-ResticBackuper.ps1'); POWERSHELL = $windowsPowerShell; ARGUMENTS = ''
     }
     Show-Run $run
@@ -392,7 +456,7 @@ function Invoke-InstallCycle {
     Assert-Equal @($stateRoot) @(Get-InstallationFootprint) "$Label : only the state folder remains of the Rewindle footprint (the repository and recovery key live elsewhere)"
 
     if ($Extras) {
-        $run = Invoke-AsUser -User $AdministratorUser -Name 'uninstall-again' -Template $progressTemplate -Values @{
+        $run = Invoke-AsUserElevated -User $AdministratorUser -Name 'uninstall-again' -Template $progressTemplate -Values @{
             HANDOFF = Join-Path $handoff 'uninstall-again.txt'; SCRIPT = (Join-Path $bundle 'payload\Uninstall-ResticBackuper.ps1'); POWERSHELL = $windowsPowerShell; ARGUMENTS = ''
         }
         Assert-True ($run.ExitCode -ne 0) "$Label : a second uninstall fails"
@@ -435,11 +499,12 @@ try {
     $probe = Invoke-AsUser -User $standardUser -Name 'probe-standard-elevation' -Template $elevationProbe
     if ($probe.ExitCode -ne 0) { Show-Run $probe; throw 'The standard test account could not run a process.' }
     Assert-Equal 'False' $probe.Stdout.Trim() 'the standard test account is not an administrator'
-    $probe = Invoke-AsUser -User $administratorUser -Name 'probe-admin-elevation' -Template $elevationProbe
+    $probe = Invoke-AsUser -User $administratorUser -Name 'probe-admin-filtered' -Template $elevationProbe
     if ($probe.ExitCode -ne 0) { Show-Run $probe; throw 'The administrator test account could not run a process.' }
-    if ($probe.Stdout.Trim() -ne 'True') {
-        throw 'The administrator test account does not run elevated. This test assumes the hosted runner has User Account Control off; adapt it before relying on it.'
-    }
+    Write-Host "The administrator test account's ordinary token is elevated: $($probe.Stdout.Trim()) (False while User Account Control is on)"
+    $probe = Invoke-AsUserElevated -User $administratorUser -Name 'probe-admin-elevation' -Template $elevationProbe
+    if ($probe.ExitCode -ne 0) { Show-Run $probe; throw 'The administrator test account could not run an elevated task.' }
+    Assert-Equal 'True' $probe.Stdout.Trim() 'the administrator test account runs elevated through its task, as after approving the Windows prompt'
 
     # ---------------------------------------------------------------------------------------------------------------------
     Write-Section '1. Plan mode as a standard user'
@@ -507,7 +572,7 @@ try {
     $firstRepository = Join-Path $root 'install\Backup'
     $common = @('-Repository', $firstRepository, '-SourceList', "$docs;$photos", '-MinimumFreeGiB', '1')
 
-    $run = Invoke-AsUser -User $administratorUser -Name 'install-bad-schedule' -Template $progressTemplate -Values @{
+    $run = Invoke-AsUserElevated -User $administratorUser -Name 'install-bad-schedule' -Template $progressTemplate -Values @{
         HANDOFF = Join-Path $handoff 'install-bad-schedule.txt'; SCRIPT = $installerScript; POWERSHELL = $windowsPowerShell
         ARGUMENTS = (ConvertTo-LiteralList ($common + @('-Schedule', '99:99')))
     }
@@ -522,7 +587,7 @@ try {
     Assert-Equal @() @(Get-InstallationFootprint) 'a refused install changed nothing'
     Assert-True (-not (Test-Path -LiteralPath $firstRepository)) 'a refused install created no repository'
 
-    $run = Invoke-AsUser -User $administratorUser -Name 'install-bad-progress-path' -Template @'
+    $run = Invoke-AsUserElevated -User $administratorUser -Name 'install-bad-progress-path' -Template @'
 $ErrorActionPreference = 'Stop'
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $outside = Join-Path $env:SystemRoot 'rewindle-contract-progress.jsonl'
@@ -568,7 +633,7 @@ finally {
         if (Test-Path -LiteralPath $installRoot) {
             $leftover = Join-Path $installRoot 'Uninstall-ResticBackuper.ps1'
             if ((Test-Path -LiteralPath $leftover) -and $null -ne $administratorUser) {
-                $cleanup = Invoke-AsUser -User $administratorUser -Name 'cleanup-uninstall' -TimeoutSeconds 600 -Values @{ SCRIPT = $leftover; SID = $administratorUser.Sid; POWERSHELL = $windowsPowerShell } -Template @'
+                $cleanup = Invoke-AsUserElevated -User $administratorUser -Name 'cleanup-uninstall' -TimeoutSeconds 600 -Values @{ SCRIPT = $leftover; SID = $administratorUser.Sid; POWERSHELL = $windowsPowerShell } -Template @'
 & '{{POWERSHELL}}' -NoProfile -ExecutionPolicy Bypass -File '{{SCRIPT}}' -Unattended -ExpectedUserSid '{{SID}}'
 exit $LASTEXITCODE
 '@
