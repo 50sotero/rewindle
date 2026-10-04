@@ -85,9 +85,16 @@ export class BridgeError extends Error {
   constructor(code: string, message: string) { super(message); this.name = 'BridgeError'; this.code = code; }
 }
 
-// Long enough for the slowest honest answer (the host's own plan time-out is shorter), short enough that a page whose host
-// went away says so instead of waiting for ever.
+// Long enough for the slowest honest answer, short enough that a page whose host went away says so instead of waiting for ever.
 const REQUEST_TIMEOUT_MS = 150_000;
+// Commands whose honest answer can take longer: a plan in Google Drive mode, which the host allows 30 minutes (PlanRunner,
+// Program.cs), and the dialogs a person may keep open. The host's own limits end these first.
+const LONG_TIMEOUTS_MS: Partial<Record<SetupCommand, number>> = {
+  getPlan: 32 * 60_000,
+  browseFolder: 60 * 60_000,
+  browseRepositoryFolder: 60 * 60_000,
+  saveRecoveryKeyCopy: 60 * 60_000,
+};
 
 type Listener = (event: HostEvent) => void;
 
@@ -132,7 +139,7 @@ class Bridge {
       const timer = window.setTimeout(() => {
         this.pending.delete(id);
         reject(new BridgeError('timeout', 'Rewindle Setup did not answer in time. Try again.'));
-      }, REQUEST_TIMEOUT_MS);
+      }, LONG_TIMEOUTS_MS[command] ?? REQUEST_TIMEOUT_MS);
       this.pending.set(id, { resolve: value => resolve(value as T), reject, timer });
       native.postMessage({ type: 'request', id, command, payload });
     });

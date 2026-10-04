@@ -235,6 +235,9 @@ export function useWizard() {
   const measured = useRef(new Set<string>());
   // The measurement requests of this run of the wizard; updates from any other (an earlier run's, cancelled) are ignored.
   const activeMeasures = useRef(new Set<string>());
+  // The newest measurement request for each folder: a re-check retires an earlier scan of the same folder that is still
+  // running, so its late result can't overwrite the newer one.
+  const latestMeasure = useRef(new Map<string, string>());
   // Set when the uninstall under way is the first half of a reinstall (read in the host's events, so a ref).
   const reinstalling = useRef(false);
 
@@ -249,7 +252,7 @@ export function useWizard() {
     if (message.event === 'theme') setTheme(message.data);
     else if (message.event === 'measure') {
       const update: MeasureUpdate = message.data;
-      if (!activeMeasures.current.has(update.request)) return;
+      if (!activeMeasures.current.has(update.request) || latestMeasure.current.get(update.path.toLowerCase()) !== update.request) return;
       setSizes(current => {
         const key = update.path.toLowerCase();
         const before = current[key];
@@ -323,6 +326,7 @@ export function useWizard() {
       const batch = fresh.slice(start, start + MEASURE_BATCH);
       const request = `m${++measureSequence.current}`;
       activeMeasures.current.add(request);
+      for (const path of batch) latestMeasure.current.set(path.toLowerCase(), request);
       bridge.request('measureFolders', { request, paths: batch }).catch(() => {
         // Sizes are a convenience: a folder that cannot be measured just shows no size. Online-only files it was already found
         // to hold stay counted, though, because they keep setup from going on.
@@ -359,6 +363,7 @@ export function useWizard() {
       // out of date, for example files OneDrive has since made online-only.
       for (const request of activeMeasures.current) void bridge.request('cancelMeasure', { request }).catch(() => undefined);
       activeMeasures.current.clear();
+      latestMeasure.current.clear();
       measured.current.clear();
       setSizes({});
       setChoices(initial);
