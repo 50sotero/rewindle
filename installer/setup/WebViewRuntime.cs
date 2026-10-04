@@ -199,12 +199,40 @@ namespace Rewindle.Setup
             {
                 if (!process.WaitForExit((int)InstallTimeout.TotalMilliseconds))
                 {
-                    throw new SetupFailure("runtime_timeout", "Microsoft’s installer is taking too long. Try again in a few minutes.");
+                    // A retry, or closing Setup (which deletes the bootstrapper), must not race an installer that is still
+                    // running. Stop it before reporting; when Windows does not let Setup stop it (it may run elevated), wait for
+                    // it to finish and let the caller judge the result from the registry as usual.
+                    if (StopTimedOut(process))
+                    {
+                        throw new SetupFailure("runtime_timeout", "Microsoft’s installer is taking too long. Try again in a few minutes.");
+                    }
+                    SetupLog.Write("The WebView2 bootstrapper ran past the time limit and could not be stopped; waiting for it to finish.");
+                    process.WaitForExit();
                 }
                 // A nonzero exit with the runtime present afterwards (a newer one was already there) is still a success;
                 // the caller checks the registry.
                 SetupLog.Write("The WebView2 bootstrapper exited with code " + process.ExitCode + ".");
             }
+        }
+
+        // True when Setup stopped the timed-out bootstrapper; false when it had already exited or Windows refused (access denied).
+        private static bool StopTimedOut(Process process)
+        {
+            try
+            {
+                process.Kill();
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+            catch (Win32Exception error)
+            {
+                SetupLog.Write("The timed-out WebView2 bootstrapper could not be stopped", error);
+                return false;
+            }
+            process.WaitForExit();
+            return true;
         }
 
         // True when the file has a valid Authenticode signature whose signer is Microsoft: the check Install-ResticBackuper.ps1

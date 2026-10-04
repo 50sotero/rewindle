@@ -111,7 +111,23 @@ function initialChoices(plan: InstallPlan, preferredRepository?: string): Choice
   for (const path of defaults) {
     if (!folders.some(folder => samePath(folder.path, path))) folders.push({ path, key: null, exists: true, custom: true, selected: true });
   }
-  // A reinstall carries on with the backups the removed copy kept, when the drive that holds them is there.
+  // A reinstall carries on with the backups the removed copy kept, when the drive that holds them is there. Backups in Google
+  // Drive for desktop sit on a drive that is never an eligible local volume (DriveFS reports FAT32), so they are recognized by
+  // the My Drive folder instead, as browseRepository does.
+  const myDrive = plan.environment.drivefs.detected ? plan.environment.drivefs.myDriveRoot : null;
+  const keptInDriveFs = !!(preferredRepository && myDrive && isWithin(preferredRepository, myDrive) && !samePath(preferredRepository, myDrive));
+  if (preferredRepository && keptInDriveFs) {
+    return {
+      folders: folders.slice(0, MAX_SOURCES),
+      storageMode: 'google_drivefs_stream',
+      driveRoot: '',
+      repository: preferredRepository,
+      customRepository: true,
+      schedule: plan.defaults.schedule,
+      vss: true,
+      startBackup: true,
+    };
+  }
   const keptDrive = preferredRepository ? plan.environment.volumes.find(volume => volume.eligible && samePath(volume.root, driveRoot(preferredRepository))) : undefined;
   const drive = keptDrive ?? initialDrive(plan);
   const repository = keptDrive && preferredRepository ? preferredRepository : drive ? defaultRepositoryFor(drive.root, plan) : '';
@@ -193,6 +209,8 @@ export function useWizard() {
   const [maintenance, setMaintenance] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshNote, setRefreshNote] = useState<string | null>(null);
+  // Whether the time field on the Schedule page currently holds a valid time; choices.schedule keeps the last valid one.
+  const [scheduleDraftValid, setScheduleDraftValid] = useState(true);
   const measureSequence = useRef(0);
   const planSequence = useRef(0);
   const measured = useRef(new Set<string>());
@@ -398,6 +416,7 @@ export function useWizard() {
       } catch (error) { setNotice(messageOf(error)); }
     },
     setSchedule: (schedule: string) => update(current => ({ ...current, schedule })),
+    setScheduleDraftValid,
     setVss: (vss: boolean) => update(current => ({ ...current, vss })),
     setStartBackup: (startBackup: boolean) => update(current => ({ ...current, startBackup })),
     dismissNotice: () => setNotice(null),
@@ -435,6 +454,7 @@ export function useWizard() {
 
   return {
     host, theme, screen, furthest, base, hostError, choices, validation, sizes, operation, notice, maintenance, refreshing, refreshNote,
+    scheduleDraftValid,
     actions, setNotice,
     goTo: setScreen,
     install: () => runOperation('install'),

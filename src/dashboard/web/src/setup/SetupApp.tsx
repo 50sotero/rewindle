@@ -132,7 +132,7 @@ export default function SetupApp() {
       }
       case 'schedule': {
         const errors = issuesFor(plan, 'schedule').errors.length > 0;
-        return { back: back('location'), next: next('review', !SCHEDULE_PATTERN.test(choices?.schedule ?? '') || errors) };
+        return { back: back('location'), next: next('review', !SCHEDULE_PATTERN.test(choices?.schedule ?? '') || !wizard.scheduleDraftValid || errors) };
       }
       case 'review': {
         const blocked = (plan?.errors.length ?? 0) > 0 || selectedPaths(choices!).length === 0;

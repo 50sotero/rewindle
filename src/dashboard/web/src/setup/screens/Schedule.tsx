@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ChevronDown, Clock, Moon, Sun, Sunset } from 'lucide-react';
 import { issuesFor, SCHEDULE_PATTERN } from '../contract';
 import { formatTime } from '../format';
@@ -24,6 +24,11 @@ export function Schedule({ wizard }: { wizard: Wizard }) {
   const { errors, warnings } = issuesFor(wizard.validation.plan, 'schedule');
   const vssIssues = issuesFor(wizard.validation.plan, 'sources').errors.filter(issue => /vss|open/i.test(issue.code));
   const valid = SCHEDULE_PATTERN.test(draft);
+  const { setScheduleDraftValid } = wizard.actions;
+
+  // Next must follow what the field shows, not the last valid time; leaving the page puts the field back to that time.
+  useEffect(() => { setScheduleDraftValid(valid); }, [setScheduleDraftValid, valid]);
+  useEffect(() => () => setScheduleDraftValid(true), [setScheduleDraftValid]);
 
   const commit = (value: string) => {
     setDraft(value);
