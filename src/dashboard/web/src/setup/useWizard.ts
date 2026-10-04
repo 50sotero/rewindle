@@ -388,6 +388,8 @@ export function useWizard() {
 
   // Every change to the choices is checked again by the installer, a moment after the last change.
   const inputsKey = useMemo(() => choices ? JSON.stringify(inputsOf(choices, base)) : '', [choices, base]);
+  // Bumped to check the same choices again, after the drives were looked at again (a chosen drive may be gone).
+  const [revalidation, setRevalidation] = useState(0);
   useEffect(() => {
     if (!choices || !base || !inputsKey) return;
     const id = ++planSequence.current;
@@ -404,7 +406,21 @@ export function useWizard() {
     return () => window.clearTimeout(timer);
     // `choices` and `base` are read through inputsKey; the check runs when what is sent changes, not on every keystroke elsewhere.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [inputsKey]);
+  }, [inputsKey, revalidation]);
+
+  // Forgets what was measured for these folders, so the next measurement is a fresh one: a folder removed and added again, or
+  // ticked again, may have changed meanwhile (OneDrive can make its files online-only).
+  const forgetMeasurement = useCallback((paths: string[]) => {
+    for (const path of paths) {
+      measured.current.delete(path.toLowerCase());
+      latestMeasure.current.delete(path.toLowerCase());
+    }
+    setSizes(current => {
+      const next = { ...current };
+      for (const path of paths) delete next[path.toLowerCase()];
+      return next;
+    });
+  }, []);
 
   const update = useCallback((change: (current: Choices) => Choices) => setChoices(current => current ? change(current) : current), []);
 
@@ -426,8 +442,15 @@ export function useWizard() {
       update(current => ({
         ...current, folders: current.folders.map(item => samePath(item.path, path) && item.exists ? { ...item, selected: !item.selected } : item),
       }));
+      if (folder && !folder.selected) {
+        forgetMeasurement([folder.path]);
+        measure([folder.path]);
+      }
     },
-    removeFolder: (path: string) => update(current => ({ ...current, folders: current.folders.filter(folder => !samePath(folder.path, path)) })),
+    removeFolder: (path: string) => {
+      forgetMeasurement([path]);
+      update(current => ({ ...current, folders: current.folders.filter(folder => !samePath(folder.path, path)) }));
+    },
     addFolder: async () => {
       setNotice(null);
       try {
@@ -451,7 +474,8 @@ export function useWizard() {
           if (existing) return { ...current, folders: current.folders.map(folder => folder === existing ? { ...folder, selected: true, exists: true } : folder) };
           return { ...current, folders: [...current.folders, { path, key: null, exists: true, custom: true, selected: true }] };
         });
-        // Measured once per path; asking again for one already measured does nothing.
+        // A folder added (again) is measured afresh.
+        forgetMeasurement([path]);
         measure([path]);
       } catch (error) { setNotice({ screen: 'folders', text: messageOf(error) }); }
     },
@@ -466,6 +490,7 @@ export function useWizard() {
         const before = base?.environment.volumes.filter(volume => volume.eligible).length ?? 0;
         const after = plan.environment.volumes.filter(volume => volume.eligible).length;
         setBase(plan);
+        setRevalidation(count => count + 1);
         // Unless the person chose a folder themselves, a drive that is now better than the one chosen (a separate one, not Windows') is taken.
         update(current => {
           if (current.storageMode !== 'local_ntfs' || current.customRepository) return current;
@@ -520,7 +545,7 @@ export function useWizard() {
     setVss: (vss: boolean) => update(current => ({ ...current, vss })),
     setStartBackup: (startBackup: boolean) => update(current => ({ ...current, startBackup })),
     dismissNotice: () => setNotice(null),
-  }), [base, choices, measure, setScreen, start, update]);
+  }), [base, choices, forgetMeasurement, measure, setScreen, start, update]);
 
   const runOperation = useCallback(async (kind: Operation, options: { reinstall?: boolean } = {}) => {
     if (!choices) return;
