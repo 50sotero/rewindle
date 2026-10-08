@@ -16,7 +16,7 @@ body:
     attributes:
       label: Rewindle version
       description: Shown in **Settings > About Rewindle**, or run `ResticBackuperDashboard.exe --version` from `C:\Program Files\ResticBackuper`.
-      placeholder: 0.2.0-alpha.1
+      placeholder: 0.2.0-alpha.2
     validations:
       required: true
 

@@ -7,6 +7,8 @@ labels. Releases before 0.2.0 were published under the name ResticBackuper.
 
 ## [Unreleased]
 
+## [0.2.0-alpha.2] - 2026-10-08
+
 ### Added
 
 - A machine-readable backend for setup programs, specified in
@@ -58,6 +60,30 @@ labels. Releases before 0.2.0 were published under the name ResticBackuper.
   installs. The WebView2 SDK pin and the deterministic ZIP helper moved to
   `build\RewindleWebView2.ps1` and `build\RewindleZip.ps1`, shared by the
   dashboard and setup builds.
+- A reinstall over the state an uninstall kept continues the same backup plan,
+  which the engine requires. When it uses another backup location, the kept
+  recovery key is rewritten to name it once the reinstall has succeeded
+  (`initialize_repository.py --commit-recovery-key`); a reinstall that fails
+  leaves the key as it was.
+- The uninstaller removes a leftover Installed apps entry whose program folder
+  is already gone, and keeps, with a warning, a Start menu shortcut or Installed
+  apps entry it can't prove is Rewindle's. Setup explains that a new install
+  won't run over such an entry.
+- README and release notes show the setup wizard (`docs/images/setup/`).
+
+### Security
+
+- Setup runs as the person who started it. Only the installer and the
+  uninstaller run elevated, and a script from Setup's own bundle runs from a
+  copy staged in an administrator-only folder and checked against the SHA-256
+  hashes Setup took when it unpacked the bundle.
+- The elevated installer's progress file is owned by Administrators and only
+  they and SYSTEM can change it; Setup trusts no other file, and a success
+  report from an installer that exits with an error is a failure.
+- Setup holds Microsoft's WebView2 bootstrapper and its own WebView2 libraries
+  open from the moment it checks them until they are used, runs and loads them
+  by their resolved paths, keeps its temporary folder out of the DLL search
+  order, and serves its own pages from memory instead of from disk.
 
 ## [0.2.0-alpha.1] - 2026-10-03
 
@@ -426,5 +452,6 @@ dashboard are built, installed and tested together. Windows x64 only.
 - Conservative uninstaller that preserves repositories, state, credentials,
   recovery keys, and recovery tools.
 
-[Unreleased]: https://github.com/50sotero/rewindle/compare/v0.2.0-alpha.1...HEAD
+[Unreleased]: https://github.com/50sotero/rewindle/compare/v0.2.0-alpha.2...HEAD
+[0.2.0-alpha.2]: https://github.com/50sotero/rewindle/compare/v0.2.0-alpha.1...v0.2.0-alpha.2
 [0.2.0-alpha.1]: https://github.com/50sotero/rewindle/releases/tag/v0.2.0-alpha.1

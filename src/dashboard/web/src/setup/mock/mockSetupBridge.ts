@@ -150,7 +150,7 @@ export function installSetupSampleBridge(): void {
       },
       defaults: { repository: sample.defaultRepository, storage_mode: 'local_ntfs', sources: sample.defaultSources, schedule: '02:00' },
       environment: {
-        version: '0.2.0-alpha.1',
+        version: '0.2.0-alpha.2',
         os: sample.os,
         powershell: '5.1',
         dotnet_framework_48: sample.dotnet,
@@ -256,7 +256,7 @@ export function installSetupSampleBridge(): void {
       await wait(duration);
       if (outcome === 'fail') {
         line({ phase, state: 'failed', title, detail: failure ?? null });
-        const failed = { type: 'result', ok: false, error: { code: 'repository_initialization_failed', message: failure, detail: null }, install_root: null, recovery_key_path: null, recovery_key_readable_by_user: null, dashboard_executable: null, version: '0.2.0-alpha.1', warnings: [] };
+        const failed = { type: 'result', ok: false, error: { code: 'repository_initialization_failed', message: failure, detail: null }, install_root: null, recovery_key_path: null, recovery_key_readable_by_user: null, dashboard_executable: null, version: '0.2.0-alpha.2', warnings: [] };
         line(failed);
         await wait(300);
         return finish('failed', failure ?? 'Setup could not finish.', failed, 1);
@@ -270,7 +270,7 @@ export function installSetupSampleBridge(): void {
       type: 'result', ok: true, error: null, install_root: 'C:\\Program Files\\ResticBackuper',
       recovery_key_path: KEY_PATH,
       recovery_key_readable_by_user: sample.install !== 'key-unreadable',
-      dashboard_executable: 'C:\\Program Files\\ResticBackuper\\ResticBackuperDashboard.exe', version: '0.2.0-alpha.1',
+      dashboard_executable: 'C:\\Program Files\\ResticBackuper\\ResticBackuperDashboard.exe', version: '0.2.0-alpha.2',
       warnings: sample.install === 'key-unreadable' ? [{ code: 'recovery_key_not_readable_by_user', message: 'The recovery key can only be opened by administrators.' }] : [],
     } : {
       type: 'result', ok: true, error: null, operation: 'uninstall', install_root: 'C:\\Program Files\\ResticBackuper',
@@ -287,7 +287,7 @@ export function installSetupSampleBridge(): void {
   async function handle(command: string, payload: Payload): Promise<unknown> {
     switch (command) {
       case 'hello':
-        return { protocol: 1, version: '0.2.0-alpha.1', dark: dark(), highContrast: prefers('(forced-colors: active)'), reducedMotion: reduceMotion(), host: 'sample', scenario: sample.name, locale: navigator.language };
+        return { protocol: 1, version: '0.2.0-alpha.2', dark: dark(), highContrast: prefers('(forced-colors: active)'), reducedMotion: reduceMotion(), host: 'sample', scenario: sample.name, locale: navigator.language };
       case 'getPlan':
         await wait(450 + Math.random() * 350);
         if (payload?.refresh === true) spareDriveConnected = true;

@@ -31,7 +31,7 @@ evidence, your run history, and guided restores, and asks Windows for approval
 before anything changes.
 
 > [!WARNING]
-> **v0.2.0-alpha.1 is an early public test release.** Rewindle is a pet project,
+> **v0.2.0-alpha.2 is an early public test release.** Rewindle is a pet project,
 > provided as is under the [MIT License](LICENSE), with no warranty. The
 > executables are not code-signed, so SmartScreen or antivirus software may warn
 > about them. It has been tested on only a small number of Windows machines.
@@ -221,17 +221,17 @@ pinned, checksum-verified builds of both.
 From the [Releases page](https://github.com/50sotero/rewindle/releases),
 download either the setup program or the ZIP, plus its `.sha256` file:
 
-- `Rewindle-v0.2.0-alpha.1-windows-x64-setup.exe`: the setup wizard, a window
+- `Rewindle-v0.2.0-alpha.2-windows-x64-setup.exe`: the setup wizard, a window
   that asks a few questions and runs the installer from the same ZIP for you
   (see below). It unpacks to a temporary folder and cleans up when it closes.
-- `Rewindle-v0.2.0-alpha.1-windows-x64.zip`: extract it, review the scripts if
+- `Rewindle-v0.2.0-alpha.2-windows-x64.zip`: extract it, review the scripts if
   you like, then double-click `Install.cmd`.
 
 Compare the checksum before you run anything:
 
 ```powershell
-(Get-FileHash .\Rewindle-v0.2.0-alpha.1-windows-x64-setup.exe -Algorithm SHA256).Hash.ToLower()
-Get-Content .\Rewindle-v0.2.0-alpha.1-windows-x64-setup.exe.sha256
+(Get-FileHash .\Rewindle-v0.2.0-alpha.2-windows-x64-setup.exe -Algorithm SHA256).Hash.ToLower()
+Get-Content .\Rewindle-v0.2.0-alpha.2-windows-x64-setup.exe.sha256
 ```
 
 The two values must match. A checksum shows the file is the one published; it
@@ -246,6 +246,13 @@ Rewindle Setup is a window with eight pages: **Welcome**, **What to protect**,
 **Next**. Back and Next are in the same place on every page, `Enter` means Next
 and `Esc` means Back, and it follows Windows' light or dark theme and
 High Contrast.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/setup/welcome-dark.png">
+    <img src="docs/images/setup/welcome-light.png" width="720" alt="Rewindle Setup's Welcome page, with the eight steps listed on the left">
+  </picture>
+</p>
 
 - **What to protect** lists your Windows folders with their sizes, measured
   while you look. Add any other folder; a folder that is missing, inside another
@@ -266,6 +273,20 @@ High Contrast.
   was and wasn't changed and lets you copy the details.
 - **Recovery key** explains the key and lets you save a copy, for example to a
   USB drive. Finish waits until you confirm you've saved it.
+
+<table>
+  <tr>
+    <td><img src="docs/images/setup/folders.png" alt="What to protect: folder cards with their sizes"></td>
+    <td><img src="docs/images/setup/location.png" alt="Backup location: drive cards with free space, a recommended backup drive and warnings"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/setup/review.png" alt="Review: the chosen folders, backup location and schedule, each with an Edit link"></td>
+    <td><img src="docs/images/setup/installing.png" alt="Install: progress through each step of the installation"></td>
+  </tr>
+</table>
+
+The screenshots show invented sample data. They are rendered from the real
+window with `tests\Test-SetupWindow.ps1 -Culture en-US`.
 
 If Rewindle is already installed, Setup opens a maintenance page instead (open
 it, reinstall or repair, or uninstall). This alpha does not upgrade in place, so
