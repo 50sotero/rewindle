@@ -11,6 +11,8 @@ param(
     # The window's size in device-independent pixels.
     [double]$Width = 960,
     [double]$Height = 680,
+    # The culture whose number and date formats the pages use, e.g. en-US for screenshots; this PC's own when left out.
+    [string]$Culture,
     # Builds the wizard's web files first (npm run build:setup); otherwise the last build in src\dashboard\build-output\setup-web is used.
     [switch]$BuildWeb
 )
@@ -95,7 +97,9 @@ try {
             '--case', $caseName,
             '--forced-colors', $(if ($ForcedColors) { 'yes' } else { 'no' }),
             '--width', $Width.ToString([Globalization.CultureInfo]::InvariantCulture),
-            '--height', $Height.ToString([Globalization.CultureInfo]::InvariantCulture)
+            '--height', $Height.ToString([Globalization.CultureInfo]::InvariantCulture),
+            '--version', ([IO.File]::ReadAllText((Join-Path $projectRoot 'VERSION')).Trim()),
+            '--culture', $(if ($Culture) { $Culture } else { [Globalization.CultureInfo]::CurrentCulture.Name })
         )
         Get-Content -LiteralPath (Join-Path $Output "smoke-$caseName-$name.log") -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
         if ($process.ExitCode -ne 0) { throw "The $caseName window test ($name theme) failed (exit code $($process.ExitCode))." }

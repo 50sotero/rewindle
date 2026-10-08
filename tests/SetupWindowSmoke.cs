@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Reflection;
@@ -94,7 +95,7 @@ namespace Rewindle.Setup.Smoke
             drivefs["detected"] = false;
             drivefs["my_drive_root"] = null;
             Dictionary<string, object> environment = new Dictionary<string, object>();
-            environment["version"] = "0.2.0-alpha.1";
+            environment["version"] = Smoke.ProductVersion;
             environment["os"] = os;
             environment["powershell"] = "5.1";
             environment["dotnet_framework_48"] = true;
@@ -200,7 +201,7 @@ namespace Rewindle.Setup.Smoke
                 result["recovery_key_path"] = keyPath;
                 result["recovery_key_readable_by_user"] = true;
                 result["dashboard_executable"] = "C:\\Program Files\\ResticBackuper\\ResticBackuperDashboard.exe";
-                result["version"] = "0.2.0-alpha.1";
+                result["version"] = Smoke.ProductVersion;
                 Append(progressPath, Json.Serialize(result));
                 finished.Set();
             }, TaskCreationOptions.LongRunning);
@@ -281,6 +282,8 @@ namespace Rewindle.Setup.Smoke
         private static bool forcedColors;
         // While true, every check of the PC fails; the plan-failure case turns it off before choosing "Try again".
         internal static volatile bool PlansFail;
+        // The version the window shows (Test-SetupWindow passes the one in VERSION).
+        internal static string ProductVersion = "0.0.0";
         private static readonly List<string> log = new List<string>();
         private static int shot;
 
@@ -305,6 +308,13 @@ namespace Rewindle.Setup.Smoke
                     case "--forced-colors": forcedColors = args[index + 1] == "yes"; break;
                     case "--width": width = double.Parse(args[index + 1]); break;
                     case "--height": height = double.Parse(args[index + 1]); break;
+                    case "--version": ProductVersion = args[index + 1]; break;
+                    case "--culture":
+                        // The number and date formats the pages use (the host reports this culture), e.g. en-US for screenshots.
+                        CultureInfo culture = CultureInfo.GetCultureInfo(args[index + 1]);
+                        CultureInfo.DefaultThreadCurrentCulture = culture;
+                        Thread.CurrentThread.CurrentCulture = culture;
+                        break;
                 }
             }
             Directory.CreateDirectory(outputFolder);
@@ -359,7 +369,7 @@ namespace Rewindle.Setup.Smoke
             File.WriteAllText(keyFile, "not a real recovery key");
 
             BridgeEnvironment environment = new BridgeEnvironment();
-            environment.ProductVersion = "0.2.0-alpha.1";
+            environment.ProductVersion = ProductVersion;
             environment.UserSid = "S-1-5-21-1-2-3-1001";
             environment.ProgramFilesFolder = Path.Combine(root, "Program Files");
             environment.CommonDataFolder = Path.Combine(root, "ProgramData");
