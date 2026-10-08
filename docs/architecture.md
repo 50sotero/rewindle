@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes Rewindle v0.2.0-alpha.1 for Windows x64. Rewindle has
+This document describes Rewindle v0.2.0-alpha.2 for Windows x64. Rewindle has
 two parts: a backup engine (PowerShell managers and Python scripts that drive
 Restic, run elevated by a scheduled task) and the Rewindle dashboard (a WPF
 host with a WebView2 React interface that runs as the signed-in user). The
@@ -280,7 +280,7 @@ not guaranteed to reproduce the release ZIP byte for byte. The published
 SHA-256 identifies the exact frozen release artifact; it is an integrity value,
 not a reproducible-build claim.
 
-This is integrity checking, not publisher authentication. v0.2.0-alpha.1 has
+This is integrity checking, not publisher authentication. v0.2.0-alpha.2 has
 no Authenticode signature. Users must obtain checksums from the project's
 GitHub release, compare them locally, and decide whether they trust the
 project. Signing credentials are deliberately not required by the alpha build.

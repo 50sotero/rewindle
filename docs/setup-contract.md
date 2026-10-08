@@ -98,7 +98,7 @@ ignored. `-ProgressPath` is refused.
     "sources": ["C:\\Users\\you\\Documents"], "schedule": "02:00"
   },
   "environment": {
-    "version": "0.2.0-alpha.1",
+    "version": "0.2.0-alpha.2",
     "os": { "caption": "Microsoft Windows 11 Pro", "build": "26100", "x64": true, "supported": true },
     "powershell": "5.1.26100.1", "dotnet_framework_48": true, "elevated": false, "webview2": "126.0.2592.87",
     "existing_install": { "rewindle": null, "legacy_personal_edition": false },
@@ -357,7 +357,7 @@ Result line, **always the last line**, written even when the install fails or is
 {"schema":"Rewindle.InstallProgress.v1","seq":26,"time":"...","type":"result","ok":true,"error":null,
  "install_root":"C:\\Program Files\\ResticBackuper","recovery_key_path":"C:\\Users\\you\\ResticBackuper-RecoveryKey.txt",
  "recovery_key_readable_by_user":true,"dashboard_executable":"C:\\Program Files\\ResticBackuper\\ResticBackuperDashboard.exe",
- "version":"0.2.0-alpha.1","warnings":[]}
+ "version":"0.2.0-alpha.2","warnings":[]}
 ```
 
 | Property | Meaning |

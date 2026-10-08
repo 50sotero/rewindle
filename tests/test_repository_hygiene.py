@@ -173,6 +173,12 @@ class RepositoryHygieneTests(unittest.TestCase):
             "brand/app-icon.ico",
             "brand/app-icon.png",
             "brand/social-card.png",
+            "docs/images/setup/welcome-light.png",
+            "docs/images/setup/welcome-dark.png",
+            "docs/images/setup/folders.png",
+            "docs/images/setup/location.png",
+            "docs/images/setup/review.png",
+            "docs/images/setup/installing.png",
         }
         findings: list[str] = []
         for path in self.files:
