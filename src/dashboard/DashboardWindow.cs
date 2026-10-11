@@ -751,7 +751,7 @@ namespace ResticBackuper.Dashboard
             AutomationProperties.SetName(backupNowButton, "Back up now");
             AutomationProperties.SetHelpText(
                 backupNowButton,
-                "Start the installed Restic backup now. Windows approval is required.");
+                "Start a backup now. Windows will ask for your permission.");
             actions.Children.Add(backupNowButton);
 
             cancelBackupButton = CreateButton("Cancel backup");
@@ -4307,8 +4307,8 @@ namespace ResticBackuper.Dashboard
                 unavailable.Margin = new Thickness(12, 14, 12, 14);
                 sourceList.Children.Add(unavailable);
                 sourceSummary.Text = notInstalled
-                    ? "Engine not installed"
-                    : "Protected configuration unavailable";
+                    ? "Backup service not installed"
+                    : "Backup settings unavailable";
                 if (DateTime.UtcNow >= sourceNoticeExpiresUtc)
                 {
                     sourceStatus.Text = sourceConfigurationNote;
@@ -4329,8 +4329,7 @@ namespace ResticBackuper.Dashboard
         {
             if (error is BackupInstallationMissingException)
             {
-                return "Engine not installed: Rewindle did not find the backup engine it reports on. Install or repair it, " +
-                    "then refresh (see Requirements in the README).";
+                return "Rewindle's backup service isn't installed on this computer. Run Rewindle Setup to install it, then choose Refresh.";
             }
             if (error is UnauthorizedAccessException)
             {
@@ -4763,11 +4762,11 @@ namespace ResticBackuper.Dashboard
                 else if (sourceOperationInProgress || scheduleOperationInProgress ||
                     repositoryOperationInProgress || backupStartInProgress)
                 {
-                    helpText = "Wait for the current protected operation to finish before requesting cancellation.";
+                    helpText = "Wait for the current step to finish, then you can cancel.";
                 }
                 else
                 {
-                    helpText = "Ask the exact active Restic run to stop cooperatively. Existing verified snapshots are not changed.";
+                    helpText = "Stop the running backup safely. Your earlier backups are not changed.";
                     enabled = true;
                 }
             }
@@ -5077,7 +5076,7 @@ namespace ResticBackuper.Dashboard
                     currentTaskSchedule.State == BackupTaskState.Unknown)
                 {
                     SetCancellationStatus(
-                        "Restic stopped. Checking that the protected task and process tree have exited…",
+                        "The backup stopped. Making sure it has fully finished…",
                         BlueText,
                         0);
                     return;
@@ -5086,12 +5085,12 @@ namespace ResticBackuper.Dashboard
                 cancellationAwaitingTerminal = false;
                 cancellationRequestedRunId = string.Empty;
                 SetCancellationStatus(
-                    "Backup cancelled safely. Previously verified snapshots remain available.",
+                    "Backup cancelled. Your earlier backups are still there.",
                     Green,
                     18);
                 ShowTrayMessage(
                     "Backup cancelled safely",
-                    "The active run stopped cooperatively. Previously verified snapshots remain available.",
+                    "The backup stopped safely. Your earlier backups are still there.",
                     Forms.ToolTipIcon.Info);
                 return;
             }
@@ -5119,7 +5118,7 @@ namespace ResticBackuper.Dashboard
             }
 
             SetCancellationStatus(
-                "Cancellation was requested. Waiting for Restic and the protected task to report their final state…",
+                "Cancelling… waiting for the backup to stop safely.",
                 Amber,
                 0);
         }
@@ -5163,7 +5162,7 @@ namespace ResticBackuper.Dashboard
                 currentTaskSchedule.State != BackupTaskState.Running)
             {
                 SetCancellationStatus(
-                    "Cancellation was not requested because the protected task is no longer confirmed as Running.",
+                    "Nothing to cancel: the backup has already finished.",
                     Amber,
                     12);
                 UpdateCancelButton(snapshot);
@@ -5306,8 +5305,8 @@ namespace ResticBackuper.Dashboard
             else if (RepositoryRecoveryBlocksMutations())
             {
                 helpText = repositoryRecoveryInProgress
-                    ? "Wait for protected repository recovery to finish before changing the schedule."
-                    : "Repair the interrupted repository move before changing the schedule.";
+                    ? "Wait for the backup location repair to finish before changing the schedule."
+                    : "Repair the interrupted move of your backup location before changing the schedule.";
             }
             else if (repositoryOperationInProgress)
             {
@@ -5659,7 +5658,7 @@ namespace ResticBackuper.Dashboard
             {
                 ShowTrayMessage(
                     "Backup location changed",
-                    "The new Restic repository is active. The previous repository was retained.",
+                    "New backups go to the new location. The old one was kept, with its backups.",
                     Forms.ToolTipIcon.Info);
             }
         }
@@ -7002,7 +7001,7 @@ namespace ResticBackuper.Dashboard
             }
             else if (snapshot.IsSuccess)
             {
-                ShowTrayMessage("Backup verified", "Snapshot, storage check, and restore test completed.", Forms.ToolTipIcon.Info);
+                ShowTrayMessage("Backup verified", "Your files were backed up, checked, and test-restored.", Forms.ToolTipIcon.Info);
             }
             else if (snapshot.IsFailure)
             {
@@ -7205,7 +7204,7 @@ namespace ResticBackuper.Dashboard
             }
             if (snapshot.NeedsAnomalyReview)
             {
-                return prefix + "review changes";
+                return prefix + "confirm these changes";
             }
             BackupFreshnessResult freshness = BackupFreshnessEvaluator.EvaluateNow(
                 currentTaskSchedule,

@@ -860,13 +860,13 @@ function CopyLinkButton({ text, label = 'Copy link' }: { text: string; label?: s
     <span className="sr-only" role="status">{copied === 'done' ? 'Link copied' : copied === 'failed' ? 'The link could not be copied' : ''}</span></>;
 }
 
-function SettingsPage({ state, send }: { state: DashboardState; send: Send }) {
+function SettingsPage({ state, send, stale = false }: { state: DashboardState; send: Send; stale?: boolean }) {
   const motionDescription = state.motion === 'Full'
     ? 'Animated transitions and feedback are always on, even when Windows reduces animation. High contrast always reduces motion.'
     : state.motion === 'Reduced'
       ? 'Movement is kept to a minimum, while progress and status updates stay visible.'
       : `Follows your Windows animation setting, which is currently ${state.reducedMotion ? 'reduced' : 'on'}.`;
-  const note = busyNote(state), quiet = !!note, missing = serviceMissing(state);
+  const note = busyNote(state, stale), quiet = !!note, missing = serviceMissing(state);
   return <><Heading title="Settings" description="Where your backups go, when they run, and how Rewindle looks." note={note} />
     <Repairs state={state} send={send} />
     {/* Without the backup service the plan, the schedule and the problem report have nothing to act on; the appearance settings below
@@ -883,10 +883,10 @@ function SettingsPage({ state, send }: { state: DashboardState; send: Send }) {
           <p>Rewindle could not read the Windows backup schedule just now. Nothing was changed. Try again, or open Details to see why.</p>
           <details className="inline-details"><summary>Details</summary><p className="muted-copy">{state.schedule.error}</p></details>
           <Button size="sm" onClick={() => send('refresh')}><RefreshCw size={13} />Try again</Button>
-        </div> : <><p className="muted-copy">Next: {state.schedule.nextRun}</p><details className="inline-details"><summary>Run conditions</summary><p className="muted-copy">{state.schedule.detail}</p></details></>}
+        </div> : <><p className="muted-copy">Next: {formatWhen(state.schedule.nextRunAt, usableLocale(state.locale), state.schedule.nextRun)}</p><details className="inline-details"><summary>Run conditions</summary><p className="muted-copy">{state.schedule.detail}</p></details></>}
         <ScheduleNotice notice={state.schedule.notice} className="schedule-notice-slot" /></div><div className="setting-controls"><Action state={state} send={send} command="editSchedule" quiet={quiet} /></div></section>
     </div><div className="settings-notes">
-      <p className="muted-copy settings-note"><LockKeyhole size={12} aria-hidden="true" />Changing the location or schedule asks for Windows approval.</p>
+      <p className="muted-copy settings-note"><LockKeyhole size={12} aria-hidden="true" />Windows asks for your permission before the location or schedule changes.</p>
       {/* Closing the window sends it to the tray (the host says so once, in a balloon, and never again). */}
       <p className="muted-copy settings-note"><Info size={12} aria-hidden="true" />Closing this window never stops a running backup. Rewindle keeps running in the notification area, where it shows your backup status, and scheduled backups run either way. To quit Rewindle, right-click its tray icon and choose Exit Rewindle.</p>
     </div></section>}
@@ -1204,7 +1204,7 @@ export default function App() {
       transition={{ duration: state.reducedMotion ? 0 : .22, ease: [.16, 1, .3, 1] }}>
       {/* A page that fails to draw is replaced by a notice, with the sidebar and the other pages still working, and is drawn again with the next state. */}
       <ErrorBoundary scope="page" label={`${page} page`} resetKey={state} onRetry={() => send('refresh')}>
-        {page === 'Protection' ? <Protection state={state} send={send} folders={folderView} setFolders={setFolderView} stale={!connected} openRunDetails={openRunDetails} /> : page === 'Activity' ? <ActivityPage state={state} send={send} view={historyView} setView={setHistoryView} openRunDetails={openRunDetails} openRestore={() => navigate('Restore')} interactive={connected} /> : page === 'Restore' ? <RestorePage state={state} send={send} /> : <SettingsPage state={state} send={send} />}
+        {page === 'Protection' ? <Protection state={state} send={send} folders={folderView} setFolders={setFolderView} stale={!connected} openRunDetails={openRunDetails} /> : page === 'Activity' ? <ActivityPage state={state} send={send} view={historyView} setView={setHistoryView} openRunDetails={openRunDetails} openRestore={() => navigate('Restore')} interactive={connected} /> : page === 'Restore' ? <RestorePage state={state} send={send} /> : <SettingsPage state={state} send={send} stale={!connected} />}
       </ErrorBoundary>
       <footer className="app-footnote"><span><LockKeyhole size={10} />{state.preview ? 'Animation preview · no backup is running' : 'Your backups are encrypted'}</span><span>{state.status.active ? <Shimmer>{state.preview ? 'Preview running' : 'Backup is running'}</Shimmer> : updatedText}</span></footer>
     </motion.main></AnimatePresence></div></div>
