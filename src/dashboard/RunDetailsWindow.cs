@@ -426,37 +426,39 @@ namespace ResticBackuper.Dashboard
             catch (OverflowException) { return false; }
         }
 
+        // What to do next, in the words of someone who has never heard of a repository or a volume. Settings' "Save problem report" and the
+        // Restore page's "Check recovery readiness" are the two things a person can run themselves; nothing here says to touch the backups.
         private static string Remediation(string failureCode, string phase)
         {
             switch (failureCode)
             {
                 case "source_preflight_failed":
-                    return "Reconnect or grant access to the affected source, verify its expected volume, then run the backup again.";
+                    return "Plug in the drive that holds these folders and make sure you can open them, then choose Back up now.";
                 case "volume_identity_mismatch":
-                    return "Reconnect the expected disk. Do not rebind a changed drive until its identity and contents are reviewed.";
+                    return "Reconnect the original drive. Rewindle stopped because the drive using this letter looks like a different one; don't carry on until you're sure it's the right drive.";
                 case "repository_low_space":
-                    return "Free space on the repository volume or move the repository with the protected location workflow.";
+                    return "The backup drive is almost full. Free up space on it, or choose Change location to move your backups to a bigger drive.";
                 case "repository_storage_unavailable":
-                    return "Reconnect the backup storage (for a Google Drive repository, make sure Google Drive for desktop is running and signed in), then run the backup again.";
+                    return "Reconnect the backup drive (if your backups are in Google Drive, make sure Google Drive for desktop is running and signed in), then choose Back up now.";
                 case "repository_authentication_failed":
-                    return "Use Check recovery readiness to test the active credential and recovery key independently.";
+                    return "Rewindle couldn't unlock your backups with its saved password. Open the Restore page and choose Check recovery readiness.";
                 case "source_data_unreadable":
-                    return "Review the affected paths and permissions. The incomplete run is not treated as a verified backup.";
+                    return "Open the affected paths listed below and check that you can read them. This run isn't counted as a finished backup.";
                 case "repository_structure_check_failed":
                 case "repository_data_check_failed":
-                    return "Do not delete snapshots. Use Check recovery readiness and preserve the repository for diagnosis.";
+                    return "Don't delete or move anything in the backup folder. Open the Restore page, choose Check recovery readiness, and if it reports a problem use Save problem report in Settings.";
                 case "restore_canary_failed":
-                    return "Use Check recovery readiness to verify the restore test file, credentials, and alternate-location restore path.";
+                    return "Open the Restore page and choose Check recovery readiness to find out why the restore test failed.";
                 case "cooperative_cancellation":
-                    return "No repair is required. A new backup can be started when the protected task is idle.";
+                    return "Nothing to repair. Choose Back up now when you want to run it again.";
             }
             if (!string.IsNullOrWhiteSpace(phase) && phase.IndexOf(
                 "cancel",
                 StringComparison.OrdinalIgnoreCase) >= 0)
-                return "Confirm the protected task is idle, then retry when ready.";
+                return "Make sure no other backup is running, then choose Back up now when you are ready.";
             return string.IsNullOrWhiteSpace(failureCode)
                 ? string.Empty
-                : "Export a redacted diagnostic bundle and use Check recovery readiness before retrying.";
+                : "Open Settings and choose Save problem report, and run Check recovery readiness on the Restore page, before trying again.";
         }
 
         private static IDictionary<string, object> TryReadObject(string path)
