@@ -2264,13 +2264,23 @@ namespace RewindleRegression {
     }
 
     $stringSequence = [Collections.Generic.IEnumerable[string]]
-    $excludedNames = Invoke-PickerStatic 'ParseExcludedFolderNames' @($stringSequence) @(,[string[]]@(
-            '**/node_modules', '**\.git\', '  **/Cache  ', '# **/commented', '*.tmp', '**/a/b', '**/', '**/*cache', 'build/', '**/vendor?', '', '**/.venv'))
-    # The set comes back through a function, which hands its items on one by one; -contains compares without regard to letter case, as the walk does.
-    $excludedList = @($excludedNames)
-    Assert-True ($excludedList.Count -eq 4 -and $excludedList -contains 'node_modules' -and $excludedList -contains '.git' -and $excludedList -contains '.venv' -and $excludedList -contains 'cache') ('the excludes.txt folder rules were not read as the whole-folder names only: ' + ($excludedList -join ', '))
-    Assert-True ($excludedList -notcontains 'a' -and $excludedList -notcontains 'b' -and $excludedList -notcontains 'build') 'a path rule or a plain pattern was taken for a folder name'
-    Assert-True (@(Invoke-PickerStatic 'ParseExcludedFolderNames' @($stringSequence) @($null)).Count -eq 0) 'no excludes.txt did not give an empty set'
+    # The same rules the backup's preflight prunes whole folders by (_literal_directory_exclusion_rules in restic_common.py): every part
+    # literal except one whole "**", which makes a suffix rule ("**/a/b") or an anchored one ("C:/x/**/a"); without "**" only a whole path.
+    $excludedRules = Invoke-PickerStatic 'ParseExcludedFolderRules' @($stringSequence) @(,[string[]]@(
+            '**/node_modules', '**\.git\', '  **/Cache  ', '# **/commented', '*.tmp', '**/a/b', '**/', '**/*cache', 'build/', '**/vendor?', '', '**/.venv',
+            '**/.gradle/caches', 'C:/Data/Skip', '\\nas\share\old', 'D:/Projects/**/.cache', '!**/keep', '**/x/**/y', 'C:/Temp/*'))
+    $excludesMethod = $excludedRules.GetType().GetMethod('Excludes')
+    function Test-Excluded([string]$Path) { return [bool]$excludesMethod.Invoke($excludedRules, [object[]]@($Path)) }
+    $countProperty = $excludedRules.GetType().GetProperty('Count')
+    Assert-True ([int]$countProperty.GetValue($excludedRules, $null) -eq 9) ('the excludes.txt rules were not compiled as the backup compiles them: ' + $countProperty.GetValue($excludedRules, $null) + ' rules')
+    foreach ($excluded in 'C:\Users\you\Code\node_modules', 'D:\repo\.GIT', 'C:\x\cache', 'C:\Users\you\app\.gradle\caches', 'C:\proj\a\b', 'C:\Data\Skip', '\\nas\share\old', 'D:\Projects\.cache', 'D:\Projects\app\deep\.cache') {
+        Assert-True (Test-Excluded $excluded) ('a folder the backup leaves out was not skipped: ' + $excluded)
+    }
+    foreach ($kept in 'C:\Users\you\Documents', 'C:\Users\you\app\.gradle', 'C:\proj\a', 'C:\proj\b', 'C:\Data\Skip\inner', 'C:\Data', 'D:\Other\.cache', 'C:\keep', 'C:\build', 'C:\Temp\x', 'C:\x\y') {
+        Assert-True (-not (Test-Excluded $kept)) ('a folder the backup keeps was skipped: ' + $kept)
+    }
+    $emptyRules = Invoke-PickerStatic 'ParseExcludedFolderRules' @($stringSequence) @($null)
+    Assert-True ([int]$countProperty.GetValue($emptyRules, $null) -eq 0) 'no excludes.txt did not give an empty rule set'
 
     function Test-InOneDrive([string]$Path, [string[]]$Roots) {
         return [bool](Invoke-PickerStatic 'IsInsideOneDrive' @([string], $stringSequence) @($Path, $Roots))
@@ -2295,12 +2305,12 @@ namespace RewindleRegression {
     $pickerRoot = Join-Path ([IO.Path]::GetTempPath()) ('rewindle-picker-' + [guid]::NewGuid().ToString('N'))
     $pickerLink = Join-Path $pickerRoot 'plain\link'
     try {
-        foreach ($folder in 'plain\sub', 'cloudtree\sub', 'skipped\node_modules') { [void][IO.Directory]::CreateDirectory((Join-Path $pickerRoot $folder)) }
-        foreach ($file in 'plain\a.txt', 'plain\sub\b.txt', 'cloudtree\sub\cloud.txt', 'skipped\node_modules\cloud.txt', 'skipped\keep.txt') { [IO.File]::WriteAllText((Join-Path $pickerRoot $file), 'x') }
+        foreach ($folder in 'plain\sub', 'cloudtree\sub', 'skipped\node_modules', 'nested\.gradle\caches') { [void][IO.Directory]::CreateDirectory((Join-Path $pickerRoot $folder)) }
+        foreach ($file in 'plain\a.txt', 'plain\sub\b.txt', 'cloudtree\sub\cloud.txt', 'skipped\node_modules\cloud.txt', 'skipped\keep.txt', 'nested\.gradle\caches\cloud.txt', 'nested\.gradle\keep.txt') { [IO.File]::WriteAllText((Join-Path $pickerRoot $file), 'x') }
         # [IO.File]::GetAttributes throws for a path that is not there, as the host's own reading of an entry's attributes does.
         $plainAttributes = [Func[IO.FileSystemInfo, IO.FileAttributes]] { param($entry) [IO.File]::GetAttributes($entry.FullName) }
         $cloudAttributes = [Func[IO.FileSystemInfo, IO.FileAttributes]] { param($entry) $actual = [IO.File]::GetAttributes($entry.FullName); if ($entry.Name -eq 'cloud.txt') { [Enum]::ToObject([IO.FileAttributes], ([int]$actual -bor 0x00400000)) } else { $actual } }
-        $scanTypes = @([string], [Collections.Generic.ISet[string]], [int], [TimeSpan], [Func[IO.FileSystemInfo, IO.FileAttributes]])
+        $scanTypes = @([string], $excludedRules.GetType(), [int], [TimeSpan], [Func[IO.FileSystemInfo, IO.FileAttributes]])
         function Invoke-PickerScan([string]$Folder, $Skipped, [int]$Limit, [TimeSpan]$Time, $Attributes) {
             return Invoke-PickerStatic 'ScanForOnlineOnly' $scanTypes @((Join-Path $pickerRoot $Folder), $Skipped, $Limit, $Time, $Attributes)
         }
@@ -2309,12 +2319,15 @@ namespace RewindleRegression {
         Assert-True (-not $scan.Found -and $scan.Complete -and $scan.Scanned -eq 3) ('a folder with nothing in the cloud was not walked completely: found=' + $scan.Found + ' complete=' + $scan.Complete + ' scanned=' + $scan.Scanned)
         $scan = Invoke-PickerScan 'cloudtree' $null 1000 $minute $cloudAttributes
         Assert-True ($scan.Found -and -not $scan.Complete) 'a file stored only in the cloud was not found, or the walk did not stop at it'
-        $skipNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-        [void]$skipNames.Add('node_modules')
-        $scan = Invoke-PickerScan 'skipped' $skipNames 1000 $minute $cloudAttributes
+        $scan = Invoke-PickerScan 'skipped' $excludedRules 1000 $minute $cloudAttributes
         Assert-True (-not $scan.Found -and $scan.Complete) 'an online-only file inside a folder the backup skips still counted'
         $scan = Invoke-PickerScan 'skipped' $null 1000 $minute $cloudAttributes
         Assert-True ($scan.Found) 'the same file was not found when nothing is skipped'
+        # A rule of more than one folder ("**/.gradle/caches", shipped in excludes.txt) is skipped too, and its parent is still walked.
+        $scan = Invoke-PickerScan 'nested' $excludedRules 1000 $minute $cloudAttributes
+        Assert-True (-not $scan.Found -and $scan.Complete -and $scan.Scanned -eq 3) ('an online-only file under a nested folder the backup skips still counted: found=' + $scan.Found + ' scanned=' + $scan.Scanned)
+        $scan = Invoke-PickerScan 'nested' $null 1000 $minute $cloudAttributes
+        Assert-True ($scan.Found) 'the nested file was not found when nothing is skipped'
         $scan = Invoke-PickerScan 'plain' $null 1 $minute $plainAttributes
         Assert-True (-not $scan.Found -and -not $scan.Complete -and $scan.Scanned -eq 1) 'the entry limit did not stop the walk, or the walk claimed to be complete'
         $scan = Invoke-PickerScan 'plain' $null 1000 ([TimeSpan]::Zero) $plainAttributes

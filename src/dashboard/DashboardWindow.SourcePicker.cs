@@ -321,7 +321,7 @@ namespace ResticBackuper.Dashboard
             // backup. The walk is bounded: a folder too big to finish in time is let through, never refused on a guess.
             OnlineOnlyScan onlineOnly = ScanForOnlineOnly(
                 normalized,
-                ReadExcludedFolderNames(configuration),
+                ReadExcludedFolderRules(configuration),
                 OnlineOnlyScanEntryLimit,
                 OnlineOnlyScanTimeLimit,
                 delegate(FileSystemInfo entry) { return entry.Attributes; });
@@ -468,42 +468,160 @@ namespace ResticBackuper.Dashboard
             return (attributes & OnlineOnlyAttributes) != 0;
         }
 
-        // The whole-folder rules of the backup's excludes.txt that name one folder wherever it is ("**/node_modules"), so the walk skips
-        // what the backup skips. Anything more elaborate is not used, and those folders are looked at as usual.
-        internal static HashSet<string> ParseExcludedFolderNames(IEnumerable<string> lines)
+        // The whole-folder rules of the backup's excludes.txt, compiled the way the backup's own preflight compiles them
+        // (_literal_directory_exclusion_rules in restic_common.py), so the walk skips exactly the folders the backup skips. A rule is used
+        // only when every part is literal except at most one whole "**": "**/.gradle/caches" is a folder whose path ends in
+        // .gradle\caches, "C:/Data/Skip" is that one folder, and "D:/Projects/**/.cache" is a .cache folder anywhere under D:\Projects.
+        // Anything more elaborate is not used, and those folders are looked at as usual.
+        internal sealed class ExcludedFolderRules
         {
-            HashSet<string> names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            public readonly List<string[]> Suffixes = new List<string[]>();
+            public readonly List<string[]> Exact = new List<string[]>();
+            // Each is { prefix, suffix }.
+            public readonly List<string[][]> Anchored = new List<string[][]>();
+
+            public int Count
+            {
+                get { return Suffixes.Count + Exact.Count + Anchored.Count; }
+            }
+
+            // Whether the backup leaves out the folder at `path` as a whole (_directory_is_definitely_excluded in restic_common.py).
+            public bool Excludes(string path)
+            {
+                string[] parts = ExcludeRuleParts(path);
+                if (parts.Length == 0)
+                {
+                    return false;
+                }
+                foreach (string[] exact in Exact)
+                {
+                    if (parts.Length == exact.Length && PartsMatchAt(parts, 0, exact))
+                    {
+                        return true;
+                    }
+                }
+                foreach (string[] suffix in Suffixes)
+                {
+                    if (PartsMatchAt(parts, parts.Length - suffix.Length, suffix))
+                    {
+                        return true;
+                    }
+                }
+                foreach (string[][] rule in Anchored)
+                {
+                    if (parts.Length >= rule[0].Length + rule[1].Length &&
+                        PartsMatchAt(parts, 0, rule[0]) &&
+                        PartsMatchAt(parts, parts.Length - rule[1].Length, rule[1]))
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            private static bool PartsMatchAt(string[] parts, int start, string[] rule)
+            {
+                if (start < 0 || start + rule.Length > parts.Length)
+                {
+                    return false;
+                }
+                for (int index = 0; index < rule.Length; index++)
+                {
+                    if (!string.Equals(parts[start + index], rule[index], StringComparison.OrdinalIgnoreCase))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        }
+
+        // A path or a rule as its parts, "/" and "\" alike, with empty parts dropped: C:\Users\you is { "C:", "Users", "you" }.
+        private static string[] ExcludeRuleParts(string path)
+        {
+            return (path ?? string.Empty).Replace('\\', '/').Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+        }
+
+        internal static ExcludedFolderRules ParseExcludedFolderRules(IEnumerable<string> lines)
+        {
+            ExcludedFolderRules rules = new ExcludedFolderRules();
             if (lines == null)
             {
-                return names;
+                return rules;
             }
             foreach (string raw in lines)
             {
-                string line = (raw ?? string.Empty).Trim().Replace('\\', '/').TrimEnd('/');
-                if (!line.StartsWith("**/", StringComparison.Ordinal))
+                string trimmed = (raw ?? string.Empty).Trim();
+                if (trimmed.Length == 0 || trimmed.StartsWith("#", StringComparison.Ordinal) || trimmed.StartsWith("!", StringComparison.Ordinal))
                 {
                     continue;
                 }
-                string name = line.Substring(3);
-                if (name.Length == 0 || name.IndexOfAny(new[] { '/', '*', '?', '[', '!' }) >= 0)
+                string pattern = trimmed.Replace('\\', '/').TrimEnd('/');
+                string[] parts = ExcludeRuleParts(pattern);
+                if (parts.Length == 0)
                 {
                     continue;
                 }
-                names.Add(name);
+                int wildcard = -1;
+                bool literal = true;
+                for (int index = 0; index < parts.Length && literal; index++)
+                {
+                    if (parts[index] == "**")
+                    {
+                        literal = wildcard < 0;
+                        wildcard = index;
+                    }
+                    else if (parts[index].IndexOfAny(new[] { '*', '?', '[' }) >= 0)
+                    {
+                        literal = false;
+                    }
+                }
+                if (!literal)
+                {
+                    continue;
+                }
+                if (wildcard >= 0)
+                {
+                    string[] prefix = parts.Take(wildcard).ToArray();
+                    string[] suffix = parts.Skip(wildcard + 1).ToArray();
+                    if (suffix.Length == 0)
+                    {
+                        continue;
+                    }
+                    if (prefix.Length > 0)
+                    {
+                        rules.Anchored.Add(new[] { prefix, suffix });
+                    }
+                    else
+                    {
+                        rules.Suffixes.Add(suffix);
+                    }
+                }
+                else if (IsDriveLetterPart(parts[0]) || pattern.StartsWith("//", StringComparison.Ordinal))
+                {
+                    // A rule without "**" is only used when it names a whole path, from a drive letter or a network share.
+                    rules.Exact.Add(parts);
+                }
             }
-            return names;
+            return rules;
         }
 
-        private static HashSet<string> ReadExcludedFolderNames(SourceConfiguration configuration)
+        private static bool IsDriveLetterPart(string part)
+        {
+            return part.Length == 2 && part[1] == ':' &&
+                ((part[0] >= 'A' && part[0] <= 'Z') || (part[0] >= 'a' && part[0] <= 'z'));
+        }
+
+        private static ExcludedFolderRules ReadExcludedFolderRules(SourceConfiguration configuration)
         {
             try
             {
                 string path = Path.Combine(configuration.InstallRoot, "excludes.txt");
-                return ParseExcludedFolderNames(File.Exists(path) ? File.ReadAllLines(path) : null);
+                return ParseExcludedFolderRules(File.Exists(path) ? File.ReadAllLines(path) : null);
             }
             catch
             {
-                return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                return new ExcludedFolderRules();
             }
         }
 
@@ -512,7 +630,7 @@ namespace ResticBackuper.Dashboard
         // is skipped. `attributesOf` is how an entry's attributes are read, so a test can supply them.
         internal static OnlineOnlyScan ScanForOnlineOnly(
             string root,
-            ISet<string> skippedFolderNames,
+            ExcludedFolderRules skippedFolders,
             int entryLimit,
             TimeSpan timeLimit,
             Func<FileSystemInfo, FileAttributes> attributesOf)
@@ -548,7 +666,7 @@ namespace ResticBackuper.Dashboard
                         scan.Scanned++;
                         FileAttributes attributes = attributesOf(entry);
                         bool folder = (attributes & FileAttributes.Directory) != 0;
-                        if (folder && skippedFolderNames != null && skippedFolderNames.Contains(entry.Name))
+                        if (folder && skippedFolders != null && skippedFolders.Excludes(entry.FullName))
                         {
                             continue;
                         }
