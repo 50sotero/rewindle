@@ -22,6 +22,7 @@ import { noticeHoldProps, useDashboard, type NoticeHold } from './useDashboard';
 import { PROTECTED_COMMANDS, usableLocale, type Availability, type CommandName, type DashboardPage, type DashboardState, type MotionPreference, type Notice, type RunState, type ThemePreference } from './native-types';
 import { PROJECT_URL } from './project';
 import { attentionText, isCancelled, isProblem, resolvedByText, resolvedRuns, unresolvedRuns } from './runProblems';
+import { formatWhen } from './when';
 
 type Send = (command: CommandName, payload?: Record<string, string | boolean>) => void;
 
@@ -175,24 +176,9 @@ const localDateKey = (value: string) => {
   return `${year}-${month}-${day}`;
 };
 
-// A run's start the way the viewer's region writes it ("Fri, Oct 2, 2:00 AM" or "Fri 2 Oct, 02:00"), with the year added once
-// the run is from an earlier year. The host sends one fixed day-month 24-hour pattern, so the page formats the ISO start
-// itself. Formatters are cached: the host publishes about once a second and every retained run is formatted each time.
-const whenFormats = new Map<string, Intl.DateTimeFormat>();
-function runWhen(started: string, locale: string | undefined, fallback: string, weekday = true) {
-  const date = new Date(started);
-  if (Number.isNaN(date.getTime())) return fallback;
-  const withYear = date.getFullYear() !== new Date().getFullYear();
-  const key = `${locale ?? ''}|${withYear}|${weekday}`;
-  let format = whenFormats.get(key);
-  if (!format) {
-    // A 12-hour clock reads "2:00 AM"; a 24-hour one keeps its leading zero ("02:00"), so the times line up down the table.
-    const twelveHour = !!new Intl.DateTimeFormat(locale, { hour: 'numeric' }).resolvedOptions().hour12;
-    format = new Intl.DateTimeFormat(locale, { weekday: weekday ? 'short' : undefined, day: 'numeric', month: 'short', year: withYear ? 'numeric' : undefined, hour: twelveHour ? 'numeric' : '2-digit', minute: '2-digit' });
-    whenFormats.set(key, format);
-  }
-  return format.format(date);
-}
+// A run's start the way the viewer's region writes it (see when.ts). The host sends one fixed day-month 24-hour pattern, so the
+// page formats the ISO start itself.
+const runWhen = (started: string, locale: string | undefined, fallback: string, weekday = true) => formatWhen(started, locale, fallback, { weekday });
 
 // Formats every run time from its ISO start in one place, so the table, the sidebar, the charts and the run details agree.
 function withRunDates(state: DashboardState): DashboardState {

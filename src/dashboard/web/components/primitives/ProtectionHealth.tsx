@@ -3,6 +3,7 @@ import { motion } from 'motion/react';
 import { ArchiveRestore, ArrowUpRight, Check, ChevronDown, Clock3, Cloud, HardDrive, LoaderCircle, OctagonAlert, Play, RefreshCw, TriangleAlert } from 'lucide-react';
 import { Button } from '@/components/atoms/Button';
 import { usableLocale, type CommandName, type DashboardState } from '@/src/native-types';
+import { formatWhen } from '@/src/when';
 import './protection-health.css';
 
 type Send = (command: CommandName, payload?: Record<string, string | boolean>) => void;
@@ -25,11 +26,9 @@ type HealthItem = {
   compact?: boolean;
 };
 
-/** A time the way the cards print it ("Oct 2, 02:00 AM", with the year once it is another year's), or '' when the text is not a date. */
+/** A time the way the cards print it ("Oct 2, 2:05 AM", with the year once it is another year's; see when.ts), or '' when the text is not a date. */
 export function healthTime(value: string | undefined, locale?: string): string {
-  const date = value ? new Date(value) : null;
-  if (!date || Number.isNaN(date.getTime())) return '';
-  return date.toLocaleString(locale, { day: 'numeric', month: 'short', year: date.getFullYear() !== new Date().getFullYear() ? 'numeric' : undefined, hour: '2-digit', minute: '2-digit' });
+  return formatWhen(value, locale, '', { weekday: false });
 }
 
 // The host's label for the restore-test step (Telemetry.cs: GetPhase and InferFailurePhase). Phase
