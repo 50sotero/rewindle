@@ -708,7 +708,7 @@ namespace ResticBackuper.Dashboard
             catch (Exception error)
             {
                 return RepositoryManagerResult.Failure(
-                    "Rewindle couldn't verify Windows' answer, so the change was not accepted: " +
+                    "Rewindle couldn't verify Windows' answer, so it was not used: " +
                         SanitizeError(error.Message),
                     exitCode);
             }
