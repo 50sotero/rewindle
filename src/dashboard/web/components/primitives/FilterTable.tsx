@@ -17,7 +17,13 @@ import { Check, ChevronRight, Minus, OctagonAlert, type LucideIcon } from "lucid
 export type FilterTableStatus = "todo" | "progress" | "done";
 export type FilterTableSelection = "all" | FilterTableStatus;
 
-export type TableRow = { id?: string; task: string; date: string; status: FilterTableStatus; statusLabel?: string; owner: string };
+export type TableRow = {
+  id?: string; task: string; date: string; status: FilterTableStatus; statusLabel?: string; owner: string;
+  /** Draws the status pill in a neutral color: the row keeps its status, but it no longer asks for anything (a failed run that a later one put right). */
+  quiet?: boolean;
+  /** A word or two after the pill ("Resolved"), with `statusHint` as its tooltip. */
+  statusNote?: string; statusHint?: string;
+};
 
 export type FilterTableLabels = {
   columns: { task: string; date: string; status: string; owner: string };
@@ -89,6 +95,9 @@ function FilterTable({
   const statusLabels = labels.statuses ?? {};
   const countFor = (key: "all" | FilterTableStatus) =>
     key === "all" ? rows.length : rows.filter((row) => row.status === key).length;
+  /* A chip whose rows are all quiet has a neutral dot too, so it does not ask for attention its rows no longer need. */
+  const quietChip = (key: "all" | FilterTableStatus) =>
+    key !== "all" && rows.some((row) => row.status === key) && rows.every((row) => row.status !== key || row.quiet);
 
   const interactive = !!onRowClick;
   const openable = interactive && !!onRowOpen;
@@ -163,7 +172,7 @@ function FilterTable({
                 font-medium transition-[background-color,box-shadow,color] duration-200
                 ${active ? "bg-surface text-ink shadow-btn" : "text-ink-2 hover:bg-hover"}`}
             >
-              {f.dot && <span className="size-1.5 rounded-full" style={{ background: f.dot }} />}
+              {f.dot && <span className="size-1.5 rounded-full" style={{ background: quietChip(f.key) ? "var(--ink-3)" : f.dot }} />}
               {filterLabels[f.key] ?? f.label}
               <span
                 className={`rounded-[4px] px-1 text-[11px] tabular-nums
@@ -206,7 +215,7 @@ function FilterTable({
             </div>
             {rows.map((row, index) => {
               const shown = filter === "all" || row.status === filter;
-              const pill = { ...PILLS[row.status], label: row.statusLabel ?? statusLabels[row.status] ?? PILLS[row.status].label };
+              const pill = { ...PILLS[row.status], label: row.statusLabel ?? statusLabels[row.status] ?? PILLS[row.status].label, ...(row.quiet ? { cls: "filter-status-quiet" } : {}) };
               const PillIcon = pill.Icon;
               const rowId = rowIdFor(row, index);
               const selected = resolvedSelectedRowId === rowId;
@@ -248,14 +257,15 @@ function FilterTable({
                       <span role={cellRole} className="flex items-center whitespace-nowrap border-r border-[var(--grid-line)] px-3 py-2 text-ink-2 tabular-nums">
                         {row.date}
                       </span>
-                      <span role={cellRole} className="flex min-w-0 items-center border-r border-[var(--grid-line)] px-3 py-2">
+                      <span role={cellRole} className="flex min-w-0 items-center gap-2 border-r border-[var(--grid-line)] px-3 py-2">
                         <span
-                          className={`inline-flex h-[23px] min-w-0 max-w-full items-center gap-1 whitespace-nowrap rounded-[8px] border px-[7px]
+                          className={`inline-flex h-[23px] min-w-0 max-w-full shrink items-center gap-1 whitespace-nowrap rounded-[8px] border px-[7px]
                             text-[13px] font-medium ${pill.cls}`}
                         >
                           <PillIcon aria-hidden="true" size={12} strokeWidth={2.5} className="shrink-0" />
                           <span className="truncate">{pill.label}</span>
                         </span>
+                        {row.statusNote && <span className="filter-status-note truncate text-[12px] text-ink-3" title={row.statusHint}>{row.statusNote}</span>}
                       </span>
                       <span role={cellRole} className="flex min-w-0 items-center px-3 py-2 text-ink-2">
                         <span className="truncate tabular-nums" title={row.owner}>{row.owner}</span>

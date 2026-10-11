@@ -422,6 +422,13 @@ select:focus-visible,
   border-color: color-mix(in srgb, var(--tag-base) 34%, var(--surface));
 }
 
+/* A status that no longer asks for anything (a failed run that a later one put right) keeps its shape and loses its hue. */
+.filter-status-quiet {
+  border: 1px solid color-mix(in srgb, var(--ink-3) 30%, var(--surface));
+  color: var(--ink-2);
+  background: color-mix(in srgb, var(--ink-3) 10%, var(--surface));
+}
+
 /* Dark mode — a richer, saturated same-hue fill
  * with bright same-hue text and no visible border (light mode keeps the soft
  * tinted pastels above). */

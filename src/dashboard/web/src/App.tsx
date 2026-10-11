@@ -21,6 +21,7 @@ import { Shimmer } from '@/components/atoms/Shimmer';
 import { noticeHoldProps, useDashboard, type NoticeHold } from './useDashboard';
 import { PROTECTED_COMMANDS, usableLocale, type Availability, type CommandName, type DashboardPage, type DashboardState, type MotionPreference, type Notice, type RunState, type ThemePreference } from './native-types';
 import { PROJECT_URL } from './project';
+import { attentionText, isCancelled, isProblem, resolvedByText, resolvedRuns, unresolvedRuns } from './runProblems';
 
 type Send = (command: CommandName, payload?: Record<string, string | boolean>) => void;
 
@@ -160,8 +161,8 @@ const duration = (n: number) => {
 type HistoryView = { query: string; sort: string; filter: FilterTableSelection };
 type ActivityDateFilter = { from: string; to: string };
 
-// How the history table and the trend charts group a run: finished and verified, stopped on request, or not done.
-const runStatus = (run: RunState): FilterTableStatus => run.success ? 'done' : /^(cancelled|canceled)$/i.test(run.result) ? 'progress' : 'todo';
+// How the history table and the trend charts group a run: finished and verified, stopped on request, or a problem (see runProblems).
+const runStatus = (run: RunState): FilterTableStatus => run.success ? 'done' : isCancelled(run) ? 'progress' : 'todo';
 
 const emptyHistoryView = (): HistoryView & ActivityDateFilter => ({ query: '', sort: 'newest', filter: 'all', from: '', to: '' });
 
@@ -636,7 +637,8 @@ const ProcessedChart = () => <GuardedChart metric="processed" />;
 
 const HISTORY_LABELS: FilterTableLabels = {
   columns: { task: 'When', date: 'Duration', status: 'Result', owner: 'Processed · files' },
-  filters: { all: 'All runs', done: 'Completed', todo: 'Needs attention', progress: 'Cancelled' },
+  // "Problems", not "Needs attention": most of them were put right by a later backup and ask for nothing (see runProblems).
+  filters: { all: 'All runs', done: 'Completed', todo: 'Problems', progress: 'Cancelled' },
   openRow: 'Open details',
 };
 
@@ -649,8 +651,14 @@ function ActivityPage({ state, send, view, setView, openRunDetails, openRestore,
   const history = useMemo(() => [...state.history].sort((a, b) => Date.parse(b.started) - Date.parse(a.started)), [historySignature]);
   const backupRuns = useMemo(() => history.filter(run => run.type === 'Backup'), [history]);
   const success = backupRuns.filter(run => run.success);
+  // A failed or incomplete run that a later success put right is shown as resolved; only what nothing has put right asks for anything.
+  const resolved = useMemo(() => resolvedRuns(history), [history]);
+  const unresolved = useMemo(() => unresolvedRuns(history, resolved), [history, resolved]);
+  const attention = attentionText(unresolved, success[0]);
+  const problems = useMemo(() => history.filter(isProblem).length, [history]);
   const average = success.length ? success.reduce((sum, run) => sum + run.durationSeconds, 0) / success.length : 0;
   const selected = state.history.find(run => run.id === state.selectedRunId);
+  const selectedResolver = selected && resolved.get(selected.id);
   const dateRangeInvalid = !!from && !!to && from > to;
   const needle = query.trim().toLowerCase();
   const matchesDate = (run: RunState) => {
@@ -671,8 +679,12 @@ function ActivityPage({ state, send, view, setView, openRunDetails, openRestore,
   const rows: TableRow[] = useMemo(() => {
     const filtered = history.filter(matchesView);
     filtered.sort((a, b) => sort === 'duration' ? b.durationSeconds - a.durationSeconds : sort === 'size' ? b.processedBytes - a.processedBytes : sort === 'oldest' ? Date.parse(a.started) - Date.parse(b.started) : Date.parse(b.started) - Date.parse(a.started));
-    return filtered.map(run => ({ id: run.id, task: `${run.startedDisplay}${run.type !== 'Backup' ? ` · ${run.type}` : ''}`, date: run.durationDisplay, status: runStatus(run), statusLabel: run.result, owner: `${run.processedDisplay} · ${run.filesDisplay} files` }));
-  }, [history, query, sort, from, to]);
+    return filtered.map(run => {
+      const by = resolved.get(run.id);
+      return { id: run.id, task: `${run.startedDisplay}${run.type !== 'Backup' ? ` · ${run.type}` : ''}`, date: run.durationDisplay, status: runStatus(run), statusLabel: run.result, owner: `${run.processedDisplay} · ${run.filesDisplay} files`,
+        ...(by ? { quiet: true, statusNote: 'Resolved', statusHint: `${resolvedByText(by)}, so this run needs nothing from you.` } : {}) };
+    });
+  }, [history, resolved, query, sort, from, to]);
   // Sorting is not a filter (it never hides a run), so only the search, the dates and the result chip count as filtering and are
   // cleared by "Clear filters"; the order stays as it was chosen.
   const filtering = !!query.trim() || !!from || !!to || filter !== 'all';
@@ -703,7 +715,7 @@ function ActivityPage({ state, send, view, setView, openRunDetails, openRestore,
     { key: 'processed', prose: 'The amount of data processed by each backup run.', Card: ProcessedChart, pill },
   ], [trend, pill]);
   return <>
-    <Heading title="Activity" description="Search your runs, inspect a snapshot, or review what needs attention." note={modeNote(state)}>
+    <Heading title="Activity" description="Search your runs, inspect a snapshot, or see why a run did not succeed." note={modeNote(state)}>
       <Action state={state} send={send} command="exportDiagnostics" icon={<ArrowUpRight size={13} />} quiet={!!modeNote(state)} />
     </Heading>
     <div className="activity-metrics">
@@ -724,11 +736,16 @@ function ActivityPage({ state, send, view, setView, openRunDetails, openRestore,
           <Button size="xs" variant="quiet" style={{ visibility: filtering ? 'visible' : 'hidden' }} onClick={clearFilters}>Clear filters</Button>
         </div>}</div>
       {state.historyTruncated && <div className="history-cap-note" role="note"><Info size={13} aria-hidden="true" /><span>{capNote}</span><Button size="xs" variant="quiet" onClick={openRestore}>Open Restore</Button></div>}
+      {/* What the history asks for: nothing while every problem was put right by a later backup, which is said once the problems are
+          the ones shown; otherwise the runs since the last successful backup, with the way to the newest one's details. */}
+      {attention ? <div className="history-cap-note is-warning" role="note"><TriangleAlert size={13} aria-hidden="true" /><span>{attention} Open its details to see what went wrong.</span>
+        <Button size="xs" variant="secondary" disabled={!interactive || !detailsAction} title={interactive ? detailsAction?.help : undefined} onClick={() => openRunDetails(unresolved[0].id)}><ArrowRight size={12} />Open details</Button></div>
+        : filter === 'todo' && problems > 0 && <div className="history-cap-note is-resolved" role="note"><CircleCheck size={13} aria-hidden="true" /><span>Nothing needs doing. A later backup succeeded after each of these runs, so they stay here only as a record of what happened.</span></div>}
       {history.length > 0 ? <>
         <FilterTable className="history-table" rows={rows} labels={HISTORY_LABELS}
           selectedRowId={state.selectedRunId} filter={filter} onFilterChange={onFilterChange} tableLabel="Backup run history"
           onRowClick={selectRow} onRowOpen={openRow} emptyContent={emptyContent} />
-        <div className="selection-bar"><div><strong>{selected ? `${selected.type} · ${selected.startedDisplay}` : newest ? `Newest run · ${newest.startedDisplay}` : 'No run to open'}</strong><span>{selected ? `${selected.result} · Snapshot ${selected.snapshot || 'unavailable'}${selectedVisible ? '' : ' · Hidden by current filters'}` : newest ? `${newest.result} · Click a row to choose another run, or double-click one to open it.` : 'Adjust the search, dates or filters to see runs.'}</span></div><Button size="sm" variant="secondary" disabled={!canOpen} title={canOpen ? undefined : detailsAction?.help} onClick={() => target && openRunDetails(target.id)}><ArrowRight size={13} />Open details</Button></div>
+        <div className="selection-bar"><div><strong>{selected ? `${selected.type} · ${selected.startedDisplay}` : newest ? `Newest run · ${newest.startedDisplay}` : 'No run to open'}</strong><span>{selected ? `${selected.result}${selectedResolver ? ` · ${resolvedByText(selectedResolver)}` : ''} · Snapshot ${selected.snapshot || 'unavailable'}${selectedVisible ? '' : ' · Hidden by current filters'}` : newest ? `${newest.result} · Click a row to choose another run, or double-click one to open it.` : 'Adjust the search, dates or filters to see runs.'}</span></div><Button size="sm" variant="secondary" disabled={!canOpen} title={canOpen ? undefined : detailsAction?.help} onClick={() => target && openRunDetails(target.id)}><ArrowRight size={13} />Open details</Button></div>
       </> : <div className="surface empty-state history-empty"><History size={22} aria-hidden="true" /><strong>No backup history yet</strong><p>Your completed backup runs will appear here once you have made your first backup.</p>
         <Action state={state} send={send} command="backupNow" primary size="md" icon={<Play size={13} fill="currentColor" />} quiet={!!modeNote(state)} /></div>}
     </section>
@@ -1024,6 +1041,8 @@ export default function App() {
   const failedClose = notice?.error ? notice.text : undefined;
   // A dialog that is open shows the notice itself, so the page's toast, which would sit unseen behind it and outlive it, stays away.
   const dialogOpen = !!state.sourcePicker?.open || !!state.restoreFlow?.open || (!!state.runDetails && dismissedRunDetailsId !== state.runDetails.id);
+  // The later run that put the open run right, if one did, so its details do not ask for something nothing needs.
+  const detailsResolvedBy = state.runDetails && !state.runDetails.success ? resolvedRuns(state.history).get(state.runDetails.id) : undefined;
   return <MotionConfig reducedMotion={state.reducedMotion ? 'always' : 'never'}><div className="app-shell">
     <a className="skip-link" href="#main-content" onClick={event => { event.preventDefault(); pageRef.current?.focus(); }}>Skip to content</a>
     {/* Always present, empty until there is something to say: a live region speaks only what is put into it after it exists. */}
@@ -1071,7 +1090,7 @@ export default function App() {
       <RestoreFlowModal flow={state.restoreFlow ?? null} reducedMotion={state.reducedMotion} availability={availability} send={send} notice={notice} dismissNotice={dismissNotice} holdNotice={holdNotice} />
     </ErrorBoundary>
     <ErrorBoundary scope="dialog" label="run details window" resetKey={!!state.runDetails && dismissedRunDetailsId !== state.runDetails.id} onClose={closeRunDetails}>
-      <RunDetailsModal details={state.runDetails ?? null} open={!!state.runDetails && dismissedRunDetailsId !== state.runDetails.id} reducedMotion={state.reducedMotion} send={send} notice={notice} dismissNotice={dismissNotice} holdNotice={holdNotice} onRequestClose={closeRunDetails} />
+      <RunDetailsModal details={state.runDetails ?? null} open={!!state.runDetails && dismissedRunDetailsId !== state.runDetails.id} resolvedBy={detailsResolvedBy} reducedMotion={state.reducedMotion} send={send} notice={notice} dismissNotice={dismissNotice} holdNotice={holdNotice} onRequestClose={closeRunDetails} />
     </ErrorBoundary>
   </div></MotionConfig>;
 }

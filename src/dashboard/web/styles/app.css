@@ -171,6 +171,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .history-table .filter-status-todo { color: var(--red-ink); background: var(--red-tint); border-color: color-mix(in srgb, var(--red) 20%, transparent); }
 .history-table .filter-status-done { color: var(--green-ink); background: var(--green-tint); border-color: color-mix(in srgb, var(--green) 20%, transparent); }
 .history-table .filter-status-progress { color: var(--ink-2); background: var(--inset); border-color: var(--line-strong); }
+.history-table .filter-status-quiet, .dark .history-table .filter-status-quiet { color: var(--ink-2); background: transparent; border-color: var(--line-strong); }
 /* The dark tints are translucent, so on a hovered or selected row the pill text fell to about 4.3:1. Mixed over
  * the surface instead, the pill is the same 5:1 on every row state. */
 .dark:not([data-high-contrast="true"]) .history-table .filter-status-todo { background: color-mix(in srgb, var(--red) 14%, var(--surface)); }
@@ -183,6 +184,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .history-cap-note { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; margin: 0 0 12px; padding: 9px 12px; border-radius: var(--r-control); background: var(--inset); box-shadow: var(--shadow-hairline); color: var(--ink-2); font-size: var(--type-sm); line-height: 1.5; }
 .history-cap-note > svg { flex: 0 0 auto; color: var(--ink-3); }
 .history-cap-note > span { flex: 1 1 280px; min-width: 0; }
+/* The history's one call to act: backups have not succeeded since the last one that did. */
+.history-cap-note.is-warning { color: var(--ink); background: var(--orange-tint); }
+.history-cap-note.is-warning > svg { color: var(--orange-ink); }
+.history-cap-note.is-resolved > svg { color: var(--green-ink); }
 .empty-state.history-empty { min-height: 220px; }
 .search-field { display: flex; align-items: center; gap: 8px; border-radius: var(--r-control); padding: 7px 10px; background: var(--surface); box-shadow: var(--shadow-hairline); color: var(--ink-3); }
 .search-field input { background: transparent; border: 0; outline: 0; min-width: 0; width: 230px; font-size: var(--type-sm); color: var(--ink); }
@@ -691,6 +696,9 @@ html[data-reduced-motion=true] dialog.app-dialog::backdrop { animation: none; ba
 .run-detail-issue { padding: 14px 16px; margin-bottom: 14px; border: 1px solid; border-radius: var(--r-card); }
 .run-detail-issue.warning { color: var(--ink); border-color: color-mix(in srgb, var(--orange) 34%, var(--line)); background: var(--orange-tint); }
 .run-detail-issue.error { color: var(--ink); border-color: color-mix(in srgb, var(--red) 34%, var(--line)); background: var(--red-tint); }
+/* A later run put this one right: what happened is kept for reference, without the color of something to act on. */
+.run-detail-issue.resolved { color: var(--ink); border-color: var(--line-strong); background: var(--inset); }
+.run-detail-issue.resolved .run-detail-issue-title svg { color: var(--green-ink); }
 .run-detail-issue-title { display: flex; align-items: center; gap: 7px; font-size: var(--type-sm); }
 .run-detail-issue-title svg { color: currentColor; }
 .run-detail-issue p { margin: 8px 0 0; color: var(--ink-2); font-size: var(--type-sm); line-height: 1.65; overflow-wrap: anywhere; }

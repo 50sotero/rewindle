@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import {
   AlertTriangle,
   Check,
+  CircleCheck,
   Clipboard,
   ClipboardCheck,
   ChevronDown,
@@ -16,14 +17,17 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/atoms/Button';
 import { ValuePill, type ValuePillTone } from '@/components/atoms/ValuePill';
-import type { CommandName, Notice, RunDetailsState } from '@/src/native-types';
+import type { CommandName, Notice, RunDetailsState, RunState } from '@/src/native-types';
 import { noticeHoldProps, type NoticeHold } from '@/src/useDashboard';
+import { knownOutcome, runNoun } from '@/src/runProblems';
 
 type Send = (command: CommandName, payload?: Record<string, string | boolean>) => void;
 
 type RunDetailsModalProps = {
   details: RunDetailsState | null;
   open: boolean;
+  /** The later run that put this one right, when it did not succeed and a later one did (see runProblems). */
+  resolvedBy?: RunState;
   reducedMotion: boolean;
   send: Send;
   notice: Notice | null;
@@ -44,12 +48,6 @@ const focusableSelector = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(',');
 
-// The host's short result, said as a sentence about the run ("Backup failed", "Dry run found source errors").
-const OUTCOMES: Record<string, string> = {
-  failed: 'failed', canceled: 'cancelled', cancelled: 'cancelled', incomplete: 'was incomplete',
-  'source errors': 'found source errors', 'cancellation failed': 'could not be cancelled', 'needs attention': 'needs attention',
-};
-
 function statusDetails(details: RunDetailsState) {
   const subject = details.type.trim() || 'Run';
   const normalizedType = details.type.trim().toLowerCase();
@@ -58,7 +56,8 @@ function statusDetails(details: RunDetailsState) {
   const warning = details.success || /cancel|warn|dry\s*run|unknown|incomplete|review/i.test(`${details.type} ${details.result}`);
   const tone: ValuePillTone = verified ? 'green' : details.success ? 'accent' : warning ? 'orange' : 'red';
   const status = normalizedResult || (details.success ? 'Completed' : 'Needs attention');
-  const outcome = OUTCOMES[status.toLowerCase()];
+  // The host's short result, said as a sentence about the run ("Backup failed", "Dry run found source errors").
+  const outcome = knownOutcome(status);
   const title = details.success
     ? verified ? 'Backup verified' : `${subject} completed`
     : outcome ? `${subject} ${outcome}` : `${subject}: ${status}`;
@@ -86,6 +85,7 @@ function DetailIconButton({ label, children, onClick, disabled = false }: {
 export default function RunDetailsModal({
   details,
   open,
+  resolvedBy,
   reducedMotion,
   send,
   notice,
@@ -194,6 +194,8 @@ export default function RunDetailsModal({
     ['Exit code', activeDetails.exitCode],
   ].filter(([, value]) => value.trim()) : [];
   const result = activeDetails ? statusDetails(activeDetails) : null;
+  // Only for the run it was worked out for: the dialog keeps the details it shows while it closes.
+  const resolver = activeDetails && !activeDetails.success && details?.id === activeDetails.id ? resolvedBy : undefined;
 
   const copy = (command: CommandName, extra?: Record<string, string | boolean>) => {
     if (!activeDetails) return;
@@ -297,10 +299,12 @@ export default function RunDetailsModal({
               <div className="run-detail-snapshot-row"><code>{activeDetails.snapshotId}</code><Button size="xs" variant="secondary" onClick={() => copy('copyRunSnapshot')}><Copy size={12} />Copy ID</Button></div>
             </section>}
 
-            {hasIssue && <section className={`run-detail-issue ${result.warning ? 'warning' : 'error'}`} aria-label="Run attention details">
-              <div className="run-detail-issue-title"><AlertTriangle size={15} /><strong>{result.warning ? 'Run needs attention' : 'Run failed'}</strong></div>
+            {hasIssue && <section className={`run-detail-issue ${resolver ? 'resolved' : result.warning ? 'warning' : 'error'}`} aria-label={resolver ? 'What happened in this run' : 'Run attention details'}>
+              {/* A run a later one put right asks for nothing: it says so first, and its next step is advice for the next time. */}
+              <div className="run-detail-issue-title">{resolver ? <CircleCheck size={15} /> : <AlertTriangle size={15} />}<strong>{resolver ? `Resolved by a later ${runNoun(resolver.type)}` : result.warning ? 'Run needs attention' : 'Run failed'}</strong></div>
+              {resolver && <p>The {runNoun(resolver.type)} on {resolver.startedDisplay} succeeded, so nothing needs doing about this run. What went wrong is kept here for reference.</p>}
               {activeDetails.failure.trim() && <p><strong>Failure</strong>{activeDetails.failure}</p>}
-              {activeDetails.remediation.trim() && <p><strong>Next step</strong>{activeDetails.remediation}</p>}
+              {activeDetails.remediation.trim() && <p><strong>{resolver ? 'If it happens again' : 'Next step'}</strong>{activeDetails.remediation}</p>}
               {activeDetails.affectedPaths.length > 0 && <div className="run-detail-paths"><strong>Affected paths</strong><ul>{activeDetails.affectedPaths.map(path => <li key={path}><code>{path}</code></li>)}</ul></div>}
               {!activeDetails.failure.trim() && !activeDetails.remediation.trim() && activeDetails.affectedPaths.length === 0 && <p>No additional issue detail was recorded for this run.</p>}
             </section>}

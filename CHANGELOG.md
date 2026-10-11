@@ -7,6 +7,15 @@ labels. Releases before 0.2.0 were published under the name ResticBackuper.
 
 ## [Unreleased]
 
+### Changed
+
+- Activity no longer treats every failed or incomplete run as something to act
+  on. A run that a later successful backup put right is marked **Resolved**,
+  in a neutral color, and its details say that nothing needs doing and keep
+  the run's next step as advice for next time. The "Needs attention" filter is
+  now **Problems**. The page warns, with a link to the details, only when no
+  backup has succeeded since a run that failed.
+
 ## [0.2.0-alpha.2] - 2026-10-08
 
 ### Added
