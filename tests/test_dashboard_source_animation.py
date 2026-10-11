@@ -40,8 +40,8 @@ class DashboardSourceAnimationTests(unittest.TestCase):
     def test_pending_copy_is_honest_about_backup_state(self) -> None:
         for marker in (
             "No backup has started.",
-            "The folder is not shown as protected until this check passes.",
-            "Protected list unchanged.",
+            "The folder isn't counted as backed up until this check passes.",
+            "The list of folders was not changed.",
             "Included in the next backup",
         ):
             self.assertIn(marker, self.window)

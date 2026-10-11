@@ -1748,7 +1748,7 @@ namespace RewindleRegression {
     $missingSetup = Invoke-Private $setupDashboard 'BuildWebSetupState'
     Assert-True ($missingSetup['engineFound'] -eq $false -and [string]$missingSetup['problem'] -eq 'Engine not installed: Rewindle did not find the backup engine it reports on.') 'the page was not told the service is missing'
     Assert-True (-not [string]::IsNullOrEmpty([string]$missingSetup['appVersion']) -and ([string]$missingSetup['expectedConfig']) -like '*backup-config.json') 'the page was not given what a bug report about a missing service needs'
-    Assert-True ([string]$missingSetup['engine'] -eq 'Rewindle engine' -and [string]$missingSetup['engineProfile'] -eq 'rewindle' -and [string]$missingSetup['engineVersion'] -eq '') ('the page was not told which engine is missing: ' + [string]$missingSetup['engine'])
+    Assert-True ([string]$missingSetup['engine'] -eq 'Rewindle backup service' -and [string]$missingSetup['engineProfile'] -eq 'rewindle' -and [string]$missingSetup['engineVersion'] -eq '') ('the page was not told which engine is missing: ' + [string]$missingSetup['engine'])
     Set-PrivateField $setupDashboard 'currentSourceConfiguration' $config
     $inUseSetup = Invoke-Private $setupDashboard 'BuildWebSetupState'
     Assert-True ([string]$inUseSetup['problem'] -eq '') 'a configuration that is in use still carried a problem'
@@ -2240,6 +2240,115 @@ namespace RewindleRegression {
     Set-ReadinessReport $null
     Assert-True ((Get-ReadinessField 'actionHint').Text -like 'Actions are unavailable*' -and -not (Get-ReadinessField 'keyRotationButton').IsEnabled) 'with no report the actions were not explained as unavailable'
 
+    # The folder picker's pure helpers. What counts as stored only in the cloud is the backup's own attribute mask; the walk for such
+    # files skips the whole-folder rules of excludes.txt, never follows a link, and stops on its entry or time limit without claiming it
+    # saw everything (the picker then does not refuse the folder over files it did not get to see). Only temporary folders are touched.
+    function Invoke-PickerStatic([string]$Name, [Type[]]$ParameterTypes, [object[]]$Arguments) {
+        $method = $dashboardType.GetMethod($Name, $flags, $null, $ParameterTypes, $null)
+        if ($null -eq $method) { throw "Missing folder picker helper: $Name" }
+        $invokeArguments = New-Object object[] $Arguments.Count
+        for ($index = 0; $index -lt $Arguments.Count; $index++) {
+            $argument = $Arguments[$index]
+            if ($argument -is [System.Management.Automation.PSObject]) { $invokeArguments[$index] = $argument.PSObject.BaseObject }
+            else { $invokeArguments[$index] = $argument }
+        }
+        return $method.Invoke($null, $invokeArguments)
+    }
+    $attributesType = [Type]'System.IO.FileAttributes'
+    foreach ($case in @(
+            @(0x00040000, $true), @(0x00400000, $true), @([int][IO.FileAttributes]::Offline, $true), @((0x00040000 + 0x10), $true),
+            @([int][IO.FileAttributes]::Normal, $false), @([int][IO.FileAttributes]::Directory, $false),
+            @(([int][IO.FileAttributes]::Archive + [int][IO.FileAttributes]::ReadOnly), $false), @([int][IO.FileAttributes]::ReparsePoint, $false))) {
+        $onlineOnly = [bool](Invoke-PickerStatic 'IsOnlineOnly' @($attributesType) @([Enum]::ToObject($attributesType, [int]$case[0])))
+        Assert-True ($onlineOnly -eq [bool]$case[1]) ('the attribute value ' + $case[0] + ' was judged online-only = ' + $onlineOnly)
+    }
+
+    $stringSequence = [Collections.Generic.IEnumerable[string]]
+    $excludedNames = Invoke-PickerStatic 'ParseExcludedFolderNames' @($stringSequence) @(,[string[]]@(
+            '**/node_modules', '**\.git\', '  **/Cache  ', '# **/commented', '*.tmp', '**/a/b', '**/', '**/*cache', 'build/', '**/vendor?', '', '**/.venv'))
+    # The set comes back through a function, which hands its items on one by one; -contains compares without regard to letter case, as the walk does.
+    $excludedList = @($excludedNames)
+    Assert-True ($excludedList.Count -eq 4 -and $excludedList -contains 'node_modules' -and $excludedList -contains '.git' -and $excludedList -contains '.venv' -and $excludedList -contains 'cache') ('the excludes.txt folder rules were not read as the whole-folder names only: ' + ($excludedList -join ', '))
+    Assert-True ($excludedList -notcontains 'a' -and $excludedList -notcontains 'b' -and $excludedList -notcontains 'build') 'a path rule or a plain pattern was taken for a folder name'
+    Assert-True (@(Invoke-PickerStatic 'ParseExcludedFolderNames' @($stringSequence) @($null)).Count -eq 0) 'no excludes.txt did not give an empty set'
+
+    function Test-InOneDrive([string]$Path, [string[]]$Roots) {
+        return [bool](Invoke-PickerStatic 'IsInsideOneDrive' @([string], $stringSequence) @($Path, $Roots))
+    }
+    $oneDriveRoots = [string[]]@('C:\Users\you\OneDrive', '', $null, 'C:\Users\you\OneDrive - Contoso')
+    Assert-True (Test-InOneDrive 'C:\Users\you\OneDrive\Documents' $oneDriveRoots) 'a folder in OneDrive was not recognised'
+    Assert-True (Test-InOneDrive 'c:\users\YOU\onedrive' $oneDriveRoots) 'the OneDrive folder itself, in other letter case, was not recognised'
+    Assert-True (Test-InOneDrive 'C:\Users\you\OneDrive - Contoso\Team' $oneDriveRoots) 'a folder in a business OneDrive was not recognised'
+    Assert-True (-not (Test-InOneDrive 'C:\Users\you\OneDrive2\Documents' $oneDriveRoots)) 'a sibling folder whose name starts like OneDrive was taken for OneDrive'
+    Assert-True (-not (Test-InOneDrive 'C:\Users\you\Documents' $oneDriveRoots) -and -not (Test-InOneDrive 'D:\OneDrive\x' $oneDriveRoots)) 'a folder outside OneDrive was taken for one inside it'
+    Assert-True (-not (Test-InOneDrive 'C:\Users\you\OneDrive\Documents' $null) -and -not (Test-InOneDrive 'C:\Users\you\OneDrive\Documents' ([string[]]@()))) 'with no OneDrive folder known a path was taken for one inside it'
+
+    function Get-OneDriveSentence([string[]]$Names) {
+        $list = New-StringList $Names
+        return [string](Invoke-PickerStatic 'DescribeOneDriveKnownFolders' @([Collections.Generic.IList[string]]) @(,$list))
+    }
+    Assert-True ((Get-OneDriveSentence @()) -eq '') 'no OneDrive folders still produced a sentence'
+    Assert-True ((Get-OneDriveSentence @('Documents')) -like ' Your Documents folder is inside OneDrive*it isn''t listed.') 'one OneDrive folder was not described in the singular'
+    Assert-True ((Get-OneDriveSentence @('Desktop', 'Documents')) -like ' Your Desktop and Documents folders are inside OneDrive*they aren''t listed.') 'two OneDrive folders were not described with "and"'
+    Assert-True ((Get-OneDriveSentence @('Desktop', 'Documents', 'Pictures')) -like ' Your Desktop, Documents and Pictures folders are inside OneDrive*') 'three OneDrive folders were not listed with commas and a final "and"'
+
+    $pickerRoot = Join-Path ([IO.Path]::GetTempPath()) ('rewindle-picker-' + [guid]::NewGuid().ToString('N'))
+    $pickerLink = Join-Path $pickerRoot 'plain\link'
+    try {
+        foreach ($folder in 'plain\sub', 'cloudtree\sub', 'skipped\node_modules') { [void][IO.Directory]::CreateDirectory((Join-Path $pickerRoot $folder)) }
+        foreach ($file in 'plain\a.txt', 'plain\sub\b.txt', 'cloudtree\sub\cloud.txt', 'skipped\node_modules\cloud.txt', 'skipped\keep.txt') { [IO.File]::WriteAllText((Join-Path $pickerRoot $file), 'x') }
+        # [IO.File]::GetAttributes throws for a path that is not there, as the host's own reading of an entry's attributes does.
+        $plainAttributes = [Func[IO.FileSystemInfo, IO.FileAttributes]] { param($entry) [IO.File]::GetAttributes($entry.FullName) }
+        $cloudAttributes = [Func[IO.FileSystemInfo, IO.FileAttributes]] { param($entry) $actual = [IO.File]::GetAttributes($entry.FullName); if ($entry.Name -eq 'cloud.txt') { [Enum]::ToObject([IO.FileAttributes], ([int]$actual -bor 0x00400000)) } else { $actual } }
+        $scanTypes = @([string], [Collections.Generic.ISet[string]], [int], [TimeSpan], [Func[IO.FileSystemInfo, IO.FileAttributes]])
+        function Invoke-PickerScan([string]$Folder, $Skipped, [int]$Limit, [TimeSpan]$Time, $Attributes) {
+            return Invoke-PickerStatic 'ScanForOnlineOnly' $scanTypes @((Join-Path $pickerRoot $Folder), $Skipped, $Limit, $Time, $Attributes)
+        }
+        $minute = [TimeSpan]::FromMinutes(1)
+        $scan = Invoke-PickerScan 'plain' $null 1000 $minute $plainAttributes
+        Assert-True (-not $scan.Found -and $scan.Complete -and $scan.Scanned -eq 3) ('a folder with nothing in the cloud was not walked completely: found=' + $scan.Found + ' complete=' + $scan.Complete + ' scanned=' + $scan.Scanned)
+        $scan = Invoke-PickerScan 'cloudtree' $null 1000 $minute $cloudAttributes
+        Assert-True ($scan.Found -and -not $scan.Complete) 'a file stored only in the cloud was not found, or the walk did not stop at it'
+        $skipNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        [void]$skipNames.Add('node_modules')
+        $scan = Invoke-PickerScan 'skipped' $skipNames 1000 $minute $cloudAttributes
+        Assert-True (-not $scan.Found -and $scan.Complete) 'an online-only file inside a folder the backup skips still counted'
+        $scan = Invoke-PickerScan 'skipped' $null 1000 $minute $cloudAttributes
+        Assert-True ($scan.Found) 'the same file was not found when nothing is skipped'
+        $scan = Invoke-PickerScan 'plain' $null 1 $minute $plainAttributes
+        Assert-True (-not $scan.Found -and -not $scan.Complete -and $scan.Scanned -eq 1) 'the entry limit did not stop the walk, or the walk claimed to be complete'
+        $scan = Invoke-PickerScan 'plain' $null 1000 ([TimeSpan]::Zero) $plainAttributes
+        Assert-True (-not $scan.Found -and -not $scan.Complete -and $scan.Scanned -eq 0) 'the time limit did not stop the walk, or the walk claimed to be complete'
+        $scan = Invoke-PickerScan 'missing-folder' $null 1000 $minute $plainAttributes
+        Assert-True (-not $scan.Found -and -not $scan.Complete) 'a folder that does not exist was treated as found or as completely walked'
+
+        $chainTestable = $false
+        try {
+            [void](New-Item -ItemType Junction -Path $pickerLink -Target (Join-Path $pickerRoot 'cloudtree') -ErrorAction Stop)
+            $chainTestable = $true
+        }
+        catch {
+            $skipped.Add('SKIPPED: a junction could not be created here, so the walk was not checked against a link')
+        }
+        if ($chainTestable) {
+            $scan = Invoke-PickerScan 'plain' $null 1000 $minute $cloudAttributes
+            Assert-True (-not $scan.Found -and $scan.Complete) 'the walk followed a link into a folder it was not asked about'
+            Assert-True (-not [bool](Invoke-Static $dashboardType 'HasNormalDirectoryChain' @([string]$pickerLink))) 'a folder reached through a link counted as a normal folder'
+            $ancestorIsLink = $false
+            for ($ancestor = Get-Item -LiteralPath (Join-Path $pickerRoot 'plain'); $null -ne $ancestor; $ancestor = $ancestor.Parent) {
+                if ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) { $ancestorIsLink = $true }
+            }
+            if (-not $ancestorIsLink) {
+                Assert-True ([bool](Invoke-Static $dashboardType 'HasNormalDirectoryChain' @([string](Join-Path $pickerRoot 'plain'))) ) 'a normal folder did not count as a normal folder'
+            }
+        }
+    }
+    finally {
+        # A link is removed first and on its own, so deleting the tree can never reach what it points to.
+        if (Test-Path -LiteralPath $pickerLink) { [IO.Directory]::Delete($pickerLink, $false) }
+        if (Test-Path -LiteralPath $pickerRoot) { Remove-Item -LiteralPath $pickerRoot -Recurse -Force }
+    }
+
     # The dialogs draw from the page tokens instead of each choosing its own: the primary button is ink on the canvas (the page's bg-ink with
     # text-canvas) in the schedule, location and readiness dialogs alike, the other buttons are the quiet look, and accent text is one
     # hue in both themes (the page's --accent-ink). Windows High Contrast uses the system colors, so the hues are only checked without it.
@@ -2296,4 +2405,4 @@ finally {
 }
 
 foreach ($note in $skipped) { Write-Output $note }
-Write-Output 'Regressions passed: snapshot scope reset, explicit whole-snapshot validation, observed-path enforcement, review invalidation, reload, retry routing, inline folder-read failures, launch guards, honest cancellation, UNC/reparse/no-overwrite/overlap destination guards and their plain-language refusals, diagnostics redaction of object keys, of whole paths (either slash, any root) and of account IDs, capped run history that is not rewritten for an evicted baseline, no live samples written and the old file removed, readable run-details timelines from long and odd logs, the restore approval wait, one Windows approval per restore session (every listing and one restore, a new session only after one ended, closed with the flow and a changed plan, a declined approval, a pipe served by another process, oversized and foreign frames), no folder read on choosing a backup or restoring all of it, folder listings kept per snapshot and bounded, the session-or-per-step choice from the installed engine, the published reason a restore cannot start, Open and Copy on a restore result acting only on the folder the restore reported once it has finished, an unreadable schedule and the outcome of a schedule change, schedule summaries for every day and lenient schedule times, capped automatic web view reloads, missing-runtime detection, a configuration check that could not complete ending the read it followed, cut-short folder listings and the published path limit, history lists bound again only when a run differs, one not-responding notice per stuck web view, backup freshness across a change of the clocks and of the run times, the tray balloon for a backup starting once per run, the not-started note for an accepted backup request that started nothing, the bounded crash log and its redacted copy in a diagnostic bundle, the installed plan read without keeping its writer out (and still refused when cut short, not an object or too large) with an install root that follows Program Files, the backup-location window''s done/current/failed steps and refused folders, the recovery-readiness window''s explained actions, the free-space warning for a whole snapshot that will not fit (a warning and never an error), the history limit the page is told, the schedule, location and readiness dialogs sharing the page tokens and the schedule wording, a status that cannot be read for a moment, a missing state folder, the retired legacy cloud file, a run history that is never written over while it is unreadable, the tray hover text and first-close hint, the setup state the page is told, and diagnostics that say what they left out and read a log cut inside a character.'
+Write-Output 'Regressions passed: snapshot scope reset, explicit whole-snapshot validation, observed-path enforcement, review invalidation, reload, retry routing, inline folder-read failures, launch guards, honest cancellation, UNC/reparse/no-overwrite/overlap destination guards and their plain-language refusals, diagnostics redaction of object keys, of whole paths (either slash, any root) and of account IDs, capped run history that is not rewritten for an evicted baseline, no live samples written and the old file removed, readable run-details timelines from long and odd logs, the restore approval wait, one Windows approval per restore session (every listing and one restore, a new session only after one ended, closed with the flow and a changed plan, a declined approval, a pipe served by another process, oversized and foreign frames), no folder read on choosing a backup or restoring all of it, folder listings kept per snapshot and bounded, the session-or-per-step choice from the installed engine, the published reason a restore cannot start, Open and Copy on a restore result acting only on the folder the restore reported once it has finished, an unreadable schedule and the outcome of a schedule change, schedule summaries for every day and lenient schedule times, capped automatic web view reloads, missing-runtime detection, a configuration check that could not complete ending the read it followed, cut-short folder listings and the published path limit, history lists bound again only when a run differs, one not-responding notice per stuck web view, backup freshness across a change of the clocks and of the run times, the tray balloon for a backup starting once per run, the not-started note for an accepted backup request that started nothing, the bounded crash log and its redacted copy in a diagnostic bundle, the installed plan read without keeping its writer out (and still refused when cut short, not an object or too large) with an install root that follows Program Files, the backup-location window''s done/current/failed steps and refused folders, the recovery-readiness window''s explained actions, the folder picker''s cloud-only walk (bounded by entries and time, skipping excluded folders and links), OneDrive paths and wording, the free-space warning for a whole snapshot that will not fit (a warning and never an error), the history limit the page is told, the schedule, location and readiness dialogs sharing the page tokens and the schedule wording, a status that cannot be read for a moment, a missing state folder, the retired legacy cloud file, a run history that is never written over while it is unreadable, the tray hover text and first-close hint, the setup state the page is told, and diagnostics that say what they left out and read a log cut inside a character.'

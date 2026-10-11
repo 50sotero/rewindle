@@ -68,7 +68,8 @@ namespace ResticBackuper.Dashboard
             sourcePickerName = string.Empty;
             sourcePickerStatus = "idle";
             sourcePickerMessage =
-                "Choose a folder to protect. Nothing changes until you review it and approve the Windows prompt.";
+                "Choose a folder to back up. Nothing changes until you check it and choose Yes in the Windows permission prompt." +
+                DescribeOneDriveKnownFolders(KnownFoldersInOneDrive());
             sourcePickerConfigGeneration = currentSourceConfiguration.ConfigGeneration;
             sourcePickerPlanId = currentSourceConfiguration.PlanId ?? string.Empty;
             sourcePickerSuggestions = BuildSourcePickerSuggestions(currentSourceConfiguration);
@@ -80,12 +81,12 @@ namespace ResticBackuper.Dashboard
         {
             if (currentSourceConfiguration == null)
             {
-                error = "The protected backup configuration is unavailable.";
+                error = "Rewindle can't read its backup settings right now.";
                 return false;
             }
             if (sourceOperationInProgress || BackupBlocksSourceChanges())
             {
-                error = "Wait for the current protected operation to finish before choosing a folder.";
+                error = "Wait for the current backup or settings change to finish before choosing a folder.";
                 return false;
             }
             error = string.Empty;
@@ -113,7 +114,7 @@ namespace ResticBackuper.Dashboard
             }
             catch (Exception exception)
             {
-                error = "The folder picker could not open. " + exception.Message;
+                error = "Windows' folder browser couldn't open. Type or paste the folder path instead.";
                 return false;
             }
             if (string.IsNullOrWhiteSpace(path))
@@ -139,7 +140,7 @@ namespace ResticBackuper.Dashboard
             }
             if (path == null || path.Trim().Length == 0 || path.Trim().Length > 4096)
             {
-                error = "Enter an absolute local folder path.";
+                error = "Type or paste a folder path such as C:\\Users\\you\\Documents.";
                 return false;
             }
 
@@ -149,7 +150,7 @@ namespace ResticBackuper.Dashboard
             sourcePickerPath = requestedPath;
             sourcePickerName = string.Empty;
             sourcePickerStatus = "checking";
-            sourcePickerMessage = "Checking the folder, drive, and protected backup boundaries…";
+            sourcePickerMessage = "Checking the folder and its drive…";
             SourceConfiguration configuration = currentSourceConfiguration;
             sourcePickerConfigGeneration = configuration == null
                 ? 0
@@ -207,7 +208,7 @@ namespace ResticBackuper.Dashboard
                 {
                     return InvalidSourcePickerPath(
                         requestedPath,
-                        "Use a local drive-letter path such as C:\\Users\\you\\Documents.");
+                        "Use a folder on this PC, such as C:\\Users\\you\\Documents.");
                 }
                 string root = Path.GetPathRoot(requestedPath);
                 if (string.IsNullOrWhiteSpace(root) ||
@@ -215,7 +216,7 @@ namespace ResticBackuper.Dashboard
                 {
                     return InvalidSourcePickerPath(
                         requestedPath,
-                        "Use a local drive-letter path. Network and UNC folders are not supported.");
+                        "Rewindle can only back up folders on this PC's own drives (like C: or D:), not network folders.");
                 }
                 normalized = SourceConfiguration.NormalizePath(requestedPath);
             }
@@ -234,7 +235,10 @@ namespace ResticBackuper.Dashboard
             {
                 return InvalidSourcePickerPath(
                     normalized,
-                    "This folder uses a reparse point or link. Choose a normal local folder.");
+                    IsInsideOneDrive(normalized)
+                        ? "This folder is inside OneDrive, and Rewindle can't back up OneDrive folders yet. " +
+                            "Choose a folder that isn't in OneDrive, or move the files out of OneDrive first."
+                        : "This folder (or a folder above it) is a link that Rewindle won't follow. Choose the real folder instead.");
             }
 
             try
@@ -245,21 +249,21 @@ namespace ResticBackuper.Dashboard
                 {
                     return InvalidSourcePickerPath(
                         normalized,
-                        "The folder must be on a ready local fixed or removable drive.");
+                        "That folder is on a drive that isn't ready, or isn't a hard drive or USB drive on this PC, so it can't be backed up.");
                 }
             }
             catch
             {
                 return InvalidSourcePickerPath(
                     normalized,
-                    "The folder's local drive could not be checked.");
+                    "Rewindle couldn't check the drive this folder is on.");
             }
 
             if (configuration == null)
             {
                 return InvalidSourcePickerPath(
                     normalized,
-                    "The protected backup configuration is unavailable. Refresh and try again.");
+                    "Rewindle can't read its backup settings right now. Try again.");
             }
 
             foreach (BackupSourceView source in configuration.Sources)
@@ -272,8 +276,8 @@ namespace ResticBackuper.Dashboard
                         Path = normalized,
                         Name = source.DisplayName,
                         Message = source.IsProtectedCanary
-                            ? "This folder holds the required restore test file and is already protected."
-                            : "This folder is already protected. Choose another folder."
+                            ? "This is Rewindle's own restore-test folder. It is always included, so there is nothing to add."
+                            : "This folder is already in your backup. Choose a different folder."
                     };
                 }
                 if (IsWithinPath(normalized, source.SourcePath) ||
@@ -286,8 +290,8 @@ namespace ResticBackuper.Dashboard
                             Status = "covered",
                             Path = normalized,
                             Name = new BackupSourceView(normalized, false).DisplayName,
-                            Message = "This folder is already covered by protected folder \"" +
-                                source.DisplayName + "\". You do not need to add it separately."
+                            Message = "This folder is already included because it is inside \"" +
+                                source.DisplayName + "\". You don't need to add it."
                         };
                     }
                     return new SourcePickerValidation
@@ -295,8 +299,9 @@ namespace ResticBackuper.Dashboard
                         Status = "invalid",
                         Path = normalized,
                         Name = new BackupSourceView(normalized, false).DisplayName,
-                        Message = "This folder contains the existing protected folder \"" +
-                            source.DisplayName + "\". Choose a separate folder so protected folders do not overlap."
+                        Message = "This folder contains \"" + source.DisplayName + "\", which is already in your backup. " +
+                            "To back up the larger folder instead, remove \"" + source.DisplayName +
+                            "\" (and any other folders inside this one) first, then add this one."
                     };
                 }
             }
@@ -308,8 +313,25 @@ namespace ResticBackuper.Dashboard
                 {
                     return InvalidSourcePickerPath(
                         normalized,
-                        "This folder overlaps protected Rewindle storage. Choose a folder outside the app, repository, and state locations.");
+                        "This folder is where Rewindle keeps its own files or your backups, so it can't be backed up. Choose a different folder.");
                 }
+            }
+
+            // The backup refuses a folder that holds files kept only in the cloud (its "strict" policy), so say so now, not on the first
+            // backup. The walk is bounded: a folder too big to finish in time is let through, never refused on a guess.
+            OnlineOnlyScan onlineOnly = ScanForOnlineOnly(
+                normalized,
+                ReadExcludedFolderNames(configuration),
+                OnlineOnlyScanEntryLimit,
+                OnlineOnlyScanTimeLimit,
+                delegate(FileSystemInfo entry) { return entry.Attributes; });
+            if (onlineOnly.Found)
+            {
+                return InvalidSourcePickerPath(
+                    normalized,
+                    "Some files in this folder are stored only in the cloud (OneDrive or a similar app). Rewindle can only back up files that are on this PC, " +
+                    "so backups of this folder would fail. In that app, right-click the folder, choose \"Always keep on this device\", " +
+                    "wait for the files to download, then choose Check folder.");
             }
 
             BackupSourceView view = new BackupSourceView(normalized, false);
@@ -318,7 +340,8 @@ namespace ResticBackuper.Dashboard
                 Status = "ready",
                 Path = normalized,
                 Name = view.DisplayName,
-                Message = "Ready to protect. The folder will be included in future backups after Windows approval; no backup starts now."
+                Message = "Ready to add. After you choose Add folder, Windows asks for your permission (\"Do you want to allow this app to make changes to your device?\"). " +
+                    "It may say \"Windows PowerShell\": that is Rewindle's helper, so choose Yes. No backup starts now."
             };
         }
 
@@ -352,6 +375,203 @@ namespace ResticBackuper.Dashboard
             {
                 return false;
             }
+        }
+
+        // Whether `path` is, or is below, one of OneDrive's folders. The roots are the ones Windows names in the environment; a business
+        // account's folder ("OneDrive - Company") is OneDriveCommercial.
+        private static bool IsInsideOneDrive(string path)
+        {
+            return IsInsideOneDrive(path, OneDriveRoots());
+        }
+
+        internal static bool IsInsideOneDrive(string path, IEnumerable<string> oneDriveRoots)
+        {
+            if (oneDriveRoots == null)
+            {
+                return false;
+            }
+            foreach (string root in oneDriveRoots)
+            {
+                if (!string.IsNullOrWhiteSpace(root) && IsWithinPath(path, root))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static string[] OneDriveRoots()
+        {
+            return new[]
+            {
+                Environment.GetEnvironmentVariable("OneDrive"),
+                Environment.GetEnvironmentVariable("OneDriveConsumer"),
+                Environment.GetEnvironmentVariable("OneDriveCommercial")
+            };
+        }
+
+        // The usual folders that OneDrive keeps (its "backup this folder" option moves them there), by the name the picker gives them.
+        private static List<string> KnownFoldersInOneDrive()
+        {
+            List<string> names = new List<string>();
+            string[,] known =
+            {
+                { "Desktop", Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory) },
+                { "Documents", Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments) },
+                { "Pictures", Environment.GetFolderPath(Environment.SpecialFolder.MyPictures) },
+                { "Music", Environment.GetFolderPath(Environment.SpecialFolder.MyMusic) },
+                { "Videos", Environment.GetFolderPath(Environment.SpecialFolder.MyVideos) }
+            };
+            for (int index = 0; index < known.GetLength(0); index++)
+            {
+                if (!string.IsNullOrWhiteSpace(known[index, 1]) && IsInsideOneDrive(known[index, 1]))
+                {
+                    names.Add(known[index, 0]);
+                }
+            }
+            return names;
+        }
+
+        // The sentence added to the opening message when some usual folders are missing from the quick locations because OneDrive keeps them.
+        internal static string DescribeOneDriveKnownFolders(IList<string> names)
+        {
+            if (names == null || names.Count == 0)
+            {
+                return string.Empty;
+            }
+            string list = names.Count == 1
+                ? names[0]
+                : string.Join(", ", names.Take(names.Count - 1).ToArray()) + " and " + names[names.Count - 1];
+            return " Your " + list + (names.Count == 1 ? " folder is" : " folders are") +
+                " inside OneDrive, which Rewindle can't back up yet, so " + (names.Count == 1 ? "it isn't" : "they aren't") + " listed.";
+        }
+
+        // What Windows sets on a file or folder whose content is only in the cloud (OneDrive and similar), as the backup's own preflight and
+        // Setup's folder check read it (CLOUD_ONLY_ATTRIBUTE_MASK in restic_common.py): recall on open, recall on data access, offline.
+        private const FileAttributes OnlineOnlyAttributes = (FileAttributes)0x00040000 | (FileAttributes)0x00400000 | FileAttributes.Offline;
+        private const int OnlineOnlyScanEntryLimit = 20000;
+        private static readonly TimeSpan OnlineOnlyScanTimeLimit = TimeSpan.FromSeconds(2);
+
+        internal sealed class OnlineOnlyScan
+        {
+            // A file or folder that is only in the cloud was seen.
+            public bool Found;
+            // How many entries were looked at.
+            public int Scanned;
+            // Everything below the folder was looked at. False when the entry or time limit stopped the walk first; Found then says only
+            // what was seen so far, and the caller does not treat the folder as refused for what it did not get to see.
+            public bool Complete;
+        }
+
+        internal static bool IsOnlineOnly(FileAttributes attributes)
+        {
+            return (attributes & OnlineOnlyAttributes) != 0;
+        }
+
+        // The whole-folder rules of the backup's excludes.txt that name one folder wherever it is ("**/node_modules"), so the walk skips
+        // what the backup skips. Anything more elaborate is not used, and those folders are looked at as usual.
+        internal static HashSet<string> ParseExcludedFolderNames(IEnumerable<string> lines)
+        {
+            HashSet<string> names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (lines == null)
+            {
+                return names;
+            }
+            foreach (string raw in lines)
+            {
+                string line = (raw ?? string.Empty).Trim().Replace('\\', '/').TrimEnd('/');
+                if (!line.StartsWith("**/", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                string name = line.Substring(3);
+                if (name.Length == 0 || name.IndexOfAny(new[] { '/', '*', '?', '[', '!' }) >= 0)
+                {
+                    continue;
+                }
+                names.Add(name);
+            }
+            return names;
+        }
+
+        private static HashSet<string> ReadExcludedFolderNames(SourceConfiguration configuration)
+        {
+            try
+            {
+                string path = Path.Combine(configuration.InstallRoot, "excludes.txt");
+                return ParseExcludedFolderNames(File.Exists(path) ? File.ReadAllLines(path) : null);
+            }
+            catch
+            {
+                return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            }
+        }
+
+        // A bounded walk of `root` for a file or folder that is only in the cloud. It stops at the first one, after `entryLimit` entries or
+        // after `timeLimit`, whichever comes first. A link is not followed (its target is somewhere else), and a folder that cannot be opened
+        // is skipped. `attributesOf` is how an entry's attributes are read, so a test can supply them.
+        internal static OnlineOnlyScan ScanForOnlineOnly(
+            string root,
+            ISet<string> skippedFolderNames,
+            int entryLimit,
+            TimeSpan timeLimit,
+            Func<FileSystemInfo, FileAttributes> attributesOf)
+        {
+            OnlineOnlyScan scan = new OnlineOnlyScan();
+            System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+            Stack<DirectoryInfo> pending = new Stack<DirectoryInfo>();
+            try
+            {
+                DirectoryInfo start = new DirectoryInfo(root);
+                if (IsOnlineOnly(attributesOf(start)))
+                {
+                    scan.Found = true;
+                    return scan;
+                }
+                pending.Push(start);
+            }
+            catch
+            {
+                return scan;
+            }
+            while (pending.Count > 0)
+            {
+                DirectoryInfo directory = pending.Pop();
+                try
+                {
+                    foreach (FileSystemInfo entry in directory.EnumerateFileSystemInfos())
+                    {
+                        if (scan.Scanned >= entryLimit || clock.Elapsed >= timeLimit)
+                        {
+                            return scan;
+                        }
+                        scan.Scanned++;
+                        FileAttributes attributes = attributesOf(entry);
+                        bool folder = (attributes & FileAttributes.Directory) != 0;
+                        if (folder && skippedFolderNames != null && skippedFolderNames.Contains(entry.Name))
+                        {
+                            continue;
+                        }
+                        if (IsOnlineOnly(attributes))
+                        {
+                            scan.Found = true;
+                            return scan;
+                        }
+                        if (folder && (attributes & FileAttributes.ReparsePoint) == 0)
+                        {
+                            pending.Push((DirectoryInfo)entry);
+                        }
+                    }
+                }
+                catch (IOException)
+                {
+                }
+                catch (UnauthorizedAccessException)
+                {
+                }
+            }
+            scan.Complete = true;
+            return scan;
         }
 
         private static bool IsWithinPath(string candidate, string parent)
@@ -499,6 +719,12 @@ namespace ResticBackuper.Dashboard
             {
                 return;
             }
+            // A usual folder that sits inside OneDrive (or behind a link) is refused when it is checked, so it is not offered; the opening
+            // message says why (see KnownFoldersInOneDrive).
+            if (!HasNormalDirectoryChain(normalized))
+            {
+                return;
+            }
             if (configuration != null && configuration.Sources.Any(
                 source => !string.Equals(source.SourcePath, normalized, StringComparison.OrdinalIgnoreCase) &&
                     IsWithinPath(source.SourcePath, normalized)))
@@ -531,12 +757,12 @@ namespace ResticBackuper.Dashboard
             if (string.IsNullOrWhiteSpace(path) ||
                 !string.Equals(path, sourcePickerPath, StringComparison.Ordinal))
             {
-                error = "Check this exact folder before protecting it.";
+                error = "Check this folder first, then choose Add folder.";
                 return false;
             }
             if (!string.Equals(sourcePickerStatus, "ready", StringComparison.Ordinal))
             {
-                error = "The folder is not ready to protect.";
+                error = "This folder isn't ready to add yet. Check it again.";
                 return false;
             }
             try
@@ -545,7 +771,7 @@ namespace ResticBackuper.Dashboard
             }
             catch
             {
-                error = "The backup plan could not be refreshed. Check the folder again before saving.";
+                error = "Rewindle couldn't re-read its backup settings. Check the folder again before adding it.";
                 sourcePickerStatus = "invalid";
                 sourcePickerMessage = error;
                 PublishWebPresentationState();
@@ -555,7 +781,7 @@ namespace ResticBackuper.Dashboard
                 !string.Equals(currentSourceConfiguration.PlanId, sourcePickerPlanId, StringComparison.Ordinal) ||
                 currentSourceConfiguration.ConfigGeneration != sourcePickerConfigGeneration)
             {
-                error = "The backup plan changed while this folder was being reviewed. Check the folder again.";
+                error = "Your backup settings changed while you were looking at this folder. Check it again.";
                 sourcePickerStatus = "invalid";
                 sourcePickerMessage = error;
                 PublishWebPresentationState();
@@ -563,7 +789,7 @@ namespace ResticBackuper.Dashboard
             }
             if (BackupBlocksSourceChanges() || sourceOperationInProgress)
             {
-                error = "A protected operation is already running. Try again when it finishes.";
+                error = "A backup or settings change is running. Try again when it finishes.";
                 sourcePickerStatus = "failed";
                 sourcePickerMessage = error;
                 PublishWebPresentationState();
@@ -572,7 +798,7 @@ namespace ResticBackuper.Dashboard
 
             sourcePickerBusy = true;
             sourcePickerStatus = "busy";
-            sourcePickerMessage = "Waiting for Windows approval. Your backup plan will change only after approval succeeds…";
+            sourcePickerMessage = "Waiting for you to answer the Windows permission prompt. If you can't see it, look for a flashing icon on the taskbar. Nothing changes unless you choose Yes…";
             PublishWebPresentationState();
             ConfirmSourcePickerAsync(path);
             return true;
@@ -595,19 +821,21 @@ namespace ResticBackuper.Dashboard
                 currentSourceConfiguration.ContainsUserSource(path))
             {
                 sourcePickerStatus = "succeeded";
-                sourcePickerMessage = "Folder protected. It will be included in the next backup; no backup was started.";
+                sourcePickerMessage = "Folder added. It will be included in your next backup. Nothing was backed up just now.";
             }
             else if (sourceOperationStage == SourceOperationStage.Cancelled)
             {
                 sourcePickerStatus = "cancelled";
-                sourcePickerMessage = "Windows approval was cancelled. Nothing changed; you can review or choose another folder.";
+                sourcePickerMessage = "You didn't allow the change in the Windows permission prompt, so nothing changed. Choose Try again to check the folder and add it, or choose another folder.";
             }
             else
             {
                 sourcePickerStatus = "failed";
-                sourcePickerMessage = string.IsNullOrWhiteSpace(sourceOperationError)
-                    ? "The folder was not added. Review the folder and try again."
-                    : sourceOperationError;
+                sourcePickerMessage = "The folder wasn't added and nothing changed. Choose Try again to check it and add it again. " +
+                    "If it keeps failing, restart Rewindle, or use Export diagnostics in Settings and send the file when you ask for help." +
+                    (string.IsNullOrWhiteSpace(sourceOperationError)
+                        ? string.Empty
+                        : " (Technical detail: " + sourceOperationError + ")");
             }
             PublishWebPresentationState();
         }
@@ -618,7 +846,7 @@ namespace ResticBackuper.Dashboard
             if (sourceOperationInProgress ||
                 (sourcePickerBusy && string.Equals(sourcePickerStatus, "busy", StringComparison.Ordinal)))
             {
-                error = "Wait for the protected folder change to finish before closing this chooser.";
+                error = "Wait for the folder change to finish before closing this window.";
                 return false;
             }
             ResetSourcePicker();
@@ -643,9 +871,9 @@ namespace ResticBackuper.Dashboard
         private string ShowModernFolderPicker()
         {
             return ShowModernFolderPicker(
-                "Choose a folder to protect",
-                "Review folder",
-                "Choose a folder to protect in future Restic backup runs.");
+                "Choose a folder to back up",
+                "Choose folder",
+                "Choose a folder to back up.");
         }
 
         private string ShowModernFolderPicker(
@@ -756,7 +984,7 @@ namespace ResticBackuper.Dashboard
         {
             return ShowLegacyFolderPicker(
                 new WindowInteropHelper(this).Handle,
-                "Choose a folder to protect in future Restic backup runs.");
+                "Choose a folder to back up.");
         }
 
         private static string ShowLegacyFolderPicker(IntPtr owner, string description)
