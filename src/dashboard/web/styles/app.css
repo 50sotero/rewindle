@@ -200,7 +200,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .sort-field { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-control); padding: 6px 8px; font-size: var(--type-xs); color: var(--ink-2); }
 .chart-card { padding: 20px 20px 10px; }
 .chart-heading { display: flex; align-items: start; justify-content: space-between; gap: 20px; }
-.chart-value { margin: 8px 0; font-size: var(--type-2xl); letter-spacing: -.8px; font-weight: 500; }
+.chart-value { margin: 8px 0 2px; font-size: var(--type-2xl); letter-spacing: -.8px; font-weight: 500; }
+.chart-takeaway { margin: 0 0 10px; color: var(--ink-2); font-size: var(--type-sm); line-height: 1.5; }
+.trends-section { display: flex; flex-direction: column; gap: 14px; }
+.trends-section > h2 { margin-bottom: -2px; }
 .chart-area { height: 176px; position: relative; }
 .chart-note { margin: 2px 0 8px; color: var(--ink-3); font-size: var(--type-xs); line-height: 1.5; }
 /* The run charts are SVG drawn from tokens, so they follow the theme and Windows High Contrast; the plot is one
@@ -214,12 +217,13 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .run-chart-cursor { stroke: var(--ink-3); stroke-width: 1; stroke-dasharray: 3 3; }
 .run-chart-dot { fill: var(--accent); stroke: var(--surface); stroke-width: 1.5; }
 .run-chart-dot.is-failed { fill: var(--red); }
+/* A failure a later backup put right: the diamond's shape without the color of something to act on. */
+.run-chart-dot.is-resolved { fill: var(--surface); stroke: var(--ink-2); }
 .run-chart-dot.is-canceled { fill: var(--surface); stroke: var(--ink-2); }
 .run-chart-selected { fill: none; stroke: var(--accent); stroke-width: 2; }
 .run-chart-tip { position: absolute; z-index: 3; transform: translateX(-50%); padding: 6px 10px; border: 1px solid var(--tooltip-border); border-radius: var(--r-control); color: var(--tooltip-fg); background: var(--tooltip-bg); box-shadow: var(--shadow-overlay); font-size: var(--type-sm); line-height: 1.45; white-space: nowrap; font-variant-numeric: tabular-nums; pointer-events: none; }
 .run-chart-tip strong { display: block; font-weight: 550; }
 .run-chart-tip span { color: var(--tooltip-muted); }
-.insights-wide > div { max-width: none; min-height: 0; }
 .activity-metrics { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 14px; }
 .activity-metrics > div { padding: 16px 18px; }
 .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 150px; padding: 24px; color: var(--ink-2); text-align: center; font-size: var(--type-sm); }
@@ -516,6 +520,7 @@ html[data-reduced-motion=true] dialog.app-dialog::backdrop { animation: none; ba
 .selection-bar span { display: block; font-size: var(--type-xs); color: var(--ink-2); margin-top: 4px; }
 .history-table .filter-table-row[aria-selected=true] { background: var(--accent-tint); box-shadow: inset 3px 0 var(--accent); }
 .history-table .filter-table-row > span { padding-top: 12px; padding-bottom: 12px; }
+.history-table .filter-table-row { cursor: pointer; user-select: none; }
 .first-run-summary { display: flex; align-items: center; gap: 14px; padding: 22px; color: var(--ink-2); }
 .first-run-summary strong { font-size: var(--type-base); color: var(--ink); font-weight: 550; }
 .first-run-summary p { margin: 6px 0 0; font-size: var(--type-sm); line-height: 1.65; }
@@ -644,6 +649,8 @@ html[data-reduced-motion=true] dialog.app-dialog::backdrop { animation: none; ba
 .run-detail-status-icon.orange { color: var(--orange-ink); background: var(--orange-tint); }
 .run-detail-status-icon.red { color: var(--red-ink); background: var(--red-tint); }
 .run-detail-status-icon.accent { color: var(--accent-ink); background: var(--accent-tint); }
+/* A run that was stopped on request, or that a later backup put right: nothing to act on, so none of the alert colors. */
+.run-detail-status-icon.neutral { color: var(--ink-2); background: var(--field); }
 .run-detail-eyebrow {
   display: flex;
   align-items: center;
@@ -658,17 +665,6 @@ html[data-reduced-motion=true] dialog.app-dialog::backdrop { animation: none; ba
 .run-detail-eyebrow-status { color: var(--accent-ink); }
 .run-detail-heading h2 { margin: 7px 0 3px; font-size: var(--type-2xl); font-weight: 600; letter-spacing: -.7px; line-height: 1.2; }
 .run-detail-subtitle { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; color: var(--ink-2); font-size: var(--type-sm); line-height: 1.6; }
-.run-detail-id {
-  display: block;
-  max-width: min(620px, 70vw);
-  margin-top: 7px;
-  overflow-wrap: anywhere;
-  color: var(--ink-3);
-  font-family: var(--font-mono-face), monospace;
-  font-size: var(--type-xs);
-  line-height: 1.5;
-  user-select: text;
-}
 /* The body is the dialog's scroll region. The event timeline is the point of the dialog, so it takes the height
  * the summary above it leaves (at least 340px), and sits beside the summary when the dialog is wide enough. */
 .run-detail-scroll { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; min-height: 0; overflow-y: auto; padding: 18px 26px 16px; scrollbar-gutter: stable; }
@@ -687,18 +683,15 @@ html[data-reduced-motion=true] dialog.app-dialog::backdrop { animation: none; ba
 .run-detail-stat-label { display: flex; align-items: center; gap: 6px; color: var(--ink-3); font-size: var(--type-xs); }
 .run-detail-stat-label svg { flex: 0 0 auto; }
 .run-detail-stat strong { display: block; margin-top: 6px; overflow-wrap: anywhere; color: var(--ink); font-size: var(--type-lg); font-weight: 550; font-variant-numeric: tabular-nums; line-height: 1.25; }
-.run-detail-snapshot { padding: 16px; margin-bottom: 14px; }
-.run-detail-section-heading, .run-detail-events-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
-.run-detail-section-heading h3, .run-detail-events-heading h3 { margin: 4px 0 0; font-size: var(--type-lg); font-weight: 550; letter-spacing: -.2px; }
-.run-detail-snapshot-row { display: flex; align-items: flex-start; gap: 12px; margin-top: 13px; }
-.run-detail-snapshot-row code { min-width: 0; flex: 1; overflow-wrap: anywhere; color: var(--ink-2); font-family: var(--font-mono-face), monospace; font-size: var(--type-xs); line-height: 1.65; user-select: text; }
-.run-detail-snapshot-row button { flex: 0 0 auto; }
+.run-detail-events-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.run-detail-events-heading h3 { margin: 4px 0 0; font-size: var(--type-lg); font-weight: 550; letter-spacing: -.2px; }
 .run-detail-issue { padding: 14px 16px; margin-bottom: 14px; border: 1px solid; border-radius: var(--r-card); }
 .run-detail-issue.warning { color: var(--ink); border-color: color-mix(in srgb, var(--orange) 34%, var(--line)); background: var(--orange-tint); }
 .run-detail-issue.error { color: var(--ink); border-color: color-mix(in srgb, var(--red) 34%, var(--line)); background: var(--red-tint); }
 /* A later run put this one right: what happened is kept for reference, without the color of something to act on. */
-.run-detail-issue.resolved { color: var(--ink); border-color: var(--line-strong); background: var(--inset); }
+.run-detail-issue.resolved, .run-detail-issue.stopped { color: var(--ink); border-color: var(--line-strong); background: var(--inset); }
 .run-detail-issue.resolved .run-detail-issue-title svg { color: var(--green-ink); }
+.run-detail-issue.stopped .run-detail-issue-title svg { color: var(--ink-2); }
 .run-detail-issue-title { display: flex; align-items: center; gap: 7px; font-size: var(--type-sm); }
 .run-detail-issue-title svg { color: currentColor; }
 .run-detail-issue p { margin: 8px 0 0; color: var(--ink-2); font-size: var(--type-sm); line-height: 1.65; overflow-wrap: anywhere; }
@@ -720,8 +713,15 @@ html[data-reduced-motion=true] dialog.app-dialog::backdrop { animation: none; ba
 .run-detail-technical-grid > div { min-width: 0; }
 .run-detail-technical-grid span { display: block; margin-bottom: 5px; color: var(--ink-3); font-size: var(--type-xs); }
 .run-detail-technical-grid code { display: block; overflow-wrap: anywhere; color: var(--ink); font-family: var(--font-mono-face), monospace; font-size: var(--type-xs); }
-.run-detail-technical > p { margin: 0; padding: 0 14px 14px; color: var(--ink-2); font-size: var(--type-xs); }
+/* The run's id and snapshot: one per line, with the snapshot's copy button beside it. */
+.run-detail-technical-rows { display: grid; gap: 8px; padding: 13px 14px 14px; }
+.run-detail-technical-grid + .run-detail-technical-rows { padding-top: 0; }
+.run-detail-technical-rows > div { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; }
+.run-detail-technical-rows span { flex: 0 0 74px; color: var(--ink-3); font-size: var(--type-xs); }
+.run-detail-technical-rows code { min-width: 0; flex: 1 1 0; overflow-wrap: anywhere; color: var(--ink); font-family: var(--font-mono-face), monospace; font-size: var(--type-xs); user-select: text; }
 .run-detail-events { display: flex; flex-direction: column; min-height: 340px; padding: 16px; }
+/* The log of a run that worked starts closed ("Show log events"), so the section is only its heading. */
+.run-detail-events.is-collapsed { min-height: 0; align-self: start; }
 .run-detail-events-heading { align-items: center; }
 .run-detail-events-heading p { margin: 5px 0 0; color: var(--ink-2); font-size: var(--type-xs); }
 .run-detail-events-heading .run-detail-events-note { display: flex; align-items: center; gap: 6px; color: var(--orange-ink); }

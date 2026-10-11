@@ -14,14 +14,16 @@ import ProtectedFolders, { type FolderView } from '@/components/primitives/Prote
 import ProtectionHealth, { healthTime, phaseName } from '@/components/primitives/ProtectionHealth';
 import FolderPickerModal from '@/components/primitives/FolderPickerModal';
 import RestoreFlowModal from '@/components/primitives/RestoreFlowModal';
-import InsightCards, { type InsightPage } from '@/components/primitives/InsightCards';
 import RunDetailsModal from '@/components/primitives/RunDetailsModal';
 import { Button } from '@/components/atoms/Button';
 import { Shimmer } from '@/components/atoms/Shimmer';
 import { noticeHoldProps, useDashboard, type NoticeHold } from './useDashboard';
 import { PROTECTED_COMMANDS, usableLocale, type Availability, type CommandName, type DashboardPage, type DashboardState, type MotionPreference, type Notice, type RunState, type ThemePreference } from './native-types';
 import { PROJECT_URL } from './project';
-import { attentionText, isCancelled, isProblem, resolvedByText, resolvedRuns, unresolvedRuns } from './runProblems';
+import {
+  attentionText, isCancelled, isProblem, isUnchanged, lastSuccessfulBackup, lastVerified, resolvedByText, resolvedRuns, resultHint, resultLabel,
+  typeLabel, unresolvedRuns, usualSeconds, type Verified,
+} from './runProblems';
 import { formatWhen } from './when';
 
 type Send = (command: CommandName, payload?: Record<string, string | boolean>) => void;
@@ -452,8 +454,9 @@ function Protection({ state, send, folders, setFolders, stale }: { state: Dashbo
 // stopped early, so it is marked on the baseline instead. Every color is a token, so they follow the theme and
 // Windows High Contrast.
 type ChartMetric = 'duration' | 'processed';
-type RunChartData = { runs: RunState[]; selectedId: string | null; onSelect: (runId: string) => void; locale?: string };
-const RunChartContext = createContext<RunChartData>({ runs: [], selectedId: null, onSelect: () => undefined });
+// `resolvedIds`: the runs that did not finish and a later backup put right; they are marked quietly, not in the color of something to act on.
+type RunChartData = { runs: RunState[]; selectedId: string | null; onSelect: (runId: string) => void; locale?: string; resolvedIds: ReadonlySet<string> };
+const RunChartContext = createContext<RunChartData>({ runs: [], selectedId: null, onSelect: () => undefined, resolvedIds: new Set() });
 
 // `floor` is the y of the baseline; the labels under it sit in the 28px below.
 const CHART_HEIGHT = 176;
@@ -464,8 +467,9 @@ const axisLabel = (value: number, metric: ChartMetric, locale?: string) => metri
 const rawValue = (run: RunState, metric: ChartMetric) => metric === 'duration' ? run.durationSeconds : run.processedBytes;
 const shownValue = (run: RunState, metric: ChartMetric) => metric === 'duration' ? run.durationDisplay : run.processedDisplay;
 
-// A value axis padded enough that small changes stay visible, with a few round gridlines inside it. Bytes are
-// scaled to one unit first, so the gridlines read 4.2, 4.4 and 4.6 GiB, not 4.5 billion bytes.
+// A value axis with a few round gridlines inside it. Bytes are scaled to one unit first, so the gridlines read 4.2, 4.4 and 4.6 GiB,
+// not 4.5 billion bytes. When the values stay within half of the peak the axis starts at zero: starting it near the lowest value
+// would draw a 1% change in size as a cliff, and a person reading it would worry about nothing. The tooltip has the exact figures.
 function chartScale(values: number[], metric: ChartMetric) {
   const peak = Math.max(...values, 1);
   let unit = 0;
@@ -474,14 +478,27 @@ function chartScale(values: number[], metric: ChartMetric) {
   const low = Math.min(...scaled), high = Math.max(...scaled);
   if (high <= 0) return { min: 0, max: divisor, ticks: [0] };
   const pad = Math.max((high - low) * .12, high * .02);
-  const min = Math.max(0, low - pad), max = high + pad, rough = (max - min) / 4;
+  const min = (high - low) / high < .5 ? 0 : Math.max(0, low - pad), max = high + pad, rough = (max - min) / 4;
   const step = metric === 'duration' ? DURATION_STEPS.find(candidate => candidate >= rough) ?? decimalStep(rough) : decimalStep(rough);
   const ticks: number[] = [];
   for (let n = Math.ceil(min / step); n * step <= max; n++) ticks.push(n * step * divisor);
   return { min: min * divisor, max: max * divisor, ticks };
 }
 
-function TrendChart({ runs, metric, selectedId, onSelect, locale }: { runs: RunState[]; metric: ChartMetric; selectedId: string | null; onSelect: (runId: string) => void; locale?: string }) {
+// What sits on the baseline, said once for the note under the chart and (without the symbols) for the spoken summary: runs that did not
+// finish (a filled diamond while any is still open, a hollow one once a later backup put each right) and runs stopped on request.
+function markerNote(runs: RunState[], resolvedIds: ReadonlySet<string>, symbols = true): string {
+  const failed = runs.filter(isProblem), open = failed.filter(run => !resolvedIds.has(run.id)).length, stopped = runs.filter(isCancelled).length;
+  const parts: string[] = [];
+  if (failed.length) {
+    const fixed = failed.length - open;
+    parts.push(`${symbols ? `${open ? '◆' : '◇'} ` : ''}${failed.length} ${failed.length === 1 ? 'run' : 'runs'} that did not finish${open === 0 ? `, ${failed.length === 1 ? 'put' : 'each put'} right by a later backup` : fixed > 0 ? ` (${fixed} put right by a later backup)` : ''}`);
+  }
+  if (stopped) parts.push(`${symbols ? '○ ' : ''}${stopped} cancelled`);
+  return parts.length ? `On the baseline, left out of the trend: ${parts.join('; ')}.` : '';
+}
+
+function TrendChart({ runs, metric, selectedId, onSelect, locale, resolvedIds }: { runs: RunState[]; metric: ChartMetric; selectedId: string | null; onSelect: (runId: string) => void; locale?: string; resolvedIds: ReadonlySet<string> }) {
   const plotRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   const [active, setActive] = useState<number | null>(null);
@@ -503,8 +520,8 @@ function TrendChart({ runs, metric, selectedId, onSelect, locale }: { runs: RunS
     const start = times[0], span = Math.max(1, times[last] - start), inner = Math.max(1, width - left - right - 2 * inset), range = scale.max - scale.min || 1;
     const px = (time: number) => left + inset + (time - start) / span * inner;
     const py = (value: number) => top + (1 - (value - scale.min) / range) * (floor - top);
-    return { scale, start, span, px, py, dots: runs.map((run, i) => ({ run, x: px(times[i]), y: run.success ? py(rawValue(run, metric)) : floor, status: runStatus(run) })) };
-  }, [runs, metric, width, last]);
+    return { scale, start, span, px, py, dots: runs.map((run, i) => ({ run, x: px(times[i]), y: run.success ? py(rawValue(run, metric)) : floor, status: runStatus(run), resolved: resolvedIds.has(run.id) })) };
+  }, [runs, metric, width, last, resolvedIds]);
   const { scale, dots } = model;
   const plotted = dots.filter(dot => dot.run.success);
   const selectedIndex = runs.findIndex(run => run.id === selectedId);
@@ -540,17 +557,17 @@ function TrendChart({ runs, metric, selectedId, onSelect, locale }: { runs: RunS
   };
 
   // The figures spoken for the chart count verified runs only; the others are named so a listener knows they exist.
-  const verified = runs.filter(run => run.success), marked = runs.length - verified.length;
+  const verified = runs.filter(run => run.success);
   const extreme = (better: (a: number, b: number) => boolean) => verified.reduce((best, run) => better(rawValue(run, metric), rawValue(best, metric)) ? run : best, verified[0]);
   const summary = (metric === 'duration'
-    ? `Backup duration for the last ${verified.length} verified runs: latest ${verified[verified.length - 1].durationDisplay}, shortest ${shownValue(extreme((a, b) => a < b), metric)}, longest ${shownValue(extreme((a, b) => a > b), metric)}.`
-    : `Data processed by the last ${verified.length} verified runs: latest ${verified[verified.length - 1].processedDisplay}, smallest ${shownValue(extreme((a, b) => a < b), metric)}, largest ${shownValue(extreme((a, b) => a > b), metric)}.`)
-    + (marked ? ` ${marked} failed or cancelled ${marked === 1 ? 'run is' : 'runs are'} marked on the baseline and not counted.` : '');
-  const title = metric === 'duration' ? 'Backup duration by run' : 'Data processed by run';
+    ? `Backup time for the last ${verified.length} successful backups: latest ${verified[verified.length - 1].durationDisplay}, shortest ${shownValue(extreme((a, b) => a < b), metric)}, longest ${shownValue(extreme((a, b) => a > b), metric)}.`
+    : `Data covered by the last ${verified.length} successful backups: latest ${verified[verified.length - 1].processedDisplay}, smallest ${shownValue(extreme((a, b) => a < b), metric)}, largest ${shownValue(extreme((a, b) => a > b), metric)}.`)
+    + (markerNote(runs, resolvedIds, false) ? ` ${markerNote(runs, resolvedIds, false)}` : '');
+  const title = metric === 'duration' ? 'How long each backup took' : 'How much data each backup covered';
   const tip = active !== null && width > 0 ? dots[current] : null;
   return <div className="chart-area">
     <div ref={plotRef} className="run-chart" role="slider" tabIndex={0} aria-label={title} aria-describedby={summaryId}
-      aria-valuemin={1} aria-valuemax={runs.length} aria-valuenow={current + 1} aria-valuetext={`${runs[current].startedDisplay}, ${runs[current].success ? `${shownValue(runs[current], metric)}, ` : ''}${runs[current].result}`}
+      aria-valuemin={1} aria-valuemax={runs.length} aria-valuenow={current + 1} aria-valuetext={`${runs[current].startedDisplay}, ${runs[current].success ? `${shownValue(runs[current], metric)}, ` : ''}${resultLabel(runs[current].result)}${resolvedIds.has(runs[current].id) ? ', put right by a later backup' : ''}`}
       onPointerDown={event => { const index = nearest(event.clientX); if (index !== null) setActive(index); }}
       onPointerMove={event => { const index = nearest(event.clientX); if (index !== null) setActive(index); }}
       onPointerLeave={event => setActive(event.currentTarget.matches(':focus-visible') ? resting : null)}
@@ -571,26 +588,26 @@ function TrendChart({ runs, metric, selectedId, onSelect, locale }: { runs: RunS
         {tip && <line className="run-chart-cursor" x1={tip.x} x2={tip.x} y1={top} y2={floor} />}
         {dots.map((dot, i) => <g key={dot.run.id} transform={`translate(${dot.x.toFixed(1)} ${dot.y.toFixed(1)})`}>
           {i === selectedIndex && <circle className="run-chart-selected" r={8} />}
-          {dot.status === 'todo' ? <rect className="run-chart-dot is-failed" x={-4} y={-4} width={8} height={8} transform={`rotate(45) scale(${tip && i === current ? 1.3 : 1})`} />
+          {dot.status === 'todo' ? <rect className={`run-chart-dot ${dot.resolved ? 'is-resolved' : 'is-failed'}`} x={-4} y={-4} width={8} height={8} transform={`rotate(45) scale(${tip && i === current ? 1.3 : 1})`} />
             : <circle className={`run-chart-dot${dot.status === 'progress' ? ' is-canceled' : ''}`} r={tip && i === current ? 5 : 3.5} />}
         </g>)}
       </svg>}
       {tip && <div className="run-chart-tip" style={{ left: Math.max(Math.min(tip.x, width - 78), 78), top: tip.y >= 60 ? tip.y - 60 : tip.y + 14 }} aria-hidden="true">
-        <strong>{tip.run.startedDisplay}</strong><span>{tip.run.success ? `${shownValue(tip.run, metric)} · ${tip.run.result}` : `${tip.run.result} · not counted`}</span>
+        <strong>{tip.run.startedDisplay}</strong><span>{tip.run.success ? `${shownValue(tip.run, metric)} · ${resultLabel(tip.run.result)}` : `${resultLabel(tip.run.result)}${tip.resolved ? ' · put right by a later backup' : ''} · not in the trend`}</span>
       </div>}
     </div>
     <p id={summaryId} className="sr-only">{summary} Use the left and right arrow keys to move between runs and Enter to select one.</p>
     <div className="sr-only"><table><caption>{title}</caption>
-      <thead><tr><th scope="col">Started</th><th scope="col">{metric === 'duration' ? 'Duration' : 'Processed'}</th><th scope="col">Result</th></tr></thead>
-      <tbody>{runs.map(run => <tr key={run.id}><td>{run.startedDisplay}</td><td>{run.success ? shownValue(run, metric) : '—'}</td><td>{run.result}</td></tr>)}</tbody></table></div>
+      <thead><tr><th scope="col">Started</th><th scope="col">{metric === 'duration' ? 'Duration' : 'Size covered'}</th><th scope="col">Result</th></tr></thead>
+      <tbody>{runs.map(run => <tr key={run.id}><td>{run.startedDisplay}</td><td>{run.success ? shownValue(run, metric) : '—'}</td><td>{resultLabel(run.result)}</td></tr>)}</tbody></table></div>
   </div>;
 }
 
-// How many verified runs each chart follows.
+// How many successful backups each chart follows.
 const CHART_RUNS = 30;
 
 function RunChart({ metric }: { metric: ChartMetric }) {
-  const { runs: all, selectedId, onSelect, locale } = useContext(RunChartContext);
+  const { runs: all, selectedId, onSelect, locale, resolvedIds } = useContext(RunChartContext);
   // The last 30 verified runs, oldest first, so the line reads left to right. A failed or cancelled run inside that span
   // stays on the chart as a marker, because it happened, but it is not a value: it feeds neither the line nor the figure above it.
   const { runs, verified, verifiedTotal } = useMemo(() => {
@@ -599,17 +616,24 @@ function RunChart({ metric }: { metric: ChartMetric }) {
     const from = done.length > CHART_RUNS ? Date.parse(done[done.length - CHART_RUNS].started) : Number.NEGATIVE_INFINITY;
     return { runs: dated.filter(run => Date.parse(run.started) >= from), verified: done.slice(-CHART_RUNS), verifiedTotal: done.length };
   }, [all]);
-  const latest = verified[verified.length - 1], newest = runs[runs.length - 1], marked = runs.length - verified.length;
+  const latest = verified[verified.length - 1], newest = runs[runs.length - 1];
   if (!latest || verified.length < 2) {
-    const [heading, text] = !newest ? ['No completed backups yet', 'Run history and trends will appear after your first backup.']
-      : latest ? ['Your first verified backup is recorded', `${latest.startedDisplay} · ${shownValue(latest, metric)}. A trend appears after the next verified backup.`]
-      : ['No verified backup yet', `Latest run: ${newest.startedDisplay} · ${newest.result}. A trend appears once a backup is verified.`];
+    const [heading, text] = !newest ? ['No backups yet', 'Run history and trends will appear after your first backup.']
+      : latest ? ['Your first successful backup is recorded', `${latest.startedDisplay} · ${shownValue(latest, metric)}. A trend appears after the next successful backup.`]
+      : ['No successful backup yet', `Latest run: ${newest.startedDisplay} · ${resultLabel(newest.result)}. A trend appears once a backup succeeds.`];
     return <div className="surface first-run-summary"><History size={22} /><div><strong>{heading}</strong><p>{text}</p></div></div>;
   }
+  // One sentence on what the line says, so the chart is not left to be read: the usual time, or whether the size is moving.
+  const first = verified[0];
+  const change = latest.processedBytes - first.processedBytes;
+  const takeaway = metric === 'duration' ? `Latest backup · usually about ${duration(usualSeconds(verified))}`
+    : Math.abs(change) < Math.max(1, first.processedBytes) * .01 ? `Latest backup · steady over these ${verified.length} backups`
+    : `Latest backup · ${change > 0 ? 'up' : 'down'} ${bytes(Math.abs(change), locale)} since ${first.startedDisplay}`;
+  const note = markerNote(runs, resolvedIds);
   return <div className="surface chart-card">
-    <div className="chart-heading"><div><span className="eyebrow">{metric === 'duration' ? 'Latest verified run duration' : 'Latest verified data processed'}</span><div className="chart-value">{shownValue(latest, metric)}</div></div><span className="quiet-tag">{verifiedTotal > CHART_RUNS ? `last ${CHART_RUNS} verified runs` : `${verified.length} verified runs`}</span></div>
-    <TrendChart runs={runs} metric={metric} selectedId={selectedId} onSelect={onSelect} locale={locale} />
-    {marked > 0 && <p className="chart-note">{marked} failed or cancelled {marked === 1 ? 'run is' : 'runs are'} marked on the baseline and left out of the trend.</p>}
+    <div className="chart-heading"><div><span className="eyebrow">{metric === 'duration' ? 'How long backups take' : 'How much data backups cover'}</span><div className="chart-value">{shownValue(latest, metric)}</div><p className="chart-takeaway">{takeaway}</p></div><span className="quiet-tag">{verifiedTotal > CHART_RUNS ? `last ${CHART_RUNS} successful backups` : `${verified.length} successful backups`}</span></div>
+    <TrendChart runs={runs} metric={metric} selectedId={selectedId} onSelect={onSelect} locale={locale} resolvedIds={resolvedIds} />
+    {note && <p className="chart-note">{note}</p>}
   </div>;
 }
 
@@ -621,28 +645,46 @@ function GuardedChart({ metric }: { metric: ChartMetric }) {
 const DurationChart = () => <GuardedChart metric="duration" />;
 const ProcessedChart = () => <GuardedChart metric="processed" />;
 
-const HISTORY_LABELS: FilterTableLabels = {
-  columns: { task: 'When', date: 'Duration', status: 'Result', owner: 'Processed · files' },
-  // "Problems", not "Needs attention": most of them were put right by a later backup and ask for nothing (see runProblems).
-  filters: { all: 'All runs', done: 'Completed', todo: 'Problems', progress: 'Cancelled' },
-  openRow: 'Open details',
-};
+const HISTORY_COLUMNS = { task: 'When', date: 'Time taken', status: 'Result', owner: 'Files · size' };
 
-function ActivityPage({ state, send, view, setView, openRunDetails, openRestore, interactive }: { state: DashboardState; send: Send; view: HistoryView & ActivityDateFilter; setView: (value: HistoryView & ActivityDateFilter) => void; openRunDetails: (runId: string) => void; openRestore: () => void; interactive: boolean }) {
+// The host's last verified backup, in the form runProblems settles older problems with (see lastVerified).
+const verifiedBackup = (state: DashboardState): Verified | undefined =>
+  lastVerified(state.freshness, formatWhen(state.freshness.verifiedAt, usableLocale(state.locale)));
+
+// "dayKey(6)" is the local date six days ago, as a date field writes it.
+const dayKey = (daysBack: number) => { const day = new Date(); day.setDate(day.getDate() - daysBack); return localDateKey(day.toISOString()); };
+// The ranges the date menu offers, as the number of days they reach back (today counts as the first).
+const DATE_RANGES: [days: string, label: string][] = [['7', 'Last 7 days'], ['30', 'Last 30 days'], ['365', 'Last year']];
+
+type ActivityProps = { state: DashboardState; send: Send; view: HistoryView & ActivityDateFilter; setView: (value: HistoryView & ActivityDateFilter) => void; openRunDetails: (runId: string) => void; openRestore: () => void; interactive: boolean };
+
+// Without the backup service there is no history to list and nothing to start: the one explanation takes the page's place.
+function ActivityPage(props: ActivityProps) {
+  if (serviceMissing(props.state)) return <><Heading title="Activity" description="Rewindle is waiting for a backup service to report on." /><SetupNotice state={props.state} send={props.send} /></>;
+  return <ActivityHistory {...props} />;
+}
+
+function ActivityHistory({ state, send, view, setView, openRunDetails, openRestore, interactive }: ActivityProps) {
   const { query, sort, filter, from, to } = view;
   const locale = usableLocale(state.locale);
   // The search field keeps focus when it is cleared (the clear button goes away with the text, and focus would fall to the page).
   const searchRef = useRef<HTMLInputElement>(null);
+  // "Pick dates…" shows the two date fields; a range typed or kept from before shows them too (see rangeValue).
+  const [pickDates, setPickDates] = useState(false);
   const historySignature = JSON.stringify(state.history);
   const history = useMemo(() => [...state.history].sort((a, b) => Date.parse(b.started) - Date.parse(a.started)), [historySignature]);
   const backupRuns = useMemo(() => history.filter(run => run.type === 'Backup'), [history]);
   const success = backupRuns.filter(run => run.success);
   // A failed or incomplete run that a later success put right is shown as resolved; only what nothing has put right asks for anything.
-  const resolved = useMemo(() => resolvedRuns(history), [history]);
+  // The host's own last verified backup counts as that success too, because the list only holds runs this app saw.
+  const verified = useMemo(() => verifiedBackup(state), [state.freshness.state, state.freshness.verifiedAt, locale]);
+  const resolved = useMemo(() => resolvedRuns(history, verified), [history, verified]);
   const unresolved = useMemo(() => unresolvedRuns(history, resolved), [history, resolved]);
-  const attention = attentionText(unresolved, success[0]);
+  const attention = attentionText(unresolved, lastSuccessfulBackup(history, verified));
   const problems = useMemo(() => history.filter(isProblem).length, [history]);
-  const average = success.length ? success.reduce((sum, run) => sum + run.durationSeconds, 0) / success.length : 0;
+  const failedBackups = backupRuns.filter(isProblem).length;
+  const usual = usualSeconds(success);
+  const latestBackup = success[0];
   const selected = state.history.find(run => run.id === state.selectedRunId);
   const selectedResolver = selected && resolved.get(selected.id);
   const dateRangeInvalid = !!from && !!to && from > to;
@@ -652,8 +694,9 @@ function ActivityPage({ state, send, view, setView, openRunDetails, openRestore,
     const startedDate = localDateKey(run.started);
     return !!startedDate && (!from || startedDate >= from) && (!to || startedDate <= to);
   };
-  // The local date (2025-10-02) is searchable too, because the table's own label leaves the year out for this year's runs.
-  const matchesView = (run: RunState) => matchesDate(run) && [run.id, run.startedDisplay, localDateKey(run.started), run.result, run.snapshot, run.type].join(' ').toLowerCase().includes(needle);
+  // The local date (2025-10-02) is searchable too, because the table's own label leaves the year out for this year's runs. The host's raw
+  // result and the snapshot stay searchable though the page says them differently.
+  const matchesView = (run: RunState) => matchesDate(run) && [run.id, run.startedDisplay, localDateKey(run.started), run.result, resultLabel(run.result), run.snapshot, run.type, typeLabel(run.type)].join(' ').toLowerCase().includes(needle);
   const inChip = (run: RunState) => filter === 'all' || filter === runStatus(run);
   const selectedVisible = !!selected && matchesView(selected) && inChip(selected);
   // With nothing selected, "Open details" falls back to the newest run the table shows, so the first visit has no
@@ -667,16 +710,25 @@ function ActivityPage({ state, send, view, setView, openRunDetails, openRestore,
     filtered.sort((a, b) => sort === 'duration' ? b.durationSeconds - a.durationSeconds : sort === 'size' ? b.processedBytes - a.processedBytes : sort === 'oldest' ? Date.parse(a.started) - Date.parse(b.started) : Date.parse(b.started) - Date.parse(a.started));
     return filtered.map(run => {
       const by = resolved.get(run.id);
-      return { id: run.id, task: `${run.startedDisplay}${run.type !== 'Backup' ? ` · ${run.type}` : ''}`, date: run.durationDisplay, status: runStatus(run), statusLabel: run.result, owner: `${run.processedDisplay} · ${run.filesDisplay} files`,
+      // A run that did not finish has no figures worth showing when it counted nothing: a dash says so, "0 B · 0 files" reads as an empty backup.
+      return { id: run.id, task: `${run.startedDisplay}${run.type !== 'Backup' ? ` · ${typeLabel(run.type)}` : ''}`, date: run.durationDisplay, status: runStatus(run), statusLabel: resultLabel(run.result), statusTitle: resultHint(run.result),
+        owner: run.success || run.files > 0 || run.processedBytes > 0 ? `${run.filesDisplay} files · ${run.processedDisplay}` : '—',
         ...(by ? { quiet: true, statusNote: 'Resolved', statusHint: `${resolvedByText(by)}, so this run needs nothing from you.` } : {}) };
     });
   }, [history, resolved, query, sort, from, to]);
+  // "Problems" only while something is still open; once a later backup put every one right they are a record, and the chip says so.
+  const labels = useMemo<FilterTableLabels>(() => ({
+    columns: HISTORY_COLUMNS,
+    filters: { all: 'All runs', done: 'Successful', todo: unresolved.length ? 'Problems' : 'Resolved', progress: 'Cancelled' },
+    openRow: 'Open details', filtersName: 'Show runs by result',
+  }), [unresolved.length]);
   // Sorting is not a filter (it never hides a run), so only the search, the dates and the result chip count as filtering and are
-  // cleared by "Clear filters"; the order stays as it was chosen.
+  // cleared by "Show all runs"; the order stays as it was chosen.
   const filtering = !!query.trim() || !!from || !!to || filter !== 'all';
   const shown = rows.filter(row => filter === 'all' || row.status === filter).length;
   const clearFilters = useCallback(() => {
     setView({ ...view, query: '', from: '', to: '', filter: 'all' });
+    setPickDates(false);
     searchRef.current?.focus();
   }, [setView, view]);
   // The table is large and the host publishes state every second, so everything it receives is kept stable
@@ -685,57 +737,80 @@ function ActivityPage({ state, send, view, setView, openRunDetails, openRestore,
   const selectRow = useCallback((row: TableRow) => send('selectRun', { runId: row.id ?? '' }), [send]);
   const openRow = useCallback((row: TableRow) => openRunDetails(row.id ?? ''), [openRunDetails]);
   // Only drawn while there is history to filter (the first-run state below has its own), so this is always about filters that match nothing.
-  const emptyContent = useMemo(() => <div className="empty-state"><Search size={22} aria-hidden="true" /><strong>{dateRangeInvalid ? 'Choose a valid date range' : 'No runs match these filters'}</strong><p>{dateRangeInvalid ? 'The start date must be on or before the end date.' : 'Try another search, adjust the dates, or show all results.'}</p><Button size="sm" onClick={clearFilters}>Clear filters</Button></div>, [dateRangeInvalid, clearFilters]);
-  // What the tiles and the banner say about the window of runs the host keeps; the number is the host's own (see historyLimit).
+  const emptyContent = useMemo(() => {
+    const [title, text] = dateRangeInvalid ? ['Choose a valid date range', 'The start date must be on or before the end date.']
+      : filter === 'todo' ? ['No problems found', 'None of the runs shown failed or was incomplete.']
+      : filter === 'progress' ? ['No cancelled runs', 'None of the runs shown was cancelled.']
+      : filter === 'done' ? ['No successful runs', 'None of the runs shown succeeded.']
+      : ['No runs match these filters', 'Try another search, adjust the dates, or show all runs.'];
+    return <div className="empty-state"><Search size={22} aria-hidden="true" /><strong>{title}</strong><p>{text}</p><Button size="sm" onClick={clearFilters}>Show all runs</Button></div>;
+  }, [dateRangeInvalid, filter, clearFilters]);
+  // What the banner says about the window of runs the host keeps; the number is the host's own (see historyLimit).
   const limit = state.historyLimit;
-  const windowNote = state.historyTruncated ? (limit ? `last ${limit.toLocaleString(locale)} runs` : 'newest runs only') : undefined;
   const capNote = limit
     ? `Showing the newest ${limit.toLocaleString(locale)} runs. Older runs have rolled off this list, but every backup is still saved in your backup location. Restore lists every backup you can recover from.`
     : 'The app keeps the newest 400 run records for fast loading. This does not remove backup snapshots.';
   const summary = filtering ? `Showing ${shown.toLocaleString(locale)} of ${history.length.toLocaleString(locale)} runs` : `${history.length.toLocaleString(locale)} ${history.length === 1 ? 'run' : 'runs'}`;
-  const chart = useMemo<RunChartData>(() => ({ runs: backupRuns, selectedId: state.selectedRunId, onSelect: runId => send('selectRun', { runId }), locale }), [backupRuns, state.selectedRunId, send, locale]);
-  // A trend needs two verified runs; failed and cancelled ones are only marked on it.
-  const trend = success.length > 1, pill = selected ? 'Open selected run details' : 'Open newest run details';
-  const pages: InsightPage[] = useMemo(() => [
-    { key: 'duration', prose: trend ? 'How long your backups take. Point at a run to see it, or click one to select it.' : 'Compare backup duration as your run history grows.', Card: DurationChart, pill },
-    { key: 'processed', prose: 'The amount of data processed by each backup run.', Card: ProcessedChart, pill },
-  ], [trend, pill]);
+  const resolvedIds = useMemo<ReadonlySet<string>>(() => new Set(resolved.keys()), [resolved]);
+  const chart = useMemo<RunChartData>(() => ({ runs: backupRuns, selectedId: state.selectedRunId, onSelect: runId => send('selectRun', { runId }), locale, resolvedIds }), [backupRuns, state.selectedRunId, send, locale, resolvedIds]);
+  // A trend needs two successful backups; failed and cancelled ones are only marked on it.
+  const trend = success.length > 1;
+  // The date menu shows a range it knows, or "Pick dates…" with the two fields; dates left over from before show as picked.
+  const rangeValue = !from && !to ? 'any' : !to ? DATE_RANGES.find(([days]) => from === dayKey(Number(days) - 1))?.[0] ?? 'custom' : 'custom';
+  const showDates = pickDates || rangeValue === 'custom';
+  const onRangeChange = (value: string) => {
+    setPickDates(value === 'custom');
+    if (value !== 'custom') setView({ ...view, from: value === 'any' ? '' : dayKey(Number(value) - 1), to: '' });
+  };
+  // What the first tile adds to its number, so "79" is not left to read as a score out of something: what, if anything, is still open.
+  const successSub = unresolved.length ? `${unresolved.length} ${unresolved.length === 1 ? 'needs' : 'need'} a look`
+    : failedBackups ? `${failedBackups} did not finish; ${failedBackups === 1 ? 'a later backup put it' : 'later backups put them'} right`
+    : success.length ? 'None have failed' : undefined;
+  if (history.length === 0) {
+    return <>
+      <Heading title="Activity" description="See every backup Rewindle has made, and what happened when one did not finish." note={modeNote(state)} />
+      <div className="surface empty-state history-empty"><History size={22} aria-hidden="true" /><strong>No backups yet</strong><p>Your backups will be listed here once the first one has run. You can start one now.</p>
+        <Action state={state} send={send} command="backupNow" primary size="md" icon={<Play size={13} fill="currentColor" />} quiet={!!modeNote(state)} /></div>
+    </>;
+  }
   return <>
-    <Heading title="Activity" description="Search your runs, inspect a snapshot, or see why a run did not succeed." note={modeNote(state)}>
-      <Action state={state} send={send} command="exportDiagnostics" icon={<ArrowUpRight size={13} />} quiet={!!modeNote(state)} />
-    </Heading>
+    <Heading title="Activity" description="See every backup Rewindle has made, and what happened when one did not finish." note={modeNote(state)} />
     <div className="activity-metrics">
-      <div className="surface"><Stat label="Verified backups" value={backupRuns.length ? `${success.length} / ${backupRuns.length}` : 'No backups yet'} icon={<ShieldCheck size={13} />} sub={windowNote} /></div>
-      <div className="surface"><Stat label="Average duration" value={success.length ? duration(average) : '—'} icon={<Clock3 size={13} />} sub={windowNote} /></div>
-      <div className="surface"><Stat label="Latest stored" value={success.length ? success[0].storedDisplay : '—'} icon={<Database size={13} />} sub={windowNote} hint="New data the latest verified backup added to your backup location, after deduplication and compression." /></div>
+      <div className="surface"><Stat label="Successful backups" value={backupRuns.length ? String(success.length) : 'No backups yet'} icon={<ShieldCheck size={13} />} sub={successSub} /></div>
+      <div className="surface"><Stat label="Usual backup time" value={usual ? duration(usual) : '—'} icon={<Clock3 size={13} />} sub={latestBackup ? `Last one: ${latestBackup.durationDisplay}` : undefined} /></div>
+      <div className="surface"><Stat label="New data in last backup" value={latestBackup ? (isUnchanged(latestBackup.result) ? 'Nothing new' : latestBackup.storedDisplay) : '—'} icon={<Database size={13} />}
+        sub={latestBackup ? (isUnchanged(latestBackup.result) ? 'Your files matched the previous backup' : 'Added to your backup location') : undefined} /></div>
     </div>
     <section>
-      <div className="section-toolbar"><div><div className="history-heading"><h2 className="section-title">Run history</h2>{history.length > 0 && <span className="history-count" role="status">{summary}</span>}</div>
-        {history.length > 0 && <p className="history-scope-note">History lists runs Rewindle has observed; runs that finish while it is closed may be missing.</p>}</div>
-        {history.length > 0 && <div className="history-tools">
-          <label className="search-field"><Search size={13} aria-hidden="true" /><input ref={searchRef} aria-label="Search backup history" placeholder="Date, result, or snapshot…" value={query} onChange={event => setView({ ...view, query: event.target.value })}
+      <div className="section-toolbar"><div><div className="history-heading"><h2 className="section-title">Run history</h2><span className="history-count" role="status">{summary}</span></div>
+        <p className="history-scope-note">Click a run to select it. Double-click it, or press Enter, to see its details. Runs that finish while Rewindle is closed can be missing from this list.</p></div>
+        <div className="history-tools">
+          <label className="search-field"><Search size={13} aria-hidden="true" /><input ref={searchRef} aria-label="Search backup history" placeholder="Search by date or result…" value={query} onChange={event => setView({ ...view, query: event.target.value })}
             onKeyDown={event => { if (event.key === 'Escape' && query) { event.preventDefault(); event.stopPropagation(); setView({ ...view, query: '' }); } }} />{query && <button aria-label="Clear history search" onClick={() => { setView({ ...view, query: '' }); searchRef.current?.focus(); }}><X size={13} /></button>}</label>
-          <label className="date-filter"><span>From</span><input type="date" aria-label="Show runs from date" value={from} max={to || undefined} onChange={event => setView({ ...view, from: event.target.value })} /></label>
-          <label className="date-filter"><span>To</span><input type="date" aria-label="Show runs through date" value={to} min={from || undefined} onChange={event => setView({ ...view, to: event.target.value })} /></label>
+          <select className="sort-field" aria-label="Show runs from" value={showDates ? 'custom' : rangeValue} onChange={event => onRangeChange(event.target.value)}>
+            <option value="any">Any time</option>{DATE_RANGES.map(([days, label]) => <option key={days} value={days}>{label}</option>)}<option value="custom">Pick dates…</option></select>
+          {showDates && <>
+            <label className="date-filter"><span>From</span><input type="date" aria-label="Show runs from date" value={from} max={to || undefined} onChange={event => setView({ ...view, from: event.target.value })} /></label>
+            <label className="date-filter"><span>To</span><input type="date" aria-label="Show runs through date" value={to} min={from || undefined} onChange={event => setView({ ...view, to: event.target.value })} /></label></>}
           <select className="sort-field" aria-label="Sort backup history" value={sort} onChange={event => setView({ ...view, sort: event.target.value })}><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="duration">Longest first</option><option value="size">Largest first</option></select>
           {/* Always in the toolbar, hidden (so out of the tab order too) while there is nothing to clear: it appearing and going shifted the other fields. */}
           <Button size="xs" variant="quiet" style={{ visibility: filtering ? 'visible' : 'hidden' }} onClick={clearFilters}>Clear filters</Button>
-        </div>}</div>
+        </div></div>
       {state.historyTruncated && <div className="history-cap-note" role="note"><Info size={13} aria-hidden="true" /><span>{capNote}</span><Button size="xs" variant="quiet" onClick={openRestore}>Open Restore</Button></div>}
       {/* What the history asks for: nothing while every problem was put right by a later backup, which is said once the problems are
-          the ones shown; otherwise the runs since the last successful backup, with the way to the newest one's details. */}
-      {attention ? <div className="history-cap-note is-warning" role="note"><TriangleAlert size={13} aria-hidden="true" /><span>{attention} Open its details to see what went wrong.</span>
+          the ones shown; otherwise the runs since the last successful backup, with a way to try again and the way to the newest one's details. */}
+      {attention ? <div className="history-cap-note is-warning" role="note"><TriangleAlert size={13} aria-hidden="true" /><span>{attention} Try Back up now. If it fails again, open its details to see why.</span>
+        <Action state={state} send={send} command="backupNow" primary size="xs" icon={<Play size={12} fill="currentColor" />} quiet />
         <Button size="xs" variant="secondary" disabled={!interactive || !detailsAction} title={interactive ? detailsAction?.help : undefined} onClick={() => openRunDetails(unresolved[0].id)}><ArrowRight size={12} />Open details</Button></div>
         : filter === 'todo' && problems > 0 && <div className="history-cap-note is-resolved" role="note"><CircleCheck size={13} aria-hidden="true" /><span>Nothing needs doing. A later backup succeeded after each of these runs, so they stay here only as a record of what happened.</span></div>}
-      {history.length > 0 ? <>
-        <FilterTable className="history-table" rows={rows} labels={HISTORY_LABELS}
-          selectedRowId={state.selectedRunId} filter={filter} onFilterChange={onFilterChange} tableLabel="Backup run history"
-          onRowClick={selectRow} onRowOpen={openRow} emptyContent={emptyContent} />
-        <div className="selection-bar"><div><strong>{selected ? `${selected.type} · ${selected.startedDisplay}` : newest ? `Newest run · ${newest.startedDisplay}` : 'No run to open'}</strong><span>{selected ? `${selected.result}${selectedResolver ? ` · ${resolvedByText(selectedResolver)}` : ''} · Snapshot ${selected.snapshot || 'unavailable'}${selectedVisible ? '' : ' · Hidden by current filters'}` : newest ? `${newest.result} · Click a row to choose another run, or double-click one to open it.` : 'Adjust the search, dates or filters to see runs.'}</span></div><Button size="sm" variant="secondary" disabled={!canOpen} title={canOpen ? undefined : detailsAction?.help} onClick={() => target && openRunDetails(target.id)}><ArrowRight size={13} />Open details</Button></div>
-      </> : <div className="surface empty-state history-empty"><History size={22} aria-hidden="true" /><strong>No backup history yet</strong><p>Your completed backup runs will appear here once you have made your first backup.</p>
-        <Action state={state} send={send} command="backupNow" primary size="md" icon={<Play size={13} fill="currentColor" />} quiet={!!modeNote(state)} /></div>}
+      <FilterTable className="history-table" rows={rows} labels={labels}
+        selectedRowId={state.selectedRunId} filter={filter} onFilterChange={onFilterChange} tableLabel="Backup run history"
+        onRowClick={selectRow} onRowOpen={openRow} emptyContent={emptyContent} />
+      <div className="selection-bar"><div><strong>{selected ? `${typeLabel(selected.type)} · ${selected.startedDisplay}` : newest ? `Newest run · ${newest.startedDisplay}` : 'No run to open'}</strong><span>{selected ? `${resultLabel(selected.result)}${selectedResolver ? ` · ${resolvedByText(selectedResolver)}` : ''}${selectedVisible ? '' : ' · Hidden by current filters'}` : newest ? resultLabel(newest.result) : 'Adjust the search, dates or filters to see runs.'}</span></div><Button size="sm" variant="secondary" disabled={!canOpen} title={canOpen ? undefined : detailsAction?.help} onClick={() => target && openRunDetails(target.id)}><ArrowRight size={13} />Open details</Button></div>
     </section>
-    <RunChartContext.Provider value={chart}><div className="insights-wide"><InsightCards pages={pages} labels={{ title: 'Backup trends' }} actionDisabled={!canOpen} onAction={() => target && openRunDetails(target.id)} /></div></RunChartContext.Provider>
+    {/* Both charts side by side, with no pager to hide half of them. Fewer than two successful backups draws one card that says why. */}
+    <RunChartContext.Provider value={chart}><section className="trends-section"><h2 className="section-title">Backup trends</h2>
+      {trend ? <div className="two-columns"><DurationChart /><ProcessedChart /></div> : <DurationChart />}</section></RunChartContext.Provider>
   </>;
 }
 
@@ -1028,7 +1103,7 @@ export default function App() {
   // A dialog that is open shows the notice itself, so the page's toast, which would sit unseen behind it and outlive it, stays away.
   const dialogOpen = !!state.sourcePicker?.open || !!state.restoreFlow?.open || (!!state.runDetails && dismissedRunDetailsId !== state.runDetails.id);
   // The later run that put the open run right, if one did, so its details do not ask for something nothing needs.
-  const detailsResolvedBy = state.runDetails && !state.runDetails.success ? resolvedRuns(state.history).get(state.runDetails.id) : undefined;
+  const detailsResolvedBy = state.runDetails && !state.runDetails.success ? resolvedRuns(state.history, verifiedBackup(state)).get(state.runDetails.id) : undefined;
   return <MotionConfig reducedMotion={state.reducedMotion ? 'always' : 'never'}><div className="app-shell">
     <a className="skip-link" href="#main-content" onClick={event => { event.preventDefault(); pageRef.current?.focus(); }}>Skip to content</a>
     {/* Always present, empty until there is something to say: a live region speaks only what is put into it after it exists. */}

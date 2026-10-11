@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { Check, ChevronRight, Minus, OctagonAlert, type LucideIcon } from "lucide-react";
+import { Check, ChevronRight, History, Minus, OctagonAlert, type LucideIcon } from "lucide-react";
 
 /* ─────────────────────────────────────────────────────────
  * FILTER TABLE
@@ -23,6 +23,8 @@ export type TableRow = {
   quiet?: boolean;
   /** A word or two after the pill ("Resolved"), with `statusHint` as its tooltip. */
   statusNote?: string; statusHint?: string;
+  /** A sentence on what the pill's word means, as its tooltip. */
+  statusTitle?: string;
 };
 
 export type FilterTableLabels = {
@@ -31,14 +33,17 @@ export type FilterTableLabels = {
   statuses?: Partial<Record<FilterTableStatus, string>>;
   /** Names the trailing per-row button, which is drawn only when the table has `onRowOpen`. */
   openRow?: string;
+  /** Names the group of filter chips for assistive technology. */
+  filtersName?: string;
 };
 
-/* The chip dots use the same tokens as the pills below, so a chip and its rows read as one status. */
+/* The chip dots use the same tokens as the pills below, so a chip and its rows read as one status. Everything first, then the good
+   news, then what may need a look; a chip with nothing behind it is not drawn (see below), so the row stays short. */
 const FILTERS: { key: "all" | FilterTableStatus; label: string; dot?: string }[] = [
   { key: "all", label: "All" },
+  { key: "done", label: "Completed", dot: "var(--green)" },
   { key: "todo", label: "To do", dot: "var(--red)" },
   { key: "progress", label: "In Progress", dot: "var(--ink-3)" },
-  { key: "done", label: "Completed", dot: "var(--green)" },
 ];
 
 /* Each status has its own shape as well as its own color, so a pill never relies on color alone. */
@@ -51,9 +56,10 @@ const PILLS: Record<FilterTableStatus, { label: string; cls: string; Icon: Lucid
 /* PageUp / PageDown move this many visible rows. */
 const PAGE_STEP = 8;
 
-/* One literal per layout so Tailwind sees the whole class. The last track holds the open button. */
-const GRID = "grid-cols-[minmax(0,1.3fr)_minmax(0,0.6fr)_minmax(0,0.95fr)_minmax(10rem,0.9fr)]";
-const GRID_OPEN = "grid-cols-[minmax(0,1.3fr)_minmax(0,0.6fr)_minmax(0,0.95fr)_minmax(10rem,0.9fr)_2.75rem]";
+/* One literal per layout so Tailwind sees the whole class. The last track holds the open button. The result track keeps room for
+   a pill and the word after it ("Failed  Resolved"), the figures track for "12,141 files · 4.55 GiB". */
+const GRID = "grid-cols-[minmax(0,1.3fr)_minmax(0,0.6fr)_minmax(10rem,0.95fr)_minmax(11.5rem,0.9fr)]";
+const GRID_OPEN = "grid-cols-[minmax(0,1.3fr)_minmax(0,0.6fr)_minmax(10rem,0.95fr)_minmax(11.5rem,0.9fr)_2.75rem]";
 
 /* The rows and the column names are the caller's: there are no sample ones to fall back on. */
 export type FilterTableProps = {
@@ -157,11 +163,15 @@ function FilterTable({
     <div className={`w-full max-w-105${className ? ` ${className}` : ""}`}>
       {/* filter chips — the padding leaves room for the 5px focus ring inside the scroll clip */}
       <div
+        role="group"
+        aria-label={labels.filtersName ?? "Show runs by result"}
         className="-mx-1.5 -mt-0.5 mb-0.5 flex items-center gap-1 overflow-x-auto px-1.5 py-1.5"
         style={{ scrollbarWidth: "none" }}
       >
         {FILTERS.map((f) => {
           const active = filter === f.key;
+          /* A chip that counts nothing leads to an empty table, so it is left out unless it is the one chosen. */
+          if (f.key !== "all" && !active && countFor(f.key) === 0) return null;
           return (
             <button
               key={f.key}
@@ -189,13 +199,13 @@ function FilterTable({
       {/* table — rows are the focus stops, so the scroller itself only needs one when there are none;
           the header row is sticky, and the scroll padding keeps a row that is scrolled to out from under it */}
       <div
-        aria-label={tableLabel}
+        aria-label={`${tableLabel} (scrollable)`}
         className="overflow-x-auto rounded-card bg-surface shadow-card"
         role="region"
         tabIndex={interactive ? undefined : 0}
         style={{ scrollbarWidth: "none", scrollPaddingTop: "2.25rem" }}
       >
-        <div className="min-w-[420px]">
+        <div className="min-w-[560px]">
           {/* How to use the rows, read with the grid's name; a tooltip on every row said it to a pointer only. */}
           {interactive && (
             <span id={keysHintId} className="sr-only">
@@ -215,7 +225,8 @@ function FilterTable({
             </div>
             {rows.map((row, index) => {
               const shown = filter === "all" || row.status === filter;
-              const pill = { ...PILLS[row.status], label: row.statusLabel ?? statusLabels[row.status] ?? PILLS[row.status].label, ...(row.quiet ? { cls: "filter-status-quiet" } : {}) };
+              /* A quiet pill (a failure that was put right) keeps its word but not the stop sign: it has its own glyph, a clock face turned back. */
+              const pill = { ...PILLS[row.status], label: row.statusLabel ?? statusLabels[row.status] ?? PILLS[row.status].label, ...(row.quiet ? { cls: "filter-status-quiet", Icon: History } : {}) };
               const PillIcon = pill.Icon;
               const rowId = rowIdFor(row, index);
               const selected = resolvedSelectedRowId === rowId;
@@ -259,6 +270,7 @@ function FilterTable({
                       </span>
                       <span role={cellRole} className="flex min-w-0 items-center gap-2 border-r border-[var(--grid-line)] px-3 py-2">
                         <span
+                          title={row.statusTitle}
                           className={`inline-flex h-[23px] min-w-0 max-w-full shrink items-center gap-1 whitespace-nowrap rounded-[8px] border px-[7px]
                             text-[13px] font-medium ${pill.cls}`}
                         >
