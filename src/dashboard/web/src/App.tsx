@@ -5,6 +5,7 @@ import {
   HardDrive, Clock3, LockKeyhole, Check, X, Play, Pause,
   Search, Sun, Moon, Monitor, CloudCheck, ArchiveRestore,
   Files, Gauge, Database, CircleAlert, CircleCheck, Activity, ListChecks, TriangleAlert, Info, OctagonAlert, Copy,
+  Type as TextSize, Keyboard,
 } from 'lucide-react';
 import SidebarNav from '@/components/primitives/SidebarNav';
 import TaskRows, { type TaskRow } from '@/components/primitives/TaskRows';
@@ -24,7 +25,7 @@ import {
   attentionText, isCancelled, isProblem, isUnchanged, lastSuccessfulBackup, lastVerified, resolvedByText, resolvedRuns, resultHint, resultLabel,
   typeLabel, unresolvedRuns, usualSeconds, type Verified,
 } from './runProblems';
-import { formatWhen } from './when';
+import { formatClock, formatWhen } from './when';
 
 type Send = (command: CommandName, payload?: Record<string, string | boolean>) => void;
 
@@ -62,7 +63,7 @@ function CrashNotice({ scope, label, error, componentStack, note, onRetry, onClo
   const details = useMemo(() => crashDetails(error, componentStack), [error, componentStack]);
   const copy = async () => { setCopied(await copyText(details) ? 'done' : 'failed'); window.setTimeout(() => setCopied('idle'), 2500); };
   const copyButton = <Button size="sm" onClick={copy}><Copy size={13} aria-hidden="true" />{copied === 'done' ? 'Copied' : copied === 'failed' ? 'Could not copy' : 'Copy details'}</Button>;
-  const reload = <Button size="sm" variant={scope === 'app' ? 'primary' : 'secondary'} autoFocus={scope === 'app'} onClick={() => window.location.reload()}><RefreshCw size={13} aria-hidden="true" />Reload dashboard</Button>;
+  const reload = <Button size="sm" variant={scope === 'app' ? 'primary' : 'secondary'} autoFocus={scope === 'app'} onClick={() => window.location.reload()}><RefreshCw size={13} aria-hidden="true" />Reload Rewindle</Button>;
   const technical = <details className="crash-details"><summary>Technical details</summary><pre>{details}</pre></details>;
   if (scope === 'card') {
     return <div className="surface crash-card is-compact" role="alert"><TriangleAlert size={18} aria-hidden="true" />
@@ -73,8 +74,8 @@ function CrashNotice({ scope, label, error, componentStack, note, onRetry, onClo
     return <div className="crash-overlay"><section className="surface crash-card" role="alertdialog" aria-modal="true" aria-labelledby={titleId}
       onKeyDown={event => { if (event.key === 'Escape' && onClose) { event.preventDefault(); onClose(); } }}>
       <span className="crash-icon"><TriangleAlert size={22} aria-hidden="true" /></span>
-      <h2 id={titleId}>The {label} hit a problem</h2>
-      <p>It stopped drawing, so it was cleared away. Close it and open it again. Nothing was changed, and a restore that is already running carries on by itself.</p>
+      <h2 id={titleId}>The {label} couldn't be shown</h2>
+      <p>This window couldn't be shown. Close it and open it again. Nothing was changed, and a restore that is already running carries on by itself.</p>
       {note && <p className="crash-note" role="status">{note}</p>}
       <div className="crash-actions">{onClose && <Button size="sm" variant="primary" autoFocus onClick={onClose}>Close</Button>}{reload}{copyButton}</div>
       {technical}</section></div>;
@@ -82,15 +83,15 @@ function CrashNotice({ scope, label, error, componentStack, note, onRetry, onClo
   if (scope === 'page') {
     return <section className="surface crash-card" role="alert" aria-labelledby={titleId}>
       <span className="crash-icon"><TriangleAlert size={22} aria-hidden="true" /></span>
-      <h2 id={titleId}>This page hit a problem</h2>
-      <p>The {label} stopped drawing. The rest of the app still works, so you can open another page. Your backups and settings are not affected.</p>
+      <h2 id={titleId}>This page couldn't be shown</h2>
+      <p>The rest of Rewindle still works, so you can open another page. Your backups and settings are not affected.</p>
       <div className="crash-actions">{onRetry && <Button size="sm" variant="primary" onClick={onRetry}>Try again</Button>}{reload}{copyButton}</div>
       {technical}</section>;
   }
   return <div className="crash-screen" role="alert" aria-labelledby={titleId}>
     <span className="crash-icon"><TriangleAlert size={26} aria-hidden="true" /></span>
-    <h1 id={titleId}>Rewindle hit a problem</h1>
-    <p>This screen stopped drawing, so it was cleared. Your backups and settings are not affected, and scheduled backups keep running on their own. Reload the dashboard to carry on.</p>
+    <h1 id={titleId}>Something went wrong</h1>
+    <p>Rewindle couldn't show this window. Your backups and settings are not affected, and scheduled backups keep running. Reload to carry on.</p>
     <div className="crash-actions">{reload}{copyButton}</div>
     {technical}
   </div>;
@@ -270,7 +271,7 @@ const serviceMissing = (state: DashboardState) => state.setup?.engineFound === f
 
 // What a computer without the backup service sees in place of the pages that need it: one explanation, where Rewindle looked, what to do,
 // and a line to paste into a bug report, instead of an "unavailable" in every widget. It only reads: nothing here changes anything, and
-// "Check again" is the same refresh the toolbar has.
+// "Try again" is the same refresh the toolbar has.
 function SetupNotice({ state, send }: { state: DashboardState; send: Send }) {
   const titleId = useId();
   const [copied, setCopied] = useState<'idle' | 'done' | 'failed'>('idle');
@@ -282,16 +283,16 @@ function SetupNotice({ state, send }: { state: DashboardState; send: Send }) {
   return <section className="surface setup-notice" aria-labelledby={titleId}>
     <span className="setup-icon"><HardDrive size={22} aria-hidden="true" /></span>
     <div className="setup-copy">
-      <h2 id={titleId}>Engine not installed</h2>
-      <p>Rewindle reports on a backup engine installed under Program Files. It did not find one on this computer, so there is nothing to show yet. Nothing was changed.</p>
-      <p>Install or repair the engine (the Rewindle installer sets it up), then choose Check again. The README lists what Rewindle needs, under Requirements.</p>
+      <h2 id={titleId}>Rewindle's backup service isn't installed</h2>
+      <p>Rewindle shows the state of its backup service, which Rewindle Setup installs under Program Files. It wasn't found on this computer, so there is nothing to show yet. Nothing was changed.</p>
+      <p>Install or repair the backup service (Rewindle Setup does both), then choose Try again. The README lists what Rewindle needs, under Requirements.</p>
       <dl className="setup-where">
-        {setup.engine && <div><dt>Engine</dt><dd>{setup.engine}{setup.engineChosenBy === '--engine' ? ' (chosen with --engine)' : ''}</dd></div>}
+        {setup.engine && <div><dt>Backup service</dt><dd>{setup.engine}{setup.engineChosenBy === '--engine' ? ' (chosen with --engine)' : ''}</dd></div>}
         {searched.map((path, index) => <div key={path}><dt>{index === 0 ? 'Looked for' : ''}</dt><dd>{path}</dd></div>)}
         {setup.stateFolder && <div><dt>Reads status from</dt><dd>{setup.stateFolder}</dd></div>}
       </dl>
       <div className="setup-actions">
-        <Button size="sm" variant="primary" onClick={() => send('refresh')}><RefreshCw size={13} aria-hidden="true" />Check again</Button>
+        <Button size="sm" variant="primary" onClick={() => send('refresh')}><RefreshCw size={13} aria-hidden="true" />Try again</Button>
         <Button size="sm" onClick={copy}><Copy size={13} aria-hidden="true" />{copied === 'done' ? 'Copied' : copied === 'failed' ? 'Could not copy' : 'Copy details'}</Button>
       </div>
       <p className="setup-report">{report}</p>
@@ -833,67 +834,107 @@ function RestorePage({ state, send }: { state: DashboardState; send: Send }) {
   </>;
 }
 
+// The three themes in the order the Settings picker lists them and the toolbar button steps through them (System, Light, Dark, and
+// round again), so the button never replaces "follow Windows" without a way back.
+const THEME_STEPS: { name: ThemePreference; label: string; Icon: typeof Sun }[] = [
+  { name: 'System', label: 'System', Icon: Monitor }, { name: 'Daylight', label: 'Light', Icon: Sun }, { name: 'Midnight', label: 'Dark', Icon: Moon }];
+const MOTION_STEPS: { name: MotionPreference; label: string }[] = [{ name: 'System', label: 'Follow Windows' }, { name: 'Full', label: 'Always on' }, { name: 'Reduced', label: 'Reduced' }];
+const ISSUES_URL = `${PROJECT_URL}/issues`;
+
+// Copies a link: the page cannot open one (the host refuses every navigation away from the app), so the person pastes it into a
+// browser. The button says it worked, and a screen reader is told too.
+function CopyLinkButton({ text, label = 'Copy link' }: { text: string; label?: string }) {
+  const [copied, setCopied] = useState<'idle' | 'done' | 'failed'>('idle');
+  const copy = async () => { setCopied(await copyText(text) ? 'done' : 'failed'); window.setTimeout(() => setCopied('idle'), 2500); };
+  return <><Button size="sm" onClick={copy}><Copy size={13} aria-hidden="true" />{copied === 'done' ? 'Copied' : copied === 'failed' ? 'Could not copy' : label}</Button>
+    <span className="sr-only" role="status">{copied === 'done' ? 'Link copied' : copied === 'failed' ? 'The link could not be copied' : ''}</span></>;
+}
+
 function SettingsPage({ state, send }: { state: DashboardState; send: Send }) {
-  const themes: { name: ThemePreference; label: string; Icon: typeof Sun }[] = [{ name: 'System', label: 'System', Icon: Monitor }, { name: 'Midnight', label: 'Dark', Icon: Moon }, { name: 'Daylight', label: 'Light', Icon: Sun }];
-  const motions: { name: MotionPreference; label: string }[] = [{ name: 'System', label: 'System' }, { name: 'Full', label: 'Full' }, { name: 'Reduced', label: 'Reduced' }];
   const motionDescription = state.motion === 'Full'
-    ? 'Use animated transitions and feedback, even when Windows reduces animation. High contrast always reduces motion.'
+    ? 'Animated transitions and feedback are always on, even when Windows reduces animation. High contrast always reduces motion.'
     : state.motion === 'Reduced'
-      ? 'Minimize movement while keeping progress and status updates visible.'
-      : `System follows your Windows animation setting. It is currently using ${state.reducedMotion ? 'reduced' : 'full'} motion.`;
-  const note = busyNote(state), quiet = !!note;
-  return <><Heading title="Settings" description="Manage your backup plan and make the app comfortable to use." note={note} />
+      ? 'Movement is kept to a minimum, while progress and status updates stay visible.'
+      : `Follows your Windows animation setting, which is currently ${state.reducedMotion ? 'reduced' : 'on'}.`;
+  const note = busyNote(state), quiet = !!note, missing = serviceMissing(state);
+  return <><Heading title="Settings" description="Where your backups go, when they run, and how Rewindle looks." note={note} />
     <Repairs state={state} send={send} />
-    {/* Every row has the same two slots, the words (`setting-copy`) and what they are controlled with (`setting-controls`), which sits at
-        the bottom of its card, so the two pickers in a row of cards line up whatever the length of the text above them. */}
-    <section className="settings-section"><h2 className="section-title">Appearance and motion</h2><div className="settings-grid">
-      <section className="surface setting-row"><div className="setting-copy"><h3 className="info-heading"><Sun size={15} />Appearance</h3><p className="muted-copy">Follow your system, or choose a light or dark theme.</p>{state.highContrast && <p className="muted-copy">Windows High Contrast is on and sets the colors for now. Your choice is saved and applies when High Contrast is turned off.</p>}</div><div className="setting-controls"><div className="theme-picker" role="group" aria-label="Appearance">
-        {themes.map(({ name, label, Icon }) => <button key={name} className="theme-choice" aria-pressed={state.theme === name} onClick={() => send('setTheme', { theme: name })}>
-          {state.theme === name && <motion.div className="theme-highlight" layoutId="theme-thumb" transition={{ type: 'spring', stiffness: 440, damping: 34 }} />}<span><Icon size={13} />{label}</span></button>)}
-      </div></div></section>
-      <section className="surface setting-row"><div className="setting-copy"><h3 className="info-heading"><Activity size={15} />Motion</h3><p className="muted-copy">{motionDescription}</p></div><div className="setting-controls"><div className="motion-picker" role="group" aria-label="Motion preference">{motions.map(({ name, label }) => <button key={name} className="motion-choice" aria-pressed={state.motion === name} onClick={() => send('setMotion', { motion: name })}>{state.motion === name && <motion.div className="motion-highlight" layoutId="motion-thumb" transition={{ type: 'spring', stiffness: 440, damping: 34 }} />}<span>{label}</span></button>)}</div><Action state={state} send={send} command="togglePreview" icon={state.preview ? <Pause size={12} /> : <Play size={12} />}>{state.preview ? 'Stop preview' : 'Preview animations'}</Action></div></section>
-    </div></section>
-    {/* Without the backup service the plan, the schedule, the checks and the diagnostics have nothing to act on; the appearance
-        settings above still work, and the one explanation stands where the rest would be. */}
-    {serviceMissing(state) ? <SetupNotice state={state} send={send} /> : <>
+    {/* Without the backup service the plan, the schedule and the problem report have nothing to act on; the appearance settings below
+        still work, and the one explanation stands where the rest would be. Every row has the same two slots, the words
+        (`setting-copy`) and what they are controlled with (`setting-controls`), which sits at the bottom of its card, so the two
+        pickers in a row of cards line up whatever the length of the text above them. */}
+    {missing ? <SetupNotice state={state} send={send} /> :
     <section className="settings-section"><h2 className="section-title">Backup plan</h2><div className="settings-grid">
       <section className="surface setting-row"><div className="setting-copy"><h3 className="info-heading"><HardDrive size={15} />Backup location</h3><p className="muted-copy path-copy">{state.repository.path}</p><VolumeLine repository={state.repository} /></div><div className="setting-controls"><Action state={state} send={send} command="changeRepository" quiet={quiet} /></div></section>
       <section className="surface setting-row"><div className="setting-copy"><h3 className="info-heading"><Clock3 size={15} />Automatic backups</h3><p className="info-main">{state.schedule.summary}</p>
         {/* An unreadable schedule is a problem to explain, not a summary: the reason the host reports goes under Details. */}
         {state.schedule.error ? <div className="attention-note schedule-problem" role="alert">
           <strong><CircleAlert size={14} className="inline mr-2" />The schedule could not be read</strong>
-          <p>Rewindle could not read the Windows backup schedule just now. Nothing was changed. Check again, or open Details to see why.</p>
+          <p>Rewindle could not read the Windows backup schedule just now. Nothing was changed. Try again, or open Details to see why.</p>
           <details className="inline-details"><summary>Details</summary><p className="muted-copy">{state.schedule.error}</p></details>
-          <Button size="sm" onClick={() => send('refresh')}><RefreshCw size={13} />Check again</Button>
+          <Button size="sm" onClick={() => send('refresh')}><RefreshCw size={13} />Try again</Button>
         </div> : <><p className="muted-copy">Next: {state.schedule.nextRun}</p><details className="inline-details"><summary>Run conditions</summary><p className="muted-copy">{state.schedule.detail}</p></details></>}
         <ScheduleNotice notice={state.schedule.notice} className="schedule-notice-slot" /></div><div className="setting-controls"><Action state={state} send={send} command="editSchedule" quiet={quiet} /></div></section>
-    </div><p className="muted-copy settings-note"><LockKeyhole size={12} aria-hidden="true" />Changing the location or schedule asks for Windows approval. Closing this window never stops a running backup.</p></section>
-    <section className="settings-section"><h2 className="section-title">Verification & support</h2><ProtectionHealth state={state} send={send} quiet={quiet} heading={false} context="settings" /><div className="settings-grid">
-      <section className="surface setting-row support-row"><div className="setting-copy"><h3 className="info-heading"><ListChecks size={15} />Diagnostics</h3><p className="muted-copy">Create a redacted support bundle to investigate a problem.</p>{state.setup?.engine && <p className="muted-copy">Engine: {state.setup.engine}{state.setup.engineVersion ? ` · version ${state.setup.engineVersion}` : ''}</p>}</div><div className="setting-controls"><Action state={state} send={send} command="exportDiagnostics" icon={<ArrowUpRight size={13} />} quiet={!!modeNote(state)} /></div></section>
+    </div><div className="settings-notes">
+      <p className="muted-copy settings-note"><LockKeyhole size={12} aria-hidden="true" />Changing the location or schedule asks for Windows approval.</p>
+      {/* Closing the window sends it to the tray (the host says so once, in a balloon, and never again). */}
+      <p className="muted-copy settings-note"><Info size={12} aria-hidden="true" />Closing this window never stops a running backup. Rewindle keeps running in the notification area, where it shows your backup status, and scheduled backups run either way. To quit Rewindle, right-click its tray icon and choose Exit Rewindle.</p>
+    </div></section>}
+    {/* The backup health cards (local backup, restore test, off-site copy) are on Protection, where the person looks for them; they were
+        also here, which said everything twice. */}
+    <section className="settings-section"><h2 className="section-title">Appearance</h2><div className="settings-grid">
+      <section className="surface setting-row"><div className="setting-copy"><h3 className="info-heading"><Sun size={15} />Theme</h3><p className="muted-copy">Follow your system, or choose a light or dark theme.</p>{state.highContrast && <p className="muted-copy">Windows High Contrast is on and sets the colors for now. Your choice is saved and applies when High Contrast is turned off.</p>}</div><div className="setting-controls"><div className="theme-picker" role="group" aria-label="Theme">
+        {THEME_STEPS.map(({ name, label, Icon }) => <button key={name} className="theme-choice" aria-pressed={state.theme === name} onClick={() => send('setTheme', { theme: name })}>
+          {state.theme === name && <motion.div className="theme-highlight" layoutId="theme-thumb" transition={{ type: 'spring', stiffness: 440, damping: 34 }} />}<span><Icon size={13} />{label}</span></button>)}
+      </div></div></section>
+      <section className="surface setting-row"><div className="setting-copy"><h3 className="info-heading"><Activity size={15} />Animations</h3><p className="muted-copy">{motionDescription}</p></div><div className="setting-controls"><div className="motion-picker" role="group" aria-label="Animations">{MOTION_STEPS.map(({ name, label }) => <button key={name} className="motion-choice" aria-pressed={state.motion === name} onClick={() => send('setMotion', { motion: name })}>{state.motion === name && <motion.div className="motion-highlight" layoutId="motion-thumb" transition={{ type: 'spring', stiffness: 440, damping: 34 }} />}<span>{label}</span></button>)}</div>
+        {/* The preview fakes a running backup and pauses the real controls, so it is for the sample data (screenshots, trying the interface), not for someone looking after their backups. */}
+        {state.demo && <Action state={state} send={send} command="togglePreview" icon={state.preview ? <Pause size={12} /> : <Play size={12} />}>{state.preview ? 'Stop preview' : 'Preview animations'}</Action>}</div></section>
+      {/* The host answers each press with the size it reached ("Text size 125%") and keeps it for the next launch. */}
+      <section className="surface setting-row wide-row"><div className="setting-copy"><h3 className="info-heading"><TextSize size={15} />Text size</h3><p className="muted-copy">Make everything larger or smaller. Rewindle keeps your choice the next time it opens.</p></div><div className="setting-controls">
+        <Button size="sm" onClick={() => send('setZoom', { zoom: 'out' })}>Smaller</Button><Button size="sm" onClick={() => send('setZoom', { zoom: 'reset' })}>Normal size</Button><Button size="sm" onClick={() => send('setZoom', { zoom: 'in' })}>Larger</Button></div></section>
     </div></section>
-    </>}
-    <AboutSection state={state} send={send} />
+    <section className="settings-section"><h2 className="section-title">Help and about</h2><div className="settings-grid">
+      {!missing && <section className="surface setting-row wide-row"><div className="setting-copy"><h3 className="info-heading"><ListChecks size={15} />Problem report</h3>
+        <p className="muted-copy">Save a report to send when you need help. It lists what Rewindle saw, with personal file names and account details removed.</p>
+        <p className="muted-copy">To get help, attach it to a new issue at <span className="path-copy">{ISSUES_URL.replace(/^https?:\/\//, '')}</span>.</p></div>
+        <div className="setting-controls"><Action state={state} send={send} command="exportDiagnostics" icon={<ArrowUpRight size={13} />} quiet={!!modeNote(state)}>Save problem report</Action><CopyLinkButton text={ISSUES_URL} /></div></section>}
+      <AboutSection state={state} send={send} />
+    </div></section>
   </>;
 }
 
-// What a person or a bug report asks first: which Rewindle this is, which engine it reports on, and under what terms. The licenses
-// button opens the folder of notices that ships beside the app; the host finds that folder itself, the page sends no path.
+// What the keyboard does, said where a person looks for help (these used to be a tooltip on the footer's clock). The page handles the
+// first four itself and the desktop app handles zoom; Escape is each window's and each search field's own.
+const SHORTCUTS: { keys: React.ReactNode; does: string }[] = [
+  { keys: <><kbd>Ctrl+1</kbd> to <kbd>Ctrl+4</kbd></>, does: 'Open Protection, Activity, Restore or Settings' },
+  { keys: <kbd>/</kbd>, does: 'Search the page (Activity, and Protection when it has a search box)' },
+  { keys: <kbd>F5</kbd>, does: 'Refresh' },
+  { keys: <><kbd>Ctrl+=</kbd> and <kbd>Ctrl+-</kbd></>, does: 'Make text larger or smaller' },
+  { keys: <kbd>Ctrl+0</kbd>, does: 'Return text to normal size' },
+  { keys: <kbd>Esc</kbd>, does: 'Close a window, or clear a search' },
+];
+
+// What a person or a bug report asks first: which Rewindle this is, which backup service it reports on, and under what terms. The
+// licenses button opens the folder of notices that ships beside the app; the host finds that folder itself, the page sends no path.
 function AboutSection({ state, send }: { state: DashboardState; send: Send }) {
-  // The sample data has no host, and so no version or engine to name.
+  // The sample data has no host, and so no version or backup service to name.
   const setup = state.setup, unknown = state.demo ? 'Sample data' : 'Unknown';
-  const engine = setup?.engineFound === false ? 'Not installed'
+  const service = setup?.engineFound === false ? 'Not installed'
     : setup?.engine ? `${setup.engine}${setup.engineVersion ? ` · version ${setup.engineVersion}` : ''}` : unknown;
-  return <section className="settings-section"><h2 className="section-title">About Rewindle</h2>
-    <section className="surface setting-row about-row">
-      <dl className="about-facts">
-        <div><dt>Version</dt><dd>{setup?.appVersion || unknown}</dd></div>
-        <div><dt>Engine</dt><dd>{engine}</dd></div>
-        <div><dt>License</dt><dd>MIT License</dd></div>
-        <div><dt>Backups</dt><dd>Powered by Restic</dd></div>
-        <div><dt>Project</dt><dd className="path-copy">{PROJECT_URL}</dd></div>
-      </dl>
-      <div className="setting-controls"><Button size="sm" onClick={() => send('openLicensesFolder')}><ArrowUpRight size={13} aria-hidden="true" />Open licenses folder</Button></div>
-    </section></section>;
+  return <section className="surface setting-row about-row">
+    <h3 className="info-heading about-heading">About Rewindle</h3>
+    <dl className="about-facts">
+      <div><dt>Version</dt><dd>{setup?.appVersion || unknown}</dd></div>
+      <div><dt>Backup service</dt><dd>{service}</dd></div>
+      <div><dt>License</dt><dd>MIT License</dd></div>
+      <div><dt>Built on</dt><dd>Restic, open-source encrypted backup</dd></div>
+      <div><dt>Source code</dt><dd className="path-copy">{PROJECT_URL}</dd></div>
+    </dl>
+    <div className="setting-controls"><Button size="sm" onClick={() => send('openLicensesFolder')}><ArrowUpRight size={13} aria-hidden="true" />Open licenses folder</Button><CopyLinkButton text={PROJECT_URL} label="Copy project link" /></div>
+    <details className="inline-details shortcuts"><summary><Keyboard size={13} aria-hidden="true" />Keyboard shortcuts</summary>
+      <dl className="shortcut-list">{SHORTCUTS.map((shortcut, index) => <div key={index}><dt>{shortcut.keys}</dt><dd>{shortcut.does}</dd></div>)}</dl></details>
+  </section>;
 }
 
 // A notice outside a dialog, drawn in the page's corner. It is only the part that comes and goes: the live region around it is always
@@ -974,8 +1015,8 @@ export default function App() {
     if (!offline && !unreadable && !rawState.preview && !rawState.demo) return dated;
     const locked = (key: string) => offline || (unreadable && !needsNoStatus.has(key))
       || (rawState.demo ? !sampleActions.has(key) : rawState.preview && PROTECTED_COMMANDS.has(key as CommandName));
-    const reason = (key: string) => offline ? 'The dashboard is waiting to reconnect to the desktop app. Refresh to try again.'
-      : unreadable && !needsNoStatus.has(key) ? 'Backup status cannot be read right now. Retry once the message above clears.'
+    const reason = (key: string) => offline ? 'Rewindle has stopped updating, so this is turned off for now. Try again in a moment.'
+      : unreadable && !needsNoStatus.has(key) ? 'Backup status cannot be read right now. Try again once the message above clears.'
       : rawState.demo ? 'Sample data is read-only.' : 'Stop the animation preview before using this action.';
     return { ...dated, sources: dated.sources.map(source => ({ ...source, canRemove: false })), actions: Object.fromEntries(Object.entries(dated.actions).map(([key, value]) => [key, value && locked(key) ? { ...value, enabled: false, help: reason(key) } : value])) };
   }, [rawState, connected]);
@@ -990,6 +1031,11 @@ export default function App() {
   const scrollPositions = useRef<Partial<Record<DashboardPage, number>>>({});
   const focusPage = useRef(false);
   const appliedTheme = useRef<string | null>(null);
+  // The refresh button spins for a moment when pressed: the host answers a refresh with nothing to show but the next state, so without
+  // it the button looks dead. Where animation is off, the words "Refreshing" are said to a screen reader instead (see the toolbar).
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(refreshTimer.current), []);
   // Layout effect: apply theme, contrast and motion before the first frame of new state is painted. <html> starts with no theme
   // class (the first frame follows prefers-color-scheme, which the host sets to the theme it resolved), and both classes are set
   // here, so a fixed Light or Dark choice never depends on the operating system's own setting.
@@ -1093,10 +1139,13 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [dismissedRunDetailsId, page, send, state?.restoreFlow?.open, state?.runDetails, state?.sourcePicker?.open]);
   if (!state) return <div className="connection-screen"><img src="./rewindle-icon.svg" alt="" width="48" height="48" /><LoadingState label="Opening Rewindle" variant="Orbit" /><p>{(window.rewindleNative ?? window.chrome?.webview) ? 'Loading your protected folders, backup history, and backup status.' : 'Open the desktop app to connect to your backup state.'}</p></div>;
-  // The sidebar is narrow, so its dates leave out the weekday and the result keeps its room.
-  const recents = [...state.history].sort((a, b) => Date.parse(b.started) - Date.parse(a.started)).slice(0, 8).map(run => ({ id: run.id, label: `${runWhen(run.started, usableLocale(state.locale), run.startedDisplay, false)} · ${run.result}` }));
-  // This button flips between Light and Dark. From the System setting that replaces it, which Settings can restore, so the title says so.
-  const themeAction = state.dark ? 'Use light theme' : 'Use dark theme';
+  // The toolbar button steps System, Light, Dark and round again, so it never replaces "follow Windows" with no way back; its title says
+  // where the theme is and where one press takes it.
+  const themeIndex = Math.max(0, THEME_STEPS.findIndex(step => step.name === state.theme)), themeNow = THEME_STEPS[themeIndex], themeNext = THEME_STEPS[(themeIndex + 1) % THEME_STEPS.length];
+  const themeTitle = `Theme: ${themeNow.label}. Switch to ${themeNext.label}.`;
+  const refresh = () => { send('refresh'); setRefreshing(true); window.clearTimeout(refreshTimer.current); refreshTimer.current = window.setTimeout(() => setRefreshing(false), 800); };
+  // When the figures were read, in the viewer's own clock ("Updated 14:03" or "Updated 2:03 PM"); the host's words while it retries.
+  const updatedClock = formatClock(state.updatedAt, usableLocale(state.locale)), updatedText = updatedClock ? `Updated ${updatedClock}` : state.updated;
   // Why protected controls may be off, so a dialog can say it in its own words: the link is down, the backup status cannot be read, or the animation preview is running.
   const availability: Availability = !connected ? 'offline' : state.dataError ? 'dataError' : state.preview ? 'preview' : 'ok';
   const failedClose = notice?.error ? notice.text : undefined;
@@ -1111,20 +1160,21 @@ export default function App() {
     <div className="sr-only" role="alert" aria-live="assertive" aria-atomic="true">{spoken.assertive}</div>
     <SidebarNav className="app-sidebar" fill storageKey="rewindle.sidebar" activeNav={page} onNavigate={key => navigate(key as DashboardPage)} navItems={navItems}
       primaryActionLabel={null}
-      recents={recents} recentLabel="Recent backups" recentSearchLabel="Search latest 8 backups"
-      activeTitle={recents.find(run => run.id === state.selectedRunId)?.label ?? null}
-      onPick={id => { setHistoryView(emptyHistoryView()); scrollPositions.current.Activity = 0; send('selectRun', { runId: id }); navigate('Activity'); }} onViewAll={() => { setHistoryView(emptyHistoryView()); scrollPositions.current.Activity = 0; navigate('Activity'); }} viewAllLabel="View all activity" footerLabel="Settings" footerShortcut="Control+4" footerActive={page === 'Settings'} footerIcon={<Settings size={14} />} onFooterClick={() => navigate('Settings')} />
+      footerLabel="Settings" footerShortcut="Control+4" footerActive={page === 'Settings'} footerIcon={<Settings size={18} />} onFooterClick={() => navigate('Settings')} />
     <div className="workspace"><header className="topbar"><div className="toolbar-actions">
       {(state.demo || state.preview) && <span className="demo-label">{state.demo ? 'Sample data' : 'Animation preview'}</span>}
-      {/* Narrow, only the dot is drawn (see the 860px rule in app.css), so the tooltip says what it means and the words stay in the page for assistive technology. */}
-      <span className="connection" title={`${connected ? 'App connected' : 'App reconnecting'}. Connection to the desktop app. Off-site verification is shown under Protection.`}><span className={`connection-dot ${connected ? '' : 'offline'}`} /><span className="connection-label">{connected ? 'App connected' : 'App reconnecting'}</span></span>
+      {/* No "connected" light: the window is the app, so a light that is always on says nothing. When the page stops getting updates, the
+          banner below says so and the Protection hero dims. */}
       {(state.demo || state.preview) && <Button size="sm" disabled={!state.actions.togglePreview?.enabled} title={state.actions.togglePreview?.help} onClick={() => send('togglePreview')}>{state.preview ? <X size={12} /> : <Play size={12} />}{state.preview ? 'Stop preview' : 'Play animation'}</Button>}
-      <Button size="icon-sm" variant="quiet" aria-label="Refresh dashboard" title="Refresh dashboard (F5)" onClick={() => send('refresh')}><RefreshCw size={14} /></Button>
-      <Button size="icon-sm" variant="quiet" aria-label={themeAction} title={state.theme === 'System' ? `${themeAction} (replaces System; Settings restores it)` : themeAction} onClick={() => send('setTheme', { theme: state.dark ? 'Daylight' : 'Midnight' })}>{state.dark ? <Sun size={15} /> : <Moon size={15} />}</Button>
+      <Button size="icon-sm" variant="quiet" aria-label="Refresh" title="Refresh (F5)" onClick={refresh}><RefreshCw size={14} className={refreshing ? 'refresh-spin' : undefined} /></Button>
+      <span className="sr-only" role="status">{refreshing ? 'Refreshing' : ''}</span>
+      <Button size="icon-sm" variant="quiet" aria-label={themeTitle} title={themeTitle} onClick={() => send('setTheme', { theme: themeNext.name })}><themeNow.Icon size={15} /></Button>
     </div></header>
     {/* The status container is always present, so the warning that is put into it is announced; an alert is announced as it appears. */}
-    <div role="status">{!connected && <div className="connection-warning"><CircleAlert size={14} /><span>Connection interrupted. Displayed status may be out of date.</span><Button size="xs" onClick={() => send('refresh')}>Refresh</Button></div>}</div>
-    {state.dataError && <div className="connection-warning" role="alert"><CircleAlert size={14} /><span>Backup status could not be read. History shows the last available data. {state.dataError}</span><Button size="xs" onClick={() => send('refresh')}>Retry</Button></div>}
+    <div role="status">{!connected && <div className="connection-warning"><CircleAlert size={14} /><span>Rewindle has stopped updating, so what you see may be out of date.</span><Button size="xs" onClick={refresh}>Try again</Button></div>}</div>
+    {/* What the host reported is its own wording, often a system message, so it waits under Details instead of running into the sentence. */}
+    {state.dataError && <div className="connection-warning" role="alert"><CircleAlert size={14} /><div><span>Rewindle couldn't read the backup status just now, so this page may be out of date.</span>
+      <details className="inline-details"><summary>Details</summary><p className="muted-copy">{state.dataError}</p></details></div><Button size="xs" onClick={refresh}>Try again</Button></div>}
     {/* Named for the page, because a page change moves focus here (see onAnimationComplete): an unnamed landmark would be announced as
         just "main", and the title of the page that was opened would never be read. The skip link points here too. */}
     <div className="page-scroll" ref={scrollRef}><AnimatePresence mode="wait" initial={false}><motion.main id="main-content" tabIndex={-1} aria-label={page} ref={pageRef} className="page" key={page}
@@ -1136,7 +1186,7 @@ export default function App() {
       <ErrorBoundary scope="page" label={`${page} page`} resetKey={state} onRetry={() => send('refresh')}>
         {page === 'Protection' ? <Protection state={state} send={send} folders={folderView} setFolders={setFolderView} stale={!connected} /> : page === 'Activity' ? <ActivityPage state={state} send={send} view={historyView} setView={setHistoryView} openRunDetails={openRunDetails} openRestore={() => navigate('Restore')} interactive={connected} /> : page === 'Restore' ? <RestorePage state={state} send={send} /> : <SettingsPage state={state} send={send} />}
       </ErrorBoundary>
-      <footer className="app-footnote"><span><LockKeyhole size={10} />{state.preview ? 'Animation preview · no backup is running' : 'Restic · encrypted local backup'}</span><span title="Ctrl/Cmd+1–4 changes pages. / focuses search. Ctrl+= and Ctrl+- zoom, Ctrl+0 resets.">{state.status.active ? <Shimmer>{state.preview ? 'Preview running' : 'Backup is running'}</Shimmer> : state.updated}</span></footer>
+      <footer className="app-footnote"><span><LockKeyhole size={10} />{state.preview ? 'Animation preview · no backup is running' : 'Your backups are encrypted'}</span><span>{state.status.active ? <Shimmer>{state.preview ? 'Preview running' : 'Backup is running'}</Shimmer> : updatedText}</span></footer>
     </motion.main></AnimatePresence></div></div>
     {/* The two regions are in the page from the start and empty until there is something to say, so a screen reader already knows them
         when a notice is put in: a live region that is created together with its text is often not announced. Only the toast inside

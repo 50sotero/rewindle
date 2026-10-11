@@ -59,13 +59,6 @@ export type SidebarRecent = {
   prompt?: string;
 };
 
-const DEFAULT_RECENTS: SidebarRecent[] = [
-  { id: "latest", label: "Latest backup" },
-  { id: "weekly", label: "Weekly verification" },
-  { id: "documents", label: "Documents snapshot" },
-  { id: "photos", label: "Photos snapshot" },
-];
-
 export type SidebarNavProps = {
   brand?: SidebarBrand;
   navItems?: SidebarNavItem[];
@@ -102,8 +95,10 @@ export type SidebarNavProps = {
 // window is about 450 CSS pixels across), and the expanded sidebar alone takes 224 of them, which left the page 176 and cut its content off.
 const NARROW_QUERY = "(max-width: 700px)";
 // Until the person has chosen, a window this narrow or narrower starts with the sidebar folded: at the desktop app's smallest size (about 884
-// CSS pixels across) the open sidebar leaves the page about 610 of them. Choosing, either way, is kept and from then on decides.
-const COMPACT_QUERY = "(max-width: 1040px)";
+// CSS pixels across) the open sidebar leaves the page about 610 of them, which the page's layouts are made for. It used to be 1040, which
+// folded the sidebar to four unlabeled icons on a laptop at 125-150% scaling, where a first-time visitor has no way to tell the pages apart.
+// Choosing, either way, is kept and from then on decides.
+const COMPACT_QUERY = "(max-width: 900px)";
 
 const mediaMatches = (query: string) => typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia(query).matches;
 
@@ -233,7 +228,7 @@ export default function SidebarNav({
   footerDisabled = false,
   footerActive = false,
   footerShortcut,
-  recents = DEFAULT_RECENTS,
+  recents = [],
   recentLabel = "Backup history",
   recentSearchLabel = "Search backup history",
   onViewAll,
@@ -349,6 +344,7 @@ export default function SidebarNav({
             ref={collapseButtonRef}
             type="button"
             aria-label="Collapse sidebar"
+            title="Collapse sidebar"
             aria-expanded={!collapsed}
             inert={collapsed}
             onClick={collapse}
@@ -361,6 +357,7 @@ export default function SidebarNav({
             ref={expandButtonRef}
             type="button"
             aria-label="Expand sidebar"
+            title="Expand sidebar"
             aria-expanded={!collapsed}
             inert={!collapsed}
             onClick={expand}
@@ -400,6 +397,9 @@ export default function SidebarNav({
           </GlideGroup>
         </nav>
 
+        {/* The history block is drawn only when it has something to hold (the app passes none: Activity is a page of its own). Without
+            it a spacer keeps the footer at the bottom of the sidebar. */}
+        {recents.length === 0 && !onViewAll ? <div aria-hidden="true" className="min-h-0 flex-1" /> :
         <div aria-hidden={collapsed} inert={collapsed} className={`mt-3 min-h-0 flex-1 overflow-y-auto transition-opacity duration-150 ${collapsed ? 'pointer-events-none opacity-0' : 'opacity-100'}`}>
           <div className="sidebar-copy relative mx-2 mb-1 h-8">
             <div
@@ -508,10 +508,12 @@ export default function SidebarNav({
               <IconChevronRight size={14} aria-hidden="true" />
             </button>
           )}
-        </div>
+        </div>}
 
+        {/* Settings is a page like the three above it, so it is drawn like them (left-aligned, the icon on the rail's centerline, the
+            same text size and hover) and sits in a navigation landmark of its own. */}
         {footerLabel && (
-          <div className={`mx-2 mt-3 border-t border-line pt-3 ${collapsed ? 'w-9' : ''}`}>
+          <nav aria-label="Secondary" className={`mx-2 mt-3 border-t border-line pt-3 ${collapsed ? 'w-9' : ''}`}>
             <button
               type="button"
               disabled={footerDisabled}
@@ -520,12 +522,12 @@ export default function SidebarNav({
               aria-keyshortcuts={footerShortcut}
               aria-current={footerActive ? 'page' : undefined}
               onClick={onFooterClick}
-              className={`sidebar-footer relative flex h-8 w-full items-center justify-center gap-1.5 rounded-control ${footerActive ? 'bg-accent-tint text-ink' : 'text-ink-2 hover:bg-line-strong'} text-[13px] font-medium transition-[background-color,transform] duration-150 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50`}
+              className={`sidebar-footer relative flex h-8 w-full items-center rounded-[8px] px-2 text-left text-[14px] font-medium ${footerActive ? 'bg-accent-tint' : 'hover:bg-hover-2'} transition-[background-color,transform] duration-150 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50`}
             >
-              {footerIcon && <span className={`flex shrink-0 ${footerActive ? 'text-accent-ink' : ''}`}>{footerIcon}</span>}
-              {!collapsed && <span className="sidebar-copy">{footerLabel}</span>}
+              {footerIcon && <span className={`flex size-5 shrink-0 items-center justify-center ${footerActive ? 'text-accent-ink' : 'text-ink-2'}`}>{footerIcon}</span>}
+              {!collapsed && <span className={`sidebar-copy ml-1.5 min-w-0 flex-1 truncate ${footerActive ? 'text-ink' : 'text-ink-2'}`}>{footerLabel}</span>}
             </button>
-          </div>
+          </nav>
         )}
       </div>
     </aside>

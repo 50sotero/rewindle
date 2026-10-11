@@ -62,13 +62,13 @@
   --orange-ink: #8A4B00;
   --red-ink: #B33A42;
 
-  /* type scale — the sizes the app's own CSS uses. 11px is the floor for text a person reads: the host turns browser zoom off, so
-   * small type cannot be enlarged. They are px, not rem, as the rest of the app is; the Tailwind theme's own --text-* scale is a
-   * separate thing (Button uses it), hence the --type- prefix. */
-  --type-xs: 11px;
-  --type-sm: 12px;
-  --type-base: 13px;
-  --type-md: 14px;
+  /* type scale — the sizes the app's own CSS uses. 12px is the floor for text a person reads (it was 11px: the "Last verified" chip and
+   * the figure labels were set in it, and Settings has a Text size control for anyone who needs more). They are px, not rem, as the
+   * rest of the app is; the Tailwind theme's own --text-* scale is a separate thing (Button uses it), hence the --type- prefix. */
+  --type-xs: 12px;
+  --type-sm: 13px;
+  --type-base: 14px;
+  --type-md: 15px;
   --type-lg: 16px;
   --type-xl: 20px;
   --type-2xl: 24px;

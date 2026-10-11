@@ -189,6 +189,8 @@ export interface SetupState {
 export interface DashboardState {
   page: DashboardPage; demo: boolean; preview: boolean; theme: ThemePreference; motion: MotionPreference;
   dark: boolean; reducedMotion: boolean; highContrast: boolean; updated: string; subtitle: string; dataError?: string;
+  /** When the figures on screen were read, as an ISO 8601 timestamp, so the page writes the time of day the way the viewer's region does. Empty while the host is retrying (then `updated` says so in words); absent from an older host. */
+  updatedAt?: string;
   /** The host's regional format (for example "en-GB"), so figures and dates the page formats itself read like the host's. */
   locale?: string;
   setup?: SetupState;

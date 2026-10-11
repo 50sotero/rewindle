@@ -99,17 +99,17 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
 
 ### Settings
 
-- Appearance (System, Dark or Light; Windows High Contrast is respected) and
-  motion (System, Full or Reduced).
+- Appearance (theme System, Light or Dark; Windows High Contrast is respected),
+  animations (Follow Windows, Always on or Reduced) and text size (Smaller, Normal size, Larger; kept for the next launch).
 - **Change location** moves the repository: it copies to an empty folder,
   verifies the copy and then switches, keeping the old repository.
   **Edit schedule** sets daily or selected-day backups and their run conditions.
-- The same three verification cards as Protection, **Export diagnostics**, and
-  **About Rewindle**: version, engine, MIT License, and **Open licenses folder**.
+- Under **Help and about**: **Save problem report** (a redacted support bundle) and
+  **About Rewindle**: version, backup service, MIT License, **Open licenses folder** and the keyboard shortcuts.
 
 Rewindle lives in the notification area. Closing the window never stops a
 running backup. `Ctrl+1` to `Ctrl+4` switch pages, `F5` refreshes, and
-`Ctrl+=` / `Ctrl+-` / `Ctrl+0` zoom between 80% and 200%. Status is never shown
+`Ctrl+=` / `Ctrl+-` / `Ctrl+0` change the text size between 80% and 200% (Settings has buttons for it, and Rewindle remembers the size). Status is never shown
 by color alone, and a screen reader is told when a backup starts, finishes,
 fails or is cancelled.
 

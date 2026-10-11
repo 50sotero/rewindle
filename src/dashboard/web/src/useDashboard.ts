@@ -12,7 +12,7 @@ const OVERDUE_MS = 5000;
 const noticeDuration = (text: string) => Math.max(8000, text.length * 80);
 // Said when the host refused or failed a command and gave no reason of its own. The host gives one with every refusal, so this only
 // stands in for an answer that left it out: a refusal nobody can see reads as the button doing nothing.
-const UNEXPLAINED_FAILURE = 'That action could not be completed. Refresh and try again.';
+const UNEXPLAINED_FAILURE = 'That action could not be completed. Try again.';
 
 export type NoticeHold = (held: boolean) => void;
 
@@ -55,11 +55,11 @@ export function useDashboard() {
   }, []);
   const send = useCallback((command: CommandName, payload?: Record<string, string | boolean>, onResult?: (ok: boolean) => void) => {
     const native = window.rewindleNative ?? window.chrome?.webview;
-    if (!native) { say('Open the desktop app to use backup controls.', true); onResult?.(false); return; }
+    if (!native) { say('Backup controls only work in the Rewindle app.', true); onResult?.(false); return; }
     // Only a command that changes or reads the backup plan waits for a live link. Moving between pages, the theme, picking a run,
     // closing a dialog and the like only touch what the page shows, so a stale link does not stop them.
     if (PROTECTED_COMMANDS.has(command) && lastMessage.current && Date.now() - lastMessage.current > STALE_AFTER_MS) {
-      say('The dashboard has lost its connection. Refresh before changing your backup plan.', true);
+      say('Rewindle has stopped updating. Press Refresh (F5), then try again.', true);
       onResult?.(false);
       return;
     }

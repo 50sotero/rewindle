@@ -89,7 +89,7 @@ export function createSampleState(now = Date.now()): DashboardState {
   return {
     page: 'Protection', demo: true, preview: false, theme: 'System', motion: 'System',
     dark: false, reducedMotion: false, highContrast: false,
-    updated: `Updated ${new Date(now).toLocaleTimeString(undefined, { hour12: false })}`, subtitle: '', dataError: '',
+    updated: `Updated ${new Date(now).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })}`, updatedAt: new Date(now).toISOString(), subtitle: '', dataError: '',
     status: {
       key: 'success', title: 'Backup verified',
       detail: `${latest.filesDisplay} files and ${latest.processedDisplay} are protected. The snapshot and a restore test file were checked.`,

@@ -60,6 +60,8 @@ namespace ResticBackuper.Dashboard
         private Button webPresentationExitButton;
         private Task webPresentationInitialization;
         private bool webPresentationConfigured;
+        // The last size handed to DashboardZoomStore, so a change of size is kept once however many events report it.
+        private double lastSavedWebZoom = 1.0;
         private bool webPresentationClosing;
         private bool webPresentationReady;
         private bool webPresentationHandshakeReady;
@@ -126,6 +128,7 @@ namespace ResticBackuper.Dashboard
                 webPresentation.AllowExternalDrop = false;
                 webPresentation.Visibility = Visibility.Visible;
                 webPresentation.Loaded += OnWebPresentationLoaded;
+                webPresentation.ZoomFactorChanged += OnWebPresentationZoomFactorChanged;
             }
             if (!shell.Children.Contains(webPresentation))
             {
@@ -472,7 +475,51 @@ namespace ResticBackuper.Dashboard
             core.AddWebResourceRequestedFilter(
                 "*",
                 CoreWebView2WebResourceContext.All);
+            RestoreWebZoom();
             webPresentationConfigured = true;
+        }
+
+        // The text size the person last chose, applied to a web view that starts at 100% (every launch, and a browser process that was
+        // restarted). The size is kept again whenever it changes, by the buttons, the keys or Ctrl+mouse wheel alike.
+        private void RestoreWebZoom()
+        {
+            double saved;
+            WebView2 view = webPresentation;
+            if (view == null || !DashboardZoomStore.TryLoad(out saved))
+            {
+                return;
+            }
+            try
+            {
+                lastSavedWebZoom = saved;
+                view.ZoomFactor = saved;
+            }
+            catch (Exception)
+            {
+                // A browser that went away cannot be resized; the page then simply opens at 100%.
+            }
+        }
+
+        private void OnWebPresentationZoomFactorChanged(object sender, EventArgs args)
+        {
+            WebView2 view = webPresentation;
+            if (view == null || webPresentationClosing)
+            {
+                return;
+            }
+            try
+            {
+                double zoom = view.ZoomFactor;
+                if (Math.Abs(zoom - lastSavedWebZoom) > 0.0001)
+                {
+                    lastSavedWebZoom = zoom;
+                    DashboardZoomStore.TrySave(zoom);
+                }
+            }
+            catch (Exception)
+            {
+                // Best effort, like the save itself.
+            }
         }
 
         private void OnWebPresentationNavigationStarting(
@@ -908,7 +955,7 @@ namespace ResticBackuper.Dashboard
                 // details go to the log, as they did when the exception reached the dispatcher.
                 CrashLog.Write("Dashboard command", exception);
                 accepted = false;
-                error = "That action could not be completed. Refresh and try again.";
+                error = "That action could not be completed. Try again.";
             }
             // The state the command led to goes out before its answer, as the page expects (a folder that was
             // chosen, for one, is in the state when the answer says the picker is done).
@@ -1076,7 +1123,7 @@ namespace ResticBackuper.Dashboard
                 }
                 catch (Exception exception)
                 {
-                    error = "Run details could not be opened. " + exception.Message;
+                    error = "The run details could not be opened. Try again. Details: " + exception.Message;
                     return false;
                 }
             }
@@ -1226,7 +1273,7 @@ namespace ResticBackuper.Dashboard
             }
             catch (Exception exception)
             {
-                error = "The licenses folder could not be found. " + exception.Message;
+                error = "The licenses folder could not be found. Details: " + exception.Message;
                 return false;
             }
             try
@@ -1242,28 +1289,28 @@ namespace ResticBackuper.Dashboard
             }
             catch (Exception exception)
             {
-                error = "The licenses folder could not be opened. " + exception.Message;
+                error = "The licenses folder could not be opened. Details: " + exception.Message;
                 return false;
             }
         }
 
         // Makes the dashboard larger or smaller, for people who need larger text. "in" and "out" step from where the page is now
         // (Ctrl+mouse wheel zooms it by itself, so it can be at any size), and "reset" returns to 100%. The new size is the
-        // answer, which the page shows as a notice and so also tells a screen reader. It is not saved: Rewindle starts at 100%,
-        // as it always has.
+        // answer, which the page shows as a notice and so also tells a screen reader. The size is kept (DashboardZoomStore, also
+        // for Ctrl+mouse wheel) and applied again when Rewindle next opens.
         private bool ExecuteZoomCommand(IDictionary<string, object> payload, out string message)
         {
             message = string.Empty;
             string direction = WebReadString(payload, "zoom", 16);
             if (direction != "in" && direction != "out" && direction != "reset")
             {
-                message = "The requested zoom is invalid.";
+                message = "The requested text size is not valid.";
                 return false;
             }
             WebView2 view = webPresentation;
             if (view == null || webPresentationClosing || WebPresentationCore() == null)
             {
-                message = "The dashboard is still starting. Try zooming again in a moment.";
+                message = "Rewindle is still starting. Try changing the text size again in a moment.";
                 return false;
             }
             try
@@ -1300,19 +1347,21 @@ namespace ResticBackuper.Dashboard
                 if (changed || direction == "reset")
                 {
                     view.ZoomFactor = next;
+                    lastSavedWebZoom = next;
+                    DashboardZoomStore.TrySave(next);
                 }
                 string percent = Math.Round(next * 100, MidpointRounding.AwayFromZero)
                     .ToString("0", CultureInfo.CurrentCulture) + "%";
                 message = changed || direction == "reset"
-                    ? "Zoom " + percent
+                    ? "Text size " + percent
                     : direction == "in"
-                        ? "Zoom is at its largest, " + percent
-                        : "Zoom is at its smallest, " + percent;
+                        ? "Text is already at its largest size, " + percent
+                        : "Text is already at its smallest size, " + percent;
                 return true;
             }
             catch (Exception error)
             {
-                message = "The zoom could not be changed. " + error.Message;
+                message = "The text size could not be changed. Details: " + error.Message;
                 return false;
             }
         }
@@ -1520,7 +1569,7 @@ namespace ResticBackuper.Dashboard
             }
             catch (Exception exception)
             {
-                message = "The run-details action could not be completed. " + exception.Message;
+                message = "That action could not be completed. Try again. Details: " + exception.Message;
                 return false;
             }
         }
@@ -1729,6 +1778,11 @@ namespace ResticBackuper.Dashboard
             state["reducedMotion"] = motionResolution == null || !motionResolution.MotionAllowed;
             state["highContrast"] = themeResolution != null && themeResolution.IsHighContrast;
             state["updated"] = lastUpdated == null ? string.Empty : lastUpdated.Text ?? string.Empty;
+            // The same moment as an ISO timestamp, so the page writes the time of day the way the viewer's region does (empty while the
+            // read is being retried, when `updated` says so in words).
+            state["updatedAt"] = lastUpdatedAt.HasValue
+                ? lastUpdatedAt.Value.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture)
+                : string.Empty;
             state["subtitle"] = headerSubtitle == null ? string.Empty : headerSubtitle.Text ?? string.Empty;
             state["status"] = BuildWebStatusState(snapshot);
             state["sources"] = BuildWebSourceStates();
@@ -2368,6 +2422,161 @@ namespace ResticBackuper.Dashboard
                 string.Equals(uri.Host, WebHostName, StringComparison.OrdinalIgnoreCase) &&
                 string.IsNullOrEmpty(uri.UserInfo) &&
                 (uri.Port == -1 || uri.Port == 443);
+        }
+    }
+
+    // The text size the person chose (Settings > Text size, Ctrl+= and Ctrl+-, or Ctrl+mouse wheel), kept in zoom.json beside the theme
+    // and motion files so Rewindle opens at the same size next time. It is read and written the way those are: a small file directly
+    // inside the per-user settings folder, replaced atomically and never through a link. A file that is missing, unreadable or odd
+    // means 100%, as it always was.
+    internal static class DashboardZoomStore
+    {
+        private const int SchemaVersion = 1;
+        private const int MaximumBytes = 4 * 1024;
+        private const string FileName = "zoom.json";
+        private const double Smallest = 0.8;
+        private const double Largest = 2.0;
+        private static readonly object Sync = new object();
+
+        // True when a size other than 100% was saved (the one to apply); 100% needs nothing applied.
+        internal static bool TryLoad(out double zoom)
+        {
+            zoom = 1.0;
+            lock (Sync)
+            {
+                try
+                {
+                    string path = GetPath();
+                    if (string.IsNullOrEmpty(path) || !File.Exists(path) || IsReparsePoint(path) ||
+                        IsReparsePoint(Path.GetDirectoryName(path)))
+                    {
+                        return false;
+                    }
+                    FileInfo info = new FileInfo(path);
+                    if (info.Length <= 0 || info.Length > MaximumBytes)
+                    {
+                        return false;
+                    }
+                    JavaScriptSerializer serializer = new JavaScriptSerializer();
+                    serializer.MaxJsonLength = MaximumBytes;
+                    serializer.RecursionLimit = 8;
+                    IDictionary<string, object> document = serializer.DeserializeObject(
+                        File.ReadAllText(path, new UTF8Encoding(false, true))) as IDictionary<string, object>;
+                    object rawVersion, rawZoom;
+                    double value;
+                    if (document == null ||
+                        !document.TryGetValue("schema_version", out rawVersion) || rawVersion == null ||
+                        Convert.ToString(rawVersion, CultureInfo.InvariantCulture) != SchemaVersion.ToString(CultureInfo.InvariantCulture) ||
+                        !document.TryGetValue("zoom", out rawZoom) || rawZoom == null ||
+                        !double.TryParse(Convert.ToString(rawZoom, CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out value) ||
+                        double.IsNaN(value) || double.IsInfinity(value))
+                    {
+                        return false;
+                    }
+                    zoom = Math.Max(Smallest, Math.Min(Largest, value));
+                    return Math.Abs(zoom - 1.0) > 0.0001;
+                }
+                catch (Exception error)
+                {
+                    if (IsFatal(error))
+                    {
+                        throw;
+                    }
+                    return false;
+                }
+            }
+        }
+
+        // Best effort: a size that cannot be kept only means the next launch opens at 100%.
+        internal static bool TrySave(double zoom)
+        {
+            if (double.IsNaN(zoom) || double.IsInfinity(zoom))
+            {
+                return false;
+            }
+            zoom = Math.Max(Smallest, Math.Min(Largest, zoom));
+            lock (Sync)
+            {
+                string temporaryPath = null;
+                try
+                {
+                    string targetPath = GetPath();
+                    string directory = string.IsNullOrEmpty(targetPath) ? null : Path.GetDirectoryName(targetPath);
+                    if (string.IsNullOrEmpty(directory))
+                    {
+                        return false;
+                    }
+                    Directory.CreateDirectory(directory);
+                    if (IsReparsePoint(directory) || (File.Exists(targetPath) && IsReparsePoint(targetPath)))
+                    {
+                        return false;
+                    }
+                    byte[] bytes = new UTF8Encoding(false, true).GetBytes(
+                        "{\"schema_version\":" + SchemaVersion.ToString(CultureInfo.InvariantCulture) +
+                        ",\"zoom\":" + zoom.ToString("0.####", CultureInfo.InvariantCulture) + "}");
+                    temporaryPath = Path.Combine(directory, ".zoom." + Guid.NewGuid().ToString("N") + ".tmp");
+                    using (FileStream stream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+                    {
+                        stream.Write(bytes, 0, bytes.Length);
+                        stream.Flush(true);
+                    }
+                    if (File.Exists(targetPath))
+                    {
+                        AtomicFile.ReplaceExisting(temporaryPath, targetPath);
+                    }
+                    else
+                    {
+                        File.Move(temporaryPath, targetPath);
+                    }
+                    temporaryPath = null;
+                    return true;
+                }
+                catch (Exception error)
+                {
+                    if (IsFatal(error))
+                    {
+                        throw;
+                    }
+                    return false;
+                }
+                finally
+                {
+                    if (!string.IsNullOrEmpty(temporaryPath))
+                    {
+                        try
+                        {
+                            File.Delete(temporaryPath);
+                        }
+                        catch (Exception error)
+                        {
+                            if (IsFatal(error))
+                            {
+                                throw;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        private static string GetPath()
+        {
+            string themePath = DashboardThemeManager.SettingsPath;
+            string directory = string.IsNullOrEmpty(themePath) ? string.Empty : Path.GetDirectoryName(Path.GetFullPath(themePath));
+            return string.IsNullOrWhiteSpace(directory) ? string.Empty : Path.Combine(directory, FileName);
+        }
+
+        private static bool IsReparsePoint(string path)
+        {
+            return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+        }
+
+        private static bool IsFatal(Exception error)
+        {
+            return error is OutOfMemoryException ||
+                error is StackOverflowException ||
+                error is System.Threading.ThreadAbortException ||
+                error is AccessViolationException;
         }
     }
 }
