@@ -214,6 +214,9 @@ namespace ResticBackuper.Dashboard
     {
         NotConfigured,
         StatusUnavailable,
+        // The last check is of an earlier backup than the latest one (or from before a settings change). Nothing is wrong and
+        // nothing is asked of the person: the next check covers the latest backup.
+        Stale,
         Failed,
         InProgress,
         LocalVerifiedProviderPending,
@@ -254,10 +257,10 @@ namespace ResticBackuper.Dashboard
         public OffsiteStatusView()
         {
             Kind = OffsiteStatusKind.NotConfigured;
-            StatusLabel = "Cloud verification not configured";
+            StatusLabel = "No off-site copy is set up";
             // Said for every backup, so it names no provider: most have no cloud copy at all, and one that does says which
             // it is in its own evidence.
-            StatusDetail = "No cloud verification has been recorded for this backup.";
+            StatusDetail = "That is optional. Your backup on this computer works without one.";
             PlanId = string.Empty;
             ConfigGeneration = -1;
             RepositoryId = string.Empty;
@@ -295,7 +298,7 @@ namespace ResticBackuper.Dashboard
         // EnsureLocalCacheLoaded). The dashboard refreshes about once a second.
         private const int MaximumHistoryLoadAttempts = 6;
         private const string LegacyEvidenceRetiredDetail =
-            "Legacy local-mirror evidence is retired and cannot prove the streamed Google Drive repository is available in the cloud.";
+            "An old off-site status record was found. It is retired and no longer counts as proof, so Rewindle needs a new check of the Google Drive copy.";
 
         private readonly string stateDirectory;
         private readonly string statusPath;
@@ -757,17 +760,17 @@ namespace ResticBackuper.Dashboard
                 // not the same as an installation that has not made its first backup yet.
                 return BuildTelemetryError(
                     "not_installed",
-                    "Engine not installed",
-                    "Rewindle reads backup status from " + stateDirectory + ", and that folder does not exist. Install or "
-                        + "repair the backup engine, or start Rewindle with --state-dir to read another folder (see "
-                        + "Requirements in the README).",
+                    "Backup service not installed",
+                    "Rewindle reads backup status from " + stateDirectory + ", and that folder does not exist, so the backup "
+                        + "service does not seem to be installed. Open Rewindle Setup and choose Reinstall or repair, or start "
+                        + "Rewindle with --state-dir to read another folder (see Requirements in the README).",
                     DateTime.MinValue);
             }
 
             TelemetrySnapshot waiting = new TelemetrySnapshot();
             waiting.StateKey = "waiting";
             waiting.StatusLabel = "Waiting for the first backup";
-            waiting.StatusDetail = "No backup status or verified dry-run baseline exists yet.";
+            waiting.StatusDetail = "Nothing has been backed up yet. Choose Back up now to make the first backup.";
             waiting.PhaseLabel = "Ready";
             waiting.LastUpdatedLocal = DateTime.Now;
             waiting.ProgressIsEstimated = true;
@@ -820,18 +823,18 @@ namespace ResticBackuper.Dashboard
             switch (read.Reason)
             {
                 case JsonReadResult.ReasonLocked:
-                    return fileName + " is in use by another program, so Rewindle cannot read it yet. It tries again every second.";
+                    return fileName + " is in use by another program, so Rewindle can\u2019t read it yet. It tries again every second.";
                 case JsonReadResult.ReasonChanging:
                     return fileName + " was still being written when Rewindle read it. It tries again every second.";
                 case JsonReadResult.ReasonInvalid:
-                    return fileName + " is not valid JSON, so Rewindle cannot read it. The next run rewrites it.";
+                    return fileName + " is damaged, so Rewindle can\u2019t read it. The next backup writes a fresh one.";
                 case JsonReadResult.ReasonTooLarge:
-                    return fileName + " is larger than Rewindle's size limit, so it was not read.";
+                    return fileName + " is larger than Rewindle expects, so it was not read.";
                 case JsonReadResult.ReasonLink:
-                    return fileName + " is a link, which Rewindle does not follow, so it was not read.";
+                    return fileName + " is a shortcut (a link), which Rewindle does not follow, so it was not read.";
                 case JsonReadResult.ReasonAccessDenied:
                     return "Windows did not let Rewindle read " + fileName + " (access denied). Check that your Windows "
-                        + "account can read the backup's state folder.";
+                        + "account is allowed to read Rewindle\u2019s status folder.";
                 default:
                     return fileName + " could not be read right now. Rewindle tries again every second.";
             }
@@ -917,12 +920,12 @@ namespace ResticBackuper.Dashboard
                 if (string.Equals(read.Reason, JsonReadResult.ReasonRetired, StringComparison.Ordinal))
                 {
                     // The words an old-format proof has always been given (below), now for the retired local file as well.
-                    result.StatusLabel = "Direct cloud verification required";
+                    result.StatusLabel = "A new Google Drive check is needed";
                     result.StatusDetail = LegacyEvidenceRetiredDetail;
                     return result;
                 }
-                result.StatusLabel = "Off-site status unavailable";
-                result.StatusDetail = CleanOffsiteDetail(read.Error);
+                result.StatusLabel = "Off-site status can\u2019t be read";
+                result.StatusDetail = DescribeUnreadable("The off-site status file", read);
                 return result;
             }
 
@@ -936,7 +939,7 @@ namespace ResticBackuper.Dashboard
                     StringComparison.Ordinal))
             {
                 result.Kind = OffsiteStatusKind.StatusUnavailable;
-                result.StatusLabel = "Direct cloud verification required";
+                result.StatusLabel = "A new Google Drive check is needed";
                 result.StatusDetail = LegacyEvidenceRetiredDetail;
                 return result;
             }
@@ -948,9 +951,9 @@ namespace ResticBackuper.Dashboard
                     StringComparison.Ordinal))
             {
                 result.Kind = OffsiteStatusKind.StatusUnavailable;
-                result.StatusLabel = "Post-activation cloud verification required";
+                result.StatusLabel = "A new Google Drive check is needed";
                 result.StatusDetail =
-                    "Pre-activation migration evidence is not current off-site protection status.";
+                    "The last check was made before the Google Drive copy was switched on, so it does not count.";
                 return result;
             }
 
@@ -973,11 +976,14 @@ namespace ResticBackuper.Dashboard
             if (state == "failed")
             {
                 result.Kind = OffsiteStatusKind.Failed;
-                result.StatusLabel = "Direct cloud verification failed";
-                result.StatusDetail = CleanOffsiteDetail(
+                result.StatusLabel = "The check of the Google Drive copy failed";
+                string failedDetail = CleanOffsiteDetail(
                     string.IsNullOrWhiteSpace(errorMessage)
                         ? statusMessage
                         : errorMessage);
+                result.StatusDetail = string.IsNullOrEmpty(failedDetail)
+                    ? "The check did not succeed. Rewindle checks again automatically."
+                    : failedDetail;
                 return result;
             }
 
@@ -987,18 +993,21 @@ namespace ResticBackuper.Dashboard
             {
                 result.Kind = OffsiteStatusKind.InProgress;
                 result.StatusLabel = state == "restoring"
-                    ? "Direct cloud restore verification in progress"
-                    : "Google Drive repository verification in progress";
-                result.StatusDetail = CleanOffsiteDetail(statusMessage);
+                    ? "Testing a restore from Google Drive"
+                    : "Checking the Google Drive copy";
+                string progressDetail = CleanOffsiteDetail(statusMessage);
+                result.StatusDetail = string.IsNullOrEmpty(progressDetail)
+                    ? "Rewindle is comparing the Google Drive copy with your backups."
+                    : progressDetail;
                 return result;
             }
 
             if (state != "verified")
             {
                 result.Kind = OffsiteStatusKind.StatusUnavailable;
-                result.StatusLabel = "Off-site status unavailable";
+                result.StatusLabel = "Off-site status can\u2019t be read";
                 result.StatusDetail =
-                    "The direct-cloud proof contains an unrecognized state.";
+                    "The latest check of the Google Drive copy reported a result that Rewindle does not recognise.";
                 return result;
             }
 
@@ -1165,9 +1174,9 @@ namespace ResticBackuper.Dashboard
                 || !assetBinding)
             {
                 result.Kind = OffsiteStatusKind.StatusUnavailable;
-                result.StatusLabel = "Direct cloud verification incomplete";
+                result.StatusLabel = "The Google Drive check is incomplete";
                 result.StatusDetail =
-                    "The latest proof lacks a complete My Drive path bound to the installed backup plan, repository identity, inventory, immutable-evidence, or direct-restore binding.";
+                    "The latest check does not fully match your current backup (its backup location, file list or test restore), so it can\u2019t be counted yet.";
                 return result;
             }
 
@@ -1175,9 +1184,9 @@ namespace ResticBackuper.Dashboard
             if (!TryGetUtc(document, "verified_utc", out verifiedUtc))
             {
                 result.Kind = OffsiteStatusKind.StatusUnavailable;
-                result.StatusLabel = "Direct cloud verification incomplete";
+                result.StatusLabel = "The Google Drive check is incomplete";
                 result.StatusDetail =
-                    "The latest proof has no valid verification timestamp.";
+                    "The latest check has no valid time recorded, so it can\u2019t be counted yet.";
                 return result;
             }
 
@@ -1194,10 +1203,10 @@ namespace ResticBackuper.Dashboard
                     snapshotId,
                     true))
             {
-                result.Kind = OffsiteStatusKind.StatusUnavailable;
-                result.StatusLabel = "Direct cloud proof is stale";
+                result.Kind = OffsiteStatusKind.Stale;
+                result.StatusLabel = "The Google Drive copy is waiting for its next check";
                 result.StatusDetail =
-                    "The proof does not match the latest successfully verified backup plan, generation, repository, and snapshot.";
+                    "The last check does not cover your latest backup yet. The next check will.";
                 return result;
             }
 
@@ -1211,10 +1220,10 @@ namespace ResticBackuper.Dashboard
                     snapshotId,
                     false))
             {
-                result.Kind = OffsiteStatusKind.StatusUnavailable;
-                result.StatusLabel = "Direct cloud proof is stale";
+                result.Kind = OffsiteStatusKind.Stale;
+                result.StatusLabel = "The Google Drive copy is waiting for its next check";
                 result.StatusDetail =
-                    "The proof does not match the repository plan or generation in current protected backup telemetry.";
+                    "The last check was made before your backup settings changed. The next check will use the new settings.";
                 return result;
             }
 
@@ -1230,10 +1239,10 @@ namespace ResticBackuper.Dashboard
             if (verifiedUtc < lastSuccessFinishedUtc
                 || (currentHasTimestamp && verifiedUtc < currentTelemetryUtc))
             {
-                result.Kind = OffsiteStatusKind.StatusUnavailable;
-                result.StatusLabel = "Direct cloud proof is stale";
+                result.Kind = OffsiteStatusKind.Stale;
+                result.StatusLabel = "The Google Drive copy is waiting for its next check";
                 result.StatusDetail =
-                    "The cloud verification predates the latest repository-changing backup attempt or successful backup.";
+                    "Your latest backup is newer than the last check of the Google Drive copy. The next check will include it.";
                 return result;
             }
 
@@ -1249,9 +1258,9 @@ namespace ResticBackuper.Dashboard
             result.ProviderUploadConfirmed = true;
             result.RestoreVerified = true;
             result.Kind = OffsiteStatusKind.RestoreVerified;
-            result.StatusLabel = "Google Drive repository verified";
+            result.StatusLabel = "Google Drive copy verified";
             result.StatusDetail =
-                "The live streamed repository matches Google Drive's API inventory, and an independent direct-cloud restore succeeded.";
+                "Google Drive holds a complete copy of your backups, and a test restore from Google Drive worked.";
             return result;
         }
 
@@ -1471,7 +1480,7 @@ namespace ResticBackuper.Dashboard
                     || value.IndexOf("RESTIC_", StringComparison.OrdinalIgnoreCase) >= 0
                     || value.IndexOf("recovery key", StringComparison.OrdinalIgnoreCase) >= 0))
             {
-                return "Off-site status needs attention without exposing credential details.";
+                return "The details of this problem are hidden because they may include sign-in information.";
             }
             return CleanDisplayText(value, 320);
         }
@@ -1531,33 +1540,33 @@ namespace ResticBackuper.Dashboard
             snapshot.ErrorCount = SafeInt(GetLong(document, "error_count", 0));
             snapshot.LastUpdatedLocal = ToLocalOrNow(lastWriteUtc);
             snapshot.PhaseIndex = -1;
-            snapshot.PhaseLabel = "Baseline";
+            snapshot.PhaseLabel = "Test scan";
 
             if (state == "clean")
             {
                 snapshot.StateKey = "ready";
                 snapshot.StatusLabel = "Ready for the first backup";
-                snapshot.StatusDetail = "Verified dry run: "
-                    + TelemetryFormat.FormatCount(snapshot.FilesDone) + " files and "
+                snapshot.StatusDetail = "The test scan passed: "
+                    + TelemetryFormat.FormatCount(snapshot.FilesDone) + " files ("
                     + TelemetryFormat.FormatBytes(snapshot.BytesDone)
-                    + " scanned with no errors.";
+                    + ") were looked at and no problems were found. No backup has been made yet.";
                 snapshot.IsSuccess = false;
                 snapshot.Percent = 0;
                 snapshot.ProgressIsEstimated = true;
-                snapshot.ConfidenceLabel = "Validation baseline ready";
+                snapshot.ConfidenceLabel = "Test scan complete";
             }
             else
             {
                 snapshot.StateKey = state;
                 snapshot.StatusLabel = state == "source_errors"
-                    ? "Dry run found unreadable files"
-                    : "Dry run needs attention";
+                    ? "The test scan found files it can\u2019t read"
+                    : "The test scan did not finish cleanly";
                 snapshot.StatusDetail = snapshot.ErrorCount > 0
-                    ? TelemetryFormat.FormatCount(snapshot.ErrorCount) + " source errors were recorded."
-                    : CleanDisplayText(GetString(document, "failure", "The dry run did not complete cleanly."), 240);
+                    ? TelemetryFormat.FormatCount(snapshot.ErrorCount) + " files or folders could not be read during the test scan."
+                    : "The test scan stopped before it finished. Run it again, or start the first backup.";
                 snapshot.IsFailure = true;
                 snapshot.ProgressIsEstimated = false;
-                snapshot.ConfidenceLabel = "Final dry-run result";
+                snapshot.ConfidenceLabel = "Final test scan result";
             }
             return snapshot;
         }
@@ -1805,7 +1814,7 @@ namespace ResticBackuper.Dashboard
             {
                 snapshot.Percent = OverallPercent(phase.Stage, backupFraction);
                 snapshot.ProgressIsEstimated = true;
-                snapshot.ConfidenceLabel = "Progress when cancellation completed";
+                snapshot.ConfidenceLabel = "Progress when the backup stopped";
                 snapshot.PhaseLabel = "Cancelled";
                 snapshot.StatusLabel = "Backup cancelled";
             }
@@ -1814,8 +1823,8 @@ namespace ResticBackuper.Dashboard
                 snapshot.Percent = OverallPercent(phase.Stage, backupFraction);
                 snapshot.ProgressIsEstimated = true;
                 snapshot.ConfidenceLabel = interrupted
-                    ? "Last recorded progress before interruption"
-                    : "Last recorded progress before failure";
+                    ? "Last progress before the interruption"
+                    : "Last progress before the backup stopped";
             }
             else
             {
@@ -1861,36 +1870,36 @@ namespace ResticBackuper.Dashboard
             }
             if (snapshot.StateKey == "interrupted")
             {
-                return "The protected status stopped updating and its backup process is no longer running or no longer matches this status; no completed result was recorded.";
+                return "The backup stopped partway and no result was saved. Your earlier backups are not affected.";
             }
             if (snapshot.StateKey == "success")
             {
-                return "Verified " + TelemetryFormat.FormatCount(snapshot.FilesDone)
-                    + " files; " + TelemetryFormat.FormatBytes(snapshot.StoredBytes)
-                    + " added to the repository.";
+                return "Verified: " + TelemetryFormat.FormatCount(snapshot.FilesDone)
+                    + " files checked, " + TelemetryFormat.FormatBytes(snapshot.StoredBytes)
+                    + " of new data saved.";
             }
             if (snapshot.StateKey == "success_unchanged")
             {
-                return "All protected files already matched the latest verified snapshot.";
+                return "Nothing has changed since your last verified backup, so there was nothing new to save.";
             }
             if (snapshot.StateKey == "cancelled")
             {
-                return "Restic stopped cooperatively. Previously verified snapshots remain available, and this run was not marked successful.";
+                return "This backup was stopped safely. Your earlier backups are untouched, and this one does not count as complete.";
             }
             if (snapshot.StateKey == "cancelling")
             {
-                return "Restic received a run-bound cancellation request and is stopping cleanly.";
+                return "Rewindle asked the backup to stop, and it is finishing up safely.";
             }
             if (snapshot.IsFailure)
             {
-                string failure = GetString(document, "failure", string.Empty);
-                if (!string.IsNullOrEmpty(failure))
+                string described = DescribeFailureCode(GetString(document, "failure_code", string.Empty));
+                if (described.Length > 0)
                 {
-                    return CleanDisplayText(failure, 240);
+                    return described;
                 }
                 return snapshot.ErrorCount > 0
-                    ? TelemetryFormat.FormatCount(snapshot.ErrorCount) + " errors were recorded during this run."
-                    : "The backup stopped before verification completed.";
+                    ? TelemetryFormat.FormatCount(snapshot.ErrorCount) + " problems were recorded during this backup, so it does not count as complete."
+                    : "The backup stopped before it finished, so it does not count as complete. Your earlier backups are not affected.";
             }
             if (snapshot.StateKey == "backing_up")
             {
@@ -1906,25 +1915,65 @@ namespace ResticBackuper.Dashboard
             }
             if (snapshot.StateKey == "starting")
             {
-                return "Validating the repository and preparing the protected source list.";
+                return "Getting ready: opening the backup location and listing your protected folders.";
             }
             if (snapshot.StateKey == "verifying_snapshot")
             {
-                return "Confirming that the new snapshot is present and correctly bound to this computer.";
+                return "Making sure the new backup was saved correctly.";
             }
             if (snapshot.StateKey == "checking_repository")
             {
-                return "Checking repository structure before the run is marked successful.";
+                return "Checking the backup location before this backup is counted as verified.";
             }
             if (snapshot.StateKey == "restoring_canary")
             {
-                return "Restoring and checking a small test file to prove recovery works.";
+                return "Restoring a small test file to prove your files can be recovered.";
             }
             if (snapshot.StateKey == "checking_data_subset")
             {
-                return "Reading this run's scheduled repository-data sample.";
+                return "Reading a sample of the saved data to check that it is intact.";
             }
-            return "Backup telemetry was received; the current phase is not yet classified.";
+            return "The backup is running, but Rewindle does not recognise its current step yet.";
+        }
+
+        // A failed run in plain words, by the stable failure_code the backup engine records (src/backup.py classify_failure), so the
+        // sentence never depends on an exception's own text, which can name a path. Each says what happened and, where the person can do
+        // something about it, what. Empty for a code this version does not know; the run's recorded failure stays in its details.
+        private static string DescribeFailureCode(string code)
+        {
+            switch ((code ?? string.Empty).Trim().ToLowerInvariant())
+            {
+                case "source_data_unreadable":
+                    return "Some files couldn\u2019t be read (a program may have had them open), so this backup is incomplete. The next backup tries again.";
+                case "repository_low_space":
+                    return "The backup drive doesn\u2019t have enough free space. Free up some space on it, then try again.";
+                case "volume_identity_mismatch":
+                    return "The drive that holds your backups is not the one Rewindle expects. Plug in the original backup drive.";
+                case "repository_storage_unavailable":
+                    return "Rewindle couldn\u2019t reach the backup location. Check that the backup drive is plugged in, then try again.";
+                case "source_preflight_failed":
+                    return "One of the protected folders couldn\u2019t be opened. Check that each protected folder still exists.";
+                case "repository_authentication_failed":
+                    return "Rewindle couldn\u2019t unlock the backup location, so the backup stopped before it began. Your earlier backups are not affected.";
+                case "restic_backup_failed":
+                    return "The backup stopped before it finished. Your earlier backups are not affected.";
+                case "snapshot_verification_failed":
+                    return "The new backup was saved, but Rewindle couldn\u2019t confirm it is complete, so it does not count as verified.";
+                case "repository_structure_check_failed":
+                    return "The check of the backup location found a problem, so this backup does not count as verified.";
+                case "restore_canary_failed":
+                    return "The restore test failed, so this backup does not count as verified.";
+                case "repository_data_check_failed":
+                    return "The check of a sample of the saved data found a problem, so this backup does not count as verified.";
+                case "wrapper_interrupted":
+                    return "The backup was stopped before it finished. Your earlier backups are not affected.";
+                case "wrapper_failed":
+                    return "The backup stopped because of an unexpected problem. Your earlier backups are not affected.";
+                case "cooperative_cancellation_failed":
+                    return "Rewindle couldn\u2019t stop the backup cleanly, so it ended without a result. Your earlier backups are not affected.";
+                default:
+                    return string.Empty;
+            }
         }
 
         private static string BuildChangeAnomalyDetail(
@@ -2212,23 +2261,23 @@ namespace ResticBackuper.Dashboard
         {
             if (exactProgress)
             {
-                return "Restic-reported progress";
+                return "Based on the progress reported so far";
             }
             if (baseline.DryRunOnly)
             {
-                return "Estimated from verified dry run";
+                return "Estimated from the test scan";
             }
             if (baseline.UsesComparableRuns)
             {
-                return "Low-confidence estimate from comparable recent runs";
+                return "Rough estimate from similar recent backups";
             }
             if (baseline.SampleCount >= 5)
             {
-                return "High-confidence median of matching folder-set runs";
+                return "Estimated from your recent backups of these folders";
             }
             if (baseline.SampleCount > 0)
             {
-                return "Estimated from matching folder-set history";
+                return "Estimated from earlier backups of these folders";
             }
             return "Learning from this run";
         }
@@ -2265,20 +2314,20 @@ namespace ResticBackuper.Dashboard
                 // The wrappers' preflight phases: the backup storage, the protected folders and the repository key are
                 // checked before Restic reads anything.
                 case "checking_repository_storage":
-                    return new PhaseInfo(0, 0, "Preparing", "Checking backup storage");
+                    return new PhaseInfo(0, 0, "Preparing", "Checking the backup location");
                 case "preflighting_sources":
                     return new PhaseInfo(0, 0, "Preparing", "Checking protected folders");
                 case "authenticating_repository":
-                    return new PhaseInfo(0, 0, "Preparing", "Opening the backup repository");
+                    return new PhaseInfo(0, 0, "Preparing", "Unlocking the backup location");
                 // The legacy personal edition checks its streamed storage again after the snapshot is verified.
                 case "verifying_repository_storage":
-                    return new PhaseInfo(2, 3, "Repository", "Checking storage");
+                    return new PhaseInfo(2, 3, "Repository", "Checking the saved backup");
                 case "backing_up":
                     return new PhaseInfo(0, 1, "Backing up", "Backing up files");
                 case "verifying_snapshot":
-                    return new PhaseInfo(1, 2, "Snapshot", "Confirming snapshot");
+                    return new PhaseInfo(1, 2, "Snapshot", "Confirming the new backup");
                 case "checking_repository":
-                    return new PhaseInfo(2, 3, "Repository", "Checking storage");
+                    return new PhaseInfo(2, 3, "Repository", "Checking the saved backup");
                 case "restoring_canary":
                     return new PhaseInfo(3, 4, "Recovery test", "Running restore test");
                 case "checking_data_subset":
@@ -2307,19 +2356,19 @@ namespace ResticBackuper.Dashboard
             }
             if (backupExitCode < 0)
             {
-                return new PhaseInfo(0, 0, "Preparing", "Backup failed while preparing");
+                return new PhaseInfo(0, 0, "Preparing", "Backup couldn\u2019t get started");
             }
 
             string snapshotId = GetString(document, "snapshot_id", string.Empty);
             if (string.IsNullOrEmpty(snapshotId))
             {
-                return new PhaseInfo(1, 2, "Snapshot", "Snapshot verification failed");
+                return new PhaseInfo(1, 2, "Snapshot", "Couldn\u2019t confirm the new backup");
             }
 
             IDictionary<string, object> verification = GetDictionary(document, "verification");
             if (!GetBool(verification, "repository_structure", false))
             {
-                return new PhaseInfo(2, 3, "Repository", "Storage check failed");
+                return new PhaseInfo(2, 3, "Repository", "The backup location check failed");
             }
 
             IDictionary<string, object> canary = GetDictionary(verification, "canary");

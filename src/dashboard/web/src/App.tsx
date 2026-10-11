@@ -12,7 +12,7 @@ import TaskRows, { type TaskRow } from '@/components/primitives/TaskRows';
 import FilterTable, { type TableRow, type FilterTableLabels, type FilterTableSelection, type FilterTableStatus } from '@/components/primitives/FilterTable';
 import LoadingState from '@/components/primitives/LoadingState';
 import ProtectedFolders, { type FolderView } from '@/components/primitives/ProtectedFolders';
-import ProtectionHealth, { healthTime, phaseName } from '@/components/primitives/ProtectionHealth';
+import ProtectionHealth, { phaseName } from '@/components/primitives/ProtectionHealth';
 import FolderPickerModal from '@/components/primitives/FolderPickerModal';
 import RestoreFlowModal from '@/components/primitives/RestoreFlowModal';
 import RunDetailsModal from '@/components/primitives/RunDetailsModal';
@@ -25,7 +25,8 @@ import {
   attentionText, isCancelled, isProblem, isUnchanged, lastSuccessfulBackup, lastVerified, resolvedByText, resolvedRuns, resultHint, resultLabel,
   typeLabel, unresolvedRuns, usualSeconds, type Verified,
 } from './runProblems';
-import { formatClock, formatWhen } from './when';
+import { formatClock, formatWhen, formatWhenAgo } from './when';
+import { driveOf, heroConcern, heroTone } from './protectionTone';
 
 type Send = (command: CommandName, payload?: Record<string, string | boolean>) => void;
 
@@ -216,17 +217,19 @@ function Action({ state, send, command, children, icon, primary = false, payload
 const modeNote = (state: DashboardState) => state.demo || state.preview ? busyNote(state) : '';
 
 // Why the schedule, location and folder controls are paused, said once for the whole page.
-function busyNote(state: DashboardState): string {
+function busyNote(state: DashboardState, offline = false): string {
   if (state.demo) return 'You are viewing sample data. Backups and changes are turned off.';
   if (state.preview) return 'The animation preview is running. Real backups and changes are paused.';
+  // The page lost the host and every control is off. The banner at the top says so; this says it once for the controls, so they do not each repeat it.
+  if (offline) return 'Waiting to reconnect to Rewindle. Backup controls are paused. Scheduled backups are not affected.';
   if (state.status.active) return 'A backup is running. Schedule, location and folder changes unlock when it finishes.';
   if (state.recovery.repairNeeded) return 'Backups are paused until the backup location is repaired.';
   return '';
 }
 
-// `hint` says what a figure counts, as a tooltip, for the ones whose meaning is not in their label. `bad` draws a figure that is a
-// problem when it is not zero (errors) in the text-grade red; the label and the number still say it in words. `sub` is a line of
-// words under the figure, for what it covers ("last 400 runs").
+// `hint` says what a figure counts, as a tooltip, for the ones whose meaning is not in their label (it does not reach a keyboard or touch
+// user, so Protection names its figures plainly and leaves it out). `bad` draws a figure that is a problem when it is not zero (errors) in
+// the text-grade red; the label and the number still say it in words. `sub` is a line of words under the figure, for what it covers ("last 400 runs").
 function Stat({ label, value, icon, hint, bad = false, sub }: { label: string; value: string; icon?: React.ReactNode; hint?: string; bad?: boolean; sub?: string }) {
   return <div title={hint} className={bad ? 'stat-bad' : undefined}><span className="stat-label">{icon}{label}</span><div style={{ overflow: 'hidden' }}>
     <motion.span className="stat-number" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
@@ -255,7 +258,7 @@ function Repairs({ state, send }: { state: DashboardState; send: Send }) {
   // The host publishes one sentence as both the state line and the action's help; print it once.
   const repeated = !!state.actions.repairRepository?.help && state.actions.repairRepository.help === state.recovery.repairState;
   return <motion.div className="attention-note" initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }}>
-    <strong><CircleAlert size={14} className="inline mr-2" />Backup location needs attention</strong>
+    <strong><CircleAlert size={14} className="inline mr-2" />Backups are paused: moving the backup location didn’t finish</strong>
     <p>{state.recovery.repairMessage}<br />{state.recovery.repairState}</p>
     {state.recovery.repairBusy ? <>
       <LoadingState label="Repairing backup location" variant="Orbit" live={false} />
@@ -300,60 +303,28 @@ function SetupNotice({ state, send }: { state: DashboardState; send: Send }) {
   </section>;
 }
 
-type HeroTone = 'active' | 'danger' | 'warning' | 'success';
-
-// One tone for the whole hero. The host overrides the title and badge text for an overdue or paused
-// schedule, a repair, or a pending change review, but status.success still describes the last run,
-// so the emblem, tag icon and step rows derive their look from everything the page already knows.
-// A protected folder that cannot be found keeps the hero from being all green: the next backup cannot include it.
-function heroTone(state: DashboardState): HeroTone {
-  const s = state.status, freshness = state.freshness.state;
-  if (s.active || state.recovery.repairBusy) return 'active';
-  if (s.failure || state.recovery.repairNeeded || freshness === 'Overdue' || freshness === 'ClockAnomaly') return 'danger';
-  if (!s.success || s.cancelled || freshness !== 'Healthy' || state.actions.reviewChanges?.visible || state.dataError || state.sources.some(source => !source.exists)) return 'warning';
-  return 'success';
-}
-
-// The host draws its status badge in capitals for the native window ("NEEDS ATTENTION", "LIVE  •  BACKING UP"). The page says it as a
-// sentence, like the chips beside it. Only text that is all capitals is changed, so a badge the host already wrote as a sentence
-// ("Status unavailable") stays as it is, and "Off-site" keeps its hyphen and its capital.
-function toSentence(badge: string): string {
-  return badge.split(/\s*[•·]\s*/).map(part => {
-    const text = part.trim();
-    if (!text || text !== text.toUpperCase()) return text;
-    const lower = text.toLowerCase().replace(/\boff-site\b/g, 'Off-site');
-    return lower.charAt(0).toUpperCase() + lower.slice(1);
-  }).filter(Boolean).join(' · ');
-}
-
-// What the status chip says. The host's plain "READY" badge is its fallback for a backup plan with nothing running and nothing wrong, and
-// no verified run behind it. Beside "Last verified" that reads better as "Awaiting backup". The host picks the badge by precedence (a
-// repair, a pause, an overdue backup each take it over), which the page cannot rebuild from the state key alone, so it follows the badge.
-function statusBadgeLabel(status: DashboardState['status']): string {
-  const label = toSentence(status.badge);
-  return !status.success && label === 'Ready' ? 'Awaiting backup' : label;
-}
-
 // The storage line under the backup location. A drive that said it is not ready is a warning (its own icon, and a color that is readable
-// as text), not a muted line: the backups cannot be written until it is back.
+// as text), not a muted line: the backups cannot be written until it is back. The host's own words for it ("D:\ • Volume unavailable")
+// say nothing to do, so the page names the drive and keeps the host's words as a tooltip.
 function VolumeLine({ repository }: { repository: DashboardState['repository'] }) {
-  const missing = repository.volumeReady === false;
-  return <div className={`muted-copy volume-line${missing ? ' is-unavailable' : ''}`}>{missing && <><TriangleAlert size={13} aria-hidden="true" /><span className="sr-only">Needs attention: </span></>}{repository.volume}</div>;
+  const missing = repository.volumeReady === false, drive = driveOf(repository.path);
+  return <div className={`muted-copy volume-line${missing ? ' is-unavailable' : ''}`} title={missing ? repository.volume : undefined}>{missing && <><TriangleAlert size={13} aria-hidden="true" /><span className="sr-only">Needs attention: </span></>}{missing ? `The backup drive${drive ? ` (${drive})` : ''} isn’t connected` : repository.volume}</div>;
 }
 
 // `stale` is a page that has lost the host (see App's `connected`): what it shows is the last thing the host said, so it stops moving and
 // is dimmed, and the banner above it says why.
-function Protection({ state, send, folders, setFolders, stale }: { state: DashboardState; send: Send; folders: FolderView; setFolders: (value: FolderView) => void; stale: boolean }) {
+function Protection({ state, send, folders, setFolders, stale, openRunDetails }: { state: DashboardState; send: Send; folders: FolderView; setFolders: (value: FolderView) => void; stale: boolean; openRunDetails: (runId: string) => void }) {
   // Without the backup service every widget below would say "unavailable" or "0"; the one explanation takes their place.
   if (serviceMissing(state)) return <><Heading title="Protection" description="Rewindle is waiting for a backup service to report on." /><SetupNotice state={state} send={send} /></>;
   const s = state.status;
-  const tone = heroTone(state);
+  const tone = heroTone(state), concern = heroConcern(state);
   const locale = usableLocale(state.locale);
-  // When the last verified backup finished. Not drawn where the time cannot be trusted (the status could not be read, or the clocks
-  // disagree), the same rule the Local backup card below follows.
+  // When the last verified backup finished, with its age in words ("yesterday at 2:03 AM"): how recent it is is the first thing to know.
+  // Not drawn where the time cannot be trusted (the status could not be read, or the clocks disagree), the same rule the Local backup card follows.
   const verifiedKnown = !state.dataError && state.freshness.state !== 'ClockAnomaly';
-  const verifiedAt = healthTime(state.freshness.verifiedAt, locale);
-  const missingFolders = state.sources.filter(source => !source.exists).length;
+  const verifiedAt = formatWhenAgo(state.freshness.verifiedAt, locale);
+  // The host puts the same sentence in the hero and in the repair note above it; say it once.
+  const repairDuplicate = state.recovery.repairNeeded && !!state.recovery.repairMessage && s.detail === state.recovery.repairMessage;
   // The last run passed but something else needs attention (overdue, paused, a change review): its steps
   // are shown as that run's results, not as proof that the backup is current.
   const lastRunOnly = s.success && tone !== 'success';
@@ -365,7 +336,7 @@ function Protection({ state, send, folders, setFolders, stale }: { state: Dashbo
     : s.active ? (i < s.phaseIndex ? 'done' : i === s.phaseIndex ? 'running' : 'pending')
     : ended && s.phaseIndex >= 0 ? (i < s.phaseIndex ? 'done' : i === s.phaseIndex ? (s.failure ? 'failed' : 'cancelled') : 'pending')
     : 'guide';
-  const note = busyNote(state), quiet = !!note;
+  const note = busyNote(state, stale), quiet = !!note;
   // The host's title already says "Estimated time remaining" when the progress is an estimate, and "Stopping safely: Please wait" while
   // a cancel finishes, so the suffix is only for a plain "Time remaining" that has a time in it.
   const etaEstimated = s.estimated && s.key !== 'cancelling' && !/estimated/i.test(s.etaTitle || '') && /\d/.test(s.eta || '');
@@ -375,23 +346,28 @@ function Protection({ state, send, folders, setFolders, stale }: { state: Dashbo
   const metricsContext = state.preview ? 'Previewed live run' : s.active ? 'Current run'
     : !s.runId || !(s.success || s.failure || s.cancelled) ? 'No run recorded yet' : s.success ? 'Latest verified run' : 'Latest recorded run';
   const hasErrors = /[1-9]/.test(s.errors || '');
-  // One name per step, the same ones the page uses everywhere else: the restore test restores a small test file after every backup.
-  const names = ['Back up files', 'Save snapshot', 'Check storage', 'Restore test'];
+  // One name per step, the same ones the page uses everywhere else: the restore test restores a small test file after every backup. A row says
+  // its state once (its mark and pill), so it has no second line of its own; what it does is one line in its details.
+  const names = ['Back up files', 'Save the backup', 'Check the backup', 'Restore test'];
+  const explanations = ['Reads your protected folders and copies what changed.', 'Saves an encrypted copy of your files as one backup.', 'Checks that the saved backup data is intact.', 'Restores a small test file after every backup and compares it with the original.'];
   const rows: TaskRow[] = names.map((label, i) => ({
     key: `backup-${i}`, label, step: i + 1,
     status: stepStatus(i),
-    amount: s.success ? ['Files protected', 'Snapshot saved', 'Storage checked', 'Restore test passed'][i] : s.active && i === s.phaseIndex ? phaseName(s.phaseLabel) : '',
-    details: [
-      { label: ['Read your protected folders', 'Save an encrypted point in time', 'Check that the saved backup data is intact', 'Restore a small test file after every backup and verify it'][i], meta: '' },
-      { label: i === 0 ? `${s.files} files · ${s.bytes}` : i === 1 ? state.repository.path : i === 2 ? 'Restic integrity check' : 'Independent restore verification', meta: '' },
-    ],
+    amount: '',
+    details: [{ label: explanations[i], meta: '' }],
   }));
+  // Which of the four steps a running backup is on. The title above already names the phase in the host's words, so the loader counts instead of repeating it.
+  const stepNumber = Math.min(Math.max(s.phaseIndex, 0), 3) + 1;
+  const reviewLabel = state.actions.reviewChanges?.label === 'Review changes' ? 'Confirm these changes' : undefined;
+  const showTags = verifiedKnown || (stale && !!state.updated);
   const folderCount = state.sources.length;
   return <>
     <Heading title="Protection" description={`${folderCount} protected ${folderCount === 1 ? 'folder' : 'folders'} · ${state.schedule.summary}`} note={note}>
       {s.active && <Action state={state} send={send} command="cancelBackup" icon={<X size={13} />} quiet={quiet} />}
       <Action state={state} send={send} command="backupNow" primary size="md" icon={<Play size={13} fill="currentColor" />} quiet={quiet} />
     </Heading>
+    {/* A backup that was asked for and did not start: the host's explanation used to be a tooltip on a button that was already back to normal. */}
+    <div className="live-slot" role="status">{s.backupNote && !s.active && <p className="source-notice warning"><TriangleAlert size={14} aria-hidden="true" />{s.backupNote}</p>}</div>
     <Repairs state={state} send={send} />
     <section className={`surface surface-pad protection-hero ${s.active ? 'is-active' : ''} ${stale ? 'is-stale' : ''}`}>
       <div className="hero-grid">
@@ -400,44 +376,57 @@ function Protection({ state, send, folders, setFolders, stale }: { state: Dashbo
           <div className="status-line">
             <motion.div key={s.key} initial={{ scale: .7, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={{ type: 'spring', stiffness: 310, damping: 21 }}
               className={`status-emblem ${tone === 'success' ? '' : tone}`}>
-              {tone === 'danger' ? <OctagonAlert size={22} /> : tone === 'active' ? <Activity size={23} /> : tone === 'success' ? <ShieldCheck size={24} /> : s.success ? <TriangleAlert size={22} /> : <Clock3 size={22} />}
+              {tone === 'danger' ? <OctagonAlert size={22} /> : tone === 'active' ? <Activity size={23} /> : tone === 'success' ? <ShieldCheck size={24} /> : tone === 'neutral' ? <Info size={22} /> : s.success ? <TriangleAlert size={22} /> : <Clock3 size={22} />}
             </motion.div>
             {/* A heading, so the page's main status is a stop in the outline under its title, with the sections below at the same
                 level. Not a live region: useAnnouncements (in App) speaks the run reaching its next phase or ending, and it does
                 so on every page, where this hero exists only on Protection. */}
             <h2 className="status-title">{(tone === 'danger' || tone === 'warning') && <span className="sr-only">Needs attention: </span>}{s.title}</h2>
           </div>
-          <div className="status-detail">{s.detail}</div>
+          {s.detail && !repairDuplicate && <div className="status-detail">{s.detail}</div>}
+          {/* What the colour above is about, when the host's title does not say it (see heroConcern). The container is always present, so a
+              drive that is unplugged while the page is open is announced. */}
+          <div role="status">{concern && <p className={`hero-concern ${concern.tone}`}>{concern.tone === 'danger' ? <OctagonAlert size={14} aria-hidden="true" /> : <TriangleAlert size={14} aria-hidden="true" />}<span>{concern.text}</span></p>}</div>
           {s.active ? <div className="progress-area">
             {/* No clock of its own: the loader counts from when it mounted, which is not when the run began (open the app 20 minutes in, or
                 leave this page and come back, and it read 0s beside the host's real Elapsed). */}
-            <div className="progress-copy"><LoadingState label={phaseName(s.phaseLabel) || 'Backing up'} live={false} showElapsed={false} /><strong>{Math.round(s.progress * 100)}%</strong></div>
+            <div className="progress-copy"><LoadingState label={s.key === 'cancelling' ? 'Please wait' : `Step ${stepNumber} of 4`} live={false} showElapsed={false} /><strong>{Math.round(s.progress * 100)}%</strong></div>
             <div className="progress-rail" role="progressbar" aria-label={state.preview ? 'Preview backup progress' : 'Backup progress'} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(s.progress * 100)}><motion.div className="progress-bar" animate={{ width: `${Math.max(0, Math.min(100, s.progress * 100))}%` }} transition={{ duration: .65, ease: [.16, 1, .3, 1] }} /></div>
             <p className="muted-copy eta-line">{s.etaTitle || 'Time remaining'}: {s.eta || 'Calculating…'}{etaEstimated ? ' · estimated' : ''}</p>
             {/* Where the estimate comes from and when it expects to finish ("Likely around 14:35"): said on the page, not in a tooltip a keyboard or touch user never sees. */}
             {s.etaHint && <p className="muted-copy eta-hint">{s.etaHint}</p>}
-          </div> : <div className="status-tags">
-            {/* The first thing to know about protection is how recent it is. (The footer already says the backup is encrypted.) */}
+          </div> : showTags && <div className="status-tags">
             {verifiedKnown && <span className="quiet-tag">{verifiedAt ? <ShieldCheck size={11} aria-hidden="true" /> : <Clock3 size={11} aria-hidden="true" />}{verifiedAt ? <>Last verified <time dateTime={state.freshness.verifiedAt}>{verifiedAt}</time></> : 'No verified backup yet'}</span>}
-            <span className="quiet-tag">{tone === 'success' ? <Check size={11} /> : <Clock3 size={11} />}{statusBadgeLabel(s)}</span>
-            {missingFolders > 0 && <span className="quiet-tag is-warning"><TriangleAlert size={11} aria-hidden="true" />{missingFolders === 1 ? '1 folder cannot be found' : `${missingFolders} folders cannot be found`}</span>}
+            {/* A page that lost the host shows the last thing it was told; this says when that was. */}
+            {stale && state.updated && <span className="quiet-tag"><Clock3 size={11} aria-hidden="true" />{state.updated}</span>}
           </div>}
-          <div className="info-action"><Action state={state} send={send} command="reviewChanges" icon={<ListChecks size={13} />} /></div>
+          <div className="info-action">
+            {s.failure && !s.active && s.runId && <Button size="sm" disabled={!state.actions.viewRunDetails?.enabled} title={state.actions.viewRunDetails?.help || undefined} onClick={() => openRunDetails(s.runId)}><ListChecks size={13} aria-hidden="true" />See what happened</Button>}
+            <Action state={state} send={send} command="reviewChanges" icon={<ListChecks size={13} />}>{reviewLabel}</Action>
+          </div>
         </div>
         <div><TaskRows rows={rows} className="backup-tasks" labels={{ completed: s.success ? 'Verified' : 'Done', failed: 'Failed', pending: ended ? 'Not run' : 'Pending' }} /></div>
       </div>
       <div className="stats-grid">
         <Stat label="Files" value={s.files} icon={<Files size={12} />} />
-        <Stat label="Processed" value={s.bytes} icon={<Database size={12} />} hint="Data read from your protected folders during the run." />
+        <Stat label="Data read" value={s.bytes} icon={<Database size={12} />} />
         {/* "Run time", not "Last run": the figure is a length of time, which "Last run" reads as the moment the run happened. */}
-        <Stat label={s.active ? 'Throughput' : 'Run time'} value={s.active ? s.speed : s.elapsed} icon={s.active ? <Gauge size={12} /> : <Clock3 size={12} />} hint={s.active ? undefined : 'How long the run took.'} />
-        <Stat label={s.active ? 'Elapsed' : 'Errors'} value={s.active ? s.elapsed : s.errors} icon={s.active ? <Clock3 size={12} /> : <CircleAlert size={12} />} bad={!s.active && hasErrors} />
+        <Stat label={s.active ? 'Throughput' : 'Run time'} value={s.active ? s.speed : s.elapsed} icon={s.active ? <Gauge size={12} /> : <Clock3 size={12} />} />
+        {/* A status that could not be read has no count of errors: its "0" would say there were none. */}
+        <Stat label={s.active ? 'Elapsed' : 'Errors'} value={s.active ? s.elapsed : s.unavailable ? '—' : s.errors} icon={s.active ? <Clock3 size={12} /> : <CircleAlert size={12} />} bad={!s.active && hasErrors} />
       </div>
       {!state.dataError && !s.unavailable && <p className="stats-caption">{metricsRun && !state.preview ? `${metricsContext} · ${metricsRun}` : metricsContext}</p>}
     </section>
     <div className="two-columns backup-destinations">
       <section className="surface surface-pad"><div className="info-heading"><Clock3 size={15} className="text-ink-3" />Next automatic backup</div>
-        <div className="info-main">{state.schedule.nextRun || 'No upcoming run'}</div><div className="muted-copy">{state.schedule.summary}</div>
+        {/* A schedule Windows would not show is a problem with a way out, not a card that says "Unavailable" (Settings has the same). */}
+        {state.schedule.error ? <div className="schedule-problem">
+          <p className="muted-copy">Rewindle can’t read the Windows backup schedule just now. Nothing was changed.</p>
+          <div className="actions"><Button size="xs" onClick={() => send('refresh')}><RefreshCw size={12} aria-hidden="true" />Try again</Button></div>
+          <details className="inline-details"><summary>Technical details</summary><p className="muted-copy">{state.schedule.error}</p></details>
+        </div> : <>
+          <div className="info-main">{state.schedule.nextRunAt ? formatWhen(state.schedule.nextRunAt, locale, state.schedule.nextRun) : state.schedule.nextRun || 'No upcoming run'}</div><div className="muted-copy">{state.schedule.summary}</div>
+        </>}
         <ScheduleNotice notice={state.schedule.notice} className="schedule-notice-slot" />
         <div className="info-action"><Action state={state} send={send} command="editSchedule" icon={<ArrowUpRight size={12} />} quiet={quiet} /></div></section>
       <section className="surface surface-pad"><div className="info-heading"><HardDrive size={15} className="text-ink-3" />Backup location</div>
@@ -1008,7 +997,7 @@ function useAnnouncements(state: DashboardState | null, connected: boolean): Spo
     // Nothing to compare with yet, or the host was still reading the backup state (its key is "unknown" until it has). A status that
     // cannot be read is already said by the page's own alert; once it can be read again, that change is spoken like any other.
     if (!before || (before.key === 'unknown' && !before.error) || state.dataError) return;
-    if (r.repairNeeded && !before.repair) { say(`Backup location needs attention. ${r.repairMessage} ${r.repairState}`.trim(), true); return; }
+    if (r.repairNeeded && !before.repair) { say(`Backups are paused: moving the backup location didn’t finish. ${r.repairMessage} ${r.repairState}`.trim(), true); return; }
     if (s.key !== before.key || s.title !== before.title) { say(s.active ? s.title : [s.title, s.detail].filter(Boolean).join('. '), s.failure); return; }
     if (r.repairNeeded && r.repairState && r.repairState !== before.repairState) { say(r.repairState, false); return; }
     if (s.active && (s.phaseIndex !== before.phase || quarter !== before.quarter)) say(`${phaseName(s.phaseLabel) || 'Backing up'}, ${Math.round(s.progress * 100)} percent`, false);
@@ -1020,6 +1009,16 @@ function useAnnouncements(state: DashboardState | null, connected: boolean): Spo
     return () => window.clearTimeout(timer);
   }, [spoken]);
   return spoken;
+}
+
+// The loader on the first screen, before the host has sent anything. Without a clock (it would count seconds nobody asked for), and if the
+// host stays silent for a while it says so and offers to ask again, so the first screen is never a spinner with no way out.
+function OpeningLoader({ send }: { send: Send }) {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => { const timer = window.setTimeout(() => setSlow(true), 10000); return () => window.clearTimeout(timer); }, []);
+  const hosted = !!(window.rewindleNative ?? window.chrome?.webview);
+  return <><LoadingState label="Opening Rewindle" variant="Orbit" showElapsed={false} />
+    <div role="status">{slow && hosted && <p>Taking longer than usual. <Button size="sm" onClick={() => send('ready')}>Try again</Button></p>}</div></>;
 }
 
 export default function App() {
@@ -1159,7 +1158,7 @@ export default function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [dismissedRunDetailsId, page, send, state?.restoreFlow?.open, state?.runDetails, state?.sourcePicker?.open]);
-  if (!state) return <div className="connection-screen"><img src="./rewindle-icon.svg" alt="" width="48" height="48" /><LoadingState label="Opening Rewindle" variant="Orbit" /><p>{(window.rewindleNative ?? window.chrome?.webview) ? 'Loading your protected folders, backup history, and backup status.' : 'Open the desktop app to connect to your backup state.'}</p></div>;
+  if (!state) return <div className="connection-screen"><img src="./rewindle-icon.svg" alt="" width="48" height="48" /><OpeningLoader send={send} /><p>{(window.rewindleNative ?? window.chrome?.webview) ? 'Loading your protected folders, backup history, and backup status.' : 'Open the desktop app to connect to your backup state.'}</p></div>;
   // The toolbar button steps System, Light, Dark and round again, so it never replaces "follow Windows" with no way back; its title says
   // where the theme is and where one press takes it.
   const themeIndex = Math.max(0, THEME_STEPS.findIndex(step => step.name === state.theme)), themeNow = THEME_STEPS[themeIndex], themeNext = THEME_STEPS[(themeIndex + 1) % THEME_STEPS.length];
@@ -1205,7 +1204,7 @@ export default function App() {
       transition={{ duration: state.reducedMotion ? 0 : .22, ease: [.16, 1, .3, 1] }}>
       {/* A page that fails to draw is replaced by a notice, with the sidebar and the other pages still working, and is drawn again with the next state. */}
       <ErrorBoundary scope="page" label={`${page} page`} resetKey={state} onRetry={() => send('refresh')}>
-        {page === 'Protection' ? <Protection state={state} send={send} folders={folderView} setFolders={setFolderView} stale={!connected} /> : page === 'Activity' ? <ActivityPage state={state} send={send} view={historyView} setView={setHistoryView} openRunDetails={openRunDetails} openRestore={() => navigate('Restore')} interactive={connected} /> : page === 'Restore' ? <RestorePage state={state} send={send} /> : <SettingsPage state={state} send={send} />}
+        {page === 'Protection' ? <Protection state={state} send={send} folders={folderView} setFolders={setFolderView} stale={!connected} openRunDetails={openRunDetails} /> : page === 'Activity' ? <ActivityPage state={state} send={send} view={historyView} setView={setHistoryView} openRunDetails={openRunDetails} openRestore={() => navigate('Restore')} interactive={connected} /> : page === 'Restore' ? <RestorePage state={state} send={send} /> : <SettingsPage state={state} send={send} />}
       </ErrorBoundary>
       <footer className="app-footnote"><span><LockKeyhole size={10} />{state.preview ? 'Animation preview · no backup is running' : 'Your backups are encrypted'}</span><span>{state.status.active ? <Shimmer>{state.preview ? 'Preview running' : 'Backup is running'}</Shimmer> : updatedText}</span></footer>
     </motion.main></AnimatePresence></div></div>

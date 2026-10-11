@@ -136,8 +136,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .status-emblem.active { background: var(--accent-tint); color: var(--accent); }
 .status-emblem.danger { background: var(--red-tint); color: var(--red-ink); }
 .status-emblem.warning { background: var(--orange-tint); color: var(--orange-ink); }
-.status-title { font-weight: 550; letter-spacing: -.5px; font-size: var(--type-2xl); line-height: 1.3; }
-.status-detail { font-size: var(--type-sm); color: var(--ink-2); line-height: 1.7; margin-top: 13px; overflow-wrap: anywhere; }
+/* Nothing is wrong and nothing is asked (a backup the person stopped while the backups are still on time): not a color that asks. */
+.status-emblem.neutral { background: var(--field); color: var(--ink-2); }
+/* The answer to "am I protected?" is the largest thing on the page, as large as the page's own title. */
+.status-title { font-weight: 550; letter-spacing: -.6px; font-size: var(--type-3xl); line-height: 1.25; }
+.status-detail { font-size: var(--type-base); color: var(--ink); line-height: 1.65; margin-top: 13px; overflow-wrap: anywhere; }
 .status-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 16px; }
 .quiet-tag { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; background: var(--inset); color: var(--ink-2); border-radius: var(--r-chip); font-size: var(--type-xs); box-shadow: var(--shadow-hairline); }
 .progress-area { margin-top: 22px; }
@@ -151,7 +154,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .backup-tasks button { height: 40px; }
 .stats-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); border-top: 1px solid var(--line); margin-top: 18px; padding-top: 14px; gap: 18px; }
 .stat-label { display: flex; align-items: center; gap: 6px; font-size: var(--type-xs); color: var(--ink-3); }
-.stat-number { display: inline-block; margin-top: 6px; font-size: var(--type-xl); font-weight: 500; letter-spacing: -.6px; color: var(--ink); font-variant-numeric: tabular-nums; }
+.stat-number { display: inline-block; overflow-wrap: anywhere; margin-top: 6px; font-size: var(--type-xl); font-weight: 500; letter-spacing: -.6px; color: var(--ink); font-variant-numeric: tabular-nums; }
 /* What a figure covers, in words under it ("last 400 runs"). */
 .stat-sub { display: block; margin-top: 2px; color: var(--ink-3); font-size: var(--type-xs); line-height: 1.45; }
 .two-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
@@ -361,10 +364,22 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .protection-hero .info-action:empty { display: none; }
 /* A hero the host has stopped updating (the link is down) still shows the last thing it said, so it is dimmed and nothing in it moves:
  * a frozen page must not look busy. Forced colors would blend the dimmed text into the page, so there it keeps its colors and gets a dashed edge. */
-.protection-hero.is-stale { opacity: .6; }
+.protection-hero.is-stale { opacity: .8; }
 .protection-hero.is-stale, .protection-hero.is-stale *, .protection-hero.is-stale *::before, .protection-hero.is-stale *::after { animation-play-state: paused !important; }
 .protection-hero.is-stale .progress-bar::after { animation: none; }
 @media (forced-colors: active) { .protection-hero.is-stale { opacity: 1; outline-style: dashed; } }
+/* The fill of a progress bar is a background, which forced colors repaints as Canvas: the bar looked empty. (The restore dialog's bar has the same rule.) */
+@media (forced-colors: active) { .progress-bar { forced-color-adjust: none; background: Highlight; } .hero-concern, .status-emblem.neutral { outline: 1px solid CanvasText; outline-offset: -1px; } }
+/* What the hero's colour is about when the host's title does not say it (heroConcern): one line under the status, in the same two tones as the rest. */
+.hero-concern { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0 0; padding: 10px 12px; border-radius: var(--r-control); font-size: var(--type-sm); line-height: 1.6; color: var(--ink); background: var(--orange-tint); }
+.hero-concern svg { flex-shrink: 0; margin-top: 2px; color: var(--orange-ink); }
+.hero-concern.danger { background: var(--red-tint); }
+.hero-concern.danger svg { color: var(--red-ink); }
+.hero-concern span { min-width: 0; overflow-wrap: anywhere; }
+/* The buttons that answer the hero (see what happened, confirm the changes) sit side by side. */
+.protection-hero .info-action { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
+/* A live region that is empty most of the time takes no row of the page's column, so it adds no gap, but it is still there to announce what is put into it. */
+.live-slot:empty { position: absolute; }
 /* A tag that is a problem rather than a fact (a protected folder that cannot be found). */
 .quiet-tag.is-warning { color: var(--orange-ink); background: var(--orange-tint); box-shadow: none; }
 /* The storage line under the backup destination, once the drive says it is not ready. */
@@ -396,6 +411,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
  * same look as a folder notice. On Protection the card is a grid, and the slot spans both of its columns. */
 .setting-row .schedule-notice, .backup-destinations .schedule-notice { margin: 12px 0 0; }
 .backup-destinations .schedule-notice-slot { grid-column: 1 / -1; }
+.backup-destinations .schedule-problem { grid-column: 1; }
 .schedule-problem { margin-top: 12px; }
 .schedule-problem .inline-details { margin: 8px 0 12px; }
 .folder-lock-note { margin: -6px 0 14px; font-size: var(--type-sm); }
@@ -596,6 +612,8 @@ html[data-reduced-motion=true] dialog.app-dialog::backdrop { animation: none; ba
   .activity-metrics .stat-number { font-size: var(--type-lg); }
 }
 @container workspace (max-width: 560px) {
+  /* Four figures in a row need about 440px; narrower (a small window, or a large zoom) they are two by two instead of cut short. */
+  .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 14px; }
   .folder-remove-label { display: none; }
   .shortcut-list > div, .about-facts > div { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .folder-row-lock { width: 35px; }

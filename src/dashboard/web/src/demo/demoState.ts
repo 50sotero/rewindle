@@ -92,7 +92,7 @@ export function createSampleState(now = Date.now()): DashboardState {
     updated: `Updated ${new Date(now).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })}`, updatedAt: new Date(now).toISOString(), subtitle: '', dataError: '',
     status: {
       key: 'success', title: 'Backup verified',
-      detail: `${latest.filesDisplay} files and ${latest.processedDisplay} are protected. The snapshot and a restore test file were checked.`,
+      detail: `Verified: ${latest.filesDisplay} files checked, ${latest.storedDisplay} of new data saved.`,
       badge: 'VERIFIED', active: false, success: true, failure: false, cancelled: false, phaseIndex: 4, phaseLabel: 'Complete',
       progress: 1, estimated: false, runId: latest.id,
       files: latest.filesDisplay, bytes: latest.processedDisplay, speed: '—', elapsed: latest.durationDisplay, errors: '0',
@@ -103,13 +103,13 @@ export function createSampleState(now = Date.now()): DashboardState {
       { path: 'C:\\Users\\you\\Pictures', name: 'Pictures', isCanary: false, exists: true, canRemove: true, detail: 'Protected  •  ~\\Pictures' },
       { path: 'C:\\Users\\you\\Desktop', name: 'Desktop', isCanary: false, exists: true, canRemove: true, detail: 'Protected  •  ~\\Desktop' },
       { path: 'C:\\Users\\you\\Music', name: 'Music', isCanary: false, exists: true, canRemove: true, detail: 'Protected  •  ~\\Music' },
-      { path: 'C:\\Users\\you\\Projects', name: 'Projects + restore canary', isCanary: true, exists: true, canRemove: false, detail: 'Required  •  ~\\Projects' },
+      { path: 'C:\\Users\\you\\Projects', name: 'Projects + restore test file', isCanary: true, exists: true, canRemove: false, detail: 'Required  •  ~\\Projects' },
     ],
     sourceStatus: 'Administrator approval is required to change protected folders.', sourceNotice: null, sourcePicker: null,
     sourceOperation: { active: false, stage: 'Idle', message: '', path: '' },
     history, historyTruncated: false, selectedRunId: latest.id,
     schedule: {
-      summary: 'Daily at 02:00', nextRun: formatWhen(next),
+      summary: 'Daily at 02:00', nextRun: formatWhen(next), nextRunAt: next.toISOString(),
       detail: 'Run missed backups • Wait for AC power',
     },
     repository: { path: repositoryPath, volume: '412 GiB free of 931 GiB  •  NTFS' },
@@ -118,7 +118,7 @@ export function createSampleState(now = Date.now()): DashboardState {
       state: 'Healthy', verifiedAt: new Date(Date.parse(latest.started) + latest.durationSeconds * 1000).toISOString(),
     },
     offsite: {
-      title: 'Cloud verification not configured', detail: 'No cloud verification has been recorded for this backup.',
+      title: 'No off-site copy is set up', detail: 'That is optional. Your backup on this computer works without one.',
       evidence: '', kind: 'NotConfigured', checkedAt: '', providerConfirmed: false, restoreVerified: false,
     },
     recovery: {

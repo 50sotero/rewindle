@@ -22,7 +22,8 @@
 .health-danger .health-reason { background: var(--red-tint); }
 .health-time { margin: 10px 0 0; font-size: var(--type-xs); color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .health-time time { color: var(--ink-2); }
-.health-next-step { border-top: 1px solid var(--line); padding-top: 12px; margin: 13px 0 0; font-size: var(--type-xs); color: var(--ink-2); line-height: 1.65; }
+/* The sentence that says what to do is not the smallest text on the card. */
+.health-next-step { border-top: 1px solid var(--line); padding-top: 12px; margin: 13px 0 0; font-size: var(--type-sm); color: var(--ink); line-height: 1.65; }
 .health-evidence { margin-top: 12px; font-size: var(--type-xs); color: var(--ink-2); }
 .health-evidence summary { cursor: pointer; display: flex; gap: 8px; align-items: center; width: fit-content; color: var(--ink); border-radius: var(--r-chip); }
 .health-evidence summary::-webkit-details-marker { display: none; }

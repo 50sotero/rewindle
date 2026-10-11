@@ -48,3 +48,25 @@ export function formatClock(iso: string | undefined | null, locale?: string, fal
   if (!date || Number.isNaN(date.getTime())) return fallback;
   return date.toLocaleTimeString(locale, { hour: usesTwelveHourClock(locale) ? 'numeric' : '2-digit', minute: '2-digit' });
 }
+
+const DAY_MS = 86_400_000;
+
+/** How many calendar days (local) `date` is before `now`: 0 today, 1 yesterday, negative for a moment still to come. */
+function daysBefore(date: Date, now: Date): number {
+  const startOf = (value: Date) => new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+  return Math.round((startOf(now) - startOf(date)) / DAY_MS);
+}
+
+/**
+ * A moment with its age in words, for a time whose age is the point ("Last verified yesterday at 2:03 AM"): today and yesterday by name,
+ * up to two weeks as "3 days ago" with the date in brackets, and the plain `formatWhen` after that (or for a moment still to come).
+ * `now` is only for tests.
+ */
+export function formatWhenAgo(iso: string | undefined | null, locale?: string, fallback = '', now: Date = new Date()): string {
+  const date = iso ? new Date(iso) : null;
+  if (!date || Number.isNaN(date.getTime())) return fallback;
+  const days = daysBefore(date, now);
+  if (days === 0 || days === 1) return `${days === 0 ? 'today' : 'yesterday'} at ${formatClock(iso, locale, fallback)}`;
+  if (days > 1 && days <= 14) return `${days} days ago (${formatWhen(iso, locale, fallback)})`;
+  return formatWhen(iso, locale, fallback);
+}

@@ -173,7 +173,7 @@ namespace ResticBackuper.Dashboard
                     null,
                     null,
                     "Schedule unavailable",
-                    "The installed backup schedule could not be verified.");
+                    "Rewindle could not read the Windows backup schedule, so it cannot tell whether backups are on time.");
             }
 
             DateTime? nextScheduledLocal = FindNextScheduledLocal(schedule, localNow, localTimeZone);
@@ -201,8 +201,9 @@ namespace ResticBackuper.Dashboard
                     null,
                     null,
                     nextScheduledLocal,
-                    "Clock needs attention",
-                    "Windows reports inconsistent local and UTC time. Check the date, time and time zone settings.");
+                    "Check your PC’s clock",
+                    "Windows reports two different times for the same moment, so Rewindle cannot tell how old your backups are. " +
+                        "Check the date, time and time zone in Windows Settings > Time & language > Date & time.");
             }
 
             if (verifiedUtc.HasValue && verifiedUtc.Value > utcNow.Add(ClockTolerance))
@@ -214,9 +215,9 @@ namespace ResticBackuper.Dashboard
                     null,
                     null,
                     nextScheduledLocal,
-                    "Clock needs attention",
-                    "The last verified backup is timestamped in the future (" +
-                        FormatLocal(verifiedLocal.Value) + "). Check the Windows clock.");
+                    "Check your PC’s clock",
+                    "The last verified backup is dated in the future (" +
+                        FormatLocal(verifiedLocal.Value) + "). Check the date and time in Windows Settings > Time & language > Date & time.");
             }
 
             DateTime? latestDueLocal;
@@ -232,7 +233,7 @@ namespace ResticBackuper.Dashboard
 
             if (!verifiedUtc.HasValue)
             {
-                string noVerifiedDetail = "No completed, verified backup has been recorded.";
+                string noVerifiedDetail = "No backup has been verified yet.";
                 if (nextScheduledLocal.HasValue)
                 {
                     noVerifiedDetail += " Next scheduled " + FormatLocal(nextScheduledLocal.Value) + ".";
@@ -272,8 +273,9 @@ namespace ResticBackuper.Dashboard
                     latestDueUtc,
                     nextScheduledLocal,
                     "Overdue",
-                    "No verified backup covers the " + FormatLocal(latestDueLocal.Value) +
-                        " scheduled run. Last verified " + FormatLocal(verifiedLocal.Value) + ".");
+                    "The backup due on " + FormatLocal(latestDueLocal.Value) +
+                        " did not complete. Your last good backup was " + FormatLocal(verifiedLocal.Value) +
+                        ". Choose Back up now to catch up.");
             }
 
             string healthyDetail = "Last verified " + FormatLocal(verifiedLocal.Value) + ".";

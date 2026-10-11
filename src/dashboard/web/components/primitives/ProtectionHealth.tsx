@@ -3,7 +3,7 @@ import { motion } from 'motion/react';
 import { ArchiveRestore, ArrowUpRight, Check, ChevronDown, Clock3, Cloud, HardDrive, LoaderCircle, OctagonAlert, Play, RefreshCw, TriangleAlert } from 'lucide-react';
 import { Button } from '@/components/atoms/Button';
 import { usableLocale, type CommandName, type DashboardState } from '@/src/native-types';
-import { formatWhen } from '@/src/when';
+import { formatClock, formatWhen, formatWhenAgo } from '@/src/when';
 import './protection-health.css';
 
 type Send = (command: CommandName, payload?: Record<string, string | boolean>) => void;
@@ -21,6 +21,8 @@ type HealthItem = {
   action?: { command: CommandName; label: string; payload?: Record<string, string | boolean> };
   /** Draws the action as the page's main button. Only where nothing else on the page is: Protection already has one at the top. */
   primary?: boolean;
+  /** Draws the action as a quiet button: nothing is wrong, and the button is only there for someone who wants it. */
+  subdued?: boolean;
   /** Drawn as one quiet line instead of a card: an off-site copy that is not set up is optional, so it asks for nothing (no time, no
    *  next step, no evidence, no button) and does not take a card's room for ever. */
   compact?: boolean;
@@ -31,15 +33,20 @@ export function healthTime(value: string | undefined, locale?: string): string {
   return formatWhen(value, locale, '', { weekday: false });
 }
 
+/** The same moment with its age in words ("yesterday at 2:03 AM", "3 days ago (Wed, Oct 8, 2:03 AM)"), or '' when the text is not a date. */
+export function healthAge(value: string | undefined, locale?: string): string {
+  return formatWhenAgo(value, locale, '');
+}
+
 // The host's label for the restore-test step (Telemetry.cs: GetPhase and InferFailurePhase). Phase
-// index 3 is shared with the repository data sample and a generic verification failure, so the label
+// index 3 is shared with the backup data sample and a generic verification failure, so the label
 // is what tells a failed or running restore test apart from those. The page only matches it: wherever
 // it is shown, it says "Restore test" (see phaseName), the one name this step has on every screen.
 const RECOVERY_TEST_PHASE = 'Recovery test';
 
-/** A host phase label the way the page says it. The host's "Recovery test" and "Repository" are the restore test and the storage check everywhere else on the page. */
+/** A host phase label the way the page says it. The host's "Recovery test" is the restore test everywhere else on the page, and its "Repository", "Snapshot" and "Data sample" are checks of the saved backup. */
 export function phaseName(label: string): string {
-  return label === RECOVERY_TEST_PHASE ? 'Restore test' : label === 'Repository' ? 'Storage check' : label;
+  return label === RECOVERY_TEST_PHASE ? 'Restore test' : label === 'Repository' ? 'Backup check' : label === 'Snapshot' ? 'Saving the backup' : label === 'Data sample' ? 'Backup data check' : label;
 }
 
 // The first line of what the host reported, cut to what a card can hold. The whole text stays in the details under it.
@@ -51,107 +58,126 @@ function briefReason(text: string | undefined): string {
 
 type ItemAction = NonNullable<HealthItem['action']>;
 
-// On Protection the hero already says what the host says for these four states, word for word (the host puts the same sentence in both
-// places), so the card there names the cause instead of repeating it. Settings has no hero and keeps the host's sentence, which carries
-// the dates. A state that is not here (a schedule that cannot be read) is not repeated by the hero, so its card keeps the host's sentence.
+// On Protection the hero already says what the host says for these states (the host puts the same sentence in both places), so the
+// card there names the cause in a few words instead of repeating it. Settings has no hero and keeps the host's sentence, which carries
+// the dates. A schedule that cannot be read has its own wording below: the hero's concern line and this card each say a different half.
 const FRESHNESS_CAUSE: Partial<Record<DashboardState['freshness']['state'], string>> = {
-  Overdue: 'The last verified backup is older than the schedule expects.',
-  Paused: 'Automatic backups are paused.',
-  NoVerifiedBackup: 'No completed, verified backup has been recorded yet.',
-  ClockAnomaly: 'The computer’s clock looks wrong, so the age of the last backup cannot be judged.',
+  Overdue: 'Anything you changed since your last good backup isn’t saved yet.',
+  Paused: 'Nothing will back up on its own until you turn the schedule back on.',
+  NoVerifiedBackup: 'Your files are not protected until the first backup finishes.',
+  ClockAnomaly: 'Rewindle can’t tell how old your last backup is.',
+  Unavailable: 'Your backups may still be running on time. Rewindle just can’t confirm it.',
 };
+
+// What the card calls the schedule's state. The host's "Healthy" and "Overdue" are one word each; beside "Local backup" these read as sentences.
+const FRESHNESS_TITLE: Partial<Record<DashboardState['freshness']['state'], string>> = { Healthy: 'On schedule', Overdue: 'Backup overdue' };
 
 export function protectionHealthItems(state: DashboardState, context: HealthContext = 'protection'): HealthItem[] {
   const freshness = state.freshness;
   const cloud = state.offsite;
+  const s = state.status;
+  // Protection has the hero (with its own button for a failed run) and Back up now above the cards; Settings has neither.
+  const here = context === 'protection';
   // The provider is named only when the host's evidence names one ("Google Drive" for a direct My Drive proof); otherwise the page
   // says "off-site" and nothing more, because most backups have no off-site copy and one that does may be anywhere.
   const provider = (cloud.provider ?? '').trim();
   // The status could not be read: the page lost the host's answer (dataError), or the host could read no status file (status.unavailable,
   // which is not a failed run, so the failure wording below must not be used for it).
-  const unavailable = !!state.dataError || !!state.status.unavailable;
+  const unavailable = !!state.dataError || !!s.unavailable;
   const hasTest = !!freshness.verifiedAt && freshness.state !== 'ClockAnomaly' && !unavailable;
   // The newest run's restore test outranks an older pass, which stays visible as "Last passed".
-  const restoreFailed = !unavailable && state.status.failure && state.status.phaseLabel === RECOVERY_TEST_PHASE;
-  const restoreRunning = !unavailable && state.status.active && state.status.phaseLabel === RECOVERY_TEST_PHASE;
+  const restoreFailed = !unavailable && s.failure && s.phaseLabel === RECOVERY_TEST_PHASE;
+  const restoreRunning = !unavailable && s.active && s.phaseLabel === RECOVERY_TEST_PHASE;
+  // Behind schedule is as red here as in the hero. A backup the person stopped, with the backups still on time, asks for nothing, and an
+  // old restore test is not a second problem: the next backup runs it again.
+  const behind = freshness.state === 'Overdue' || freshness.state === 'ClockAnomaly';
+  const calmStop = s.cancelled && !s.failure && freshness.state === 'Healthy';
   const restoreTone: Tone = restoreFailed ? 'danger' : restoreRunning ? 'active'
-    : hasTest ? (freshness.state === 'Healthy' ? 'success' : 'warning')
+    : hasTest ? (freshness.state === 'Healthy' ? 'success' : 'neutral')
     : unavailable || freshness.state === 'ClockAnomaly' ? 'warning' : 'neutral';
-  const localTone: Tone = unavailable ? 'warning' : state.status.active ? 'active'
-    : state.status.failure ? 'danger' : state.status.cancelled ? 'warning' : freshness.state === 'Healthy' ? 'success' : 'warning';
+  const localTone: Tone = unavailable ? 'warning' : s.active ? 'active'
+    : s.failure || behind ? 'danger' : calmStop ? 'neutral' : s.cancelled ? 'warning' : freshness.state === 'Healthy' ? 'success' : 'warning';
+  // An off-site copy waiting for its next check is neutral: Rewindle does the check by itself, so nothing is asked of the person.
+  const cloudWaiting = cloud.kind === 'Stale';
   const cloudTone: Tone = unavailable ? 'warning' : cloud.kind === 'RestoreVerified' || cloud.kind === 'ProviderConfirmed' ? 'success'
     : cloud.kind === 'Failed' ? 'danger' : cloud.kind === 'InProgress' ? 'active'
-    : cloud.kind === 'NotConfigured' ? 'neutral' : 'warning';
+    : cloud.kind === 'NotConfigured' || cloudWaiting ? 'neutral' : 'warning';
   const cloudTitles: Record<DashboardState['offsite']['kind'], string> = {
-    NotConfigured: 'Not set up (optional)', StatusUnavailable: 'Needs verification', Failed: 'Verification failed',
-    InProgress: 'Verification in progress', LocalVerifiedProviderPending: provider ? `Waiting for ${provider} to confirm` : 'Waiting for confirmation',
+    NotConfigured: 'Not set up (optional)', StatusUnavailable: 'Can’t be confirmed yet', Stale: 'Waiting for the next check', Failed: 'The last check failed',
+    InProgress: 'Being checked', LocalVerifiedProviderPending: provider ? `Waiting for ${provider} to confirm` : 'Waiting for confirmation',
     ProviderConfirmed: provider ? `Confirmed by ${provider}` : 'Off-site copy confirmed', RestoreVerified: provider ? `Verified in ${provider}` : 'Off-site copy verified',
   };
   // The description under the title is worded per kind, so for an off-site copy that failed or cannot be confirmed the cause the host
-  // reports ("Direct cloud proof is stale", what a failed check said) would only be inside the closed disclosure. It is brought
-  // up as one line and the disclosure opens with it. A status that could not be read has no current cause to report.
+  // reports would only be inside the closed disclosure. It is brought up as one line and the disclosure opens with it. A status that
+  // could not be read has no current cause to report.
   const cloudProblem = !unavailable && (cloudTone === 'danger' || cloudTone === 'warning');
   // A backup with no off-site copy is not a problem and asks for nothing: it is one quiet line, not a card (see `compact`). It names no
   // provider, because nothing says there is one.
   const cloudOptional = !unavailable && cloud.kind === 'NotConfigured';
   const cloudDetails: Record<DashboardState['offsite']['kind'], string> = {
-    NotConfigured: 'No off-site copy is set up. That is optional: your local backup works without one.',
-    StatusUnavailable: 'Current off-site protection could not be confirmed. Your local backup is assessed separately.',
-    Failed: 'The most recent off-site verification did not succeed. Review the recorded issue below.',
-    InProgress: provider ? `The copy in ${provider} is being checked. A verified result will appear when it finishes.` : 'The off-site copy is being checked. A verified result will appear when it finishes.',
-    LocalVerifiedProviderPending: `The backup passed local checks. Confirmation from ${provider || 'the off-site provider'} is still pending.`,
-    ProviderConfirmed: `${provider || 'The off-site provider'} confirmed the copy. An independent restore from it has not been verified yet.`,
-    RestoreVerified: provider ? `The ${provider} inventory matches the backup location, and an independent restore from ${provider} passed.` : 'The off-site inventory matches the backup location, and an independent restore from it passed.',
+    NotConfigured: 'No off-site copy is set up. That is optional: your backup on this computer works without one.',
+    StatusUnavailable: 'Rewindle could not confirm the off-site copy just now. Your backup on this computer is not affected.',
+    Stale: `Your latest backup hasn’t been checked in ${provider || 'the off-site copy'} yet. The next check will cover it, so there is nothing to do.`,
+    Failed: 'The last check of the off-site copy did not succeed. What was reported is below.',
+    InProgress: provider ? `The copy in ${provider} is being checked. The result appears here when it finishes.` : 'The off-site copy is being checked. The result appears here when it finishes.',
+    LocalVerifiedProviderPending: `The backup passed the checks on this computer. Confirmation from ${provider || 'the off-site provider'} is still pending.`,
+    ProviderConfirmed: `${provider || 'The off-site provider'} confirmed the copy. A test restore from it has not been done yet.`,
+    RestoreVerified: provider ? `${provider} holds a complete copy of your backups, and a test restore from ${provider} worked.` : 'The off-site location holds a complete copy of your backups, and a test restore from it worked.',
   };
   // What the local card offers follows what is wrong, and its next step says the same thing in words (so both are decided in this order).
-  // A run in progress is watched in Activity, a failed run is read there, and a backup that is due is made with Back up now: on Protection
-  // that button is also at the top of the page, so the card's is a second way to the same action and stays an ordinary button; Settings has
-  // none of its own, so there it is the main one. A schedule that cannot be read is looked at in Settings.
+  // On Protection a run in progress is shown by the hero, a failed run has its button there, and a backup that is due is made with the Back up
+  // now at the top of the page, so the card does not repeat those buttons; Settings has none of them, so there the card carries them. A
+  // schedule that cannot be read is looked at in Settings.
   const needsBackup = freshness.state === 'Overdue' || freshness.state === 'NoVerifiedBackup';
-  const viewActivity: ItemAction = { command: 'navigate', label: 'View activity', payload: { page: 'Activity' } };
-  const localAction: ItemAction = unavailable ? { command: 'refresh', label: 'Refresh status' }
-    : state.status.active ? viewActivity
+  const viewActivity: ItemAction | undefined = here ? undefined : { command: 'navigate', label: 'View activity', payload: { page: 'Activity' } };
+  const heroOffersRun = here && !!s.runId;
+  const localAction: ItemAction | undefined = unavailable ? { command: 'refresh', label: 'Try again' }
+    : s.active ? viewActivity
     : freshness.state === 'Paused' ? { command: 'editSchedule', label: 'Review schedule' }
-    : freshness.state === 'ClockAnomaly' ? { command: 'refresh', label: 'Refresh status' }
-    : state.status.failure ? { command: 'navigate', label: 'Review the failed run', payload: { page: 'Activity' } }
-    : needsBackup ? { command: 'backupNow', label: 'Back up now' }
-    : state.status.cancelled ? viewActivity
-    : freshness.state === 'Unavailable' ? (context === 'protection' ? { command: 'navigate', label: 'Open Settings', payload: { page: 'Settings' } } : { command: 'refresh', label: 'Refresh status' })
+    : freshness.state === 'ClockAnomaly' ? { command: 'refresh', label: 'Try again' }
+    : s.failure ? (heroOffersRun ? undefined : { command: 'navigate', label: 'See what happened', payload: { page: 'Activity' } })
+    : needsBackup ? (here ? undefined : { command: 'backupNow', label: 'Back up now' })
+    : s.cancelled ? viewActivity
+    : freshness.state === 'Unavailable' ? (here ? { command: 'navigate', label: 'Open Settings', payload: { page: 'Settings' } } : { command: 'refresh', label: 'Try again' })
     : viewActivity;
+  const checkReadiness: ItemAction = { command: 'checkReadiness', label: state.actions.checkReadiness?.label || 'Check recovery readiness' };
   return [
     {
       key: 'local', label: 'Local backup', tone: localTone,
-      title: unavailable ? 'Status unavailable' : state.status.active ? 'Backup in progress' : state.status.failure ? 'Latest run needs attention' : state.status.cancelled ? 'Latest run was cancelled' : freshness.title || 'Not verified yet',
+      title: unavailable ? 'Status unavailable' : s.active ? 'Backup in progress' : s.failure ? 'Latest backup did not finish' : s.cancelled ? 'Latest backup was stopped' : FRESHNESS_TITLE[freshness.state] || freshness.title || 'Not verified yet',
       // A status file that could not be read has its own sentence from the host (which file, and why); a page that lost the host has none.
-      detail: unavailable ? (!state.dataError && state.status.detail) || 'Refresh the dashboard to read the current backup state.' : state.status.active || state.status.failure || state.status.cancelled ? state.status.detail
-        : freshness.state === 'Healthy' ? 'Your verified backup is up to date with the automatic schedule.'
-        : (context === 'protection' && FRESHNESS_CAUSE[freshness.state]) || freshness.detail,
-      timestamp: unavailable ? '' : freshness.verifiedAt, timestampLabel: 'Last verified',
-      nextStep: unavailable ? 'Refresh before starting another operation.' : state.status.active ? 'Leave the app open or return later to see the result.'
-        : freshness.state === 'Paused' ? 'Review the schedule to resume automatic backups.'
-        : freshness.state === 'ClockAnomaly' ? 'Check the computer’s date and time, then refresh.'
-        : state.status.failure ? 'Open the latest run for its recorded issue and next step.'
-        : needsBackup ? (context === 'protection' ? 'Use Back up now at the top of this page to create a fresh backup.' : 'Use Back up now below to create a fresh backup.')
-        : state.status.cancelled ? (context === 'protection' ? 'Review the cancelled run in Activity, or use Back up now at the top of this page.' : 'Review the cancelled run in Activity, or start a fresh backup from Protection.')
-        : freshness.state === 'Unavailable' ? (context === 'protection' ? 'Open Settings to check the schedule under Automatic backups.' : 'Check the schedule under Automatic backups, above.')
-        : 'Your next automatic run is shown in the backup schedule.',
+      detail: unavailable ? (!state.dataError && s.detail) || 'Rewindle could not read the backup status just now. It tries again on its own.'
+        : s.active ? (here ? 'A backup is running now. Progress is shown above.' : s.detail)
+        : s.failure ? (here ? 'This run is not counted as a backup.' : s.detail)
+        : s.cancelled ? (calmStop ? 'You stopped the latest backup before it finished. Your earlier backups are not affected.' : here ? 'The latest backup was stopped before it finished.' : s.detail)
+        : freshness.state === 'Healthy' ? 'Your latest backup is on schedule.'
+        : (here && FRESHNESS_CAUSE[freshness.state]) || freshness.detail,
+      // The hero already says when the last verified backup finished.
+      timestamp: unavailable || here ? '' : freshness.verifiedAt, timestampLabel: 'Last verified',
+      nextStep: unavailable ? ''
+        : s.active ? ''
+        : freshness.state === 'Paused' ? 'Choose Review schedule to turn automatic backups back on.'
+        : freshness.state === 'ClockAnomaly' ? 'Set the date and time in Windows Settings, then choose Try again.'
+        : s.failure ? (heroOffersRun ? '' : 'Open the latest run in Activity to see what happened.')
+        : needsBackup ? (here ? 'Choose Back up now at the top of this page.' : 'Choose Back up now below.')
+        : s.cancelled ? (calmStop ? '' : here ? 'Choose Back up now at the top of this page to run it again.' : 'Start a backup from Protection to run it again.')
+        : freshness.state === 'Unavailable' ? (here ? 'Open Settings to check the schedule under Automatic backups.' : 'Check the schedule under Automatic backups, above.')
+        : '',
       action: localAction,
-      primary: context === 'settings' && localAction.command === 'backupNow',
+      primary: context === 'settings' && localAction?.command === 'backupNow',
     },
     {
       key: 'cloud', label: 'Off-site copy', tone: cloudTone,
-      title: unavailable ? 'Status unavailable' : cloudTitles[cloud.kind] || 'Needs verification',
-      detail: unavailable ? 'Current off-site status could not be read.' : cloudDetails[cloud.kind] || 'No current verification result is available.',
+      title: unavailable ? 'Status unavailable' : cloudTitles[cloud.kind] || 'Can’t be confirmed yet',
+      detail: unavailable ? 'Rewindle could not read the off-site status just now.' : cloudDetails[cloud.kind] || 'There is no current check result.',
       timestamp: unavailable || cloudOptional ? '' : cloud.checkedAt,
       timestampLabel: cloudTone === 'success' ? 'Last verified' : 'Last checked',
-      nextStep: cloudOptional ? ''
-        : cloudTone === 'success' ? 'Off-site verification is separate from the local backup schedule.'
-        : cloud.kind === 'InProgress' ? 'Wait for verification to finish, then refresh the status.'
-        : `Check that ${provider || 'the off-site location'} is available and review the verification details below.`,
+      // Rewindle checks the off-site copy by itself (nothing on this page starts that check), so there is no button and nothing to wait for.
+      nextStep: cloud.kind === 'Failed' ? `Make sure ${provider || 'the off-site location'} is available. Rewindle checks again automatically.`
+        : cloud.kind === 'StatusUnavailable' ? 'Rewindle checks again automatically. The details below say what it found.' : '',
       reason: cloudProblem ? briefReason(cloud.detail) : '',
       evidence: cloudOptional ? undefined : [cloud.title, cloud.detail, cloud.evidence].filter(Boolean).join('\n\n'),
       openEvidence: cloudProblem,
-      action: cloudOptional ? undefined : { command: 'refresh', label: 'Refresh status' },
       compact: cloudOptional,
     },
     {
@@ -159,20 +185,21 @@ export function protectionHealthItems(state: DashboardState, context: HealthCont
       title: restoreFailed ? 'Latest restore test failed' : restoreRunning ? 'Restore test running'
         : hasTest ? (restoreTone === 'success' ? 'Restore test passed' : freshness.state === 'Unavailable' ? 'Passed earlier' : 'Passed earlier, not re-tested')
         : restoreTone === 'neutral' ? 'Not tested yet' : 'Restore test not confirmed',
-      detail: restoreFailed ? `The newest run could not restore its test file. ${hasTest ? 'The last passing test is shown below.' : 'No earlier passing test is recorded.'}`
+      detail: restoreFailed ? `The newest backup could not restore its test file.${hasTest ? ' An earlier restore test did pass.' : ' No earlier restore test passed.'}`
         : restoreRunning ? 'The current backup is restoring its test file to confirm that recovery works.'
         : hasTest ? (restoreTone === 'success' ? 'The latest verified backup restored its test file successfully.'
-          : freshness.state === 'Paused' ? 'Automatic backups are paused, so recovery has not been tested since this earlier pass.'
-          : freshness.state === 'Unavailable' ? 'The backup schedule could not be verified, so this test cannot be judged current.'
-          : 'This test is older than the backup schedule expects. The next verified backup runs the restore test again.')
+          : freshness.state === 'Paused' ? 'Automatic backups are paused, so the restore test has not run since this earlier pass.'
+          : freshness.state === 'Unavailable' ? 'The backup schedule could not be read, so this test cannot be judged current.'
+          : 'This test is older than the schedule expects. The next verified backup runs it again.')
         : restoreTone === 'neutral' ? 'No verified backup has run a restore test yet. The first one restores a small test file.'
-        : 'A completed, verified restore test with a reliable timestamp is not available.',
-      timestamp: hasTest ? freshness.verifiedAt : '', timestampLabel: 'Last passed',
-      nextStep: restoreFailed ? 'Open the latest run in Activity for its recorded issue, then start a fresh backup from Protection.'
-        : restoreRunning ? 'Leave the app open or return later to see the result.'
-        : 'Check recovery readiness for an independent assessment of backup access and recovery requirements.',
+        : 'There is no restore test result that can be trusted right now.',
+      // The hero already says when the last verified backup finished; this is the time of the same backup's restore test.
+      timestamp: hasTest && !here ? freshness.verifiedAt : '', timestampLabel: 'Last passed',
+      nextStep: restoreFailed ? `Choose ${checkReadiness.label} to find out why, then choose Back up now to try again.`
+        : restoreTone === 'warning' ? `${checkReadiness.label} opens a separate window that tests that your backup can be unlocked and restored.` : '',
       evidence: 'After every backup, Rewindle restores a small test file and checks it. That shows recovery works; it does not mean every backed-up file has been restored.',
-      action: { command: 'checkReadiness', label: 'Check recovery readiness' },
+      action: checkReadiness,
+      subdued: restoreTone === 'success' || restoreTone === 'neutral',
     },
   ];
 }
@@ -182,7 +209,7 @@ export function protectionHealthItems(state: DashboardState, context: HealthCont
 // grow when a backup starts.
 function HealthAction({ item, state, send, quiet, locale }: { item: HealthItem; state: DashboardState; send: Send; quiet: boolean; locale?: string }) {
   const id = useId();
-  // Refresh asks the host to read its status files again, and the host answers with nothing to show unless a file changed, so a
+  // Try again asks the host to read its status files again, and the host answers with nothing to show unless a file changed, so a
   // press that changed nothing looked as if it had done nothing. The card says when it last asked; the count restarts the note, so a
   // second press within the same minute is still seen (and heard).
   const [reread, setReread] = useState<{ at: string; count: number } | null>(null);
@@ -198,13 +225,13 @@ function HealthAction({ item, state, send, quiet, locale }: { item: HealthItem; 
   const Icon = refreshes ? RefreshCw : starts ? Play : ArrowUpRight;
   const press = () => {
     send(action.command, action.payload);
-    if (refreshes) setReread(previous => ({ at: new Date().toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' }), count: (previous?.count ?? 0) + 1 }));
+    if (refreshes) setReread(previous => ({ at: formatClock(new Date().toISOString(), locale), count: (previous?.count ?? 0) + 1 }));
   };
-  return <div className="health-action" title={quiet && reason ? reason : undefined}><Button size="xs" variant={item.primary ? 'primary' : 'secondary'} disabled={!!reason} aria-describedby={reason ? id : undefined}
+  return <div className="health-action" title={quiet && reason ? reason : undefined}><Button size="xs" variant={item.primary ? 'primary' : item.subdued ? 'quiet' : 'secondary'} disabled={!!reason} aria-describedby={reason ? id : undefined}
     onClick={press}>{starts && <Icon size={11} fill="currentColor" aria-hidden="true" />}{action.label}{!starts && <Icon size={12} aria-hidden="true" />}</Button>
     {reason && <p id={id} className={quiet ? 'sr-only' : 'action-disabled-reason'}>{reason}</p>}
-    {/* Always present, so a note that appears after a press is announced. A cloud check is not started from here, and the note says so. */}
-    {refreshes && <div role="status">{reread && <p key={reread.count} className="action-disabled-reason health-reread">Status re-read at {reread.at}.{item.key === 'cloud' ? ' Off-site checks run on their own schedule.' : ''}</p>}</div>}</div>;
+    {/* Always present, so a note that appears after a press is announced. */}
+    {refreshes && <div role="status">{reread && <p key={reread.count} className="action-disabled-reason health-reread">Status read again at {reread.at}.</p>}</div>}</div>;
 }
 
 // `heading` adds the page outline's missing level: the cards are <h3>, so on a page whose last heading is the
@@ -224,7 +251,7 @@ export default function ProtectionHealth({ state, send, quiet = false, heading =
       const Icon = icons[item.key];
       // Each state has its own shape as well as its own color: a triangle needs attention, an octagon is a problem.
       const StatusIcon = item.tone === 'success' ? Check : item.tone === 'active' ? LoaderCircle : item.tone === 'neutral' ? Clock3 : item.tone === 'warning' ? TriangleAlert : OctagonAlert;
-      const when = healthTime(item.timestamp, locale);
+      const when = healthAge(item.timestamp, locale);
       return <motion.article key={item.key} className={`health-card surface health-${item.tone}`}
         initial={{ opacity: 0, y: state.reducedMotion ? 0 : 5 }} animate={{ opacity: 1, y: 0 }}
         transition={{ duration: state.reducedMotion ? 0 : .24, delay: state.reducedMotion ? 0 : index * .035 }}>
@@ -232,12 +259,10 @@ export default function ProtectionHealth({ state, send, quiet = false, heading =
         <div className="health-card-status"><StatusIcon size={15} aria-hidden="true" /><h3>{(item.tone === 'warning' || item.tone === 'danger') && <span className="sr-only">Needs attention: </span>}{item.title}</h3></div>
         <p className="health-description">{item.detail}</p>
         {item.reason && <p className="health-reason"><span className="sr-only">Reported: </span>{item.reason}</p>}
-        <p className="health-time">{when
-          ? <>{item.timestampLabel} <time dateTime={item.timestamp}>{when}</time></>
-          : 'No verified time available'}</p>
+        {when && <p className="health-time">{item.timestampLabel} <time dateTime={item.timestamp}>{when}</time></p>}
         {item.nextStep && <p className="health-next-step">{item.nextStep}</p>}
         {/* `open` is only the state the card is drawn in: React leaves the element alone until the prop changes, so a person who closes it keeps it closed. */}
-        {item.evidence && <details className="health-evidence" open={item.openEvidence}><summary>{item.key === 'cloud' ? 'Verification details' : 'What this test covers'}<ChevronDown size={12} aria-hidden="true" /></summary><p>{item.evidence}</p></details>}
+        {item.evidence && <details className="health-evidence" open={item.openEvidence}><summary>{item.key === 'cloud' ? 'Details' : 'What this test covers'}<ChevronDown size={12} aria-hidden="true" /></summary><p>{item.evidence}</p></details>}
         <HealthAction item={item} state={state} send={send} quiet={quiet} locale={locale} />
       </motion.article>;
     })}
