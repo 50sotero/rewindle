@@ -9,12 +9,51 @@ labels. Releases before 0.2.0 were published under the name ResticBackuper.
 
 ### Changed
 
-- Activity no longer treats every failed or incomplete run as something to act
-  on. A run that a later successful backup put right is marked **Resolved**,
-  in a neutral color, and its details say that nothing needs doing and keep
-  the run's next step as advice for next time. The "Needs attention" filter is
-  now **Problems**. The page warns, with a link to the details, only when no
-  backup has succeeded since a run that failed.
+A pass over every page of the dashboard and Setup, so that nothing raises an
+alarm without saying what to do, each fact is said once, and the words are
+ones a home user reads without a glossary.
+
+- **Activity** no longer treats every failed or incomplete run as something to
+  act on. A run that a later successful backup put right is marked
+  **Resolved**, in a neutral color, and its details say that nothing needs
+  doing. The page warns, with a link to the details, only when no backup has
+  succeeded since a run that failed. The figures at the top are successful
+  backups, the usual backup time and the new data in the last backup; the
+  filter chips are Successful, Problems (or Resolved) and Cancelled, with date
+  presets; the two charts sit side by side, and a run that worked keeps its log
+  folded.
+- **Protection** names what is wrong (an unplugged backup drive, a missing
+  folder, an empty plan, a schedule that can't be read) with one next step, and
+  colors the page only when there is something to do. A failed run is
+  described in a plain sentence from its failure code, with a "See what
+  happened" button. The last verified backup reads "yesterday at 2:03 AM", the
+  off-site copy waits calmly for its next check, and the folder list says
+  "Stop backing up".
+- **Restore** says once per step what to do, shows the newest backup first
+  with a "Newest" mark, explains why files go to a separate folder (and where
+  inside it they land), and turns refusals from the backup service into plain
+  sentences. `npm run dev:demo` can walk the whole flow on invented data.
+- **Settings** has three sections (Backup plan, Appearance with a Text size
+  card, Help and about with the problem report and keyboard shortcuts). The
+  sidebar no longer repeats recent runs, the header drops the always-on
+  "connected" light, and the theme button steps through System, Light and Dark.
+  The text size is kept between launches.
+- **Times** everywhere come from one formatter in the viewer's own clock,
+  including the next run and the schedule ("Daily at 2:00 AM").
+- **Words**: the dashboard, its tray texts, the folder picker, the recovery
+  readiness window and the uninstaller no longer say repository, snapshot,
+  engine, canary, Restic or "protected task" to the user; they say backup,
+  backup location, backup service and restore test file. Retry buttons say
+  "Try again". The unusual-change review asks the person to "Confirm these
+  changes".
+- **Folder picker** warns before adding a OneDrive folder or one whose files
+  are stored only in the cloud, with a bounded check that never refuses a
+  folder on a guess.
+- **Setup** renames its steps Protected folders and Automatic backups, explains
+  how to format a FAT32 or exFAT drive as NTFS, walks through OneDrive's
+  "Always keep on this device", marks the recovery key "Saved and checked",
+  ignores Enter on the Review page so a stray key press never installs, and
+  uses a slightly larger type scale, shared with the dashboard.
 
 ## [0.2.0-alpha.2] - 2026-10-08
 

@@ -68,7 +68,7 @@ engine whose protected install root holds `backup-config.json` (Rewindle first
 when both do), or the one named by `--engine rewindle|legacy`. A root that
 cannot be inspected counts as installed, so the dashboard never silently falls
 through to the other engine. With neither installed, the pages that need an
-engine show **Engine not installed** and where the dashboard looked. A profile
+engine show **Backup service not installed** and where the dashboard looked. A profile
 changes only the names used; every check made with them (UAC, nonce- and
 digest-bound requests, path, ACL and reparse-point checks, the runtime
 manifest) is the same for both. The complete interface, and how each engine

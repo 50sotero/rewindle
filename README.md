@@ -469,7 +469,7 @@ engine profile**:
 - The dashboard picks its engine when it starts: the Rewindle engine if it is
   installed, otherwise the personal edition. `--engine rewindle` or
   `--engine legacy` chooses explicitly. If neither is installed, it shows
-  **Engine not installed** and where it looked.
+  **Backup service not installed** and where it looked.
 - The two engines use different names, so the Rewindle installer neither
   detects nor changes a personal-edition installation.
 - There is no migration. The Rewindle installer will not adopt the personal
