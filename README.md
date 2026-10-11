@@ -240,11 +240,12 @@ protection globally to run the installer.
 
 ### The setup wizard
 
-Rewindle Setup is a window with eight pages: **Welcome**, **What to protect**,
-**Backup location**, **Schedule**, **Review**, **Install**, **Recovery key** and
-**Done**. The suggestions on each page suit most people, so you can just choose
-**Next**. Back and Next are in the same place on every page, `Enter` means Next
-and `Esc` means Back, and it follows Windows' light or dark theme and
+Rewindle Setup is a window with eight pages: **Welcome**, **Protected folders**,
+**Backup location**, **Automatic backups**, **Review**, **Install**, **Recovery
+key** and **Done**. The suggestions on each page suit most people, so you can
+just choose **Next**. Back and Next are in the same place on every page, `Enter`
+means Next (except on Review, where Install takes a deliberate click) and `Esc`
+means Back, and it follows Windows' light or dark theme and
 High Contrast.
 
 <p align="center">
@@ -254,7 +255,7 @@ High Contrast.
   </picture>
 </p>
 
-- **What to protect** lists your Windows folders with their sizes, measured
+- **Protected folders** lists your Windows folders with their sizes, measured
   while you look. Add any other folder; a folder that is missing, inside another
   chosen folder, or full of online-only OneDrive files is explained in plain
   words.
@@ -262,7 +263,7 @@ High Contrast.
   is the Windows drive, which is on the same disk as Windows, and which can't
   hold backups and why. It checks that your folders fit, and offers Google
   Drive for desktop when it is running.
-- **Schedule** sets the daily time. Under *Advanced* you can turn off backing up
+- **Automatic backups** sets the daily time. Under *Advanced* you can turn off backing up
   open files.
 - **Review** shows every choice with an Edit link and whether to run the first
   backup right away. Nothing on your PC has changed up to here: the pages only
@@ -276,7 +277,7 @@ High Contrast.
 
 <table>
   <tr>
-    <td><img src="docs/images/setup/folders.png" alt="What to protect: folder cards with their sizes"></td>
+    <td><img src="docs/images/setup/folders.png" alt="Protected folders: folder cards with their sizes"></td>
     <td><img src="docs/images/setup/location.png" alt="Backup location: drive cards with free space, a recommended backup drive and warnings"></td>
   </tr>
   <tr>

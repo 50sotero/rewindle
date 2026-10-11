@@ -544,7 +544,7 @@ function Assert-OwnedTask {
         # Instead of exact arguments: a case-sensitive pattern the whole argument string must match.
         [string]$ExpectedArgumentsPattern = ''
     )
-    $notOwned = "A Windows scheduled task named $TaskName exists but was not created by Rewindle, so nothing was removed."
+    $notOwned = "A scheduled task named $TaskName was not created by Rewindle, so it was left alone. If you don't need it, delete it in Task Scheduler (search for it in the Start menu)."
     $tasks = @(Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)
     if ($tasks.Count -eq 0) {
         return $null
@@ -939,7 +939,7 @@ try {
         else {
             Write-Warning "Preserved a Start Menu shortcut with an unexpected target: $startMenuShortcut"
             $shortcutKept = $true
-            $shortcutDetail = 'A Start menu item named ResticBackuper points somewhere else, so it was left alone.'
+            $shortcutDetail = "A Start menu shortcut with Rewindle's name opens another program, so it was left alone. Delete $startMenuShortcut yourself if you don't need it."
             Add-UninstallWarning -Code 'shortcut_kept_unexpected_target' -Message $shortcutDetail
             Complete-UninstallPhase 'shortcut' $shortcutDetail
         }
