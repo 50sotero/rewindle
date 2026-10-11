@@ -819,8 +819,8 @@ function RestorePage({ state: shown, send }: { state: DashboardState; send: Send
   const next = recovery.next ?? (ready || recovery.repairNeeded || note ? '' : 'refresh');
   // Waiting is not a problem (it unlocks by itself) and a sample or preview is paused on purpose, so only the rest is drawn as one.
   const tone = ready || note ? '' : next === 'wait' ? 'active' : 'warning';
-  // The backup to look at first: the newest one that saved something. The dialog marks it "Newest" in its list.
-  const newest = ready ? state.history.filter(run => run.success && run.snapshot).reduce<RunState | null>((best, run) => !best || Date.parse(run.started) > Date.parse(best.started) ? run : best, null) : null;
+  // The page names no "newest backup": run history is capped and misses runs made while the app was closed, so only the
+  // dialog's list, read from the backup location itself, can say which backup is newest (it marks it "Newest").
   // The earlier edition (and an older engine) asks Windows for every protected step; a newer one asks once. Only the earlier one is certain from here.
   const permission = state.setup?.engineProfile === 'legacy'
     ? 'On this computer Windows asks for your permission each time Rewindle opens your backup: once to list your backups, once for each folder you open, and once to restore. Choose Yes each time.'
@@ -829,7 +829,6 @@ function RestorePage({ state: shown, send }: { state: DashboardState; send: Send
     <Repairs state={state} send={send} />
     <div className="restore-layout"><section className="surface"><div className={`status-emblem ${tone}`}><ArchiveRestore size={24} aria-hidden="true" /></div>
       <h2>{recovery.title}</h2><p className="muted-copy">{recovery.repairNeeded ? 'Restore opens once the repair above is finished.' : recovery.detail}</p>
-      {newest && <p className="muted-copy">Newest backup to restore from: <strong>{newest.startedDisplay}</strong>.</p>}
       <div className="actions" style={{ marginTop: 22 }}><Action state={state} send={send} command="openRestore" primary size="md" icon={<ArrowUpRight size={14} />} quiet />
         {next === 'refresh' && <Button size="md" variant="secondary" onClick={() => send('refresh')}><RefreshCw size={14} aria-hidden="true" />Try again</Button>}</div>
       {ready && <p className="muted-copy restore-permission">{permission}</p>}
