@@ -93,7 +93,7 @@ export interface RestoreResult {
   title?: string;
   message?: string;
   retryable?: boolean;
-  /** Names the recovery action when it is not a plain retry (for example 'Reload Restore'). */
+  /** Names the recovery action when it is not a plain retry (for example 'Start again'). */
   retryLabel?: string;
 }
 export interface RestoreFlowState {
@@ -176,7 +176,7 @@ export interface SetupState {
   os: string;
   webView2: string;
   /**
-   * The backup engine this window reports on: its name ("Rewindle engine" or "Legacy personal edition"), its profile id, the version its
+   * The backup engine this window reports on: its name ("Rewindle backup service" or "Rewindle backup service (earlier personal edition)"), its profile id, the version its
    * install states (empty while it is not installed), whether --engine or the install roots chose it, and every configuration path an
    * engine was looked for at. Additive: an older host does not send them.
    */
@@ -189,6 +189,8 @@ export interface SetupState {
 export interface DashboardState {
   page: DashboardPage; demo: boolean; preview: boolean; theme: ThemePreference; motion: MotionPreference;
   dark: boolean; reducedMotion: boolean; highContrast: boolean; updated: string; subtitle: string; dataError?: string;
+  /** When the figures on screen were read, as an ISO 8601 timestamp, so the page writes the time of day the way the viewer's region does. Empty while the host is retrying (then `updated` says so in words); absent from an older host. */
+  updatedAt?: string;
   /** The host's regional format (for example "en-GB"), so figures and dates the page formats itself read like the host's. */
   locale?: string;
   setup?: SetupState;
@@ -201,6 +203,8 @@ export interface DashboardState {
     phaseLabel: string; progress: number; estimated: boolean; runId: string;
     files: string; bytes: string; speed: string; elapsed: string; errors: string;
     etaTitle: string; eta: string; etaHint: string;
+    /** Why a backup that was asked for has not started (Windows accepted the request and the task did not run), or empty. Gone once a run appears. */
+    backupNote?: string;
   };
   sources: SourceState[]; sourceStatus: string;
   /** A short-lived outcome of a folder change ("Folder removed…", "Windows approval was cancelled…"); null once it expires. */
@@ -212,16 +216,21 @@ export interface DashboardState {
   historyLimit?: number;
   selectedRunId: string | null;
   /** `error` is why the installed schedule could not be read (empty when it could); `summary` then reads "Schedule unavailable". `notice` is the short-lived outcome of a schedule change; null once it expires. */
-  schedule: { summary: string; nextRun: string; detail: string; error?: string; notice?: { text: string; tone: 'info' | 'success' | 'warning' | 'error' } | null };
+  schedule: { summary: string; nextRun: string; /** The next run as an ISO 8601 timestamp, or empty/absent when there is none; the page formats it like every other time. */ nextRunAt?: string; detail: string; error?: string; notice?: { text: string; tone: 'info' | 'success' | 'warning' | 'error' } | null };
   /** `volumeReady` is false only when the drive itself answered that it is not ready (unplugged, disconnected); true or absent means no such answer. */
   repository: { path: string; volume: string; volumeReady?: boolean };
   freshness: { title: string; detail: string; state: 'Unavailable' | 'Healthy' | 'NoVerifiedBackup' | 'Overdue' | 'Paused' | 'ClockAnomaly'; verifiedAt: string };
   offsite: {
-    title: string; detail: string; evidence: string; kind: 'NotConfigured' | 'StatusUnavailable' | 'Failed' | 'InProgress' | 'LocalVerifiedProviderPending' | 'ProviderConfirmed' | 'RestoreVerified'; checkedAt: string; providerConfirmed: boolean; restoreVerified: boolean;
+    title: string; detail: string; evidence: string; kind: 'NotConfigured' | 'StatusUnavailable' | 'Stale' | 'Failed' | 'InProgress' | 'LocalVerifiedProviderPending' | 'ProviderConfirmed' | 'RestoreVerified'; checkedAt: string; providerConfirmed: boolean; restoreVerified: boolean;
     /** The provider the off-site evidence comes from ("Google Drive"), only when the host's evidence names one. Absent or empty otherwise. */
     provider?: string;
   };
-  recovery: { title: string; detail: string; repairNeeded: boolean; repairMessage: string; repairState: string; repairBusy: boolean; repairPercent: number | null };
+  /**
+   * `next` says what the Restore page offers when restoring is not available: 'refresh' (read the installation again), 'setup' (run
+   * Rewindle Setup again; the detail says how), 'wait' (a backup or a change is running and it unlocks by itself), or empty when
+   * there is nothing to do or the repair banner has the action. Additive: an older host does not send it.
+   */
+  recovery: { title: string; detail: string; repairNeeded: boolean; repairMessage: string; repairState: string; repairBusy: boolean; repairPercent: number | null; next?: 'refresh' | 'setup' | 'wait' | '' };
   actions: Partial<Record<CommandName, ActionState>>;
   runDetails?: RunDetailsState | null;
   restoreFlow?: RestoreFlowState | null;

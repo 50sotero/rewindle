@@ -35,7 +35,7 @@ export function HostError({ wizard }: { wizard: Wizard }) {
     <div className="screen-stack">
       <Callout tone="error" icon={<WifiOff size={18} aria-hidden="true" />} title="Setup couldn’t check this PC">
         <p className="failure-message">{wizard.hostError}</p>
-        <p>Nothing was changed. Choose <strong>Try again</strong>. If it keeps happening, <button type="button" className="text-link" onClick={() => wizard.openLink('issues')}>report the problem</button>.</p>
+        <p>Nothing was changed. Choose <strong>Try again</strong>. If it keeps happening, <button type="button" className="text-link" onClick={() => void wizard.request('copyText', { text: wizard.hostError ?? '' }).catch(() => undefined)}>copy the details</button> and <button type="button" className="text-link" onClick={() => wizard.openLink('issues')}>report the problem (opens GitHub)</button>.</p>
       </Callout>
     </div>
   );
@@ -64,7 +64,7 @@ export function Uninstalled({ wizard }: { wizard: Wizard }) {
   const places = kept ? [
     kept.repository ? { label: 'Your backups', path: kept.repository } : null,
     kept.recoveryKey ? { label: 'Your recovery key', path: kept.recoveryKey } : null,
-    kept.recoveryTools ? { label: 'Recovery tools', path: kept.recoveryTools } : null,
+    kept.recoveryTools ? { label: 'Recovery tools (programs for restoring without Rewindle)', path: kept.recoveryTools } : null,
   ].filter((place): place is { label: string; path: string } => place !== null) : [];
   return (
     <div className="screen-stack">
@@ -82,7 +82,7 @@ export function Uninstalled({ wizard }: { wizard: Wizard }) {
             Setup won’t install Rewindle again while {keptEntries.length === 1 ? 'it is' : 'they are'} there. Check {keptEntries.length === 1 ? 'it' : 'them'} and remove {keptEntries.length === 1 ? 'it' : 'them'} yourself if {keptEntries.length === 1 ? 'it isn’t' : 'they aren’t'} needed.
           </span></li>
         )}
-        <li><span>To protect this PC again, run Rewindle Setup again. <button type="button" className="text-link" onClick={() => wizard.openLink('readme')}>Read the README</button></span></li>
+        <li><span>To protect this PC again, run Rewindle Setup again. <button type="button" className="text-link" onClick={() => wizard.openLink('readme')}>See how Rewindle works</button></span></li>
       </ul>
     </div>
   );

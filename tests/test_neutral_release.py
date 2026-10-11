@@ -101,7 +101,7 @@ class NeutralDashboardTests(unittest.TestCase):
 
     def test_about_section_and_licenses_command(self) -> None:
         app = read(WEB / "src" / "App.tsx")
-        for marker in ("About Rewindle", "MIT License", "Powered by Restic", "PROJECT_URL", "openLicensesFolder",
+        for marker in ("About Rewindle", "MIT License", "Restic, open-source encrypted backup", "PROJECT_URL", "openLicensesFolder",
                        "Closing this window never stops a running backup."):
             self.assertIn(marker, app)
         web_sources = [path for path in (WEB / "src").rglob("*.ts*")] + [path for path in (WEB / "components").rglob("*.tsx")]

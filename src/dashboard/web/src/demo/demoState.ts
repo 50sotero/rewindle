@@ -89,10 +89,10 @@ export function createSampleState(now = Date.now()): DashboardState {
   return {
     page: 'Protection', demo: true, preview: false, theme: 'System', motion: 'System',
     dark: false, reducedMotion: false, highContrast: false,
-    updated: `Updated ${new Date(now).toLocaleTimeString(undefined, { hour12: false })}`, subtitle: '', dataError: '',
+    updated: `Updated ${new Date(now).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })}`, updatedAt: new Date(now).toISOString(), subtitle: '', dataError: '',
     status: {
       key: 'success', title: 'Backup verified',
-      detail: `${latest.filesDisplay} files and ${latest.processedDisplay} are protected. The snapshot and a restore test file were checked.`,
+      detail: `Verified: ${latest.filesDisplay} files checked, ${latest.storedDisplay} of new data saved.`,
       badge: 'VERIFIED', active: false, success: true, failure: false, cancelled: false, phaseIndex: 4, phaseLabel: 'Complete',
       progress: 1, estimated: false, runId: latest.id,
       files: latest.filesDisplay, bytes: latest.processedDisplay, speed: '—', elapsed: latest.durationDisplay, errors: '0',
@@ -103,13 +103,13 @@ export function createSampleState(now = Date.now()): DashboardState {
       { path: 'C:\\Users\\you\\Pictures', name: 'Pictures', isCanary: false, exists: true, canRemove: true, detail: 'Protected  •  ~\\Pictures' },
       { path: 'C:\\Users\\you\\Desktop', name: 'Desktop', isCanary: false, exists: true, canRemove: true, detail: 'Protected  •  ~\\Desktop' },
       { path: 'C:\\Users\\you\\Music', name: 'Music', isCanary: false, exists: true, canRemove: true, detail: 'Protected  •  ~\\Music' },
-      { path: 'C:\\Users\\you\\Projects', name: 'Projects + restore canary', isCanary: true, exists: true, canRemove: false, detail: 'Required  •  ~\\Projects' },
+      { path: 'C:\\Users\\you\\Projects', name: 'Projects + restore test file', isCanary: true, exists: true, canRemove: false, detail: 'Required  •  ~\\Projects' },
     ],
     sourceStatus: 'Administrator approval is required to change protected folders.', sourceNotice: null, sourcePicker: null,
     sourceOperation: { active: false, stage: 'Idle', message: '', path: '' },
     history, historyTruncated: false, selectedRunId: latest.id,
     schedule: {
-      summary: 'Daily at 02:00', nextRun: formatWhen(next),
+      summary: 'Daily at 02:00', nextRun: formatWhen(next), nextRunAt: next.toISOString(),
       detail: 'Run missed backups • Wait for AC power',
     },
     repository: { path: repositoryPath, volume: '412 GiB free of 931 GiB  •  NTFS' },
@@ -118,19 +118,19 @@ export function createSampleState(now = Date.now()): DashboardState {
       state: 'Healthy', verifiedAt: new Date(Date.parse(latest.started) + latest.durationSeconds * 1000).toISOString(),
     },
     offsite: {
-      title: 'Cloud verification not configured', detail: 'No cloud verification has been recorded for this backup.',
+      title: 'No off-site copy is set up', detail: 'That is optional. Your backup on this computer works without one.',
       evidence: '', kind: 'NotConfigured', checkedAt: '', providerConfirmed: false, restoreVerified: false,
     },
     recovery: {
-      title: 'Restore Center ready', detail: `Plan 4e1b8c0a · generation 1 · ${repositoryPath}`,
-      repairNeeded: false, repairMessage: '', repairState: '', repairBusy: false, repairPercent: null,
+      title: 'Ready to restore', detail: `Restores from ${repositoryPath} into a new, empty folder. Your original files are not touched.`,
+      repairNeeded: false, repairMessage: '', repairState: '', repairBusy: false, repairPercent: null, next: '',
     },
     actions: {
       togglePreview: action('Preview animation'), backupNow: action('Back up now', true, 'Start a backup now. Windows will ask for approval.'),
       cancelBackup: action('Cancel backup'), addSource: action('Add folder'), retrySourceChange: action('Try again', false),
       dismissSourceChange: action('Dismiss', false), editSchedule: action('Edit schedule'), changeRepository: action('Change location'),
-      repairRepository: action('Repair interrupted move', false), reviewChanges: action('Review changes', false), openRestore: action('Open Restore Center'),
-      checkReadiness: action('Check recovery readiness'), viewRunDetails: action('View run details'), exportDiagnostics: action('Export diagnostics'),
+      repairRepository: action('Repair interrupted move', false), reviewChanges: action('Review changes', false), openRestore: action('Restore files…', true, 'Choose a backup and restore files into a separate folder. Windows will ask for your permission.'),
+      checkReadiness: action('Check recovery readiness', true, 'Check that your backups can be opened and restored. This only reads; it changes nothing.'), viewRunDetails: action('View run details'), exportDiagnostics: action('Export diagnostics'),
     },
     runDetails: null, restoreFlow: null,
   };

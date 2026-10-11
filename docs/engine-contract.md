@@ -119,7 +119,7 @@ and `last_verification` (both engines; Rewindle adds `repository_storage`).
 ## 6. Dashboard-owned files
 
 All under the presentation store (section 2): `settings.json` and `tray-hint-shown.json` (appearance), the motion
-preference, `run-history.json` (schema 1, at most 400 runs), `heartbeat.json`, `crash.log` (+ `.old`), and the WebView2
+preference, the text size (`zoom.json`), `run-history.json` (schema 1, at most 400 runs), `heartbeat.json`, `crash.log` (+ `.old`), and the WebView2
 profile in `WebView2\`. With `--isolated-presentation-store` the isolated folders are used instead and history and
 heartbeat writes are off.
 

@@ -5,22 +5,28 @@ import {
   HardDrive, Clock3, LockKeyhole, Check, X, Play, Pause,
   Search, Sun, Moon, Monitor, CloudCheck, ArchiveRestore,
   Files, Gauge, Database, CircleAlert, CircleCheck, Activity, ListChecks, TriangleAlert, Info, OctagonAlert, Copy,
+  Type as TextSize, Keyboard,
 } from 'lucide-react';
 import SidebarNav from '@/components/primitives/SidebarNav';
 import TaskRows, { type TaskRow } from '@/components/primitives/TaskRows';
 import FilterTable, { type TableRow, type FilterTableLabels, type FilterTableSelection, type FilterTableStatus } from '@/components/primitives/FilterTable';
 import LoadingState from '@/components/primitives/LoadingState';
 import ProtectedFolders, { type FolderView } from '@/components/primitives/ProtectedFolders';
-import ProtectionHealth, { healthTime, phaseName } from '@/components/primitives/ProtectionHealth';
+import ProtectionHealth, { phaseName } from '@/components/primitives/ProtectionHealth';
 import FolderPickerModal from '@/components/primitives/FolderPickerModal';
 import RestoreFlowModal from '@/components/primitives/RestoreFlowModal';
-import InsightCards, { type InsightPage } from '@/components/primitives/InsightCards';
 import RunDetailsModal from '@/components/primitives/RunDetailsModal';
 import { Button } from '@/components/atoms/Button';
 import { Shimmer } from '@/components/atoms/Shimmer';
 import { noticeHoldProps, useDashboard, type NoticeHold } from './useDashboard';
 import { PROTECTED_COMMANDS, usableLocale, type Availability, type CommandName, type DashboardPage, type DashboardState, type MotionPreference, type Notice, type RunState, type ThemePreference } from './native-types';
 import { PROJECT_URL } from './project';
+import {
+  attentionText, isCancelled, isProblem, isUnchanged, lastSuccessfulBackup, lastVerified, resolvedByText, resolvedRuns, resultHint, resultLabel,
+  typeLabel, unresolvedRuns, usualSeconds, type Verified,
+} from './runProblems';
+import { formatClock, formatWhen, formatWhenAgo, localClocks } from './when';
+import { driveOf, heroConcern, heroTone } from './protectionTone';
 
 type Send = (command: CommandName, payload?: Record<string, string | boolean>) => void;
 
@@ -58,7 +64,7 @@ function CrashNotice({ scope, label, error, componentStack, note, onRetry, onClo
   const details = useMemo(() => crashDetails(error, componentStack), [error, componentStack]);
   const copy = async () => { setCopied(await copyText(details) ? 'done' : 'failed'); window.setTimeout(() => setCopied('idle'), 2500); };
   const copyButton = <Button size="sm" onClick={copy}><Copy size={13} aria-hidden="true" />{copied === 'done' ? 'Copied' : copied === 'failed' ? 'Could not copy' : 'Copy details'}</Button>;
-  const reload = <Button size="sm" variant={scope === 'app' ? 'primary' : 'secondary'} autoFocus={scope === 'app'} onClick={() => window.location.reload()}><RefreshCw size={13} aria-hidden="true" />Reload dashboard</Button>;
+  const reload = <Button size="sm" variant={scope === 'app' ? 'primary' : 'secondary'} autoFocus={scope === 'app'} onClick={() => window.location.reload()}><RefreshCw size={13} aria-hidden="true" />Reload Rewindle</Button>;
   const technical = <details className="crash-details"><summary>Technical details</summary><pre>{details}</pre></details>;
   if (scope === 'card') {
     return <div className="surface crash-card is-compact" role="alert"><TriangleAlert size={18} aria-hidden="true" />
@@ -69,8 +75,8 @@ function CrashNotice({ scope, label, error, componentStack, note, onRetry, onClo
     return <div className="crash-overlay"><section className="surface crash-card" role="alertdialog" aria-modal="true" aria-labelledby={titleId}
       onKeyDown={event => { if (event.key === 'Escape' && onClose) { event.preventDefault(); onClose(); } }}>
       <span className="crash-icon"><TriangleAlert size={22} aria-hidden="true" /></span>
-      <h2 id={titleId}>The {label} hit a problem</h2>
-      <p>It stopped drawing, so it was cleared away. Close it and open it again. Nothing was changed, and a restore that is already running carries on by itself.</p>
+      <h2 id={titleId}>The {label} couldn't be shown</h2>
+      <p>This window couldn't be shown. Close it and open it again. Nothing was changed, and a restore that is already running carries on by itself.</p>
       {note && <p className="crash-note" role="status">{note}</p>}
       <div className="crash-actions">{onClose && <Button size="sm" variant="primary" autoFocus onClick={onClose}>Close</Button>}{reload}{copyButton}</div>
       {technical}</section></div>;
@@ -78,15 +84,15 @@ function CrashNotice({ scope, label, error, componentStack, note, onRetry, onClo
   if (scope === 'page') {
     return <section className="surface crash-card" role="alert" aria-labelledby={titleId}>
       <span className="crash-icon"><TriangleAlert size={22} aria-hidden="true" /></span>
-      <h2 id={titleId}>This page hit a problem</h2>
-      <p>The {label} stopped drawing. The rest of the app still works, so you can open another page. Your backups and settings are not affected.</p>
+      <h2 id={titleId}>This page couldn't be shown</h2>
+      <p>The rest of Rewindle still works, so you can open another page. Your backups and settings are not affected.</p>
       <div className="crash-actions">{onRetry && <Button size="sm" variant="primary" onClick={onRetry}>Try again</Button>}{reload}{copyButton}</div>
       {technical}</section>;
   }
   return <div className="crash-screen" role="alert" aria-labelledby={titleId}>
     <span className="crash-icon"><TriangleAlert size={26} aria-hidden="true" /></span>
-    <h1 id={titleId}>Rewindle hit a problem</h1>
-    <p>This screen stopped drawing, so it was cleared. Your backups and settings are not affected, and scheduled backups keep running on their own. Reload the dashboard to carry on.</p>
+    <h1 id={titleId}>Something went wrong</h1>
+    <p>Rewindle couldn't show this window. Your backups and settings are not affected, and scheduled backups keep running. Reload to carry on.</p>
     <div className="crash-actions">{reload}{copyButton}</div>
     {technical}
   </div>;
@@ -160,8 +166,8 @@ const duration = (n: number) => {
 type HistoryView = { query: string; sort: string; filter: FilterTableSelection };
 type ActivityDateFilter = { from: string; to: string };
 
-// How the history table and the trend charts group a run: finished and verified, stopped on request, or not done.
-const runStatus = (run: RunState): FilterTableStatus => run.success ? 'done' : /^(cancelled|canceled)$/i.test(run.result) ? 'progress' : 'todo';
+// How the history table and the trend charts group a run: finished and verified, stopped on request, or a problem (see runProblems).
+const runStatus = (run: RunState): FilterTableStatus => run.success ? 'done' : isCancelled(run) ? 'progress' : 'todo';
 
 const emptyHistoryView = (): HistoryView & ActivityDateFilter => ({ query: '', sort: 'newest', filter: 'all', from: '', to: '' });
 
@@ -174,24 +180,9 @@ const localDateKey = (value: string) => {
   return `${year}-${month}-${day}`;
 };
 
-// A run's start the way the viewer's region writes it ("Fri, Oct 2, 2:00 AM" or "Fri 2 Oct, 02:00"), with the year added once
-// the run is from an earlier year. The host sends one fixed day-month 24-hour pattern, so the page formats the ISO start
-// itself. Formatters are cached: the host publishes about once a second and every retained run is formatted each time.
-const whenFormats = new Map<string, Intl.DateTimeFormat>();
-function runWhen(started: string, locale: string | undefined, fallback: string, weekday = true) {
-  const date = new Date(started);
-  if (Number.isNaN(date.getTime())) return fallback;
-  const withYear = date.getFullYear() !== new Date().getFullYear();
-  const key = `${locale ?? ''}|${withYear}|${weekday}`;
-  let format = whenFormats.get(key);
-  if (!format) {
-    // A 12-hour clock reads "2:00 AM"; a 24-hour one keeps its leading zero ("02:00"), so the times line up down the table.
-    const twelveHour = !!new Intl.DateTimeFormat(locale, { hour: 'numeric' }).resolvedOptions().hour12;
-    format = new Intl.DateTimeFormat(locale, { weekday: weekday ? 'short' : undefined, day: 'numeric', month: 'short', year: withYear ? 'numeric' : undefined, hour: twelveHour ? 'numeric' : '2-digit', minute: '2-digit' });
-    whenFormats.set(key, format);
-  }
-  return format.format(date);
-}
+// A run's start the way the viewer's region writes it (see when.ts). The host sends one fixed day-month 24-hour pattern, so the
+// page formats the ISO start itself.
+const runWhen = (started: string, locale: string | undefined, fallback: string, weekday = true) => formatWhen(started, locale, fallback, { weekday });
 
 // Formats every run time from its ISO start in one place, so the table, the sidebar, the charts and the run details agree.
 function withRunDates(state: DashboardState): DashboardState {
@@ -226,17 +217,19 @@ function Action({ state, send, command, children, icon, primary = false, payload
 const modeNote = (state: DashboardState) => state.demo || state.preview ? busyNote(state) : '';
 
 // Why the schedule, location and folder controls are paused, said once for the whole page.
-function busyNote(state: DashboardState): string {
+function busyNote(state: DashboardState, offline = false): string {
   if (state.demo) return 'You are viewing sample data. Backups and changes are turned off.';
   if (state.preview) return 'The animation preview is running. Real backups and changes are paused.';
+  // The page lost the host and every control is off. The banner at the top says so; this says it once for the controls, so they do not each repeat it.
+  if (offline) return 'Waiting to reconnect to Rewindle. Backup controls are paused. Scheduled backups are not affected.';
   if (state.status.active) return 'A backup is running. Schedule, location and folder changes unlock when it finishes.';
   if (state.recovery.repairNeeded) return 'Backups are paused until the backup location is repaired.';
   return '';
 }
 
-// `hint` says what a figure counts, as a tooltip, for the ones whose meaning is not in their label. `bad` draws a figure that is a
-// problem when it is not zero (errors) in the text-grade red; the label and the number still say it in words. `sub` is a line of
-// words under the figure, for what it covers ("last 400 runs").
+// `hint` says what a figure counts, as a tooltip, for the ones whose meaning is not in their label (it does not reach a keyboard or touch
+// user, so Protection names its figures plainly and leaves it out). `bad` draws a figure that is a problem when it is not zero (errors) in
+// the text-grade red; the label and the number still say it in words. `sub` is a line of words under the figure, for what it covers ("last 400 runs").
 function Stat({ label, value, icon, hint, bad = false, sub }: { label: string; value: string; icon?: React.ReactNode; hint?: string; bad?: boolean; sub?: string }) {
   return <div title={hint} className={bad ? 'stat-bad' : undefined}><span className="stat-label">{icon}{label}</span><div style={{ overflow: 'hidden' }}>
     <motion.span className="stat-number" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
@@ -265,7 +258,7 @@ function Repairs({ state, send }: { state: DashboardState; send: Send }) {
   // The host publishes one sentence as both the state line and the action's help; print it once.
   const repeated = !!state.actions.repairRepository?.help && state.actions.repairRepository.help === state.recovery.repairState;
   return <motion.div className="attention-note" initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }}>
-    <strong><CircleAlert size={14} className="inline mr-2" />Backup location needs attention</strong>
+    <strong><CircleAlert size={14} className="inline mr-2" />Backups are paused: moving the backup location didn’t finish</strong>
     <p>{state.recovery.repairMessage}<br />{state.recovery.repairState}</p>
     {state.recovery.repairBusy ? <>
       <LoadingState label="Repairing backup location" variant="Orbit" live={false} />
@@ -281,7 +274,7 @@ const serviceMissing = (state: DashboardState) => state.setup?.engineFound === f
 
 // What a computer without the backup service sees in place of the pages that need it: one explanation, where Rewindle looked, what to do,
 // and a line to paste into a bug report, instead of an "unavailable" in every widget. It only reads: nothing here changes anything, and
-// "Check again" is the same refresh the toolbar has.
+// "Try again" is the same refresh the toolbar has.
 function SetupNotice({ state, send }: { state: DashboardState; send: Send }) {
   const titleId = useId();
   const [copied, setCopied] = useState<'idle' | 'done' | 'failed'>('idle');
@@ -293,16 +286,16 @@ function SetupNotice({ state, send }: { state: DashboardState; send: Send }) {
   return <section className="surface setup-notice" aria-labelledby={titleId}>
     <span className="setup-icon"><HardDrive size={22} aria-hidden="true" /></span>
     <div className="setup-copy">
-      <h2 id={titleId}>Engine not installed</h2>
-      <p>Rewindle reports on a backup engine installed under Program Files. It did not find one on this computer, so there is nothing to show yet. Nothing was changed.</p>
-      <p>Install or repair the engine (the Rewindle installer sets it up), then choose Check again. The README lists what Rewindle needs, under Requirements.</p>
+      <h2 id={titleId}>Rewindle's backup service isn't installed</h2>
+      <p>Rewindle shows the state of its backup service, which Rewindle Setup installs under Program Files. It wasn't found on this computer, so there is nothing to show yet. Nothing was changed.</p>
+      <p>Install or repair the backup service (Rewindle Setup does both), then choose Try again. The README lists what Rewindle needs, under Requirements.</p>
       <dl className="setup-where">
-        {setup.engine && <div><dt>Engine</dt><dd>{setup.engine}{setup.engineChosenBy === '--engine' ? ' (chosen with --engine)' : ''}</dd></div>}
+        {setup.engine && <div><dt>Backup service</dt><dd>{setup.engine}{setup.engineChosenBy === '--engine' ? ' (chosen with --engine)' : ''}</dd></div>}
         {searched.map((path, index) => <div key={path}><dt>{index === 0 ? 'Looked for' : ''}</dt><dd>{path}</dd></div>)}
         {setup.stateFolder && <div><dt>Reads status from</dt><dd>{setup.stateFolder}</dd></div>}
       </dl>
       <div className="setup-actions">
-        <Button size="sm" variant="primary" onClick={() => send('refresh')}><RefreshCw size={13} aria-hidden="true" />Check again</Button>
+        <Button size="sm" variant="primary" onClick={() => send('refresh')}><RefreshCw size={13} aria-hidden="true" />Try again</Button>
         <Button size="sm" onClick={copy}><Copy size={13} aria-hidden="true" />{copied === 'done' ? 'Copied' : copied === 'failed' ? 'Could not copy' : 'Copy details'}</Button>
       </div>
       <p className="setup-report">{report}</p>
@@ -310,60 +303,28 @@ function SetupNotice({ state, send }: { state: DashboardState; send: Send }) {
   </section>;
 }
 
-type HeroTone = 'active' | 'danger' | 'warning' | 'success';
-
-// One tone for the whole hero. The host overrides the title and badge text for an overdue or paused
-// schedule, a repair, or a pending change review, but status.success still describes the last run,
-// so the emblem, tag icon and step rows derive their look from everything the page already knows.
-// A protected folder that cannot be found keeps the hero from being all green: the next backup cannot include it.
-function heroTone(state: DashboardState): HeroTone {
-  const s = state.status, freshness = state.freshness.state;
-  if (s.active || state.recovery.repairBusy) return 'active';
-  if (s.failure || state.recovery.repairNeeded || freshness === 'Overdue' || freshness === 'ClockAnomaly') return 'danger';
-  if (!s.success || s.cancelled || freshness !== 'Healthy' || state.actions.reviewChanges?.visible || state.dataError || state.sources.some(source => !source.exists)) return 'warning';
-  return 'success';
-}
-
-// The host draws its status badge in capitals for the native window ("NEEDS ATTENTION", "LIVE  •  BACKING UP"). The page says it as a
-// sentence, like the chips beside it. Only text that is all capitals is changed, so a badge the host already wrote as a sentence
-// ("Status unavailable") stays as it is, and "Off-site" keeps its hyphen and its capital.
-function toSentence(badge: string): string {
-  return badge.split(/\s*[•·]\s*/).map(part => {
-    const text = part.trim();
-    if (!text || text !== text.toUpperCase()) return text;
-    const lower = text.toLowerCase().replace(/\boff-site\b/g, 'Off-site');
-    return lower.charAt(0).toUpperCase() + lower.slice(1);
-  }).filter(Boolean).join(' · ');
-}
-
-// What the status chip says. The host's plain "READY" badge is its fallback for a backup plan with nothing running and nothing wrong, and
-// no verified run behind it. Beside "Last verified" that reads better as "Awaiting backup". The host picks the badge by precedence (a
-// repair, a pause, an overdue backup each take it over), which the page cannot rebuild from the state key alone, so it follows the badge.
-function statusBadgeLabel(status: DashboardState['status']): string {
-  const label = toSentence(status.badge);
-  return !status.success && label === 'Ready' ? 'Awaiting backup' : label;
-}
-
 // The storage line under the backup location. A drive that said it is not ready is a warning (its own icon, and a color that is readable
-// as text), not a muted line: the backups cannot be written until it is back.
+// as text), not a muted line: the backups cannot be written until it is back. The host's own words for it ("D:\ • Volume unavailable")
+// say nothing to do, so the page names the drive and keeps the host's words as a tooltip.
 function VolumeLine({ repository }: { repository: DashboardState['repository'] }) {
-  const missing = repository.volumeReady === false;
-  return <div className={`muted-copy volume-line${missing ? ' is-unavailable' : ''}`}>{missing && <><TriangleAlert size={13} aria-hidden="true" /><span className="sr-only">Needs attention: </span></>}{repository.volume}</div>;
+  const missing = repository.volumeReady === false, drive = driveOf(repository.path);
+  return <div className={`muted-copy volume-line${missing ? ' is-unavailable' : ''}`} title={missing ? repository.volume : undefined}>{missing && <><TriangleAlert size={13} aria-hidden="true" /><span className="sr-only">Needs attention: </span></>}{missing ? `The backup drive${drive ? ` (${drive})` : ''} isn’t connected` : repository.volume}</div>;
 }
 
 // `stale` is a page that has lost the host (see App's `connected`): what it shows is the last thing the host said, so it stops moving and
 // is dimmed, and the banner above it says why.
-function Protection({ state, send, folders, setFolders, stale }: { state: DashboardState; send: Send; folders: FolderView; setFolders: (value: FolderView) => void; stale: boolean }) {
+function Protection({ state, send, folders, setFolders, stale, openRunDetails }: { state: DashboardState; send: Send; folders: FolderView; setFolders: (value: FolderView) => void; stale: boolean; openRunDetails: (runId: string) => void }) {
   // Without the backup service every widget below would say "unavailable" or "0"; the one explanation takes their place.
   if (serviceMissing(state)) return <><Heading title="Protection" description="Rewindle is waiting for a backup service to report on." /><SetupNotice state={state} send={send} /></>;
   const s = state.status;
-  const tone = heroTone(state);
+  const tone = heroTone(state), concern = heroConcern(state);
   const locale = usableLocale(state.locale);
-  // When the last verified backup finished. Not drawn where the time cannot be trusted (the status could not be read, or the clocks
-  // disagree), the same rule the Local backup card below follows.
+  // When the last verified backup finished, with its age in words ("yesterday at 2:03 AM"): how recent it is is the first thing to know.
+  // Not drawn where the time cannot be trusted (the status could not be read, or the clocks disagree), the same rule the Local backup card follows.
   const verifiedKnown = !state.dataError && state.freshness.state !== 'ClockAnomaly';
-  const verifiedAt = healthTime(state.freshness.verifiedAt, locale);
-  const missingFolders = state.sources.filter(source => !source.exists).length;
+  const verifiedAt = formatWhenAgo(state.freshness.verifiedAt, locale);
+  // The host puts the same sentence in the hero and in the repair note above it; say it once.
+  const repairDuplicate = state.recovery.repairNeeded && !!state.recovery.repairMessage && s.detail === state.recovery.repairMessage;
   // The last run passed but something else needs attention (overdue, paused, a change review): its steps
   // are shown as that run's results, not as proof that the backup is current.
   const lastRunOnly = s.success && tone !== 'success';
@@ -375,7 +336,7 @@ function Protection({ state, send, folders, setFolders, stale }: { state: Dashbo
     : s.active ? (i < s.phaseIndex ? 'done' : i === s.phaseIndex ? 'running' : 'pending')
     : ended && s.phaseIndex >= 0 ? (i < s.phaseIndex ? 'done' : i === s.phaseIndex ? (s.failure ? 'failed' : 'cancelled') : 'pending')
     : 'guide';
-  const note = busyNote(state), quiet = !!note;
+  const note = busyNote(state, stale), quiet = !!note;
   // The host's title already says "Estimated time remaining" when the progress is an estimate, and "Stopping safely: Please wait" while
   // a cancel finishes, so the suffix is only for a plain "Time remaining" that has a time in it.
   const etaEstimated = s.estimated && s.key !== 'cancelling' && !/estimated/i.test(s.etaTitle || '') && /\d/.test(s.eta || '');
@@ -383,25 +344,30 @@ function Protection({ state, send, folders, setFolders, stale }: { state: Dashbo
   // time it started. The host sends the figures as display text, so errors are "any digit but zero" rather than a parsed number.
   const metricsRun = state.history.find(run => run.id === s.runId)?.startedDisplay;
   const metricsContext = state.preview ? 'Previewed live run' : s.active ? 'Current run'
-    : !s.runId || !(s.success || s.failure || s.cancelled) ? 'No run recorded yet' : s.success ? 'Latest verified run' : 'Latest recorded run';
+    : !s.runId || !(s.success || s.failure || s.cancelled) ? 'No run recorded yet' : s.success ? 'From the latest verified backup' : 'Latest recorded run';
   const hasErrors = /[1-9]/.test(s.errors || '');
-  // One name per step, the same ones the page uses everywhere else: the restore test restores a small test file after every backup.
-  const names = ['Back up files', 'Save snapshot', 'Check storage', 'Restore test'];
+  // One name per step, the same ones the page uses everywhere else: the restore test restores a small test file after every backup. A row says
+  // its state once (its mark and pill), so it has no second line of its own; what it does is one line in its details.
+  const names = ['Back up files', 'Save the backup', 'Check the backup', 'Restore test'];
+  const explanations = ['Reads your protected folders and copies what changed.', 'Saves an encrypted copy of your files as one backup.', 'Checks that the saved backup data is intact.', 'Restores a small test file after every backup and compares it with the original.'];
   const rows: TaskRow[] = names.map((label, i) => ({
     key: `backup-${i}`, label, step: i + 1,
     status: stepStatus(i),
-    amount: s.success ? ['Files protected', 'Snapshot saved', 'Storage checked', 'Restore test passed'][i] : s.active && i === s.phaseIndex ? phaseName(s.phaseLabel) : '',
-    details: [
-      { label: ['Read your protected folders', 'Save an encrypted point in time', 'Check that the saved backup data is intact', 'Restore a small test file after every backup and verify it'][i], meta: '' },
-      { label: i === 0 ? `${s.files} files · ${s.bytes}` : i === 1 ? state.repository.path : i === 2 ? 'Restic integrity check' : 'Independent restore verification', meta: '' },
-    ],
+    amount: '',
+    details: [{ label: explanations[i], meta: '' }],
   }));
+  // Which of the four steps a running backup is on. The title above already names the phase in the host's words, so the loader counts instead of repeating it.
+  const stepNumber = Math.min(Math.max(s.phaseIndex, 0), 3) + 1;
+  const reviewLabel = state.actions.reviewChanges?.label === 'Review changes' ? 'Confirm these changes' : undefined;
+  const showTags = verifiedKnown || (stale && !!state.updated);
   const folderCount = state.sources.length;
   return <>
-    <Heading title="Protection" description={`${folderCount} protected ${folderCount === 1 ? 'folder' : 'folders'} · ${state.schedule.summary}`} note={note}>
+    <Heading title="Protection" description={`${folderCount} protected ${folderCount === 1 ? 'folder' : 'folders'} · ${localClocks(state.schedule.summary, locale)}`} note={note}>
       {s.active && <Action state={state} send={send} command="cancelBackup" icon={<X size={13} />} quiet={quiet} />}
       <Action state={state} send={send} command="backupNow" primary size="md" icon={<Play size={13} fill="currentColor" />} quiet={quiet} />
     </Heading>
+    {/* A backup that was asked for and did not start: the host's explanation used to be a tooltip on a button that was already back to normal. */}
+    <div className="live-slot" role="status">{s.backupNote && !s.active && <p className="source-notice warning"><TriangleAlert size={14} aria-hidden="true" />{s.backupNote}</p>}</div>
     <Repairs state={state} send={send} />
     <section className={`surface surface-pad protection-hero ${s.active ? 'is-active' : ''} ${stale ? 'is-stale' : ''}`}>
       <div className="hero-grid">
@@ -410,44 +376,57 @@ function Protection({ state, send, folders, setFolders, stale }: { state: Dashbo
           <div className="status-line">
             <motion.div key={s.key} initial={{ scale: .7, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={{ type: 'spring', stiffness: 310, damping: 21 }}
               className={`status-emblem ${tone === 'success' ? '' : tone}`}>
-              {tone === 'danger' ? <OctagonAlert size={22} /> : tone === 'active' ? <Activity size={23} /> : tone === 'success' ? <ShieldCheck size={24} /> : s.success ? <TriangleAlert size={22} /> : <Clock3 size={22} />}
+              {tone === 'danger' ? <OctagonAlert size={22} /> : tone === 'active' ? <Activity size={23} /> : tone === 'success' ? <ShieldCheck size={24} /> : tone === 'neutral' ? <Info size={22} /> : s.success ? <TriangleAlert size={22} /> : <Clock3 size={22} />}
             </motion.div>
             {/* A heading, so the page's main status is a stop in the outline under its title, with the sections below at the same
                 level. Not a live region: useAnnouncements (in App) speaks the run reaching its next phase or ending, and it does
                 so on every page, where this hero exists only on Protection. */}
             <h2 className="status-title">{(tone === 'danger' || tone === 'warning') && <span className="sr-only">Needs attention: </span>}{s.title}</h2>
           </div>
-          <div className="status-detail">{s.detail}</div>
+          {s.detail && !repairDuplicate && <div className="status-detail">{s.detail}</div>}
+          {/* What the colour above is about, when the host's title does not say it (see heroConcern). The container is always present, so a
+              drive that is unplugged while the page is open is announced. */}
+          <div role="status">{concern && <p className={`hero-concern ${concern.tone}`}>{concern.tone === 'danger' ? <OctagonAlert size={14} aria-hidden="true" /> : <TriangleAlert size={14} aria-hidden="true" />}<span>{concern.text}</span></p>}</div>
           {s.active ? <div className="progress-area">
             {/* No clock of its own: the loader counts from when it mounted, which is not when the run began (open the app 20 minutes in, or
                 leave this page and come back, and it read 0s beside the host's real Elapsed). */}
-            <div className="progress-copy"><LoadingState label={phaseName(s.phaseLabel) || 'Backing up'} live={false} showElapsed={false} /><strong>{Math.round(s.progress * 100)}%</strong></div>
+            <div className="progress-copy"><LoadingState label={s.key === 'cancelling' ? 'Please wait' : `Step ${stepNumber} of 4`} live={false} showElapsed={false} /><strong>{Math.round(s.progress * 100)}%</strong></div>
             <div className="progress-rail" role="progressbar" aria-label={state.preview ? 'Preview backup progress' : 'Backup progress'} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(s.progress * 100)}><motion.div className="progress-bar" animate={{ width: `${Math.max(0, Math.min(100, s.progress * 100))}%` }} transition={{ duration: .65, ease: [.16, 1, .3, 1] }} /></div>
             <p className="muted-copy eta-line">{s.etaTitle || 'Time remaining'}: {s.eta || 'Calculating…'}{etaEstimated ? ' · estimated' : ''}</p>
             {/* Where the estimate comes from and when it expects to finish ("Likely around 14:35"): said on the page, not in a tooltip a keyboard or touch user never sees. */}
             {s.etaHint && <p className="muted-copy eta-hint">{s.etaHint}</p>}
-          </div> : <div className="status-tags">
-            {/* The first thing to know about protection is how recent it is. (The footer already says the backup is encrypted.) */}
+          </div> : showTags && <div className="status-tags">
             {verifiedKnown && <span className="quiet-tag">{verifiedAt ? <ShieldCheck size={11} aria-hidden="true" /> : <Clock3 size={11} aria-hidden="true" />}{verifiedAt ? <>Last verified <time dateTime={state.freshness.verifiedAt}>{verifiedAt}</time></> : 'No verified backup yet'}</span>}
-            <span className="quiet-tag">{tone === 'success' ? <Check size={11} /> : <Clock3 size={11} />}{statusBadgeLabel(s)}</span>
-            {missingFolders > 0 && <span className="quiet-tag is-warning"><TriangleAlert size={11} aria-hidden="true" />{missingFolders === 1 ? '1 folder cannot be found' : `${missingFolders} folders cannot be found`}</span>}
+            {/* A page that lost the host shows the last thing it was told; this says when that was. */}
+            {stale && state.updated && <span className="quiet-tag"><Clock3 size={11} aria-hidden="true" />{state.updated}</span>}
           </div>}
-          <div className="info-action"><Action state={state} send={send} command="reviewChanges" icon={<ListChecks size={13} />} /></div>
+          <div className="info-action">
+            {s.failure && !s.active && s.runId && <Button size="sm" disabled={!state.actions.viewRunDetails?.enabled} title={state.actions.viewRunDetails?.help || undefined} onClick={() => openRunDetails(s.runId)}><ListChecks size={13} aria-hidden="true" />See what happened</Button>}
+            <Action state={state} send={send} command="reviewChanges" icon={<ListChecks size={13} />}>{reviewLabel}</Action>
+          </div>
         </div>
         <div><TaskRows rows={rows} className="backup-tasks" labels={{ completed: s.success ? 'Verified' : 'Done', failed: 'Failed', pending: ended ? 'Not run' : 'Pending' }} /></div>
       </div>
       <div className="stats-grid">
         <Stat label="Files" value={s.files} icon={<Files size={12} />} />
-        <Stat label="Processed" value={s.bytes} icon={<Database size={12} />} hint="Data read from your protected folders during the run." />
+        <Stat label="Data read" value={s.bytes} icon={<Database size={12} />} />
         {/* "Run time", not "Last run": the figure is a length of time, which "Last run" reads as the moment the run happened. */}
-        <Stat label={s.active ? 'Throughput' : 'Run time'} value={s.active ? s.speed : s.elapsed} icon={s.active ? <Gauge size={12} /> : <Clock3 size={12} />} hint={s.active ? undefined : 'How long the run took.'} />
-        <Stat label={s.active ? 'Elapsed' : 'Errors'} value={s.active ? s.elapsed : s.errors} icon={s.active ? <Clock3 size={12} /> : <CircleAlert size={12} />} bad={!s.active && hasErrors} />
+        <Stat label={s.active ? 'Throughput' : 'Run time'} value={s.active ? s.speed : s.elapsed} icon={s.active ? <Gauge size={12} /> : <Clock3 size={12} />} />
+        {/* A status that could not be read has no count of errors: its "0" would say there were none. */}
+        <Stat label={s.active ? 'Elapsed' : 'Errors'} value={s.active ? s.elapsed : s.unavailable ? '—' : s.errors} icon={s.active ? <Clock3 size={12} /> : <CircleAlert size={12} />} bad={!s.active && hasErrors} />
       </div>
-      {!state.dataError && !s.unavailable && <p className="stats-caption">{metricsRun && !state.preview ? `${metricsContext} · ${metricsRun}` : metricsContext}</p>}
+      {!state.dataError && !s.unavailable && <p className="stats-caption">{metricsRun && !state.preview && !s.success ? `${metricsContext} · ${metricsRun}` : metricsContext}</p>}
     </section>
     <div className="two-columns backup-destinations">
       <section className="surface surface-pad"><div className="info-heading"><Clock3 size={15} className="text-ink-3" />Next automatic backup</div>
-        <div className="info-main">{state.schedule.nextRun || 'No upcoming run'}</div><div className="muted-copy">{state.schedule.summary}</div>
+        {/* A schedule Windows would not show is a problem with a way out, not a card that says "Unavailable" (Settings has the same). */}
+        {state.schedule.error ? <div className="schedule-problem">
+          <p className="muted-copy">Rewindle can’t read the Windows backup schedule just now. Nothing was changed.</p>
+          <div className="actions"><Button size="xs" onClick={() => send('refresh')}><RefreshCw size={12} aria-hidden="true" />Try again</Button></div>
+          <details className="inline-details"><summary>Technical details</summary><p className="muted-copy">{state.schedule.error}</p></details>
+        </div> : <>
+          <div className="info-main">{state.schedule.nextRunAt ? formatWhen(state.schedule.nextRunAt, locale, state.schedule.nextRun) : state.schedule.nextRun || 'No upcoming run'}</div><div className="muted-copy">{localClocks(state.schedule.summary, locale)}</div>
+        </>}
         <ScheduleNotice notice={state.schedule.notice} className="schedule-notice-slot" />
         <div className="info-action"><Action state={state} send={send} command="editSchedule" icon={<ArrowUpRight size={12} />} quiet={quiet} /></div></section>
       <section className="surface surface-pad"><div className="info-heading"><HardDrive size={15} className="text-ink-3" />Backup location</div>
@@ -465,8 +444,9 @@ function Protection({ state, send, folders, setFolders, stale }: { state: Dashbo
 // stopped early, so it is marked on the baseline instead. Every color is a token, so they follow the theme and
 // Windows High Contrast.
 type ChartMetric = 'duration' | 'processed';
-type RunChartData = { runs: RunState[]; selectedId: string | null; onSelect: (runId: string) => void; locale?: string };
-const RunChartContext = createContext<RunChartData>({ runs: [], selectedId: null, onSelect: () => undefined });
+// `resolvedIds`: the runs that did not finish and a later backup put right; they are marked quietly, not in the color of something to act on.
+type RunChartData = { runs: RunState[]; selectedId: string | null; onSelect: (runId: string) => void; locale?: string; resolvedIds: ReadonlySet<string> };
+const RunChartContext = createContext<RunChartData>({ runs: [], selectedId: null, onSelect: () => undefined, resolvedIds: new Set() });
 
 // `floor` is the y of the baseline; the labels under it sit in the 28px below.
 const CHART_HEIGHT = 176;
@@ -477,8 +457,9 @@ const axisLabel = (value: number, metric: ChartMetric, locale?: string) => metri
 const rawValue = (run: RunState, metric: ChartMetric) => metric === 'duration' ? run.durationSeconds : run.processedBytes;
 const shownValue = (run: RunState, metric: ChartMetric) => metric === 'duration' ? run.durationDisplay : run.processedDisplay;
 
-// A value axis padded enough that small changes stay visible, with a few round gridlines inside it. Bytes are
-// scaled to one unit first, so the gridlines read 4.2, 4.4 and 4.6 GiB, not 4.5 billion bytes.
+// A value axis with a few round gridlines inside it. Bytes are scaled to one unit first, so the gridlines read 4.2, 4.4 and 4.6 GiB,
+// not 4.5 billion bytes. When the values stay within half of the peak the axis starts at zero: starting it near the lowest value
+// would draw a 1% change in size as a cliff, and a person reading it would worry about nothing. The tooltip has the exact figures.
 function chartScale(values: number[], metric: ChartMetric) {
   const peak = Math.max(...values, 1);
   let unit = 0;
@@ -487,14 +468,27 @@ function chartScale(values: number[], metric: ChartMetric) {
   const low = Math.min(...scaled), high = Math.max(...scaled);
   if (high <= 0) return { min: 0, max: divisor, ticks: [0] };
   const pad = Math.max((high - low) * .12, high * .02);
-  const min = Math.max(0, low - pad), max = high + pad, rough = (max - min) / 4;
+  const min = (high - low) / high < .5 ? 0 : Math.max(0, low - pad), max = high + pad, rough = (max - min) / 4;
   const step = metric === 'duration' ? DURATION_STEPS.find(candidate => candidate >= rough) ?? decimalStep(rough) : decimalStep(rough);
   const ticks: number[] = [];
   for (let n = Math.ceil(min / step); n * step <= max; n++) ticks.push(n * step * divisor);
   return { min: min * divisor, max: max * divisor, ticks };
 }
 
-function TrendChart({ runs, metric, selectedId, onSelect, locale }: { runs: RunState[]; metric: ChartMetric; selectedId: string | null; onSelect: (runId: string) => void; locale?: string }) {
+// What sits on the baseline, said once for the note under the chart and (without the symbols) for the spoken summary: runs that did not
+// finish (a filled diamond while any is still open, a hollow one once a later backup put each right) and runs stopped on request.
+function markerNote(runs: RunState[], resolvedIds: ReadonlySet<string>, symbols = true): string {
+  const failed = runs.filter(isProblem), open = failed.filter(run => !resolvedIds.has(run.id)).length, stopped = runs.filter(isCancelled).length;
+  const parts: string[] = [];
+  if (failed.length) {
+    const fixed = failed.length - open;
+    parts.push(`${symbols ? `${open ? '◆' : '◇'} ` : ''}${failed.length} ${failed.length === 1 ? 'run' : 'runs'} that did not finish${open === 0 ? `, ${failed.length === 1 ? 'put' : 'each put'} right by a later backup` : fixed > 0 ? ` (${fixed} put right by a later backup)` : ''}`);
+  }
+  if (stopped) parts.push(`${symbols ? '○ ' : ''}${stopped} cancelled`);
+  return parts.length ? `On the baseline, left out of the trend: ${parts.join('; ')}.` : '';
+}
+
+function TrendChart({ runs, metric, selectedId, onSelect, locale, resolvedIds }: { runs: RunState[]; metric: ChartMetric; selectedId: string | null; onSelect: (runId: string) => void; locale?: string; resolvedIds: ReadonlySet<string> }) {
   const plotRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   const [active, setActive] = useState<number | null>(null);
@@ -516,8 +510,8 @@ function TrendChart({ runs, metric, selectedId, onSelect, locale }: { runs: RunS
     const start = times[0], span = Math.max(1, times[last] - start), inner = Math.max(1, width - left - right - 2 * inset), range = scale.max - scale.min || 1;
     const px = (time: number) => left + inset + (time - start) / span * inner;
     const py = (value: number) => top + (1 - (value - scale.min) / range) * (floor - top);
-    return { scale, start, span, px, py, dots: runs.map((run, i) => ({ run, x: px(times[i]), y: run.success ? py(rawValue(run, metric)) : floor, status: runStatus(run) })) };
-  }, [runs, metric, width, last]);
+    return { scale, start, span, px, py, dots: runs.map((run, i) => ({ run, x: px(times[i]), y: run.success ? py(rawValue(run, metric)) : floor, status: runStatus(run), resolved: resolvedIds.has(run.id) })) };
+  }, [runs, metric, width, last, resolvedIds]);
   const { scale, dots } = model;
   const plotted = dots.filter(dot => dot.run.success);
   const selectedIndex = runs.findIndex(run => run.id === selectedId);
@@ -553,17 +547,17 @@ function TrendChart({ runs, metric, selectedId, onSelect, locale }: { runs: RunS
   };
 
   // The figures spoken for the chart count verified runs only; the others are named so a listener knows they exist.
-  const verified = runs.filter(run => run.success), marked = runs.length - verified.length;
+  const verified = runs.filter(run => run.success);
   const extreme = (better: (a: number, b: number) => boolean) => verified.reduce((best, run) => better(rawValue(run, metric), rawValue(best, metric)) ? run : best, verified[0]);
   const summary = (metric === 'duration'
-    ? `Backup duration for the last ${verified.length} verified runs: latest ${verified[verified.length - 1].durationDisplay}, shortest ${shownValue(extreme((a, b) => a < b), metric)}, longest ${shownValue(extreme((a, b) => a > b), metric)}.`
-    : `Data processed by the last ${verified.length} verified runs: latest ${verified[verified.length - 1].processedDisplay}, smallest ${shownValue(extreme((a, b) => a < b), metric)}, largest ${shownValue(extreme((a, b) => a > b), metric)}.`)
-    + (marked ? ` ${marked} failed or cancelled ${marked === 1 ? 'run is' : 'runs are'} marked on the baseline and not counted.` : '');
-  const title = metric === 'duration' ? 'Backup duration by run' : 'Data processed by run';
+    ? `Backup time for the last ${verified.length} successful backups: latest ${verified[verified.length - 1].durationDisplay}, shortest ${shownValue(extreme((a, b) => a < b), metric)}, longest ${shownValue(extreme((a, b) => a > b), metric)}.`
+    : `Data covered by the last ${verified.length} successful backups: latest ${verified[verified.length - 1].processedDisplay}, smallest ${shownValue(extreme((a, b) => a < b), metric)}, largest ${shownValue(extreme((a, b) => a > b), metric)}.`)
+    + (markerNote(runs, resolvedIds, false) ? ` ${markerNote(runs, resolvedIds, false)}` : '');
+  const title = metric === 'duration' ? 'How long each backup took' : 'How much data each backup covered';
   const tip = active !== null && width > 0 ? dots[current] : null;
   return <div className="chart-area">
     <div ref={plotRef} className="run-chart" role="slider" tabIndex={0} aria-label={title} aria-describedby={summaryId}
-      aria-valuemin={1} aria-valuemax={runs.length} aria-valuenow={current + 1} aria-valuetext={`${runs[current].startedDisplay}, ${runs[current].success ? `${shownValue(runs[current], metric)}, ` : ''}${runs[current].result}`}
+      aria-valuemin={1} aria-valuemax={runs.length} aria-valuenow={current + 1} aria-valuetext={`${runs[current].startedDisplay}, ${runs[current].success ? `${shownValue(runs[current], metric)}, ` : ''}${resultLabel(runs[current].result)}${resolvedIds.has(runs[current].id) ? ', put right by a later backup' : ''}`}
       onPointerDown={event => { const index = nearest(event.clientX); if (index !== null) setActive(index); }}
       onPointerMove={event => { const index = nearest(event.clientX); if (index !== null) setActive(index); }}
       onPointerLeave={event => setActive(event.currentTarget.matches(':focus-visible') ? resting : null)}
@@ -584,26 +578,26 @@ function TrendChart({ runs, metric, selectedId, onSelect, locale }: { runs: RunS
         {tip && <line className="run-chart-cursor" x1={tip.x} x2={tip.x} y1={top} y2={floor} />}
         {dots.map((dot, i) => <g key={dot.run.id} transform={`translate(${dot.x.toFixed(1)} ${dot.y.toFixed(1)})`}>
           {i === selectedIndex && <circle className="run-chart-selected" r={8} />}
-          {dot.status === 'todo' ? <rect className="run-chart-dot is-failed" x={-4} y={-4} width={8} height={8} transform={`rotate(45) scale(${tip && i === current ? 1.3 : 1})`} />
+          {dot.status === 'todo' ? <rect className={`run-chart-dot ${dot.resolved ? 'is-resolved' : 'is-failed'}`} x={-4} y={-4} width={8} height={8} transform={`rotate(45) scale(${tip && i === current ? 1.3 : 1})`} />
             : <circle className={`run-chart-dot${dot.status === 'progress' ? ' is-canceled' : ''}`} r={tip && i === current ? 5 : 3.5} />}
         </g>)}
       </svg>}
       {tip && <div className="run-chart-tip" style={{ left: Math.max(Math.min(tip.x, width - 78), 78), top: tip.y >= 60 ? tip.y - 60 : tip.y + 14 }} aria-hidden="true">
-        <strong>{tip.run.startedDisplay}</strong><span>{tip.run.success ? `${shownValue(tip.run, metric)} · ${tip.run.result}` : `${tip.run.result} · not counted`}</span>
+        <strong>{tip.run.startedDisplay}</strong><span>{tip.run.success ? `${shownValue(tip.run, metric)} · ${resultLabel(tip.run.result)}` : `${resultLabel(tip.run.result)}${tip.resolved ? ' · put right by a later backup' : ''} · not in the trend`}</span>
       </div>}
     </div>
     <p id={summaryId} className="sr-only">{summary} Use the left and right arrow keys to move between runs and Enter to select one.</p>
     <div className="sr-only"><table><caption>{title}</caption>
-      <thead><tr><th scope="col">Started</th><th scope="col">{metric === 'duration' ? 'Duration' : 'Processed'}</th><th scope="col">Result</th></tr></thead>
-      <tbody>{runs.map(run => <tr key={run.id}><td>{run.startedDisplay}</td><td>{run.success ? shownValue(run, metric) : '—'}</td><td>{run.result}</td></tr>)}</tbody></table></div>
+      <thead><tr><th scope="col">Started</th><th scope="col">{metric === 'duration' ? 'Duration' : 'Size covered'}</th><th scope="col">Result</th></tr></thead>
+      <tbody>{runs.map(run => <tr key={run.id}><td>{run.startedDisplay}</td><td>{run.success ? shownValue(run, metric) : '—'}</td><td>{resultLabel(run.result)}</td></tr>)}</tbody></table></div>
   </div>;
 }
 
-// How many verified runs each chart follows.
+// How many successful backups each chart follows.
 const CHART_RUNS = 30;
 
 function RunChart({ metric }: { metric: ChartMetric }) {
-  const { runs: all, selectedId, onSelect, locale } = useContext(RunChartContext);
+  const { runs: all, selectedId, onSelect, locale, resolvedIds } = useContext(RunChartContext);
   // The last 30 verified runs, oldest first, so the line reads left to right. A failed or cancelled run inside that span
   // stays on the chart as a marker, because it happened, but it is not a value: it feeds neither the line nor the figure above it.
   const { runs, verified, verifiedTotal } = useMemo(() => {
@@ -612,17 +606,24 @@ function RunChart({ metric }: { metric: ChartMetric }) {
     const from = done.length > CHART_RUNS ? Date.parse(done[done.length - CHART_RUNS].started) : Number.NEGATIVE_INFINITY;
     return { runs: dated.filter(run => Date.parse(run.started) >= from), verified: done.slice(-CHART_RUNS), verifiedTotal: done.length };
   }, [all]);
-  const latest = verified[verified.length - 1], newest = runs[runs.length - 1], marked = runs.length - verified.length;
+  const latest = verified[verified.length - 1], newest = runs[runs.length - 1];
   if (!latest || verified.length < 2) {
-    const [heading, text] = !newest ? ['No completed backups yet', 'Run history and trends will appear after your first backup.']
-      : latest ? ['Your first verified backup is recorded', `${latest.startedDisplay} · ${shownValue(latest, metric)}. A trend appears after the next verified backup.`]
-      : ['No verified backup yet', `Latest run: ${newest.startedDisplay} · ${newest.result}. A trend appears once a backup is verified.`];
+    const [heading, text] = !newest ? ['No backups yet', 'Run history and trends will appear after your first backup.']
+      : latest ? ['Your first successful backup is recorded', `${latest.startedDisplay} · ${shownValue(latest, metric)}. A trend appears after the next successful backup.`]
+      : ['No successful backup yet', `Latest run: ${newest.startedDisplay} · ${resultLabel(newest.result)}. A trend appears once a backup succeeds.`];
     return <div className="surface first-run-summary"><History size={22} /><div><strong>{heading}</strong><p>{text}</p></div></div>;
   }
+  // One sentence on what the line says, so the chart is not left to be read: the usual time, or whether the size is moving.
+  const first = verified[0];
+  const change = latest.processedBytes - first.processedBytes;
+  const takeaway = metric === 'duration' ? `Latest backup · usually about ${duration(usualSeconds(verified))}`
+    : Math.abs(change) < Math.max(1, first.processedBytes) * .01 ? `Latest backup · steady over these ${verified.length} backups`
+    : `Latest backup · ${change > 0 ? 'up' : 'down'} ${bytes(Math.abs(change), locale)} since ${first.startedDisplay}`;
+  const note = markerNote(runs, resolvedIds);
   return <div className="surface chart-card">
-    <div className="chart-heading"><div><span className="eyebrow">{metric === 'duration' ? 'Latest verified run duration' : 'Latest verified data processed'}</span><div className="chart-value">{shownValue(latest, metric)}</div></div><span className="quiet-tag">{verifiedTotal > CHART_RUNS ? `last ${CHART_RUNS} verified runs` : `${verified.length} verified runs`}</span></div>
-    <TrendChart runs={runs} metric={metric} selectedId={selectedId} onSelect={onSelect} locale={locale} />
-    {marked > 0 && <p className="chart-note">{marked} failed or cancelled {marked === 1 ? 'run is' : 'runs are'} marked on the baseline and left out of the trend.</p>}
+    <div className="chart-heading"><div><span className="eyebrow">{metric === 'duration' ? 'How long backups take' : 'How much data backups cover'}</span><div className="chart-value">{shownValue(latest, metric)}</div><p className="chart-takeaway">{takeaway}</p></div><span className="quiet-tag">{verifiedTotal > CHART_RUNS ? `last ${CHART_RUNS} successful backups` : `${verified.length} successful backups`}</span></div>
+    <TrendChart runs={runs} metric={metric} selectedId={selectedId} onSelect={onSelect} locale={locale} resolvedIds={resolvedIds} />
+    {note && <p className="chart-note">{note}</p>}
   </div>;
 }
 
@@ -634,23 +635,48 @@ function GuardedChart({ metric }: { metric: ChartMetric }) {
 const DurationChart = () => <GuardedChart metric="duration" />;
 const ProcessedChart = () => <GuardedChart metric="processed" />;
 
-const HISTORY_LABELS: FilterTableLabels = {
-  columns: { task: 'When', date: 'Duration', status: 'Result', owner: 'Processed · files' },
-  filters: { all: 'All runs', done: 'Completed', todo: 'Needs attention', progress: 'Cancelled' },
-  openRow: 'Open details',
-};
+const HISTORY_COLUMNS = { task: 'When', date: 'Time taken', status: 'Result', owner: 'Files · size' };
 
-function ActivityPage({ state, send, view, setView, openRunDetails, openRestore, interactive }: { state: DashboardState; send: Send; view: HistoryView & ActivityDateFilter; setView: (value: HistoryView & ActivityDateFilter) => void; openRunDetails: (runId: string) => void; openRestore: () => void; interactive: boolean }) {
+// The host's last verified backup, in the form runProblems settles older problems with (see lastVerified).
+const verifiedBackup = (state: DashboardState): Verified | undefined =>
+  lastVerified(state.freshness, formatWhen(state.freshness.verifiedAt, usableLocale(state.locale)));
+
+// "dayKey(6)" is the local date six days ago, as a date field writes it.
+const dayKey = (daysBack: number) => { const day = new Date(); day.setDate(day.getDate() - daysBack); return localDateKey(day.toISOString()); };
+// The ranges the date menu offers, as the number of days they reach back (today counts as the first).
+const DATE_RANGES: [days: string, label: string][] = [['7', 'Last 7 days'], ['30', 'Last 30 days'], ['365', 'Last year']];
+
+type ActivityProps = { state: DashboardState; send: Send; view: HistoryView & ActivityDateFilter; setView: (value: HistoryView & ActivityDateFilter) => void; openRunDetails: (runId: string) => void; openRestore: () => void; interactive: boolean };
+
+// Without the backup service there is no history to list and nothing to start: the one explanation takes the page's place.
+function ActivityPage(props: ActivityProps) {
+  if (serviceMissing(props.state)) return <><Heading title="Activity" description="Rewindle is waiting for a backup service to report on." /><SetupNotice state={props.state} send={props.send} /></>;
+  return <ActivityHistory {...props} />;
+}
+
+function ActivityHistory({ state, send, view, setView, openRunDetails, openRestore, interactive }: ActivityProps) {
   const { query, sort, filter, from, to } = view;
   const locale = usableLocale(state.locale);
   // The search field keeps focus when it is cleared (the clear button goes away with the text, and focus would fall to the page).
   const searchRef = useRef<HTMLInputElement>(null);
+  // "Pick dates…" shows the two date fields; a range typed or kept from before shows them too (see rangeValue).
+  const [pickDates, setPickDates] = useState(false);
   const historySignature = JSON.stringify(state.history);
   const history = useMemo(() => [...state.history].sort((a, b) => Date.parse(b.started) - Date.parse(a.started)), [historySignature]);
   const backupRuns = useMemo(() => history.filter(run => run.type === 'Backup'), [history]);
   const success = backupRuns.filter(run => run.success);
-  const average = success.length ? success.reduce((sum, run) => sum + run.durationSeconds, 0) / success.length : 0;
+  // A failed or incomplete run that a later success put right is shown as resolved; only what nothing has put right asks for anything.
+  // The host's own last verified backup counts as that success too, because the list only holds runs this app saw.
+  const verified = useMemo(() => verifiedBackup(state), [state.freshness.state, state.freshness.verifiedAt, locale]);
+  const resolved = useMemo(() => resolvedRuns(history, verified), [history, verified]);
+  const unresolved = useMemo(() => unresolvedRuns(history, resolved), [history, resolved]);
+  const attention = attentionText(unresolved, lastSuccessfulBackup(history, verified));
+  const problems = useMemo(() => history.filter(isProblem).length, [history]);
+  const failedBackups = backupRuns.filter(isProblem).length;
+  const usual = usualSeconds(success);
+  const latestBackup = success[0];
   const selected = state.history.find(run => run.id === state.selectedRunId);
+  const selectedResolver = selected && resolved.get(selected.id);
   const dateRangeInvalid = !!from && !!to && from > to;
   const needle = query.trim().toLowerCase();
   const matchesDate = (run: RunState) => {
@@ -658,8 +684,9 @@ function ActivityPage({ state, send, view, setView, openRunDetails, openRestore,
     const startedDate = localDateKey(run.started);
     return !!startedDate && (!from || startedDate >= from) && (!to || startedDate <= to);
   };
-  // The local date (2025-10-02) is searchable too, because the table's own label leaves the year out for this year's runs.
-  const matchesView = (run: RunState) => matchesDate(run) && [run.id, run.startedDisplay, localDateKey(run.started), run.result, run.snapshot, run.type].join(' ').toLowerCase().includes(needle);
+  // The local date (2025-10-02) is searchable too, because the table's own label leaves the year out for this year's runs. The host's raw
+  // result and the snapshot stay searchable though the page says them differently.
+  const matchesView = (run: RunState) => matchesDate(run) && [run.id, run.startedDisplay, localDateKey(run.started), run.result, resultLabel(run.result), run.snapshot, run.type, typeLabel(run.type)].join(' ').toLowerCase().includes(needle);
   const inChip = (run: RunState) => filter === 'all' || filter === runStatus(run);
   const selectedVisible = !!selected && matchesView(selected) && inChip(selected);
   // With nothing selected, "Open details" falls back to the newest run the table shows, so the first visit has no
@@ -671,14 +698,27 @@ function ActivityPage({ state, send, view, setView, openRunDetails, openRestore,
   const rows: TableRow[] = useMemo(() => {
     const filtered = history.filter(matchesView);
     filtered.sort((a, b) => sort === 'duration' ? b.durationSeconds - a.durationSeconds : sort === 'size' ? b.processedBytes - a.processedBytes : sort === 'oldest' ? Date.parse(a.started) - Date.parse(b.started) : Date.parse(b.started) - Date.parse(a.started));
-    return filtered.map(run => ({ id: run.id, task: `${run.startedDisplay}${run.type !== 'Backup' ? ` · ${run.type}` : ''}`, date: run.durationDisplay, status: runStatus(run), statusLabel: run.result, owner: `${run.processedDisplay} · ${run.filesDisplay} files` }));
-  }, [history, query, sort, from, to]);
+    return filtered.map(run => {
+      const by = resolved.get(run.id);
+      // A run that did not finish has no figures worth showing when it counted nothing: a dash says so, "0 B · 0 files" reads as an empty backup.
+      return { id: run.id, task: `${run.startedDisplay}${run.type !== 'Backup' ? ` · ${typeLabel(run.type)}` : ''}`, date: run.durationDisplay, status: runStatus(run), statusLabel: resultLabel(run.result), statusTitle: resultHint(run.result),
+        owner: run.success || run.files > 0 || run.processedBytes > 0 ? `${run.filesDisplay} files · ${run.processedDisplay}` : '—',
+        ...(by ? { quiet: true, statusNote: 'Resolved', statusHint: `${resolvedByText(by)}, so this run needs nothing from you.` } : {}) };
+    });
+  }, [history, resolved, query, sort, from, to]);
+  // "Problems" only while something is still open; once a later backup put every one right they are a record, and the chip says so.
+  const labels = useMemo<FilterTableLabels>(() => ({
+    columns: HISTORY_COLUMNS,
+    filters: { all: 'All runs', done: 'Successful', todo: unresolved.length ? 'Problems' : 'Resolved', progress: 'Cancelled' },
+    openRow: 'Open details', filtersName: 'Show runs by result',
+  }), [unresolved.length]);
   // Sorting is not a filter (it never hides a run), so only the search, the dates and the result chip count as filtering and are
-  // cleared by "Clear filters"; the order stays as it was chosen.
+  // cleared by "Show all runs"; the order stays as it was chosen.
   const filtering = !!query.trim() || !!from || !!to || filter !== 'all';
   const shown = rows.filter(row => filter === 'all' || row.status === filter).length;
   const clearFilters = useCallback(() => {
     setView({ ...view, query: '', from: '', to: '', filter: 'all' });
+    setPickDates(false);
     searchRef.current?.focus();
   }, [setView, view]);
   // The table is large and the host publishes state every second, so everything it receives is kept stable
@@ -687,135 +727,223 @@ function ActivityPage({ state, send, view, setView, openRunDetails, openRestore,
   const selectRow = useCallback((row: TableRow) => send('selectRun', { runId: row.id ?? '' }), [send]);
   const openRow = useCallback((row: TableRow) => openRunDetails(row.id ?? ''), [openRunDetails]);
   // Only drawn while there is history to filter (the first-run state below has its own), so this is always about filters that match nothing.
-  const emptyContent = useMemo(() => <div className="empty-state"><Search size={22} aria-hidden="true" /><strong>{dateRangeInvalid ? 'Choose a valid date range' : 'No runs match these filters'}</strong><p>{dateRangeInvalid ? 'The start date must be on or before the end date.' : 'Try another search, adjust the dates, or show all results.'}</p><Button size="sm" onClick={clearFilters}>Clear filters</Button></div>, [dateRangeInvalid, clearFilters]);
-  // What the tiles and the banner say about the window of runs the host keeps; the number is the host's own (see historyLimit).
+  const emptyContent = useMemo(() => {
+    const [title, text] = dateRangeInvalid ? ['Choose a valid date range', 'The start date must be on or before the end date.']
+      : filter === 'todo' ? ['No problems found', 'None of the runs shown failed or was incomplete.']
+      : filter === 'progress' ? ['No cancelled runs', 'None of the runs shown was cancelled.']
+      : filter === 'done' ? ['No successful runs', 'None of the runs shown succeeded.']
+      : ['No runs match these filters', 'Try another search, adjust the dates, or show all runs.'];
+    return <div className="empty-state"><Search size={22} aria-hidden="true" /><strong>{title}</strong><p>{text}</p><Button size="sm" onClick={clearFilters}>Show all runs</Button></div>;
+  }, [dateRangeInvalid, filter, clearFilters]);
+  // What the banner says about the window of runs the host keeps; the number is the host's own (see historyLimit).
   const limit = state.historyLimit;
-  const windowNote = state.historyTruncated ? (limit ? `last ${limit.toLocaleString(locale)} runs` : 'newest runs only') : undefined;
   const capNote = limit
     ? `Showing the newest ${limit.toLocaleString(locale)} runs. Older runs have rolled off this list, but every backup is still saved in your backup location. Restore lists every backup you can recover from.`
     : 'The app keeps the newest 400 run records for fast loading. This does not remove backup snapshots.';
   const summary = filtering ? `Showing ${shown.toLocaleString(locale)} of ${history.length.toLocaleString(locale)} runs` : `${history.length.toLocaleString(locale)} ${history.length === 1 ? 'run' : 'runs'}`;
-  const chart = useMemo<RunChartData>(() => ({ runs: backupRuns, selectedId: state.selectedRunId, onSelect: runId => send('selectRun', { runId }), locale }), [backupRuns, state.selectedRunId, send, locale]);
-  // A trend needs two verified runs; failed and cancelled ones are only marked on it.
-  const trend = success.length > 1, pill = selected ? 'Open selected run details' : 'Open newest run details';
-  const pages: InsightPage[] = useMemo(() => [
-    { key: 'duration', prose: trend ? 'How long your backups take. Point at a run to see it, or click one to select it.' : 'Compare backup duration as your run history grows.', Card: DurationChart, pill },
-    { key: 'processed', prose: 'The amount of data processed by each backup run.', Card: ProcessedChart, pill },
-  ], [trend, pill]);
+  const resolvedIds = useMemo<ReadonlySet<string>>(() => new Set(resolved.keys()), [resolved]);
+  const chart = useMemo<RunChartData>(() => ({ runs: backupRuns, selectedId: state.selectedRunId, onSelect: runId => send('selectRun', { runId }), locale, resolvedIds }), [backupRuns, state.selectedRunId, send, locale, resolvedIds]);
+  // A trend needs two successful backups; failed and cancelled ones are only marked on it.
+  const trend = success.length > 1;
+  // The date menu shows a range it knows, or "Pick dates…" with the two fields; dates left over from before show as picked.
+  const rangeValue = !from && !to ? 'any' : !to ? DATE_RANGES.find(([days]) => from === dayKey(Number(days) - 1))?.[0] ?? 'custom' : 'custom';
+  const showDates = pickDates || rangeValue === 'custom';
+  const onRangeChange = (value: string) => {
+    setPickDates(value === 'custom');
+    if (value !== 'custom') setView({ ...view, from: value === 'any' ? '' : dayKey(Number(value) - 1), to: '' });
+  };
+  // What the first tile adds to its number, so "79" is not left to read as a score out of something: what, if anything, is still open.
+  const successSub = unresolved.length ? `${unresolved.length} ${unresolved.length === 1 ? 'needs' : 'need'} a look`
+    : failedBackups ? `${failedBackups} did not finish; ${failedBackups === 1 ? 'a later backup put it' : 'later backups put them'} right`
+    : success.length ? 'None have failed' : undefined;
+  if (history.length === 0) {
+    return <>
+      <Heading title="Activity" description="See every backup Rewindle has made, and what happened when one did not finish." note={modeNote(state)} />
+      <div className="surface empty-state history-empty"><History size={22} aria-hidden="true" /><strong>No backups yet</strong><p>Your backups will be listed here once the first one has run. You can start one now.</p>
+        <Action state={state} send={send} command="backupNow" primary size="md" icon={<Play size={13} fill="currentColor" />} quiet={!!modeNote(state)} /></div>
+    </>;
+  }
   return <>
-    <Heading title="Activity" description="Search your runs, inspect a snapshot, or review what needs attention." note={modeNote(state)}>
-      <Action state={state} send={send} command="exportDiagnostics" icon={<ArrowUpRight size={13} />} quiet={!!modeNote(state)} />
-    </Heading>
+    <Heading title="Activity" description="See every backup Rewindle has made, and what happened when one did not finish." note={modeNote(state)} />
     <div className="activity-metrics">
-      <div className="surface"><Stat label="Verified backups" value={backupRuns.length ? `${success.length} / ${backupRuns.length}` : 'No backups yet'} icon={<ShieldCheck size={13} />} sub={windowNote} /></div>
-      <div className="surface"><Stat label="Average duration" value={success.length ? duration(average) : '—'} icon={<Clock3 size={13} />} sub={windowNote} /></div>
-      <div className="surface"><Stat label="Latest stored" value={success.length ? success[0].storedDisplay : '—'} icon={<Database size={13} />} sub={windowNote} hint="New data the latest verified backup added to your backup location, after deduplication and compression." /></div>
+      <div className="surface"><Stat label="Successful backups" value={backupRuns.length ? String(success.length) : 'No backups yet'} icon={<ShieldCheck size={13} />} sub={successSub} /></div>
+      <div className="surface"><Stat label="Usual backup time" value={usual ? duration(usual) : '—'} icon={<Clock3 size={13} />} sub={latestBackup ? `Last one: ${latestBackup.durationDisplay}` : undefined} /></div>
+      <div className="surface"><Stat label="New data in last backup" value={latestBackup ? (isUnchanged(latestBackup.result) ? 'Nothing new' : latestBackup.storedDisplay) : '—'} icon={<Database size={13} />}
+        sub={latestBackup ? (isUnchanged(latestBackup.result) ? 'Your files matched the previous backup' : 'Added to your backup location') : undefined} /></div>
     </div>
     <section>
-      <div className="section-toolbar"><div><div className="history-heading"><h2 className="section-title">Run history</h2>{history.length > 0 && <span className="history-count" role="status">{summary}</span>}</div>
-        {history.length > 0 && <p className="history-scope-note">History lists runs Rewindle has observed; runs that finish while it is closed may be missing.</p>}</div>
-        {history.length > 0 && <div className="history-tools">
-          <label className="search-field"><Search size={13} aria-hidden="true" /><input ref={searchRef} aria-label="Search backup history" placeholder="Date, result, or snapshot…" value={query} onChange={event => setView({ ...view, query: event.target.value })}
+      <div className="section-toolbar"><div><div className="history-heading"><h2 className="section-title">Run history</h2><span className="history-count" role="status">{summary}</span></div>
+        <p className="history-scope-note">Click a run to select it. Double-click it, or press Enter, to see its details. Runs that finish while Rewindle is closed can be missing from this list.</p></div>
+        <div className="history-tools">
+          <label className="search-field"><Search size={13} aria-hidden="true" /><input ref={searchRef} aria-label="Search backup history" placeholder="Search by date or result…" value={query} onChange={event => setView({ ...view, query: event.target.value })}
             onKeyDown={event => { if (event.key === 'Escape' && query) { event.preventDefault(); event.stopPropagation(); setView({ ...view, query: '' }); } }} />{query && <button aria-label="Clear history search" onClick={() => { setView({ ...view, query: '' }); searchRef.current?.focus(); }}><X size={13} /></button>}</label>
-          <label className="date-filter"><span>From</span><input type="date" aria-label="Show runs from date" value={from} max={to || undefined} onChange={event => setView({ ...view, from: event.target.value })} /></label>
-          <label className="date-filter"><span>To</span><input type="date" aria-label="Show runs through date" value={to} min={from || undefined} onChange={event => setView({ ...view, to: event.target.value })} /></label>
+          <select className="sort-field" aria-label="Show runs from" value={showDates ? 'custom' : rangeValue} onChange={event => onRangeChange(event.target.value)}>
+            <option value="any">Any time</option>{DATE_RANGES.map(([days, label]) => <option key={days} value={days}>{label}</option>)}<option value="custom">Pick dates…</option></select>
+          {showDates && <>
+            <label className="date-filter"><span>From</span><input type="date" aria-label="Show runs from date" value={from} max={to || undefined} onChange={event => setView({ ...view, from: event.target.value })} /></label>
+            <label className="date-filter"><span>To</span><input type="date" aria-label="Show runs through date" value={to} min={from || undefined} onChange={event => setView({ ...view, to: event.target.value })} /></label></>}
           <select className="sort-field" aria-label="Sort backup history" value={sort} onChange={event => setView({ ...view, sort: event.target.value })}><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="duration">Longest first</option><option value="size">Largest first</option></select>
           {/* Always in the toolbar, hidden (so out of the tab order too) while there is nothing to clear: it appearing and going shifted the other fields. */}
           <Button size="xs" variant="quiet" style={{ visibility: filtering ? 'visible' : 'hidden' }} onClick={clearFilters}>Clear filters</Button>
-        </div>}</div>
+        </div></div>
       {state.historyTruncated && <div className="history-cap-note" role="note"><Info size={13} aria-hidden="true" /><span>{capNote}</span><Button size="xs" variant="quiet" onClick={openRestore}>Open Restore</Button></div>}
-      {history.length > 0 ? <>
-        <FilterTable className="history-table" rows={rows} labels={HISTORY_LABELS}
-          selectedRowId={state.selectedRunId} filter={filter} onFilterChange={onFilterChange} tableLabel="Backup run history"
-          onRowClick={selectRow} onRowOpen={openRow} emptyContent={emptyContent} />
-        <div className="selection-bar"><div><strong>{selected ? `${selected.type} · ${selected.startedDisplay}` : newest ? `Newest run · ${newest.startedDisplay}` : 'No run to open'}</strong><span>{selected ? `${selected.result} · Snapshot ${selected.snapshot || 'unavailable'}${selectedVisible ? '' : ' · Hidden by current filters'}` : newest ? `${newest.result} · Click a row to choose another run, or double-click one to open it.` : 'Adjust the search, dates or filters to see runs.'}</span></div><Button size="sm" variant="secondary" disabled={!canOpen} title={canOpen ? undefined : detailsAction?.help} onClick={() => target && openRunDetails(target.id)}><ArrowRight size={13} />Open details</Button></div>
-      </> : <div className="surface empty-state history-empty"><History size={22} aria-hidden="true" /><strong>No backup history yet</strong><p>Your completed backup runs will appear here once you have made your first backup.</p>
-        <Action state={state} send={send} command="backupNow" primary size="md" icon={<Play size={13} fill="currentColor" />} quiet={!!modeNote(state)} /></div>}
+      {/* What the history asks for: nothing while every problem was put right by a later backup, which is said once the problems are
+          the ones shown; otherwise the runs since the last successful backup, with a way to try again and the way to the newest one's details. */}
+      {attention ? <div className="history-cap-note is-warning" role="note"><TriangleAlert size={13} aria-hidden="true" /><span>{attention} Try Back up now. If it fails again, open its details to see why.</span>
+        <Action state={state} send={send} command="backupNow" primary size="xs" icon={<Play size={12} fill="currentColor" />} quiet />
+        <Button size="xs" variant="secondary" disabled={!interactive || !detailsAction} title={interactive ? detailsAction?.help : undefined} onClick={() => openRunDetails(unresolved[0].id)}><ArrowRight size={12} />Open details</Button></div>
+        : filter === 'todo' && problems > 0 && <div className="history-cap-note is-resolved" role="note"><CircleCheck size={13} aria-hidden="true" /><span>Nothing needs doing. A later backup succeeded after each of these runs, so they stay here only as a record of what happened.</span></div>}
+      <FilterTable className="history-table" rows={rows} labels={labels}
+        selectedRowId={state.selectedRunId} filter={filter} onFilterChange={onFilterChange} tableLabel="Backup run history"
+        onRowClick={selectRow} onRowOpen={openRow} emptyContent={emptyContent} />
+      <div className="selection-bar"><div><strong>{selected ? `${typeLabel(selected.type)} · ${selected.startedDisplay}` : newest ? `Newest run · ${newest.startedDisplay}` : 'No run to open'}</strong><span>{selected ? `${resultLabel(selected.result)}${selectedResolver ? ` · ${resolvedByText(selectedResolver)}` : ''}${selectedVisible ? '' : ' · Hidden by current filters'}` : newest ? resultLabel(newest.result) : 'Adjust the search, dates or filters to see runs.'}</span></div><Button size="sm" variant="secondary" disabled={!canOpen} title={canOpen ? undefined : detailsAction?.help} onClick={() => target && openRunDetails(target.id)}><ArrowRight size={13} />Open details</Button></div>
     </section>
-    <RunChartContext.Provider value={chart}><div className="insights-wide"><InsightCards pages={pages} labels={{ title: 'Backup trends' }} actionDisabled={!canOpen} onAction={() => target && openRunDetails(target.id)} /></div></RunChartContext.Provider>
+    {/* Both charts side by side, with no pager to hide half of them. Fewer than two successful backups draws one card that says why. */}
+    <RunChartContext.Provider value={chart}><section className="trends-section"><h2 className="section-title">Backup trends</h2>
+      {trend ? <div className="two-columns"><DurationChart /><ProcessedChart /></div> : <DurationChart />}</section></RunChartContext.Provider>
   </>;
 }
 
-function RestorePage({ state, send }: { state: DashboardState; send: Send }) {
-  const steps: TaskRow[] = [
-    { key: 'choose', label: 'Choose a backup', amount: '', step: 1, status: 'guide', details: [{ label: 'Browse your saved backups in Restore Center.', meta: '' }] },
-    { key: 'find', label: 'Find your files', amount: '', step: 2, status: 'guide', details: [{ label: 'Explore the original folder structure and select what you need.', meta: '' }] },
-    { key: 'destination', label: 'Choose an empty folder', amount: '', step: 3, status: 'guide', details: [{ label: 'Restore into a new or empty location. Your original files stay in place.', meta: '' }] },
-    { key: 'verify', label: 'Restore and verify', amount: '', step: 4, status: 'guide', details: [{ label: 'Check the recovered files before using them.', meta: '' }] },
-  ];
-  const note = modeNote(state);
-  if (serviceMissing(state)) return <><Heading title="Restore" description="Choose a saved backup and recover files to a separate folder." note={note} /><SetupNotice state={state} send={send} /></>;
-  return <><Heading title="Restore" description="Choose a saved backup and recover files to a separate folder." note={note} />
+function RestorePage({ state: shown, send }: { state: DashboardState; send: Send }) {
+  const note = modeNote(shown);
+  // The sample data walks the whole flow on invented backups (demo/restoreDemo.ts), so this page's button is the one the sample leaves on.
+  const state: DashboardState = shown.demo && shown.actions.openRestore
+    ? { ...shown, actions: { ...shown.actions, openRestore: { ...shown.actions.openRestore, enabled: true, help: 'Choose a backup and restore files into a separate folder. Windows will ask for your permission.' } } }
+    : shown;
+  const description = 'Get back files you deleted, lost or changed. Rewindle copies them from a backup into a new folder; your current files are never touched.';
+  if (serviceMissing(state)) return <><Heading title="Restore" description={description} note={note} /><SetupNotice state={state} send={send} /></>;
+  const { recovery } = state;
+  const ready = !!state.actions.openRestore?.enabled;
+  // What the page offers while restoring is not available. A host that does not say is taken to need a fresh read (an unavailable
+  // restore with nothing running and no repair to make); the repair banner above has its own button, and the sample note says why itself.
+  const next = recovery.next ?? (ready || recovery.repairNeeded || note ? '' : 'refresh');
+  // Waiting is not a problem (it unlocks by itself) and a sample or preview is paused on purpose, so only the rest is drawn as one.
+  const tone = ready || note ? '' : next === 'wait' ? 'active' : 'warning';
+  // The page names no "newest backup": run history is capped and misses runs made while the app was closed, so only the
+  // dialog's list, read from the backup location itself, can say which backup is newest (it marks it "Newest").
+  // The earlier edition (and an older engine) asks Windows for every protected step; a newer one asks once. Only the earlier one is certain from here.
+  const permission = state.setup?.engineProfile === 'legacy'
+    ? 'On this computer Windows asks for your permission each time Rewindle opens your backup: once to list your backups, once for each folder you open, and once to restore. Choose Yes each time.'
+    : 'Windows asks for your permission (a shield prompt) before Rewindle reads your backup. Choose Yes.';
+  return <><Heading title="Restore" description={description} note={note} />
     <Repairs state={state} send={send} />
-    <div className="restore-layout"><section className="surface"><span className="eyebrow">Restore Center</span><div className={`status-emblem ${state.recovery.repairNeeded ? 'warning' : ''}`} style={{ marginTop: 22 }}><ArchiveRestore size={24} /></div>
-      <h2>{state.recovery.title}</h2><p className="muted-copy">{state.recovery.detail}</p>
-      <div className="actions" style={{ marginTop: 22 }}><Action state={state} send={send} command="openRestore" primary size="md" icon={<ArrowUpRight size={14} />} quiet={!!note} /><Action state={state} send={send} command="checkReadiness" quiet={!!note} /></div>
-    </section><div><h2 className="section-title" style={{ marginBottom: 16 }}>How recovery works</h2><TaskRows rows={steps} className="restore-steps" variant="List" /></div></div>
-    <div className="surface surface-pad"><div className="info-heading"><HardDrive size={15} />Backup location</div><div className="info-main">{state.repository.path}</div><p className="muted-copy">Browse a snapshot, select files, and review the destination before restoring. Recovered files are verified after the operation.</p></div>
+    <div className="restore-layout"><section className="surface"><div className={`status-emblem ${tone}`}><ArchiveRestore size={24} aria-hidden="true" /></div>
+      <h2>{recovery.title}</h2><p className="muted-copy">{recovery.repairNeeded ? 'Restore opens once the repair above is finished.' : recovery.detail}</p>
+      <div className="actions" style={{ marginTop: 22 }}><Action state={state} send={send} command="openRestore" primary size="md" icon={<ArrowUpRight size={14} />} quiet />
+        {next === 'refresh' && <Button size="md" variant="secondary" onClick={() => send('refresh')}><RefreshCw size={14} aria-hidden="true" />Try again</Button>}</div>
+      {ready && <p className="muted-copy restore-permission">{permission}</p>}
+      <div className="restore-readiness"><Action state={state} send={send} command="checkReadiness" quiet />
+        <p>Makes sure your backups can be opened and restored. It opens in its own window, only reads, and changes nothing.</p></div>
+    </section><div><h2 className="section-title" style={{ marginBottom: 16 }}>How restoring works</h2><ol className="restore-howto">
+      <li><strong>Choose a backup</strong><span>Pick the newest one from before the files were lost.</span></li>
+      <li><strong>Choose files</strong><span>Open folders and tick what you need, or restore everything.</span></li>
+      <li><strong>Choose a folder</strong><span>A new or empty folder. Your current files are never replaced.</span></li>
+      <li><strong>Review and restore</strong><span>Rewindle copies your files and checks each one.</span></li>
+    </ol></div></div>
   </>;
 }
 
-function SettingsPage({ state, send }: { state: DashboardState; send: Send }) {
-  const themes: { name: ThemePreference; label: string; Icon: typeof Sun }[] = [{ name: 'System', label: 'System', Icon: Monitor }, { name: 'Midnight', label: 'Dark', Icon: Moon }, { name: 'Daylight', label: 'Light', Icon: Sun }];
-  const motions: { name: MotionPreference; label: string }[] = [{ name: 'System', label: 'System' }, { name: 'Full', label: 'Full' }, { name: 'Reduced', label: 'Reduced' }];
+// The three themes in the order the Settings picker lists them and the toolbar button steps through them (System, Light, Dark, and
+// round again), so the button never replaces "follow Windows" without a way back.
+const THEME_STEPS: { name: ThemePreference; label: string; Icon: typeof Sun }[] = [
+  { name: 'System', label: 'System', Icon: Monitor }, { name: 'Daylight', label: 'Light', Icon: Sun }, { name: 'Midnight', label: 'Dark', Icon: Moon }];
+const MOTION_STEPS: { name: MotionPreference; label: string }[] = [{ name: 'System', label: 'Follow Windows' }, { name: 'Full', label: 'Always on' }, { name: 'Reduced', label: 'Reduced' }];
+const ISSUES_URL = `${PROJECT_URL}/issues`;
+
+// Copies a link: the page cannot open one (the host refuses every navigation away from the app), so the person pastes it into a
+// browser. The button says it worked, and a screen reader is told too.
+function CopyLinkButton({ text, label = 'Copy link' }: { text: string; label?: string }) {
+  const [copied, setCopied] = useState<'idle' | 'done' | 'failed'>('idle');
+  const copy = async () => { setCopied(await copyText(text) ? 'done' : 'failed'); window.setTimeout(() => setCopied('idle'), 2500); };
+  return <><Button size="sm" onClick={copy}><Copy size={13} aria-hidden="true" />{copied === 'done' ? 'Copied' : copied === 'failed' ? 'Could not copy' : label}</Button>
+    <span className="sr-only" role="status">{copied === 'done' ? 'Link copied' : copied === 'failed' ? 'The link could not be copied' : ''}</span></>;
+}
+
+function SettingsPage({ state, send, stale = false }: { state: DashboardState; send: Send; stale?: boolean }) {
   const motionDescription = state.motion === 'Full'
-    ? 'Use animated transitions and feedback, even when Windows reduces animation. High contrast always reduces motion.'
+    ? 'Animated transitions and feedback are always on, even when Windows reduces animation. High contrast always reduces motion.'
     : state.motion === 'Reduced'
-      ? 'Minimize movement while keeping progress and status updates visible.'
-      : `System follows your Windows animation setting. It is currently using ${state.reducedMotion ? 'reduced' : 'full'} motion.`;
-  const note = busyNote(state), quiet = !!note;
-  return <><Heading title="Settings" description="Manage your backup plan and make the app comfortable to use." note={note} />
+      ? 'Movement is kept to a minimum, while progress and status updates stay visible.'
+      : `Follows your Windows animation setting, which is currently ${state.reducedMotion ? 'reduced' : 'on'}.`;
+  const note = busyNote(state, stale), quiet = !!note, missing = serviceMissing(state);
+  return <><Heading title="Settings" description="Where your backups go, when they run, and how Rewindle looks." note={note} />
     <Repairs state={state} send={send} />
-    {/* Every row has the same two slots, the words (`setting-copy`) and what they are controlled with (`setting-controls`), which sits at
-        the bottom of its card, so the two pickers in a row of cards line up whatever the length of the text above them. */}
-    <section className="settings-section"><h2 className="section-title">Appearance and motion</h2><div className="settings-grid">
-      <section className="surface setting-row"><div className="setting-copy"><h3 className="info-heading"><Sun size={15} />Appearance</h3><p className="muted-copy">Follow your system, or choose a light or dark theme.</p>{state.highContrast && <p className="muted-copy">Windows High Contrast is on and sets the colors for now. Your choice is saved and applies when High Contrast is turned off.</p>}</div><div className="setting-controls"><div className="theme-picker" role="group" aria-label="Appearance">
-        {themes.map(({ name, label, Icon }) => <button key={name} className="theme-choice" aria-pressed={state.theme === name} onClick={() => send('setTheme', { theme: name })}>
-          {state.theme === name && <motion.div className="theme-highlight" layoutId="theme-thumb" transition={{ type: 'spring', stiffness: 440, damping: 34 }} />}<span><Icon size={13} />{label}</span></button>)}
-      </div></div></section>
-      <section className="surface setting-row"><div className="setting-copy"><h3 className="info-heading"><Activity size={15} />Motion</h3><p className="muted-copy">{motionDescription}</p></div><div className="setting-controls"><div className="motion-picker" role="group" aria-label="Motion preference">{motions.map(({ name, label }) => <button key={name} className="motion-choice" aria-pressed={state.motion === name} onClick={() => send('setMotion', { motion: name })}>{state.motion === name && <motion.div className="motion-highlight" layoutId="motion-thumb" transition={{ type: 'spring', stiffness: 440, damping: 34 }} />}<span>{label}</span></button>)}</div><Action state={state} send={send} command="togglePreview" icon={state.preview ? <Pause size={12} /> : <Play size={12} />}>{state.preview ? 'Stop preview' : 'Preview animations'}</Action></div></section>
-    </div></section>
-    {/* Without the backup service the plan, the schedule, the checks and the diagnostics have nothing to act on; the appearance
-        settings above still work, and the one explanation stands where the rest would be. */}
-    {serviceMissing(state) ? <SetupNotice state={state} send={send} /> : <>
+    {/* Without the backup service the plan, the schedule and the problem report have nothing to act on; the appearance settings below
+        still work, and the one explanation stands where the rest would be. Every row has the same two slots, the words
+        (`setting-copy`) and what they are controlled with (`setting-controls`), which sits at the bottom of its card, so the two
+        pickers in a row of cards line up whatever the length of the text above them. */}
+    {missing ? <SetupNotice state={state} send={send} /> :
     <section className="settings-section"><h2 className="section-title">Backup plan</h2><div className="settings-grid">
       <section className="surface setting-row"><div className="setting-copy"><h3 className="info-heading"><HardDrive size={15} />Backup location</h3><p className="muted-copy path-copy">{state.repository.path}</p><VolumeLine repository={state.repository} /></div><div className="setting-controls"><Action state={state} send={send} command="changeRepository" quiet={quiet} /></div></section>
-      <section className="surface setting-row"><div className="setting-copy"><h3 className="info-heading"><Clock3 size={15} />Automatic backups</h3><p className="info-main">{state.schedule.summary}</p>
+      <section className="surface setting-row"><div className="setting-copy"><h3 className="info-heading"><Clock3 size={15} />Automatic backups</h3><p className="info-main">{localClocks(state.schedule.summary, usableLocale(state.locale))}</p>
         {/* An unreadable schedule is a problem to explain, not a summary: the reason the host reports goes under Details. */}
         {state.schedule.error ? <div className="attention-note schedule-problem" role="alert">
           <strong><CircleAlert size={14} className="inline mr-2" />The schedule could not be read</strong>
-          <p>Rewindle could not read the Windows backup schedule just now. Nothing was changed. Check again, or open Details to see why.</p>
+          <p>Rewindle could not read the Windows backup schedule just now. Nothing was changed. Try again, or open Details to see why.</p>
           <details className="inline-details"><summary>Details</summary><p className="muted-copy">{state.schedule.error}</p></details>
-          <Button size="sm" onClick={() => send('refresh')}><RefreshCw size={13} />Check again</Button>
-        </div> : <><p className="muted-copy">Next: {state.schedule.nextRun}</p><details className="inline-details"><summary>Run conditions</summary><p className="muted-copy">{state.schedule.detail}</p></details></>}
+          <Button size="sm" onClick={() => send('refresh')}><RefreshCw size={13} />Try again</Button>
+        </div> : <><p className="muted-copy">Next: {formatWhen(state.schedule.nextRunAt, usableLocale(state.locale), state.schedule.nextRun)}</p><details className="inline-details"><summary>Run conditions</summary><p className="muted-copy">{state.schedule.detail}</p></details></>}
         <ScheduleNotice notice={state.schedule.notice} className="schedule-notice-slot" /></div><div className="setting-controls"><Action state={state} send={send} command="editSchedule" quiet={quiet} /></div></section>
-    </div><p className="muted-copy settings-note"><LockKeyhole size={12} aria-hidden="true" />Changing the location or schedule asks for Windows approval. Closing this window never stops a running backup.</p></section>
-    <section className="settings-section"><h2 className="section-title">Verification & support</h2><ProtectionHealth state={state} send={send} quiet={quiet} heading={false} context="settings" /><div className="settings-grid">
-      <section className="surface setting-row support-row"><div className="setting-copy"><h3 className="info-heading"><ListChecks size={15} />Diagnostics</h3><p className="muted-copy">Create a redacted support bundle to investigate a problem.</p>{state.setup?.engine && <p className="muted-copy">Engine: {state.setup.engine}{state.setup.engineVersion ? ` · version ${state.setup.engineVersion}` : ''}</p>}</div><div className="setting-controls"><Action state={state} send={send} command="exportDiagnostics" icon={<ArrowUpRight size={13} />} quiet={!!modeNote(state)} /></div></section>
+    </div><div className="settings-notes">
+      <p className="muted-copy settings-note"><LockKeyhole size={12} aria-hidden="true" />Windows asks for your permission before the location or schedule changes.</p>
+      {/* Closing the window sends it to the tray (the host says so once, in a balloon, and never again). */}
+      <p className="muted-copy settings-note"><Info size={12} aria-hidden="true" />Closing this window never stops a running backup. Rewindle keeps running in the notification area, where it shows your backup status, and scheduled backups run either way. To quit Rewindle, right-click its tray icon and choose Exit Rewindle.</p>
+    </div></section>}
+    {/* The backup health cards (local backup, restore test, off-site copy) are on Protection, where the person looks for them; they were
+        also here, which said everything twice. */}
+    <section className="settings-section"><h2 className="section-title">Appearance</h2><div className="settings-grid">
+      <section className="surface setting-row"><div className="setting-copy"><h3 className="info-heading"><Sun size={15} />Theme</h3><p className="muted-copy">Follow your system, or choose a light or dark theme.</p>{state.highContrast && <p className="muted-copy">Windows High Contrast is on and sets the colors for now. Your choice is saved and applies when High Contrast is turned off.</p>}</div><div className="setting-controls"><div className="theme-picker" role="group" aria-label="Theme">
+        {THEME_STEPS.map(({ name, label, Icon }) => <button key={name} className="theme-choice" aria-pressed={state.theme === name} onClick={() => send('setTheme', { theme: name })}>
+          {state.theme === name && <motion.div className="theme-highlight" layoutId="theme-thumb" transition={{ type: 'spring', stiffness: 440, damping: 34 }} />}<span><Icon size={13} />{label}</span></button>)}
+      </div></div></section>
+      <section className="surface setting-row"><div className="setting-copy"><h3 className="info-heading"><Activity size={15} />Animations</h3><p className="muted-copy">{motionDescription}</p></div><div className="setting-controls"><div className="motion-picker" role="group" aria-label="Animations">{MOTION_STEPS.map(({ name, label }) => <button key={name} className="motion-choice" aria-pressed={state.motion === name} onClick={() => send('setMotion', { motion: name })}>{state.motion === name && <motion.div className="motion-highlight" layoutId="motion-thumb" transition={{ type: 'spring', stiffness: 440, damping: 34 }} />}<span>{label}</span></button>)}</div>
+        {/* The preview fakes a running backup and pauses the real controls, so it is for the sample data (screenshots, trying the interface), not for someone looking after their backups. */}
+        {state.demo && <Action state={state} send={send} command="togglePreview" icon={state.preview ? <Pause size={12} /> : <Play size={12} />}>{state.preview ? 'Stop preview' : 'Preview animations'}</Action>}</div></section>
+      {/* The host answers each press with the size it reached ("Text size 125%") and keeps it for the next launch. */}
+      <section className="surface setting-row wide-row"><div className="setting-copy"><h3 className="info-heading"><TextSize size={15} />Text size</h3><p className="muted-copy">Make everything larger or smaller. Rewindle keeps your choice the next time it opens.</p></div><div className="setting-controls">
+        <Button size="sm" onClick={() => send('setZoom', { zoom: 'out' })}>Smaller</Button><Button size="sm" onClick={() => send('setZoom', { zoom: 'reset' })}>Normal size</Button><Button size="sm" onClick={() => send('setZoom', { zoom: 'in' })}>Larger</Button></div></section>
     </div></section>
-    </>}
-    <AboutSection state={state} send={send} />
+    <section className="settings-section"><h2 className="section-title">Help and about</h2><div className="settings-grid">
+      {!missing && <section className="surface setting-row wide-row"><div className="setting-copy"><h3 className="info-heading"><ListChecks size={15} />Problem report</h3>
+        <p className="muted-copy">Save a report to send when you need help. It lists what Rewindle saw, with personal file names and account details removed.</p>
+        <p className="muted-copy">To get help, attach it to a new issue at <span className="path-copy">{ISSUES_URL.replace(/^https?:\/\//, '')}</span>.</p></div>
+        <div className="setting-controls"><Action state={state} send={send} command="exportDiagnostics" icon={<ArrowUpRight size={13} />} quiet={!!modeNote(state)}>Save problem report</Action><CopyLinkButton text={ISSUES_URL} /></div></section>}
+      <AboutSection state={state} send={send} />
+    </div></section>
   </>;
 }
 
-// What a person or a bug report asks first: which Rewindle this is, which engine it reports on, and under what terms. The licenses
-// button opens the folder of notices that ships beside the app; the host finds that folder itself, the page sends no path.
+// What the keyboard does, said where a person looks for help (these used to be a tooltip on the footer's clock). The page handles the
+// first four itself and the desktop app handles zoom; Escape is each window's and each search field's own.
+const SHORTCUTS: { keys: React.ReactNode; does: string }[] = [
+  { keys: <><kbd>Ctrl+1</kbd> to <kbd>Ctrl+4</kbd></>, does: 'Open Protection, Activity, Restore or Settings' },
+  { keys: <kbd>/</kbd>, does: 'Search the page (Activity, and Protection when it has a search box)' },
+  { keys: <kbd>F5</kbd>, does: 'Refresh' },
+  { keys: <><kbd>Ctrl+=</kbd> and <kbd>Ctrl+-</kbd></>, does: 'Make text larger or smaller' },
+  { keys: <kbd>Ctrl+0</kbd>, does: 'Return text to normal size' },
+  { keys: <kbd>Esc</kbd>, does: 'Close a window, or clear a search' },
+];
+
+// What a person or a bug report asks first: which Rewindle this is, which backup service it reports on, and under what terms. The
+// licenses button opens the folder of notices that ships beside the app; the host finds that folder itself, the page sends no path.
 function AboutSection({ state, send }: { state: DashboardState; send: Send }) {
-  // The sample data has no host, and so no version or engine to name.
+  // The sample data has no host, and so no version or backup service to name.
   const setup = state.setup, unknown = state.demo ? 'Sample data' : 'Unknown';
-  const engine = setup?.engineFound === false ? 'Not installed'
+  const service = setup?.engineFound === false ? 'Not installed'
     : setup?.engine ? `${setup.engine}${setup.engineVersion ? ` · version ${setup.engineVersion}` : ''}` : unknown;
-  return <section className="settings-section"><h2 className="section-title">About Rewindle</h2>
-    <section className="surface setting-row about-row">
-      <dl className="about-facts">
-        <div><dt>Version</dt><dd>{setup?.appVersion || unknown}</dd></div>
-        <div><dt>Engine</dt><dd>{engine}</dd></div>
-        <div><dt>License</dt><dd>MIT License</dd></div>
-        <div><dt>Backups</dt><dd>Powered by Restic</dd></div>
-        <div><dt>Project</dt><dd className="path-copy">{PROJECT_URL}</dd></div>
-      </dl>
-      <div className="setting-controls"><Button size="sm" onClick={() => send('openLicensesFolder')}><ArrowUpRight size={13} aria-hidden="true" />Open licenses folder</Button></div>
-    </section></section>;
+  return <section className="surface setting-row about-row">
+    <h3 className="info-heading about-heading">About Rewindle</h3>
+    <dl className="about-facts">
+      <div><dt>Version</dt><dd>{setup?.appVersion || unknown}</dd></div>
+      <div><dt>Backup service</dt><dd>{service}</dd></div>
+      <div><dt>License</dt><dd>MIT License</dd></div>
+      <div><dt>Built on</dt><dd>Restic, open-source encrypted backup</dd></div>
+      <div><dt>Source code</dt><dd className="path-copy">{PROJECT_URL}</dd></div>
+    </dl>
+    <div className="setting-controls"><Button size="sm" onClick={() => send('openLicensesFolder')}><ArrowUpRight size={13} aria-hidden="true" />Open licenses folder</Button><CopyLinkButton text={PROJECT_URL} label="Copy project link" /></div>
+    <details className="inline-details shortcuts"><summary><Keyboard size={13} aria-hidden="true" />Keyboard shortcuts</summary>
+      <dl className="shortcut-list">{SHORTCUTS.map((shortcut, index) => <div key={index}><dt>{shortcut.keys}</dt><dd>{shortcut.does}</dd></div>)}</dl></details>
+  </section>;
 }
 
 // A notice outside a dialog, drawn in the page's corner. It is only the part that comes and goes: the live region around it is always
@@ -868,7 +996,7 @@ function useAnnouncements(state: DashboardState | null, connected: boolean): Spo
     // Nothing to compare with yet, or the host was still reading the backup state (its key is "unknown" until it has). A status that
     // cannot be read is already said by the page's own alert; once it can be read again, that change is spoken like any other.
     if (!before || (before.key === 'unknown' && !before.error) || state.dataError) return;
-    if (r.repairNeeded && !before.repair) { say(`Backup location needs attention. ${r.repairMessage} ${r.repairState}`.trim(), true); return; }
+    if (r.repairNeeded && !before.repair) { say(`Backups are paused: moving the backup location didn’t finish. ${r.repairMessage} ${r.repairState}`.trim(), true); return; }
     if (s.key !== before.key || s.title !== before.title) { say(s.active ? s.title : [s.title, s.detail].filter(Boolean).join('. '), s.failure); return; }
     if (r.repairNeeded && r.repairState && r.repairState !== before.repairState) { say(r.repairState, false); return; }
     if (s.active && (s.phaseIndex !== before.phase || quarter !== before.quarter)) say(`${phaseName(s.phaseLabel) || 'Backing up'}, ${Math.round(s.progress * 100)} percent`, false);
@@ -880,6 +1008,16 @@ function useAnnouncements(state: DashboardState | null, connected: boolean): Spo
     return () => window.clearTimeout(timer);
   }, [spoken]);
   return spoken;
+}
+
+// The loader on the first screen, before the host has sent anything. Without a clock (it would count seconds nobody asked for), and if the
+// host stays silent for a while it says so and offers to ask again, so the first screen is never a spinner with no way out.
+function OpeningLoader({ send }: { send: Send }) {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => { const timer = window.setTimeout(() => setSlow(true), 10000); return () => window.clearTimeout(timer); }, []);
+  const hosted = !!(window.rewindleNative ?? window.chrome?.webview);
+  return <><LoadingState label="Opening Rewindle" variant="Orbit" showElapsed={false} />
+    <div role="status">{slow && hosted && <p>Taking longer than usual. <Button size="sm" onClick={() => send('ready')}>Try again</Button></p>}</div></>;
 }
 
 export default function App() {
@@ -896,8 +1034,8 @@ export default function App() {
     if (!offline && !unreadable && !rawState.preview && !rawState.demo) return dated;
     const locked = (key: string) => offline || (unreadable && !needsNoStatus.has(key))
       || (rawState.demo ? !sampleActions.has(key) : rawState.preview && PROTECTED_COMMANDS.has(key as CommandName));
-    const reason = (key: string) => offline ? 'The dashboard is waiting to reconnect to the desktop app. Refresh to try again.'
-      : unreadable && !needsNoStatus.has(key) ? 'Backup status cannot be read right now. Retry once the message above clears.'
+    const reason = (key: string) => offline ? 'Rewindle has stopped updating, so this is turned off for now. Try again in a moment.'
+      : unreadable && !needsNoStatus.has(key) ? 'Backup status cannot be read right now. Try again once the message above clears.'
       : rawState.demo ? 'Sample data is read-only.' : 'Stop the animation preview before using this action.';
     return { ...dated, sources: dated.sources.map(source => ({ ...source, canRemove: false })), actions: Object.fromEntries(Object.entries(dated.actions).map(([key, value]) => [key, value && locked(key) ? { ...value, enabled: false, help: reason(key) } : value])) };
   }, [rawState, connected]);
@@ -912,6 +1050,11 @@ export default function App() {
   const scrollPositions = useRef<Partial<Record<DashboardPage, number>>>({});
   const focusPage = useRef(false);
   const appliedTheme = useRef<string | null>(null);
+  // The refresh button spins for a moment when pressed: the host answers a refresh with nothing to show but the next state, so without
+  // it the button looks dead. Where animation is off, the words "Refreshing" are said to a screen reader instead (see the toolbar).
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(refreshTimer.current), []);
   // Layout effect: apply theme, contrast and motion before the first frame of new state is painted. <html> starts with no theme
   // class (the first frame follows prefers-color-scheme, which the host sets to the theme it resolved), and both classes are set
   // here, so a fixed Light or Dark choice never depends on the operating system's own setting.
@@ -1014,16 +1157,21 @@ export default function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [dismissedRunDetailsId, page, send, state?.restoreFlow?.open, state?.runDetails, state?.sourcePicker?.open]);
-  if (!state) return <div className="connection-screen"><img src="./rewindle-icon.svg" alt="" width="48" height="48" /><LoadingState label="Opening Rewindle" variant="Orbit" /><p>{(window.rewindleNative ?? window.chrome?.webview) ? 'Loading your protected folders, backup history, and backup status.' : 'Open the desktop app to connect to your backup state.'}</p></div>;
-  // The sidebar is narrow, so its dates leave out the weekday and the result keeps its room.
-  const recents = [...state.history].sort((a, b) => Date.parse(b.started) - Date.parse(a.started)).slice(0, 8).map(run => ({ id: run.id, label: `${runWhen(run.started, usableLocale(state.locale), run.startedDisplay, false)} · ${run.result}` }));
-  // This button flips between Light and Dark. From the System setting that replaces it, which Settings can restore, so the title says so.
-  const themeAction = state.dark ? 'Use light theme' : 'Use dark theme';
+  if (!state) return <div className="connection-screen"><img src="./rewindle-icon.svg" alt="" width="48" height="48" /><OpeningLoader send={send} /><p>{(window.rewindleNative ?? window.chrome?.webview) ? 'Loading your protected folders, backup history, and backup status.' : 'Open the desktop app to connect to your backup state.'}</p></div>;
+  // The toolbar button steps System, Light, Dark and round again, so it never replaces "follow Windows" with no way back; its title says
+  // where the theme is and where one press takes it.
+  const themeIndex = Math.max(0, THEME_STEPS.findIndex(step => step.name === state.theme)), themeNow = THEME_STEPS[themeIndex], themeNext = THEME_STEPS[(themeIndex + 1) % THEME_STEPS.length];
+  const themeTitle = `Theme: ${themeNow.label}. Switch to ${themeNext.label}.`;
+  const refresh = () => { send('refresh'); setRefreshing(true); window.clearTimeout(refreshTimer.current); refreshTimer.current = window.setTimeout(() => setRefreshing(false), 800); };
+  // When the figures were read, in the viewer's own clock ("Updated 14:03" or "Updated 2:03 PM"); the host's words while it retries.
+  const updatedClock = formatClock(state.updatedAt, usableLocale(state.locale)), updatedText = updatedClock ? `Updated ${updatedClock}` : state.updated;
   // Why protected controls may be off, so a dialog can say it in its own words: the link is down, the backup status cannot be read, or the animation preview is running.
   const availability: Availability = !connected ? 'offline' : state.dataError ? 'dataError' : state.preview ? 'preview' : 'ok';
   const failedClose = notice?.error ? notice.text : undefined;
   // A dialog that is open shows the notice itself, so the page's toast, which would sit unseen behind it and outlive it, stays away.
   const dialogOpen = !!state.sourcePicker?.open || !!state.restoreFlow?.open || (!!state.runDetails && dismissedRunDetailsId !== state.runDetails.id);
+  // The later run that put the open run right, if one did, so its details do not ask for something nothing needs.
+  const detailsResolvedBy = state.runDetails && !state.runDetails.success ? resolvedRuns(state.history, verifiedBackup(state)).get(state.runDetails.id) : undefined;
   return <MotionConfig reducedMotion={state.reducedMotion ? 'always' : 'never'}><div className="app-shell">
     <a className="skip-link" href="#main-content" onClick={event => { event.preventDefault(); pageRef.current?.focus(); }}>Skip to content</a>
     {/* Always present, empty until there is something to say: a live region speaks only what is put into it after it exists. */}
@@ -1031,20 +1179,21 @@ export default function App() {
     <div className="sr-only" role="alert" aria-live="assertive" aria-atomic="true">{spoken.assertive}</div>
     <SidebarNav className="app-sidebar" fill storageKey="rewindle.sidebar" activeNav={page} onNavigate={key => navigate(key as DashboardPage)} navItems={navItems}
       primaryActionLabel={null}
-      recents={recents} recentLabel="Recent backups" recentSearchLabel="Search latest 8 backups"
-      activeTitle={recents.find(run => run.id === state.selectedRunId)?.label ?? null}
-      onPick={id => { setHistoryView(emptyHistoryView()); scrollPositions.current.Activity = 0; send('selectRun', { runId: id }); navigate('Activity'); }} onViewAll={() => { setHistoryView(emptyHistoryView()); scrollPositions.current.Activity = 0; navigate('Activity'); }} viewAllLabel="View all activity" footerLabel="Settings" footerShortcut="Control+4" footerActive={page === 'Settings'} footerIcon={<Settings size={14} />} onFooterClick={() => navigate('Settings')} />
+      footerLabel="Settings" footerShortcut="Control+4" footerActive={page === 'Settings'} footerIcon={<Settings size={18} />} onFooterClick={() => navigate('Settings')} />
     <div className="workspace"><header className="topbar"><div className="toolbar-actions">
       {(state.demo || state.preview) && <span className="demo-label">{state.demo ? 'Sample data' : 'Animation preview'}</span>}
-      {/* Narrow, only the dot is drawn (see the 860px rule in app.css), so the tooltip says what it means and the words stay in the page for assistive technology. */}
-      <span className="connection" title={`${connected ? 'App connected' : 'App reconnecting'}. Connection to the desktop app. Off-site verification is shown under Protection.`}><span className={`connection-dot ${connected ? '' : 'offline'}`} /><span className="connection-label">{connected ? 'App connected' : 'App reconnecting'}</span></span>
+      {/* No "connected" light: the window is the app, so a light that is always on says nothing. When the page stops getting updates, the
+          banner below says so and the Protection hero dims. */}
       {(state.demo || state.preview) && <Button size="sm" disabled={!state.actions.togglePreview?.enabled} title={state.actions.togglePreview?.help} onClick={() => send('togglePreview')}>{state.preview ? <X size={12} /> : <Play size={12} />}{state.preview ? 'Stop preview' : 'Play animation'}</Button>}
-      <Button size="icon-sm" variant="quiet" aria-label="Refresh dashboard" title="Refresh dashboard (F5)" onClick={() => send('refresh')}><RefreshCw size={14} /></Button>
-      <Button size="icon-sm" variant="quiet" aria-label={themeAction} title={state.theme === 'System' ? `${themeAction} (replaces System; Settings restores it)` : themeAction} onClick={() => send('setTheme', { theme: state.dark ? 'Daylight' : 'Midnight' })}>{state.dark ? <Sun size={15} /> : <Moon size={15} />}</Button>
+      <Button size="icon-sm" variant="quiet" aria-label="Refresh" title="Refresh (F5)" onClick={refresh}><RefreshCw size={14} className={refreshing ? 'refresh-spin' : undefined} /></Button>
+      <span className="sr-only" role="status">{refreshing ? 'Refreshing' : ''}</span>
+      <Button size="icon-sm" variant="quiet" aria-label={themeTitle} title={themeTitle} onClick={() => send('setTheme', { theme: themeNext.name })}><themeNow.Icon size={15} /></Button>
     </div></header>
     {/* The status container is always present, so the warning that is put into it is announced; an alert is announced as it appears. */}
-    <div role="status">{!connected && <div className="connection-warning"><CircleAlert size={14} /><span>Connection interrupted. Displayed status may be out of date.</span><Button size="xs" onClick={() => send('refresh')}>Refresh</Button></div>}</div>
-    {state.dataError && <div className="connection-warning" role="alert"><CircleAlert size={14} /><span>Backup status could not be read. History shows the last available data. {state.dataError}</span><Button size="xs" onClick={() => send('refresh')}>Retry</Button></div>}
+    <div role="status">{!connected && <div className="connection-warning"><CircleAlert size={14} /><span>Rewindle has stopped updating, so what you see may be out of date.</span><Button size="xs" onClick={refresh}>Try again</Button></div>}</div>
+    {/* What the host reported is its own wording, often a system message, so it waits under Details instead of running into the sentence. */}
+    {state.dataError && <div className="connection-warning" role="alert"><CircleAlert size={14} /><div><span>Rewindle couldn't read the backup status just now, so this page may be out of date.</span>
+      <details className="inline-details"><summary>Details</summary><p className="muted-copy">{state.dataError}</p></details></div><Button size="xs" onClick={refresh}>Try again</Button></div>}
     {/* Named for the page, because a page change moves focus here (see onAnimationComplete): an unnamed landmark would be announced as
         just "main", and the title of the page that was opened would never be read. The skip link points here too. */}
     <div className="page-scroll" ref={scrollRef}><AnimatePresence mode="wait" initial={false}><motion.main id="main-content" tabIndex={-1} aria-label={page} ref={pageRef} className="page" key={page}
@@ -1054,9 +1203,9 @@ export default function App() {
       transition={{ duration: state.reducedMotion ? 0 : .22, ease: [.16, 1, .3, 1] }}>
       {/* A page that fails to draw is replaced by a notice, with the sidebar and the other pages still working, and is drawn again with the next state. */}
       <ErrorBoundary scope="page" label={`${page} page`} resetKey={state} onRetry={() => send('refresh')}>
-        {page === 'Protection' ? <Protection state={state} send={send} folders={folderView} setFolders={setFolderView} stale={!connected} /> : page === 'Activity' ? <ActivityPage state={state} send={send} view={historyView} setView={setHistoryView} openRunDetails={openRunDetails} openRestore={() => navigate('Restore')} interactive={connected} /> : page === 'Restore' ? <RestorePage state={state} send={send} /> : <SettingsPage state={state} send={send} />}
+        {page === 'Protection' ? <Protection state={state} send={send} folders={folderView} setFolders={setFolderView} stale={!connected} openRunDetails={openRunDetails} /> : page === 'Activity' ? <ActivityPage state={state} send={send} view={historyView} setView={setHistoryView} openRunDetails={openRunDetails} openRestore={() => navigate('Restore')} interactive={connected} /> : page === 'Restore' ? <RestorePage state={state} send={send} /> : <SettingsPage state={state} send={send} stale={!connected} />}
       </ErrorBoundary>
-      <footer className="app-footnote"><span><LockKeyhole size={10} />{state.preview ? 'Animation preview · no backup is running' : 'Restic · encrypted local backup'}</span><span title="Ctrl/Cmd+1–4 changes pages. / focuses search. Ctrl+= and Ctrl+- zoom, Ctrl+0 resets.">{state.status.active ? <Shimmer>{state.preview ? 'Preview running' : 'Backup is running'}</Shimmer> : state.updated}</span></footer>
+      <footer className="app-footnote"><span><LockKeyhole size={10} />{state.preview ? 'Animation preview · no backup is running' : 'Your backups are encrypted'}</span><span>{state.status.active ? <Shimmer>{state.preview ? 'Preview running' : 'Backup is running'}</Shimmer> : updatedText}</span></footer>
     </motion.main></AnimatePresence></div></div>
     {/* The two regions are in the page from the start and empty until there is something to say, so a screen reader already knows them
         when a notice is put in: a live region that is created together with its text is often not announced. Only the toast inside
@@ -1068,10 +1217,10 @@ export default function App() {
       <FolderPickerModal picker={state.sourcePicker ?? null} send={send} reducedMotion={state.reducedMotion} availability={availability} notice={notice} dismissNotice={dismissNotice} />
     </ErrorBoundary>
     <ErrorBoundary scope="dialog" label="restore window" resetKey={!!state.restoreFlow?.open} onClose={() => send('restoreFlowClose')} note={failedClose}>
-      <RestoreFlowModal flow={state.restoreFlow ?? null} reducedMotion={state.reducedMotion} availability={availability} send={send} notice={notice} dismissNotice={dismissNotice} holdNotice={holdNotice} />
+      <RestoreFlowModal flow={state.restoreFlow ?? null} reducedMotion={state.reducedMotion} availability={availability} send={send} notice={notice} dismissNotice={dismissNotice} holdNotice={holdNotice} locale={usableLocale(state.locale)} sources={state.sources} />
     </ErrorBoundary>
     <ErrorBoundary scope="dialog" label="run details window" resetKey={!!state.runDetails && dismissedRunDetailsId !== state.runDetails.id} onClose={closeRunDetails}>
-      <RunDetailsModal details={state.runDetails ?? null} open={!!state.runDetails && dismissedRunDetailsId !== state.runDetails.id} reducedMotion={state.reducedMotion} send={send} notice={notice} dismissNotice={dismissNotice} holdNotice={holdNotice} onRequestClose={closeRunDetails} />
+      <RunDetailsModal details={state.runDetails ?? null} open={!!state.runDetails && dismissedRunDetailsId !== state.runDetails.id} resolvedBy={detailsResolvedBy} reducedMotion={state.reducedMotion} send={send} notice={notice} dismissNotice={dismissNotice} holdNotice={holdNotice} onRequestClose={closeRunDetails} />
     </ErrorBoundary>
   </div></MotionConfig>;
 }

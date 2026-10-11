@@ -294,14 +294,14 @@ def inspect(
                 checks,
                 "repository_storage",
                 "pass",
-                "DriveFS repository and protected local NTFS paths match their bindings.",
+                "Your backup location on Google Drive and Rewindle's local data folder are set up as expected.",
             )
         except Exception as error:
             add_check(
                 checks,
                 "repository_storage",
                 "fail",
-                "DriveFS repository or protected local storage binding is unavailable.",
+                "Rewindle can't confirm that your backup location on Google Drive and its local data folder are set up correctly.",
                 str(error),
             )
     else:
@@ -309,7 +309,7 @@ def inspect(
             checks,
             "repository_storage",
             "pass",
-            "The local NTFS repository storage mode is configured.",
+            "Your backup location is on a local Windows (NTFS) drive, as set up.",
         )
 
     pending_transaction_names = (
@@ -327,7 +327,7 @@ def inspect(
             checks,
             "pending_transaction",
             "fail",
-            "A protected transaction must be recovered before backups resume.",
+            "An unfinished change must be completed before backups can resume.",
             ", ".join(pending_transactions),
         )
     else:
@@ -335,7 +335,7 @@ def inspect(
             checks,
             "pending_transaction",
             "pass",
-            "No interrupted protected transaction is pending.",
+            "No unfinished changes are waiting.",
         )
 
     try:
@@ -358,9 +358,9 @@ def inspect(
             )
             if drift:
                 raise RuntimeError("Recovery configuration drift: " + ", ".join(drift))
-        add_check(checks, "recovery_bundle", "pass", "Recovery bundle manifest and plan binding are valid.")
+        add_check(checks, "recovery_bundle", "pass", "Your recovery information is complete and matches your backup settings.")
     except Exception as error:
-        add_check(checks, "recovery_bundle", "fail", "Recovery bundle needs repair.", str(error))
+        add_check(checks, "recovery_bundle", "fail", "Your recovery information needs repair.", str(error))
 
     dpapi_auth: list[str] | None = None
     try:
@@ -370,9 +370,9 @@ def inspect(
         )
         report["repository_id"] = repository_id
         report["repository_format"] = repository_format
-        add_check(checks, "active_credential", "pass", "The active DPAPI credential unlocks the repository.")
+        add_check(checks, "active_credential", "pass", "Rewindle's saved password for this Windows account opens your backups.")
     except Exception as error:
-        add_check(checks, "active_credential", "fail", "The active DPAPI credential cannot unlock the repository.", str(error))
+        add_check(checks, "active_credential", "fail", "Rewindle's saved password for this Windows account can't open your backups, so scheduled backups would fail.", str(error))
 
     try:
         acl_verifier(recovery_key)
@@ -394,22 +394,22 @@ def inspect(
             raise RuntimeError("The recovery key authenticated to an unexpected repository ID.")
         report["repository_id"] = recovery_id
         report["repository_format"] = recovery_format
-        add_check(checks, "recovery_key", "pass", "The restricted recovery key independently unlocks the repository.")
+        add_check(checks, "recovery_key", "pass", "Your recovery key opens your backups on its own.")
     except Exception as error:
-        add_check(checks, "recovery_key", "fail", "The recovery key is missing, unsafe, or cannot unlock the repository.", str(error))
+        add_check(checks, "recovery_key", "fail", "Your recovery key is missing, unsafe to use, or doesn't open your backups.", str(error))
 
     try:
         usage = shutil.disk_usage(repository)
         report["free_bytes"] = usage.free
         reserve = report["reserve_bytes"]
         if usage.free < reserve:
-            add_check(checks, "capacity", "fail", "Repository free space is below the configured reserve.")
+            add_check(checks, "capacity", "fail", "The drive holding your backups is almost full: it has less free space than Rewindle keeps in reserve.")
         elif usage.free < reserve * 1.5:
-            add_check(checks, "capacity", "warn", "Repository free space is approaching the configured reserve.")
+            add_check(checks, "capacity", "warn", "The drive holding your backups is getting full.")
         else:
-            add_check(checks, "capacity", "pass", "Repository free space is above the configured reserve.")
+            add_check(checks, "capacity", "pass", "The drive holding your backups has plenty of free space.")
     except Exception as error:
-        add_check(checks, "capacity", "fail", "Repository capacity could not be inspected.", str(error))
+        add_check(checks, "capacity", "fail", "Rewindle couldn't check the free space on the drive holding your backups.", str(error))
 
     if dpapi_auth is not None:
         try:
@@ -421,14 +421,14 @@ def inspect(
                 checks,
                 "locks",
                 "pass" if count == 0 else "warn",
-                "No repository locks are present."
+                "No leftover locks from interrupted backups."
                 if count == 0
-                else f"{count} repository lock(s) require activity/staleness review.",
+                else f"{count} lock(s) are present. If no backup is running, they are leftovers; choose Repair stale locks.",
             )
         except Exception as error:
-            add_check(checks, "locks", "fail", "Repository locks could not be inspected.", str(error))
+            add_check(checks, "locks", "fail", "Rewindle couldn't check for leftover locks.", str(error))
     else:
-        add_check(checks, "locks", "fail", "Repository locks cannot be inspected without the active credential.")
+        add_check(checks, "locks", "fail", "Rewindle can't check for leftover locks until its saved password works again.")
 
     status_path = state_directory / "last-success.json"
     status: dict[str, Any] | None = None
@@ -446,13 +446,13 @@ def inspect(
             and verification["canary"].get("verified") is True
         )
         if verified and current_plan and current_generation:
-            add_check(checks, "last_verification", "pass", "The current plan's latest backup passed structure and canary verification.")
+            add_check(checks, "last_verification", "pass", "Your latest backup was checked, and its restore test file came back correctly.")
         elif verified:
-            add_check(checks, "last_verification", "warn", "The last verified backup predates the current plan generation.")
+            add_check(checks, "last_verification", "warn", "The last checked backup was made before your latest settings change. A new backup will refresh it.")
         else:
-            add_check(checks, "last_verification", "fail", "No complete structure-and-canary verification is recorded.")
+            add_check(checks, "last_verification", "fail", "No fully checked backup is on record yet.")
     except Exception as error:
-        add_check(checks, "last_verification", "fail", "The latest verified backup record is unavailable.", str(error))
+        add_check(checks, "last_verification", "fail", "The record of your latest checked backup isn't available.", str(error))
 
     if isinstance(status, dict) and status.get("maintenance_hold") is True:
         anomaly = status.get("change_anomaly")
@@ -462,7 +462,7 @@ def inspect(
             checks,
             "change_anomaly",
             "warn",
-            "The latest verified snapshot is under a change-anomaly review hold.",
+            "Your latest backup changed far more than usual and is waiting for you to confirm these changes.",
             detail,
         )
     else:
@@ -470,7 +470,7 @@ def inspect(
             checks,
             "change_anomaly",
             "pass",
-            "No change-anomaly review hold is active.",
+            "No unusual changes are waiting for your confirmation.",
         )
 
     rotation_path = state_directory / "key-rotation-latest.json"
@@ -508,14 +508,14 @@ def inspect(
                 checks,
                 "rotation_rollback_key",
                 "pass",
-                "The retained pre-rotation recovery key still independently unlocks the repository.",
+                "The recovery key kept from before your last key change still opens your backups.",
             )
         except Exception as error:
             add_check(
                 checks,
                 "rotation_rollback_key",
                 "fail",
-                "The retained pre-rotation recovery path failed verification.",
+                "The recovery key kept from before your last key change didn't pass its check.",
                 str(error),
             )
     else:
@@ -523,7 +523,7 @@ def inspect(
             checks,
             "rotation_rollback_key",
             "pass",
-            "No completed key rotation is recorded; the original recovery credential remains active.",
+            "You haven't changed your keys, so your original recovery key is still the one in use.",
         )
 
     history_path = state_directory / "restore-history.json"
@@ -533,8 +533,8 @@ def inspect(
                 checks,
                 "restore_drill",
                 "warn",
-                "No representative restore drill has been recorded yet.",
-                "Use Run restore drill to recover and verify a bounded sample with the restricted recovery key.",
+                "You haven't run a restore drill yet.",
+                "Choose Run restore drill to restore a small sample of your files with your recovery key and check it.",
             )
             history = None
         else:
@@ -575,17 +575,17 @@ def inspect(
                     checks,
                     "restore_drill",
                     "pass",
-                    "A recovery-key restore of the canary and a bounded representative sample is recorded.",
+                    "A restore drill with your recovery key (the restore test file plus a small sample of your files) passed.",
                 )
             else:
                 add_check(
                     checks,
                     "restore_drill",
                     "warn",
-                    "Run and verify the guided recovery-key restore drill.",
+                    "Run the restore drill to prove your recovery key can restore your files.",
                 )
     except Exception as error:
-        add_check(checks, "restore_drill", "warn", "Restore-drill history could not be validated.", str(error))
+        add_check(checks, "restore_drill", "warn", "Rewindle couldn't read the record of past restore drills.", str(error))
 
     statuses = {item["status"] for item in checks}
     report["overall_status"] = "blocked" if "fail" in statuses else "warning" if "warn" in statuses else "healthy"
@@ -610,7 +610,7 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "id": "health_runtime",
                     "status": "fail",
-                    "summary": "Recovery readiness could not be inspected.",
+                    "summary": "Rewindle couldn't run its recovery check.",
                     "detail": str(error)[:1000],
                 }
             ],

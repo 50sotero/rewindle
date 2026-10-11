@@ -1,12 +1,26 @@
 import { useState } from 'react';
-import { Check, Copy, FileKey2, FolderSearch, KeyRound, Save, ShieldAlert } from 'lucide-react';
+import { Check, Copy, FileKey2, FolderSearch, KeyRound, Save, ShieldAlert, TriangleAlert } from 'lucide-react';
 import { Button } from '@/components/atoms/Button';
 import { messageOf } from '../bridge';
-import { folderName } from '../format';
+import type { PlanVolume } from '../contract';
+import { driveRoot, samePath } from '../format';
 import { Callout } from '../ui';
 import type { Wizard } from '../useWizard';
 
 export interface RecoveryState { acknowledged: boolean; savedTo: string | null }
+
+/**
+ * Where a saved copy of the key stands against "this PC is lost": on the Windows drive or its disk it goes with the PC, and on the
+ * backup drive it goes with the backups (and opens them for anyone who has that drive). `unknown` when the host named no drive.
+ */
+export type CopyPlace = 'away' | 'this-pc' | 'with-backups' | 'unknown';
+export function copyPlace(savedTo: string | null, volumes: PlanVolume[], backupRoot: string): CopyPlace {
+  const root = savedTo ? driveRoot(savedTo) : '';
+  if (!root) return 'unknown';
+  const volume = volumes.find(item => samePath(item.root, root));
+  if (volume && (volume.isSystem || volume.sameDiskAsSystem)) return 'this-pc';
+  return backupRoot && samePath(root, backupRoot) ? 'with-backups' : 'away';
+}
 
 /**
  * After a successful install: the recovery key. Saving a copy goes through the host (a Save dialog; the page never names the
@@ -21,12 +35,19 @@ export function Recovery({ wizard, state, onChange }: { wizard: Wizard; state: R
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const volumes = wizard.base?.environment.volumes ?? [];
+  // The drive the backups are written to. Google Drive leaves `driveRoot` empty on purpose (it is not a local drive to pick), so
+  // the repository's own drive is the one to compare: a copy anywhere in that Drive sits in the same account as the backups.
+  const cloud = wizard.choices?.storageMode === 'google_drivefs_stream';
+  const backupRoot = driveRoot(wizard.choices?.repository ?? '') || (wizard.choices?.driveRoot ?? '');
+  const place = copyPlace(state.savedTo, volumes, backupRoot);
 
   const save = async () => {
     setBusy(true); setError(null);
     try {
       const answer = await wizard.request<{ saved: boolean; path?: string }>('saveRecoveryKeyCopy');
-      if (answer?.saved) onChange({ ...state, savedTo: answer.path ?? 'the place you chose' });
+      // A verified copy away from this PC and the backups is the one thing the checkbox stands for, so it ticks the box itself.
+      if (answer?.saved) onChange({ ...state, savedTo: answer.path ?? 'the place you chose', acknowledged: state.acknowledged || copyPlace(answer.path ?? null, volumes, backupRoot) === 'away' });
     } catch (failure) {
       setError(messageOf(failure));
     } finally { setBusy(false); }
@@ -53,7 +74,7 @@ export function Recovery({ wizard, state, onChange }: { wizard: Wizard; state: R
       <div className="key-file">
         <FileKey2 size={22} aria-hidden="true" className="key-file-icon" />
         <div className="key-file-text">
-          <strong>{path ? folderName(path) : 'Recovery key'}</strong>
+          <strong>Your recovery key</strong>
           <span className="key-file-path" title={path ?? undefined}>{path ?? 'Setup did not report where the key was saved.'}</span>
         </div>
         {readable ? (
@@ -70,7 +91,10 @@ export function Recovery({ wizard, state, onChange }: { wizard: Wizard; state: R
       </div>
 
       <div role="status" aria-live="polite">
-        {state.savedTo && <p className="fit-line is-good"><Check size={16} aria-hidden="true" /><span>Copy saved to <strong className="break-anywhere">{state.savedTo}</strong>. Keep that drive somewhere safe, away from this PC.</span></p>}
+        {state.savedTo && (place === 'this-pc' || place === 'with-backups'
+          // The host reads every copy back and compares it, so "saved" always means "checked"; whether the place helps is up to the page.
+          ? <p className="fit-line is-tight"><TriangleAlert size={16} aria-hidden="true" /><span><strong>Saved and checked, but not in a safe place.</strong> The copy at <strong className="break-anywhere">{state.savedTo}</strong> is {place === 'this-pc' ? 'on this PC’s own drive, so it won’t help if this PC is lost' : cloud ? 'in the same Google Drive as your backups, so anyone who gets into that account could open your backups' : 'on the same drive as your backups, so losing that drive loses both, and anyone who has it could open your backups'}. Save another copy to a USB drive, or open the file and paste it into a password manager.</span></p>
+          : <p className="fit-line is-good"><Check size={16} aria-hidden="true" /><span><strong>Saved and checked.</strong> {place === 'away' ? <>The copy at <strong className="break-anywhere">{state.savedTo}</strong> matches the original. Keep that drive somewhere safe, away from this PC.</> : 'The copy matches the original.'}</span></p>)}
       </div>
       {error && <Callout tone="error" title="The copy wasn’t saved">{error}</Callout>}
 
@@ -87,7 +111,7 @@ export function Recovery({ wizard, state, onChange }: { wizard: Wizard; state: R
       <label className="ack">
         <input type="checkbox" checked={state.acknowledged} onChange={event => onChange({ ...state, acknowledged: event.target.checked })} />
         <span className="ack-box" aria-hidden="true">{state.acknowledged && <Check size={14} strokeWidth={3} />}</span>
-        <span>I’ve saved my recovery key somewhere safe</span>
+        <span>I’ve saved my recovery key somewhere safe, away from this PC</span>
       </label>
     </div>
   );

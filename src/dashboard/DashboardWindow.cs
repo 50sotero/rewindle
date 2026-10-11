@@ -129,6 +129,9 @@ namespace ResticBackuper.Dashboard
         private TextBlock elapsedValue;
         private TextBlock errorsValue;
         private TextBlock lastUpdated;
+        // When the figures on screen were read, for the page to write in the viewer's region ("updatedAt" in the web state); null while the
+        // read is being retried, when `lastUpdated` says so in words instead.
+        private DateTime? lastUpdatedAt;
         private TextBlock runCount;
         private DataGrid historyGrid;
         private Button viewRunDetailsButton;
@@ -144,6 +147,8 @@ namespace ResticBackuper.Dashboard
         private Button settingsChangeRepositoryButton;
         private Button openRestoreCenterButton;
         private Button checkRecoveryReadinessButton;
+        // What the Restore page offers while restoring is unavailable: "refresh", "setup", "wait" or empty (set by UpdateRestoreReadiness).
+        private string restoreReadinessNext = string.Empty;
         private TextBlock restoreReadinessTitle;
         private TextBlock restoreReadinessDetail;
         private Border protectionRepositoryRecoveryCard;
@@ -215,8 +220,8 @@ namespace ResticBackuper.Dashboard
         // window ends with no run, this note says so. It rides on the Back up now help until a run shows up or the next
         // request replaces it; the run it was waiting for is remembered so that a run that did start clears it.
         private const string BackupNotStartedNotice =
-            "Windows accepted the last backup request, but the backup did not start. The task may be waiting for AC power " +
-            "or another task condition (see Edit schedule).";
+            "Windows accepted the last backup request, but the backup did not start. It may be waiting for AC power " +
+            "(plug the PC in) or for another condition set in Edit schedule.";
         private string backupNotStartedText = string.Empty;
         private string backupNotStartedBaselineRunId = string.Empty;
         private bool cancellationRequestInProgress;
@@ -746,7 +751,7 @@ namespace ResticBackuper.Dashboard
             AutomationProperties.SetName(backupNowButton, "Back up now");
             AutomationProperties.SetHelpText(
                 backupNowButton,
-                "Start the installed Restic backup now. Windows approval is required.");
+                "Start a backup now. Windows will ask for your permission.");
             actions.Children.Add(backupNowButton);
 
             cancelBackupButton = CreateButton("Cancel backup");
@@ -853,14 +858,14 @@ namespace ResticBackuper.Dashboard
             readinessEyebrow.Foreground = BlueText;
             readinessCopy.Children.Add(readinessEyebrow);
             restoreReadinessTitle = new TextBlock();
-            restoreReadinessTitle.Text = "Checking protected restore components";
+            restoreReadinessTitle.Text = "Checking that restore is ready";
             restoreReadinessTitle.FontSize = 18;
             restoreReadinessTitle.FontWeight = FontWeights.SemiBold;
             restoreReadinessTitle.Foreground = PrimaryText;
             restoreReadinessTitle.Margin = new Thickness(0, 5, 0, 0);
             readinessCopy.Children.Add(restoreReadinessTitle);
             restoreReadinessDetail = new TextBlock();
-            restoreReadinessDetail.Text = "Rewindle is validating the stable backup plan and restore manager.";
+            restoreReadinessDetail.Text = "Rewindle is checking that your backups can be restored.";
             restoreReadinessDetail.FontSize = 12;
             restoreReadinessDetail.Foreground = MutedText;
             restoreReadinessDetail.TextWrapping = TextWrapping.Wrap;
@@ -877,9 +882,9 @@ namespace ResticBackuper.Dashboard
             AutomationProperties.SetName(checkRecoveryReadinessButton, "Check recovery readiness");
             AutomationProperties.SetHelpText(
                 checkRecoveryReadinessButton,
-                "Read-only checks validate the repository, both credentials, recovery bundle, capacity, locks, and restore drill.");
+                "Check that your backups can be opened and restored. This only reads; it changes nothing.");
             recoveryActions.Children.Add(checkRecoveryReadinessButton);
-            openRestoreCenterButton = CreateButton("Open Restore Center");
+            openRestoreCenterButton = CreateButton("Restore files…");
             openRestoreCenterButton.MinWidth = 164;
             openRestoreCenterButton.MinHeight = 42;
             openRestoreCenterButton.Background = Blue;
@@ -887,10 +892,10 @@ namespace ResticBackuper.Dashboard
             openRestoreCenterButton.Foreground = themeResolution.Palette.TextOnAccent;
             openRestoreCenterButton.VerticalAlignment = VerticalAlignment.Center;
             openRestoreCenterButton.Click += OnOpenRestoreCenterClick;
-            AutomationProperties.SetName(openRestoreCenterButton, "Open protected Restore Center");
+            AutomationProperties.SetName(openRestoreCenterButton, "Restore files");
             AutomationProperties.SetHelpText(
                 openRestoreCenterButton,
-                "Browse plan-bound snapshots and restore to a new or empty destination. Windows approval is required.");
+                "Choose a backup and restore files into a separate folder. Windows will ask for your permission.");
             recoveryActions.Children.Add(openRestoreCenterButton);
             Grid.SetColumn(recoveryActions, 1);
             readiness.Children.Add(recoveryActions);
@@ -1219,7 +1224,7 @@ namespace ResticBackuper.Dashboard
                 "SettingsChangeRepositoryButton");
             AutomationProperties.SetName(
                 settingsChangeRepositoryButton,
-                "Change protected backup repository location");
+                "Change backup location");
             Grid.SetColumn(settingsChangeRepositoryButton, 1);
             content.Children.Add(settingsChangeRepositoryButton);
             card.Child = content;
@@ -1265,7 +1270,7 @@ namespace ResticBackuper.Dashboard
             content.Children.Add(settingsFreshnessStatus);
 
             settingsFreshnessDetail = new TextBlock();
-            settingsFreshnessDetail.Text = "Waiting for protected backup telemetry and schedule metadata.";
+            settingsFreshnessDetail.Text = "Waiting for the backup status and schedule.";
             settingsFreshnessDetail.FontSize = 12;
             settingsFreshnessDetail.Foreground = MutedText;
             settingsFreshnessDetail.Margin = new Thickness(0, 3, 0, 0);
@@ -1731,10 +1736,10 @@ namespace ResticBackuper.Dashboard
             AutomationProperties.SetAutomationId(changeRepositoryButton, "ChangeRepositoryButton");
             AutomationProperties.SetName(
                 changeRepositoryButton,
-                "Change protected backup repository location");
+                "Change backup location");
             AutomationProperties.SetHelpText(
                 changeRepositoryButton,
-                "Copy and verify the Restic repository in a new location. The old repository is retained and no backup starts.");
+                "Copy your backups to a new location and check the copy. The old location is left as it is, and no backup starts.");
             planActions.Children.Add(changeRepositoryButton);
             editScheduleButton = CreateButton("Edit schedule");
             editScheduleButton.Margin = new Thickness(8, 0, 0, 0);
@@ -2037,7 +2042,7 @@ namespace ResticBackuper.Dashboard
             safety.Padding = new Thickness(0);
             safety.Margin = new Thickness(0, 8, 0, 0);
             TextBlock safetyText = new TextBlock();
-            safetyText.Text = "Removing a folder stops future backups. Existing snapshots remain intact.";
+            safetyText.Text = "Rewindle will stop backing up this folder. Backups you already made are kept.";
             safetyText.FontSize = 12;
             safetyText.Foreground = MutedText;
             safetyText.TextWrapping = TextWrapping.Wrap;
@@ -2159,7 +2164,7 @@ namespace ResticBackuper.Dashboard
                     "Remove " + source.DisplayName + " from future backups");
                 AutomationProperties.SetHelpText(
                     remove,
-                    "Stops future backups of this folder. Existing snapshots remain intact.");
+                    "Stops backing up this folder. Backups you already made are kept.");
                 removeSourceButtons.Add(remove);
                 Grid.SetColumn(remove, 2);
                 grid.Children.Add(remove);
@@ -2363,7 +2368,7 @@ namespace ResticBackuper.Dashboard
             wrapper.Child = content;
             AutomationProperties.SetName(
                 wrapper,
-                source.DisplayName + " added to protected folders and included in the next backup");
+                source.DisplayName + " added and included in the next backup");
 
             sourceOperationItem = wrapper;
             sourceOperationStatusText = status;
@@ -2379,7 +2384,7 @@ namespace ResticBackuper.Dashboard
                 AnimateSourceItemEntrance(wrapper);
             }
             AnnounceSourceOperation(
-                source.SourcePath + " was added to protected folders.",
+                source.SourcePath + " was added and will be included in the next backup.",
                 false);
             return wrapper;
         }
@@ -2474,41 +2479,43 @@ namespace ResticBackuper.Dashboard
                 case SourceOperationStage.AwaitingApproval:
                     tag = "Approval";
                     glyph = ">";
-                    status = "Waiting for Windows approval";
-                    detail = "Approve the Windows prompt to continue. No backup has started.";
+                    status = "Waiting for the Windows permission prompt";
+                    detail = "Choose Yes in the Windows permission prompt to continue. No backup has started.";
                     tone = BlueText;
                     break;
                 case SourceOperationStage.Applying:
                     tag = "Adding";
                     glyph = "...";
-                    status = "Adding protected folder...";
-                    detail = "Updating the protected folder list. No backup has started.";
+                    status = "Adding the folder...";
+                    detail = "Updating the list of folders to back up. No backup has started.";
                     tone = Teal;
                     busy = true;
                     break;
                 case SourceOperationStage.Verifying:
                     tag = "Checking";
                     glyph = "?";
-                    status = "Checking the protected configuration...";
-                    detail = "The folder is not shown as protected until this check passes.";
+                    status = "Checking that the folder was added...";
+                    detail = "The folder isn't counted as backed up until this check passes.";
                     tone = BlueText;
                     busy = true;
                     break;
                 case SourceOperationStage.Cancelled:
                     tag = "Cancelled";
                     glyph = "-";
-                    status = "Windows approval was cancelled";
-                    detail = "No folders were changed.";
+                    status = "Permission not given";
+                    detail = "You didn't allow the change in the Windows permission prompt. No folders were changed.";
                     tone = Amber;
                     dismissVisible = true;
                     break;
                 case SourceOperationStage.Failed:
                     tag = "Needs attention";
                     glyph = "!";
-                    status = "Could not add folder";
+                    status = "Adding the folder didn't finish";
+                    // The error says itself whether anything changed: one from before the folder tool ran says nothing did, and one about
+                    // its answer says the outcome is unknown, so nothing is added here that could contradict it.
                     detail = string.IsNullOrWhiteSpace(sourceOperationError)
-                        ? "The protected list was not changed."
-                        : sourceOperationError + " Protected list unchanged.";
+                        ? "Rewindle can't tell whether the folder was added, so check the folder list before you try again."
+                        : sourceOperationError;
                     tone = Rose;
                     retryVisible = true;
                     dismissVisible = true;
@@ -3642,10 +3649,10 @@ namespace ResticBackuper.Dashboard
             catch
             {
                 status = RepositoryRecoveryStatus.Blocked(
-                    "The interrupted-move journal could not be inspected. Backups remain paused until the protected installation is repaired.");
+                    "Rewindle couldn't read the record of the unfinished move of your backup location. Backups remain paused for your safety.");
             }
             repositoryRecoveryStatus = status ?? RepositoryRecoveryStatus.Blocked(
-                "The interrupted-move recovery status is unavailable. Backups remain paused.");
+                "Rewindle can't tell whether the move of your backup location finished. Backups remain paused for your safety.");
             if (!repositoryRecoveryInProgress && !repositoryRecoveryStatus.Exists)
             {
                 repositoryRecoveryOperationMessage = string.Empty;
@@ -3671,31 +3678,33 @@ namespace ResticBackuper.Dashboard
 
             string message = status.Exists
                 ? status.Message
-                : "Protected repository recovery is completing.";
+                : "Finishing the repair of your backup location.";
             string state;
             if (repositoryRecoveryInProgress)
             {
                 state = string.IsNullOrWhiteSpace(repositoryRecoveryOperationMessage)
-                    ? "Repairing the interrupted repository move..."
+                    ? "Finishing the interrupted move of your backup location..."
                     : repositoryRecoveryOperationMessage;
             }
             else if (!status.IsRecoverable)
             {
                 state = string.IsNullOrWhiteSpace(repositoryRecoveryOperationMessage)
-                    ? "Automatic and manual backups remain blocked. Repair the protected installation before continuing."
+                    ? "Automatic and manual backups remain blocked. Rewindle can't safely use the record of the unfinished move, and your existing backups were not touched. " +
+                        "Choose Save problem report in Settings and send the file when you ask for help (the project page is listed under About). " +
+                        "Please don't delete anything in the backup location."
                     : repositoryRecoveryOperationMessage;
             }
             else if (!managerAvailable)
             {
-                state = "The protected repository recovery helper is unavailable. Backups remain blocked.";
+                state = "Rewindle's repair tool is missing, so backups stay blocked. " + EngineProfile.Current.ReinstallAdvice();
             }
             else if (previewEnabled)
             {
-                state = "Stop the dashboard preview before starting protected recovery.";
+                state = "Stop the animation preview before repairing the interrupted move.";
             }
             else if (conflict)
             {
-                state = "Wait for the current protected operation to finish, then repair the interrupted move.";
+                state = "Wait for the current operation to finish, then repair the interrupted move.";
             }
             else if (!string.IsNullOrWhiteSpace(repositoryRecoveryOperationMessage))
             {
@@ -3703,7 +3712,7 @@ namespace ResticBackuper.Dashboard
             }
             else
             {
-                state = "Ready to repair. Windows approval is required; no backup will start.";
+                state = "Ready to repair. Windows will ask for your permission; no backup will start.";
             }
 
             string label = repositoryRecoveryInProgress
@@ -3712,7 +3721,7 @@ namespace ResticBackuper.Dashboard
                     ? "Repair interrupted move"
                     : "Repair unavailable";
             string helpText = canRepair
-                ? "Validate and repair the protected interrupted-move journal. No backup starts and no snapshot is deleted."
+                ? "Finish the interrupted move of your backup location. No backup starts and none of your backups is deleted."
                 : state;
 
             ApplyRepositoryRecoverySurface(
@@ -3807,12 +3816,12 @@ namespace ResticBackuper.Dashboard
                     Math.Min(progress.Maximum, repositoryRecoveryOperationPercent.Value));
                 AutomationProperties.SetName(
                     progress,
-                    "Repository recovery progress " +
+                    "Backup location repair progress " +
                         progress.Value.ToString("0", CultureInfo.CurrentCulture) + " percent");
             }
             else
             {
-                AutomationProperties.SetName(progress, "Repository recovery in progress");
+                AutomationProperties.SetName(progress, "Backup location repair in progress");
             }
             AutomationProperties.SetName(
                 card,
@@ -3837,7 +3846,7 @@ namespace ResticBackuper.Dashboard
                 return;
             }
             string message = string.IsNullOrWhiteSpace(progress.Message)
-                ? "Repairing protected repository state..."
+                ? "Repairing your backup location..."
                 : progress.Message;
             if (progress.Percent.HasValue)
             {
@@ -3853,7 +3862,7 @@ namespace ResticBackuper.Dashboard
             refreshGeneration++;
             RefreshRepositoryRecoveryStatus();
             // A schedule that could not be read is read again on request, not after the usual 30 seconds, so that
-            // "Check again" on the page does what it says.
+            // "Try again" on the Restore page does what it says.
             RefreshSchedule(currentTaskSchedule == null);
             TelemetrySnapshot snapshot = null;
             Exception loadFailure = null;
@@ -3901,10 +3910,13 @@ namespace ResticBackuper.Dashboard
 
         private void ShowTelemetryUnavailable(Exception error)
         {
-            heroTitle.Text = "Dashboard data is temporarily unavailable";
-            webTelemetryError = error.Message;
-            heroDetail.Text = error.Message;
-            SetBadge("DATA RETRY", Amber, BrushFrom("#3A2F18"));
+            // The exception's own words can name a path or quote a file, so the page gets one fixed sentence; the log keeps the rest.
+            CrashLog.Write("Reading the backup status", error);
+            heroTitle.Text = "Backup status can\u2019t be read right now";
+            webTelemetryError = "Rewindle is trying again automatically.";
+            heroDetail.Text = "Rewindle couldn\u2019t read the latest backup status. It is trying again automatically.";
+            SetBadge("STATUS UNAVAILABLE", Amber, BrushFrom("#3A2F18"));
+            lastUpdatedAt = null;
             lastUpdated.Text = "Retrying automatically";
         }
 
@@ -4260,7 +4272,7 @@ namespace ResticBackuper.Dashboard
                 {
                     if (!hasCanarySource)
                     {
-                        sourceStatus.Text = "The required restore test file is missing; backups cannot be verified.";
+                        sourceStatus.Text = "The restore test file is missing, so backups can\u2019t be checked. " + EngineProfile.Current.ReinstallAdvice();
                         sourceStatus.Foreground = Rose;
                     }
                     else if (!managerAvailable)
@@ -4297,8 +4309,8 @@ namespace ResticBackuper.Dashboard
                 unavailable.Margin = new Thickness(12, 14, 12, 14);
                 sourceList.Children.Add(unavailable);
                 sourceSummary.Text = notInstalled
-                    ? "Engine not installed"
-                    : "Protected configuration unavailable";
+                    ? "Backup service not installed"
+                    : "Backup settings unavailable";
                 if (DateTime.UtcNow >= sourceNoticeExpiresUtc)
                 {
                     sourceStatus.Text = sourceConfigurationNote;
@@ -4319,8 +4331,7 @@ namespace ResticBackuper.Dashboard
         {
             if (error is BackupInstallationMissingException)
             {
-                return "Engine not installed: Rewindle did not find the backup engine it reports on. Install or repair it, " +
-                    "then refresh (see Requirements in the README).";
+                return "Rewindle's backup service isn't installed on this computer. Run Rewindle Setup to install it, then choose Refresh.";
             }
             if (error is UnauthorizedAccessException)
             {
@@ -4358,55 +4369,65 @@ namespace ResticBackuper.Dashboard
             bool ready = managerAvailable && hasCanary && !blocked;
             openRestoreCenterButton.IsEnabled = ready;
             checkRecoveryReadinessButton.IsEnabled = healthAvailable && !blocked;
+            // What the Restore page offers besides the text (`recovery.next` in native-types.ts).
+            restoreReadinessNext = string.Empty;
+            // Rewindle Setup repairs only its own engine; the earlier personal edition is put right by reinstalling that program.
+            string reinstallAdvice = EngineProfile.Current.ReinstallAdvice();
             if (currentSourceConfiguration == null)
             {
-                restoreReadinessTitle.Text = "Protected configuration unavailable";
-                restoreReadinessDetail.Text = "Repair or refresh the protected installation before browsing snapshots.";
+                restoreReadinessTitle.Text = "Rewindle can't read its backup settings";
+                restoreReadinessDetail.Text = "Choose Try again. If this stays, " + char.ToLowerInvariant(reinstallAdvice[0]) + reinstallAdvice.Substring(1) +
+                    " Your backups are not affected.";
                 restoreReadinessTitle.Foreground = Rose;
+                restoreReadinessNext = "refresh";
             }
             else if (!managerAvailable)
             {
-                restoreReadinessTitle.Text = "Restore Center is not installed";
-                restoreReadinessDetail.Text = "The protected restore manager or backend is missing from the runtime manifest.";
+                restoreReadinessTitle.Text = "Restore isn't available";
+                restoreReadinessDetail.Text = "A part of Rewindle that restoring needs is missing. " + reinstallAdvice;
                 restoreReadinessTitle.Foreground = Rose;
+                restoreReadinessNext = "setup";
             }
             else if (!hasCanary)
             {
+                // A reinstall puts the restore test file back: Setup's canary phase recreates the file and the folder entry (Install-ResticBackuper.ps1).
                 restoreReadinessTitle.Text = "Restore test file is missing";
-                restoreReadinessDetail.Text = "A restore test file is required before app-guided recovery is trusted.";
+                restoreReadinessDetail.Text = "Rewindle checks every backup by restoring a small test file, and that file is gone. Restore is unavailable until it is back. " +
+                    reinstallAdvice + " Your existing backups are not affected.";
                 restoreReadinessTitle.Foreground = Rose;
+                restoreReadinessNext = "setup";
             }
             else if (repositoryRecoveryStatus.Exists)
             {
-                restoreReadinessTitle.Text = "Repair the interrupted repository move first";
+                restoreReadinessTitle.Text = "Finish moving your backup location first";
                 restoreReadinessDetail.Text = repositoryRecoveryStatus.Message;
                 restoreReadinessTitle.Foreground = Amber;
             }
             else if (blocked)
             {
-                restoreReadinessTitle.Text = "Restore access is temporarily paused";
-                restoreReadinessDetail.Text = "Wait for the active backup or protected configuration change to finish.";
+                restoreReadinessTitle.Text = "Restore will be available in a moment";
+                restoreReadinessDetail.Text = "A backup or settings change is running. Restore unlocks when it finishes.";
                 restoreReadinessTitle.Foreground = Amber;
+                restoreReadinessNext = "wait";
             }
             else
             {
-                restoreReadinessTitle.Text = "Restore Center ready";
-                restoreReadinessDetail.Text = "Plan " +
-                    currentSourceConfiguration.PlanId.Substring(0, 8) + " · generation " +
-                    currentSourceConfiguration.ConfigGeneration.ToString(CultureInfo.CurrentCulture) +
-                    " · " + currentSourceConfiguration.RepositoryPath;
+                restoreReadinessTitle.Text = "Ready to restore";
+                restoreReadinessDetail.Text = "Restores from " + currentSourceConfiguration.RepositoryPath +
+                    " into a new, empty folder. Your original files are not touched.";
                 restoreReadinessTitle.Foreground = Green;
             }
-            AutomationProperties.SetHelpText(
-                openRestoreCenterButton,
-                ready
-                    ? "Browse snapshots and restore to a separate destination. Windows approval is required."
-                    : restoreReadinessDetail.Text);
-            AutomationProperties.SetHelpText(
-                checkRecoveryReadinessButton,
-                checkRecoveryReadinessButton.IsEnabled
-                    ? "Run read-only independent repository and recovery checks."
-                    : restoreReadinessDetail.Text);
+            // A disabled button gives its reason as its help text, and the host refuses a command with the tooltip.
+            string openRestoreHelp = ready
+                ? "Choose a backup and restore files into a separate folder. Windows will ask for your permission."
+                : restoreReadinessDetail.Text;
+            string checkReadinessHelp = checkRecoveryReadinessButton.IsEnabled
+                ? "Check that your backups can be opened and restored. This only reads; it changes nothing."
+                : restoreReadinessDetail.Text;
+            AutomationProperties.SetHelpText(openRestoreCenterButton, openRestoreHelp);
+            openRestoreCenterButton.ToolTip = openRestoreHelp;
+            AutomationProperties.SetHelpText(checkRecoveryReadinessButton, checkReadinessHelp);
+            checkRecoveryReadinessButton.ToolTip = checkReadinessHelp;
         }
 
         private void OnCheckRecoveryReadinessClick(object sender, RoutedEventArgs args)
@@ -4594,7 +4615,7 @@ namespace ResticBackuper.Dashboard
             if (previewEnabled)
             {
                 label = "Stop preview first";
-                helpText = "Stop the telemetry preview before starting a real backup.";
+                helpText = "Stop the animation preview before starting a real backup.";
             }
             else if (backupStartInProgress)
             {
@@ -4620,26 +4641,26 @@ namespace ResticBackuper.Dashboard
             else if (pending)
             {
                 label = "Request sent…";
-                helpText = "Windows accepted the request. Waiting for protected backup telemetry.";
+                helpText = "Windows accepted the request. Waiting for the backup to start.";
             }
             else if (RepositoryRecoveryBlocksMutations())
             {
                 label = repositoryRecoveryInProgress
-                    ? "Repairing storage…"
+                    ? "Repairing…"
                     : "Backup paused";
                 helpText = repositoryRecoveryInProgress
-                    ? "Wait for protected repository recovery to finish."
-                    : "Repair the interrupted repository move before starting another backup.";
+                    ? "Wait for the repair of your backup location to finish."
+                    : "Repair the interrupted move of your backup location before starting another backup.";
             }
             else if (scheduleOperationInProgress)
             {
                 label = "Schedule updating…";
-                helpText = "Wait for the protected schedule change to be verified before starting a backup.";
+                helpText = "Wait for the schedule change to be checked before starting a backup.";
             }
             else if (sourceOperationInProgress)
             {
                 label = "Folders updating…";
-                helpText = "Wait for the protected folder change to finish before starting a backup.";
+                helpText = "Wait for the folder change to finish before starting a backup.";
             }
             else if (repositoryOperationInProgress)
             {
@@ -4658,7 +4679,7 @@ namespace ResticBackuper.Dashboard
             else if (!hasCanary)
             {
                 label = "Backup unavailable";
-                helpText = "The required restore test file must be present before a backup can be requested.";
+                helpText = "Backups are off because the restore test file is missing. " + EngineProfile.Current.ReinstallAdvice();
             }
             else
             {
@@ -4747,11 +4768,11 @@ namespace ResticBackuper.Dashboard
                 else if (sourceOperationInProgress || scheduleOperationInProgress ||
                     repositoryOperationInProgress || backupStartInProgress)
                 {
-                    helpText = "Wait for the current protected operation to finish before requesting cancellation.";
+                    helpText = "Wait for the current step to finish, then you can cancel.";
                 }
                 else
                 {
-                    helpText = "Ask the exact active Restic run to stop cooperatively. Existing verified snapshots are not changed.";
+                    helpText = "Stop the running backup safely. Your earlier backups are not changed.";
                     enabled = true;
                 }
             }
@@ -4824,15 +4845,15 @@ namespace ResticBackuper.Dashboard
             string helpText;
             if (anomalyReviewInProgress)
             {
-                helpText = "Windows is recording a plan-bound approval for this exact verified generation.";
+                helpText = "Waiting for you to answer the Windows permission prompt.";
             }
             else if (!helperAvailable)
             {
-                helpText = "The protected anomaly-review helper or latest verified evidence is unavailable.";
+                helpText = "Rewindle can't confirm these changes right now because a file it needs is missing. " + EngineProfile.Current.ReinstallAdvice();
             }
             else if (conflict)
             {
-                helpText = "Wait for the current protected operation to finish before reviewing this generation.";
+                helpText = "Wait for the current backup or settings change to finish before confirming these changes.";
             }
             else
             {
@@ -4866,22 +4887,17 @@ namespace ResticBackuper.Dashboard
                 return;
             }
 
-            string snapshotShort = snapshot.SnapshotId.Length > 12
-                ? snapshot.SnapshotId.Substring(0, 12)
-                : snapshot.SnapshotId;
             string detail = string.IsNullOrWhiteSpace(snapshot.MaintenanceHoldDetail)
-                ? "Restic detected an unusually large change set."
+                ? "Far more changed in this backup than usual."
                 : snapshot.MaintenanceHoldDetail;
             AnomalyReviewWording wording = EngineProfile.Current.AnomalyReview;
             MessageBoxResult confirmation = MessageBox.Show(
                 this,
                 wording.ConfirmQuestion + "\n\n" +
                     detail + "\n\n" +
-                    "Run: " + snapshot.RunId + "\n" +
-                    "Snapshot: " + snapshotShort + "\n\n" +
                     wording.ConfirmEffects + "\n\n" +
-                    "Windows approval is required.",
-                "Review suspicious backup changes",
+                    "Windows will ask for your permission.",
+                "Unusual changes in your latest backup",
                 MessageBoxButton.YesNo,
                 MessageBoxImage.Warning,
                 MessageBoxResult.No);
@@ -5052,7 +5068,7 @@ namespace ResticBackuper.Dashboard
                 StringComparison.OrdinalIgnoreCase))
             {
                 SetCancellationStatus(
-                    "Restic is stopping safely…",
+                    "Stopping the backup safely…",
                     Amber,
                     0);
                 return;
@@ -5066,7 +5082,7 @@ namespace ResticBackuper.Dashboard
                     currentTaskSchedule.State == BackupTaskState.Unknown)
                 {
                     SetCancellationStatus(
-                        "Restic stopped. Checking that the protected task and process tree have exited…",
+                        "The backup stopped. Making sure it has fully finished…",
                         BlueText,
                         0);
                     return;
@@ -5075,12 +5091,12 @@ namespace ResticBackuper.Dashboard
                 cancellationAwaitingTerminal = false;
                 cancellationRequestedRunId = string.Empty;
                 SetCancellationStatus(
-                    "Backup cancelled safely. Previously verified snapshots remain available.",
+                    "Backup cancelled. Your earlier backups are still there.",
                     Green,
                     18);
                 ShowTrayMessage(
                     "Backup cancelled safely",
-                    "The active run stopped cooperatively. Previously verified snapshots remain available.",
+                    "The backup stopped safely. Your earlier backups are still there.",
                     Forms.ToolTipIcon.Info);
                 return;
             }
@@ -5108,7 +5124,7 @@ namespace ResticBackuper.Dashboard
             }
 
             SetCancellationStatus(
-                "Cancellation was requested. Waiting for Restic and the protected task to report their final state…",
+                "Cancelling… waiting for the backup to stop safely.",
                 Amber,
                 0);
         }
@@ -5152,7 +5168,7 @@ namespace ResticBackuper.Dashboard
                 currentTaskSchedule.State != BackupTaskState.Running)
             {
                 SetCancellationStatus(
-                    "Cancellation was not requested because the protected task is no longer confirmed as Running.",
+                    "Nothing to cancel: the backup has already finished.",
                     Amber,
                     12);
                 UpdateCancelButton(snapshot);
@@ -5162,9 +5178,9 @@ namespace ResticBackuper.Dashboard
             MessageBoxResult confirmation = MessageBox.Show(
                 this,
                 "Cancel this backup?\n\n" +
-                    "Restic will be asked to stop cleanly. Previously verified snapshots are not changed, " +
-                    "and this run will not be marked successful. A run that is already completing may finish " +
-                    "before cancellation takes effect.",
+                    "Rewindle will ask the backup to stop cleanly. Your earlier backups are not changed, " +
+                    "and this one will not count as complete. A backup that is already finishing may " +
+                    "complete before it stops.",
                 "Cancel running backup?",
                 MessageBoxButton.YesNo,
                 MessageBoxImage.Warning,
@@ -5238,7 +5254,7 @@ namespace ResticBackuper.Dashboard
                 cancellationAwaitingTerminal = true;
                 nextScheduleRefreshUtc = DateTime.MinValue;
                 SetCancellationStatus(
-                    "Restic is stopping safely…",
+                    "Stopping the backup safely…",
                     Amber,
                     0);
             }
@@ -5251,8 +5267,8 @@ namespace ResticBackuper.Dashboard
                     15);
                 MessageBox.Show(
                     this,
-                    "The cooperative cancellation request was rejected. The backup was not hard-stopped.\n\n" +
-                        (result.ErrorMessage ?? "The protected cancellation helper did not return a verified result."),
+                    "Rewindle couldn\u2019t stop the backup, so it is still running. Nothing was cut off, and you can try again.\n\n" +
+                        "Details: " + (result.ErrorMessage ?? "no result came back from the cancel request."),
                     "Cancellation not requested",
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
@@ -5282,7 +5298,7 @@ namespace ResticBackuper.Dashboard
             }
             else if (previewEnabled)
             {
-                helpText = "Stop the telemetry preview before changing the automatic schedule.";
+                helpText = "Stop the animation preview before changing the automatic schedule.";
             }
             else if (backupConflict)
             {
@@ -5295,8 +5311,8 @@ namespace ResticBackuper.Dashboard
             else if (RepositoryRecoveryBlocksMutations())
             {
                 helpText = repositoryRecoveryInProgress
-                    ? "Wait for protected repository recovery to finish before changing the schedule."
-                    : "Repair the interrupted repository move before changing the schedule.";
+                    ? "Wait for the backup location repair to finish before changing the schedule."
+                    : "Repair the interrupted move of your backup location before changing the schedule.";
             }
             else if (repositoryOperationInProgress)
             {
@@ -5379,7 +5395,7 @@ namespace ResticBackuper.Dashboard
             string helpText;
             if (repositoryRecoveryInProgress)
             {
-                helpText = "The protected interrupted-move recovery is still running.";
+                helpText = "Rewindle is still finishing the interrupted move of your backup location.";
             }
             else if (repositoryOperationInProgress)
             {
@@ -5388,37 +5404,37 @@ namespace ResticBackuper.Dashboard
             else if (RepositoryRecoveryBlocksMutations())
             {
                 helpText = repositoryRecoveryInProgress
-                    ? "Wait for protected repository recovery to finish before changing storage."
-                    : "Repair the interrupted repository move before changing storage.";
+                    ? "Wait for the repair to finish before changing the backup location."
+                    : "Repair the interrupted move before changing the backup location.";
             }
             else if (previewEnabled)
             {
-                helpText = "Stop the telemetry preview before changing backup storage.";
+                helpText = "Stop the animation preview before changing the backup location.";
             }
             else if (backupConflict)
             {
-                helpText = "Wait for the current backup operation to finish before changing storage.";
+                helpText = "Wait for the current backup to finish before changing the backup location.";
             }
             else if (sourceOperationInProgress)
             {
-                helpText = "Wait for the protected folder change to finish before changing storage.";
+                helpText = "Wait for the folder change to finish before changing the backup location.";
             }
             else if (scheduleOperationInProgress)
             {
-                helpText = "Wait for the protected schedule change to finish before changing storage.";
+                helpText = "Wait for the schedule change to finish before changing the backup location.";
             }
             else if (currentSourceConfiguration == null)
             {
-                helpText = "The protected backup configuration is unavailable.";
+                helpText = "Rewindle can't read its backup settings right now.";
             }
             else if (!managerAvailable)
             {
-                helpText = "The protected repository manager is not installed.";
+                helpText = "Rewindle's backup-location tool is missing. " + EngineProfile.Current.ReinstallAdvice();
             }
             else
             {
-                helpText = "Copy and verify the Restic repository in a new location. " +
-                    "The old repository is retained and no backup starts.";
+                helpText = "Copy your backups to a new location and check the copy. " +
+                    "The old location is left as it is, and no backup starts.";
             }
             ApplyRepositoryButtonState(changeRepositoryButton, label, enabled, helpText);
             ApplyRepositoryButtonState(settingsChangeRepositoryButton, label, enabled, helpText);
@@ -5459,11 +5475,12 @@ namespace ResticBackuper.Dashboard
 
             MessageBoxResult confirmation = MessageBox.Show(
                 this,
-                "Repair the interrupted repository move now?\n\n" +
-                    "The protected recovery helper will validate the journal and restore a verified safe " +
-                    "repository and configuration state. Backups remain paused until the protected journal " +
-                    "is removed. No backup starts and no snapshot is deleted.",
-                "Repair interrupted repository move?",
+                "Repair the interrupted move of your backup location now?\n\n" +
+                    "Rewindle will check what the unfinished move left behind and put your backup location " +
+                    "and settings back in a safe state. Backups remain paused until it finishes. " +
+                    "No backup starts and none of your backups is deleted.\n\n" +
+                    "Windows will ask for your permission.",
+                "Repair the interrupted move?",
                 MessageBoxButton.YesNo,
                 MessageBoxImage.Warning,
                 MessageBoxResult.No);
@@ -5481,7 +5498,7 @@ namespace ResticBackuper.Dashboard
                 RepositoryRecoveryHasConflictingOperation())
             {
                 SetRepositoryRecoveryOperationStatus(
-                    "Protected recovery was not started because the recovery state changed. Review this warning and try again.",
+                    "The repair didn't start because the situation changed. Check the message on this page, then try again.",
                     null);
                 UpdateSourceButtons();
                 return;
@@ -5490,7 +5507,7 @@ namespace ResticBackuper.Dashboard
             repositoryRecoveryInProgress = true;
             repositoryOperationInProgress = true;
             SetRepositoryRecoveryOperationStatus(
-                "Waiting for Windows approval...",
+                "Waiting for you to answer the Windows permission prompt...",
                 null);
             UpdateSourceButtons();
 
@@ -5508,7 +5525,7 @@ namespace ResticBackuper.Dashboard
                                     if (repositoryRecoveryInProgress)
                                     {
                                         SetRepositoryRecoveryOperationStatus(
-                                            "Protected repository recovery is running...",
+                                            "Repairing the interrupted move...",
                                             null);
                                     }
                                 }),
@@ -5542,20 +5559,20 @@ namespace ResticBackuper.Dashboard
             if (result.UserCancelled)
             {
                 repositoryRecoveryOperationMessage =
-                    "Windows approval was cancelled. Backups remain paused until repair completes.";
+                    "You didn't allow the change in the Windows permission prompt. Backups remain paused until the repair finishes.";
             }
             else if (!result.Succeeded)
             {
                 string detail = string.IsNullOrWhiteSpace(result.ErrorMessage)
-                    ? "The protected recovery helper did not return a verified result."
+                    ? "Windows didn't give a clear answer."
                     : result.ErrorMessage;
                 repositoryRecoveryOperationMessage =
-                    "Repair failed: " + detail + " Backups remain paused.";
+                    "The repair didn't finish: " + detail + " Backups remain paused. Choose Repair interrupted move to try again.";
             }
             else if (!journalCleared)
             {
                 repositoryRecoveryOperationMessage =
-                    "Protected recovery returned success, but the interruption journal still exists. Backups remain paused.";
+                    "Windows reported the repair as finished, but Rewindle still sees the unfinished move. Backups remain paused. Choose Repair interrupted move to try again.";
             }
             else
             {
@@ -5570,8 +5587,8 @@ namespace ResticBackuper.Dashboard
             {
                 MessageBox.Show(
                     this,
-                    "Windows approval was cancelled. Nothing was bypassed or dismissed; backups remain paused until repair succeeds.",
-                    "Repository repair cancelled",
+                    "You didn't allow the change in the Windows permission prompt, so nothing was repaired. Backups remain paused until the repair is done.",
+                    "Repair cancelled",
                     MessageBoxButton.OK,
                     MessageBoxImage.Information);
             }
@@ -5580,7 +5597,7 @@ namespace ResticBackuper.Dashboard
                 MessageBox.Show(
                     this,
                     repositoryRecoveryOperationMessage,
-                    "Repository repair failed",
+                    "Repair didn't finish",
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
             }
@@ -5589,15 +5606,15 @@ namespace ResticBackuper.Dashboard
                 MessageBox.Show(
                     this,
                     repositoryRecoveryOperationMessage,
-                    "Repository repair not confirmed",
+                    "Repair not confirmed",
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
             }
             else
             {
                 ShowTrayMessage(
-                    "Repository move repaired",
-                    "The protected repository state was verified. Backup controls are available again.",
+                    "Backup location repaired",
+                    "Rewindle checked your backup location. Backups can run again.",
                     Forms.ToolTipIcon.Info);
             }
         }
@@ -5647,7 +5664,7 @@ namespace ResticBackuper.Dashboard
             {
                 ShowTrayMessage(
                     "Backup location changed",
-                    "The new Restic repository is active. The previous repository was retained.",
+                    "New backups go to the new location. The old one was kept, with its backups.",
                     Forms.ToolTipIcon.Info);
             }
         }
@@ -5982,7 +5999,7 @@ namespace ResticBackuper.Dashboard
             string sourcePath;
             using (Forms.FolderBrowserDialog dialog = new Forms.FolderBrowserDialog())
             {
-                dialog.Description = "Choose a folder to include in future Restic backup runs.";
+                dialog.Description = "Choose a folder to back up.";
                 dialog.RootFolder = Environment.SpecialFolder.MyComputer;
                 dialog.ShowNewFolderButton = true;
                 if (dialog.ShowDialog() != Forms.DialogResult.OK)
@@ -6063,7 +6080,8 @@ namespace ResticBackuper.Dashboard
             content.Children.Add(title);
 
             TextBlock warning = new TextBlock();
-            warning.Text = "Removing a folder stops future backups. Existing snapshots remain intact.";
+            warning.Text = "Rewindle will stop backing up this folder. Backups you've already made are kept, " +
+                "and you can still restore this folder's files from them. Windows will ask for your permission.";
             warning.FontSize = 13;
             warning.Foreground = BrushFrom("#B7C5D1");
             warning.TextWrapping = TextWrapping.Wrap;
@@ -6151,7 +6169,7 @@ namespace ResticBackuper.Dashboard
             }
             else
             {
-                SetSourceNotice("Waiting for Windows approval...", BlueText, 600);
+                SetSourceNotice("Waiting for you to answer the Windows permission prompt...", BlueText, 600);
             }
             UpdateSourceButtons();
 
@@ -6214,10 +6232,10 @@ namespace ResticBackuper.Dashboard
                 }
                 else
                 {
-                    SetSourceNotice("Windows approval was cancelled. No folders were changed.", Amber, 12);
+                    SetSourceNotice("You didn't allow the change in the Windows permission prompt. No folders were changed.", Amber, 12);
                     MessageBox.Show(
                         this,
-                        "Windows approval was cancelled. The backup folder list was not changed.",
+                        "You didn't allow the change in the Windows permission prompt. The list of folders was not changed.",
                         "Folder change cancelled",
                         MessageBoxButton.OK,
                         MessageBoxImage.Information);
@@ -6228,7 +6246,7 @@ namespace ResticBackuper.Dashboard
             if (!result.Succeeded)
             {
                 string detail = string.IsNullOrWhiteSpace(result.ErrorMessage)
-                    ? "The protected source manager could not complete the request."
+                    ? "Windows didn't finish the change. Rewindle can't tell whether it was made, so check the folder list before you try again."
                     : result.ErrorMessage;
                 if (isAdd && sourceOperationGeneration == operationGeneration)
                 {
@@ -6241,10 +6259,11 @@ namespace ResticBackuper.Dashboard
                 }
                 else
                 {
-                    SetSourceNotice("Folder change failed. The protected configuration was not updated.", Rose, 15);
+                    // The detail says whether anything changed; the list below is read again, so it shows what the folder list really is.
+                    SetSourceNotice("The folder change didn't finish. Check the folder list before you try again; if it keeps failing, restart Rewindle.", Rose, 15);
                     MessageBox.Show(
                         this,
-                        "The folder list was not changed.\n\n" + detail,
+                        detail,
                         "Folder change failed",
                         MessageBoxButton.OK,
                         MessageBoxImage.Error);
@@ -6279,7 +6298,7 @@ namespace ResticBackuper.Dashboard
                     : !isPresent);
             if (!confirmed)
             {
-                string detail = "The manager finished, but the protected configuration did not confirm the change.";
+                string detail = "Windows reported success, but Rewindle can't see the change in its settings. Nothing was added. Close and reopen Rewindle, then try again.";
                 if (isAdd && sourceOperationGeneration == operationGeneration)
                 {
                     SetSourceOperationStage(
@@ -6294,8 +6313,8 @@ namespace ResticBackuper.Dashboard
                     SetSourceNotice(detail, Rose, 15);
                     MessageBox.Show(
                         this,
-                        "The protected configuration did not confirm the requested folder change. " +
-                            "Refresh the dashboard and check the installation logs.",
+                        "Rewindle couldn't confirm the folder change in its settings. " +
+                            "Close and reopen Rewindle to see whether it went through.",
                         "Folder change not confirmed",
                         MessageBoxButton.OK,
                         MessageBoxImage.Error);
@@ -6312,13 +6331,13 @@ namespace ResticBackuper.Dashboard
                 RefreshSources(true);
                 if (!IsVisible)
                 {
-                    ShowTrayMessage("Backup folder added", sourcePath, Forms.ToolTipIcon.Info);
+                    ShowTrayMessage("Folder added", sourcePath + " will be included in your next backup.", Forms.ToolTipIcon.Info);
                 }
             }
             else
             {
-                SetSourceNotice("Folder removed from future backups. Existing snapshots were not deleted.", Green, 12);
-                ShowTrayMessage("Backup folder removed", sourcePath, Forms.ToolTipIcon.Info);
+                SetSourceNotice("Folder removed. Rewindle won't back it up any more; backups you already made are kept.", Green, 12);
+                ShowTrayMessage("Folder removed", sourcePath + " won't be backed up any more.", Forms.ToolTipIcon.Info);
             }
             UpdateSourceButtons();
         }
@@ -6407,14 +6426,14 @@ namespace ResticBackuper.Dashboard
                 ? "First backup pending"
                 : (snapshot.Percent * 100).ToString("0.0", CultureInfo.CurrentCulture) + "%";
             estimateBadge.Text = firstBackupPending
-                ? "DRY-RUN BASELINE  •  NOT YET BACKED UP"
+                ? "TEST SCAN ONLY  •  NOT YET BACKED UP"
                 : string.Equals(snapshot.StateKey, "cancelling", StringComparison.OrdinalIgnoreCase)
-                    ? "CANCELLATION REQUESTED  •  COOPERATIVE STOP"
+                    ? "STOP REQUESTED  •  STOPPING SAFELY"
                 : snapshot.IsSuccess
                     ? "FINAL VERIFIED RESULT"
                 : snapshot.ProgressIsEstimated
                     ? "ESTIMATED  •  " + snapshot.ConfidenceLabel.ToUpperInvariant()
-                    : "RESTIC COUNTERS  •  COMPOSED OVERALL";
+                    : "EXACT PROGRESS  •  OVERALL";
             estimateBadge.Foreground = firstBackupPending
                 ? Amber
                 : snapshot.ProgressIsEstimated ? Teal : BlueText;
@@ -6424,7 +6443,7 @@ namespace ResticBackuper.Dashboard
             {
                 etaTitle.Text = "Stopping safely";
                 etaValue.Text = "Please wait";
-                etaHint.Text = "Restic is finishing its current operation and releasing the repository lock";
+                etaHint.Text = "Rewindle is finishing the current step and closing the backup location safely";
             }
             else
             {
@@ -6436,7 +6455,7 @@ namespace ResticBackuper.Dashboard
                     etaValue.Text = FormatDuration(snapshot.Eta.Value);
                     string completion = snapshot.EstimatedCompletion.HasValue
                         ? "Likely around " + snapshot.EstimatedCompletion.Value.ToString("HH:mm", CultureInfo.CurrentCulture)
-                        : "Updates as Restic advances";
+                        : "Updates as the backup moves along";
                     etaHint.Text = snapshot.ProgressIsEstimated
                         ? snapshot.ConfidenceLabel + "  •  " + completion
                         : completion;
@@ -6454,13 +6473,13 @@ namespace ResticBackuper.Dashboard
                     else
                     {
                     heroTitle.Text = snapshot.NeedsAnomalyReview
-                        ? "Backup verified — review changes"
+                        ? "Backup verified — confirm these changes"
                         : "Backup verified";
                     etaTitle.Text = snapshot.NeedsAnomalyReview
-                        ? "Safety hold"
+                        ? "Next step"
                         : "Next automatic run";
                     etaValue.Text = snapshot.NeedsAnomalyReview
-                        ? "Review required"
+                        ? "Confirm these changes"
                         : currentTaskSchedule == null
                             ? "Unavailable"
                             : currentTaskSchedule.NextRunDisplay;
@@ -6468,7 +6487,7 @@ namespace ResticBackuper.Dashboard
                         ? EngineProfile.Current.AnomalyReview.HoldHeroDetail
                         : currentTaskSchedule == null
                             ? "Installed schedule could not be verified"
-                            : "Latest snapshot and restore test verified  •  " + currentTaskSchedule.Summary;
+                            : "Latest backup and restore test verified  •  " + currentTaskSchedule.Summary;
                 }
                     }
                 else if (snapshot.IsFailure)
@@ -6480,7 +6499,7 @@ namespace ResticBackuper.Dashboard
                 else if (snapshot.IsActive)
                 {
                     etaValue.Text = "Calculating";
-                    etaHint.Text = "Building an estimate from live progress and run history";
+                    etaHint.Text = "Working out an estimate from this backup\u2019s progress so far";
                 }
                 else
                 {
@@ -6526,7 +6545,7 @@ namespace ResticBackuper.Dashboard
             }
             else if (snapshot.IsFailure)
             {
-                SetBadge("NEEDS ATTENTION", Rose, BrushFrom("#3B1D2A"));
+                SetBadge("BACKUP DIDN\u2019T FINISH", Rose, BrushFrom("#3B1D2A"));
                 StopStatusPulse();
             }
             else if (snapshot.IsStatusUnavailable)
@@ -6626,7 +6645,9 @@ namespace ResticBackuper.Dashboard
             }
             historyAnimationSignature = newHistorySignature;
             runCount.Text = history.Count.ToString(CultureInfo.InvariantCulture) + (history.Count == 1 ? " run" : " runs");
-            lastUpdated.Text = "Updated " + snapshot.LastUpdatedLocal.ToString("HH:mm:ss", CultureInfo.CurrentCulture);
+            // To the minute: the page shows this on every screen, and a clock that changes every second reads as noise.
+            lastUpdatedAt = snapshot.LastUpdatedLocal;
+            lastUpdated.Text = "Updated " + snapshot.LastUpdatedLocal.ToString("HH:mm", CultureInfo.CurrentCulture);
             UpdateBackupButton(snapshot);
             UpdateActivityActions();
             WriteHeartbeat(snapshot, true);
@@ -6700,14 +6721,6 @@ namespace ResticBackuper.Dashboard
             {
                 evidence.Add(FormatBytes(status.ByteCount));
             }
-            if (status.LastUpdatedLocal.HasValue)
-            {
-                evidence.Add(
-                    "Updated "
-                    + status.LastUpdatedLocal.Value.ToString(
-                        "yyyy-MM-dd HH:mm",
-                        CultureInfo.CurrentCulture));
-            }
             settingsOffsiteEvidence.Text = evidence.Count == 0
                 ? "No verified off-site inventory or restore evidence is available yet."
                 : string.Join("  \u2022  ", evidence);
@@ -6733,26 +6746,28 @@ namespace ResticBackuper.Dashboard
             }
 
             string detail = repositoryRecoveryStatus == null
-                ? "Protected recovery status is unavailable."
+                ? "Rewindle can't read the state of the interrupted move."
                 : repositoryRecoveryStatus.Message;
             if (repositoryRecoveryInProgress)
             {
-                heroTitle.Text = "Repairing interrupted repository move";
+                heroTitle.Text = "Finishing the interrupted move of your backup location";
                 heroDetail.Text = string.IsNullOrWhiteSpace(repositoryRecoveryOperationMessage)
-                    ? "The protected recovery helper is validating repository state."
+                    ? "Rewindle is checking the unfinished move before it repairs it."
                     : repositoryRecoveryOperationMessage;
-                etaTitle.Text = "Backup safety gate";
+                etaTitle.Text = "Backups";
                 etaValue.Text = "Repairing";
-                etaHint.Text = "No backup can start until protected recovery completes and the journal disappears.";
+                etaHint.Text = "No backup can start until the repair finishes.";
                 SetBadge("REPAIR IN PROGRESS", Blue, BrushFrom("#172B45"));
             }
             else
             {
-                heroTitle.Text = "Repository repair required";
+                heroTitle.Text = "Backups paused: backup-location move unfinished";
                 heroDetail.Text = detail;
-                etaTitle.Text = "Backup safety gate";
+                etaTitle.Text = "Backups";
                 etaValue.Text = "Paused";
-                etaHint.Text = "Use Repair interrupted move. There is no dismiss or manual bypass.";
+                etaHint.Text = repositoryRecoveryStatus != null && repositoryRecoveryStatus.IsRecoverable
+                    ? "Choose Repair interrupted move. Backups stay paused until it finishes."
+                    : "Backups stay paused. Choose Save problem report in Settings and ask for help; don't delete anything in the backup location.";
                 SetBadge("BACKUPS PAUSED", Rose, BrushFrom("#3B1D2A"));
             }
             statusBadge.Visibility = Visibility.Visible;
@@ -6842,14 +6857,17 @@ namespace ResticBackuper.Dashboard
             if (freshness.State == BackupFreshnessState.Overdue ||
                 freshness.State == BackupFreshnessState.ClockAnomaly)
             {
-                SetBadge("NEEDS ATTENTION", Rose, BrushFrom("#3B1D2A"));
+                SetBadge(
+                    freshness.State == BackupFreshnessState.Overdue ? "BACKUP OVERDUE" : "CHECK THE PC CLOCK",
+                    Rose,
+                    BrushFrom("#3B1D2A"));
                 statusBadge.Visibility = Visibility.Visible;
                 StopStatusPulse();
                 if (!snapshot.IsFailure)
                 {
                     heroTitle.Text = freshness.State == BackupFreshnessState.Overdue
                         ? "Backup overdue"
-                        : "Backup clock needs attention";
+                        : "Check your PC\u2019s clock";
                     heroDetail.Text = freshness.Detail;
                     etaTitle.Text = "Backup freshness";
                     etaValue.Text = freshness.StatusLabel;
@@ -6971,12 +6989,15 @@ namespace ResticBackuper.Dashboard
                 // a cancel being carried out, have nothing new to announce.
                 if (!wasActive)
                 {
-                    ShowTrayMessage("Backup started", "Restic is now protecting your files.", Forms.ToolTipIcon.Info);
+                    ShowTrayMessage("Backup started", "Rewindle is backing up your files.", Forms.ToolTipIcon.Info);
                 }
             }
             else if (snapshot.NeedsAnomalyReview)
             {
-                ShowTrayMessage("Backup verified — review changes", snapshot.StatusDetail, Forms.ToolTipIcon.Warning);
+                ShowTrayMessage(
+                    "Backup finished: please look it over",
+                    "Far more files changed than usual. Open Rewindle and choose Confirm these changes. Nothing was deleted.",
+                    Forms.ToolTipIcon.Warning);
             }
             else if (snapshot.AnomalyReviewAcknowledged)
             {
@@ -6987,11 +7008,11 @@ namespace ResticBackuper.Dashboard
             }
             else if (snapshot.IsSuccess)
             {
-                ShowTrayMessage("Backup verified", "Snapshot, storage check, and restore test completed.", Forms.ToolTipIcon.Info);
+                ShowTrayMessage("Backup verified", "Your files were backed up, checked, and test-restored.", Forms.ToolTipIcon.Info);
             }
             else if (snapshot.IsFailure)
             {
-                ShowTrayMessage("Backup needs attention", snapshot.StatusDetail, Forms.ToolTipIcon.Error);
+                ShowTrayMessage("Backup didn\u2019t finish", snapshot.StatusDetail, Forms.ToolTipIcon.Error);
             }
             lastStateKey = snapshot.StateKey;
         }
@@ -7186,11 +7207,11 @@ namespace ResticBackuper.Dashboard
             }
             if (snapshot.IsFailure)
             {
-                return prefix + "last backup needs attention";
+                return prefix + "last backup didn\u2019t finish";
             }
             if (snapshot.NeedsAnomalyReview)
             {
-                return prefix + "review changes";
+                return prefix + "confirm these changes";
             }
             BackupFreshnessResult freshness = BackupFreshnessEvaluator.EvaluateNow(
                 currentTaskSchedule,
@@ -7231,10 +7252,26 @@ namespace ResticBackuper.Dashboard
             return days.ToString(CultureInfo.CurrentCulture) + (days == 1 ? " day ago" : " days ago");
         }
 
+        // A balloon holds about 250 characters. Longer text is cut at a word, with an ellipsis, rather than in the middle of one.
+        private static string ShortenBalloonText(string message)
+        {
+            const int Limit = 220;
+            if (string.IsNullOrEmpty(message) || message.Length <= Limit)
+            {
+                return message ?? string.Empty;
+            }
+            int cut = message.LastIndexOf(' ', Limit - 2);
+            if (cut < Limit / 2)
+            {
+                cut = Limit - 1;
+            }
+            return message.Substring(0, cut).TrimEnd() + "\u2026";
+        }
+
         private void ShowTrayMessage(string title, string message, Forms.ToolTipIcon icon)
         {
             trayIcon.BalloonTipTitle = title;
-            trayIcon.BalloonTipText = message.Length > 220 ? message.Substring(0, 220) : message;
+            trayIcon.BalloonTipText = ShortenBalloonText(message);
             trayIcon.BalloonTipIcon = icon;
             trayIcon.ShowBalloonTip(4500);
         }

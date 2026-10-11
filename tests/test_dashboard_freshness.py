@@ -54,7 +54,8 @@ class DashboardFreshnessSourceTests(unittest.TestCase):
         self.assertIn("AutomationProperties.SetHelpText(protectionFreshnessStatus", self.window)
         self.assertIn("AutomationProperties.SetHelpText(settingsFreshnessStatus", self.window)
         for label in (
-            'SetBadge("NEEDS ATTENTION"',
+            '"BACKUP OVERDUE"',
+            '"CHECK THE PC CLOCK"',
             'SetBadge("PAUSED"',
             'SetBadge("FIRST BACKUP NEEDED"',
         ):
@@ -64,7 +65,7 @@ class DashboardFreshnessSourceTests(unittest.TestCase):
         freshness = self.method("ApplyFreshnessStatus", "ApplyPreview")
         gate = freshness.index("if (activeRunOwnsPrimaryStatus)")
         early_return = freshness.index("return;", gate)
-        attention_override = freshness.index('SetBadge("NEEDS ATTENTION"')
+        attention_override = freshness.index('"BACKUP OVERDUE"')
         self.assertLess(gate, early_return)
         self.assertLess(early_return, attention_override)
         self.assertRegex(

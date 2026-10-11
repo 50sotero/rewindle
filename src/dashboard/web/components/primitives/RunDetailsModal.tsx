@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import {
   AlertTriangle,
   Check,
+  CircleCheck,
   Clipboard,
   ClipboardCheck,
   ChevronDown,
@@ -18,12 +19,15 @@ import { Button } from '@/components/atoms/Button';
 import { ValuePill, type ValuePillTone } from '@/components/atoms/ValuePill';
 import type { CommandName, Notice, RunDetailsState } from '@/src/native-types';
 import { noticeHoldProps, type NoticeHold } from '@/src/useDashboard';
+import { isUnchanged, knownOutcome, resultLabel, runNoun, typeLabel, type Resolver } from '@/src/runProblems';
 
 type Send = (command: CommandName, payload?: Record<string, string | boolean>) => void;
 
 type RunDetailsModalProps = {
   details: RunDetailsState | null;
   open: boolean;
+  /** The later run that put this one right, when it did not succeed and a later one did (see runProblems). */
+  resolvedBy?: Resolver;
   reducedMotion: boolean;
   send: Send;
   notice: Notice | null;
@@ -44,28 +48,27 @@ const focusableSelector = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(',');
 
-// The host's short result, said as a sentence about the run ("Backup failed", "Dry run found source errors").
-const OUTCOMES: Record<string, string> = {
-  failed: 'failed', canceled: 'cancelled', cancelled: 'cancelled', incomplete: 'was incomplete',
-  'source errors': 'found source errors', 'cancellation failed': 'could not be cancelled', 'needs attention': 'needs attention',
-};
-
-function statusDetails(details: RunDetailsState) {
-  const subject = details.type.trim() || 'Run';
-  const normalizedType = details.type.trim().toLowerCase();
+// `resolved`: a later backup put this run right, so it is a record and not something to act on.
+function statusDetails(details: RunDetailsState, resolved: boolean) {
+  const noun = runNoun(details.type), subject = `${noun.charAt(0).toUpperCase()}${noun.slice(1)}`, isBackup = noun === 'backup';
   const normalizedResult = details.result.trim();
-  const verified = details.success && normalizedType === 'backup' && /^verified$/i.test(normalizedResult);
-  const warning = details.success || /cancel|warn|dry\s*run|unknown|incomplete|review/i.test(`${details.type} ${details.result}`);
-  const tone: ValuePillTone = verified ? 'green' : details.success ? 'accent' : warning ? 'orange' : 'red';
+  // Stopped on request: nothing went wrong, so it is told apart from a run that failed.
+  const cancelled = /^(cancelled|canceled)$/i.test(normalizedResult);
+  const unchanged = details.success && isBackup && isUnchanged(normalizedResult);
+  const verified = details.success && isBackup && (unchanged || /^verified$/i.test(normalizedResult));
+  // Orange is for a run that may need a look; a failed one is red. A stopped or an already-resolved run is neither.
+  const warning = details.success || /warn|unknown|incomplete|review|source errors|cancellation failed/i.test(normalizedResult);
+  const tone: ValuePillTone = verified ? 'green' : resolved || cancelled ? 'neutral' : details.success ? 'accent' : warning ? 'orange' : 'red';
   const status = normalizedResult || (details.success ? 'Completed' : 'Needs attention');
-  const outcome = OUTCOMES[status.toLowerCase()];
+  // The host's short result, said as a sentence about the run ("Backup failed", "Check found files it could not read").
+  const outcome = knownOutcome(status);
   const title = details.success
-    ? verified ? 'Backup verified' : `${subject} completed`
-    : outcome ? `${subject} ${outcome}` : `${subject}: ${status}`;
+    ? unchanged ? 'Nothing new to back up' : verified ? 'Backup verified' : !isBackup && /^clean baseline$/i.test(status) ? 'Check passed' : `${subject} completed`
+    : outcome ? `${subject} ${outcome}` : `${subject}: ${resultLabel(status)}`;
   // The headline already names the result for a verified or an unsuccessful run, so the eyebrow's "type / result"
-  // would only repeat it. For other successes ("Unchanged", "Clean baseline") the eyebrow is where the result shows.
+  // would only repeat it. For other successes the eyebrow is where the result shows.
   const titleStatesResult = verified || !details.success;
-  return { tone, status, title, warning, verified, titleStatesResult };
+  return { tone, status, title, warning, verified, unchanged, cancelled, isBackup, noun, titleStatesResult };
 }
 
 function DetailStat({ label, value, icon, hint }: { label: string; value: string; icon: React.ReactNode; hint?: string }) {
@@ -75,10 +78,11 @@ function DetailStat({ label, value, icon, hint }: { label: string; value: string
   </div>;
 }
 
-function DetailIconButton({ label, children, onClick, disabled = false }: {
-  label: string; children: React.ReactNode; onClick: () => void; disabled?: boolean;
+// `why` is the tooltip while the button is off, so it never just sits there greyed out with no reason.
+function DetailIconButton({ label, children, onClick, disabled = false, why }: {
+  label: string; children: React.ReactNode; onClick: () => void; disabled?: boolean; why?: string;
 }) {
-  return <Button size="sm" variant="secondary" className="run-detail-action" aria-label={label} title={label} onClick={onClick} disabled={disabled}>
+  return <Button size="sm" variant="secondary" className="run-detail-action" aria-label={label} title={disabled && why ? why : label} onClick={onClick} disabled={disabled}>
     {children}<span>{label}</span>
   </Button>;
 }
@@ -86,6 +90,7 @@ function DetailIconButton({ label, children, onClick, disabled = false }: {
 export default function RunDetailsModal({
   details,
   open,
+  resolvedBy,
   reducedMotion,
   send,
   notice,
@@ -105,6 +110,8 @@ export default function RunDetailsModal({
   const [activeDetails, setActiveDetails] = useState<RunDetailsState | null>(details);
   const [phase, setPhase] = useState<ModalPhase>('closed');
   const [query, setQuery] = useState('');
+  // The log of a run that worked is a wall of lines nobody needs; it opens on request. A failed run shows it at once.
+  const [showEvents, setShowEvents] = useState(false);
 
   onRequestCloseRef.current = onRequestClose;
 
@@ -112,6 +119,7 @@ export default function RunDetailsModal({
     if (details && details.id !== activeDetails?.id) {
       setActiveDetails(details);
       setQuery('');
+      setShowEvents(false);
     } else if (details && activeDetails && details.id === activeDetails.id && details !== activeDetails) {
       // The native host keeps a single immutable details payload open. Keep this
       // update tolerant of a reconnect without resetting the user's filter.
@@ -129,6 +137,7 @@ export default function RunDetailsModal({
     setPhase('closed');
     setActiveDetails(null);
     setQuery('');
+    setShowEvents(false);
     const returnFocus = returnFocusRef.current;
     returnFocusRef.current = null;
     if (returnFocus && document.contains(returnFocus)) returnFocus.focus({ preventScroll: true });
@@ -185,15 +194,24 @@ export default function RunDetailsModal({
       if (eventsRef.current) eventsRef.current.scrollTop = query ? 0 : eventsRef.current.scrollHeight;
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeDetails?.id, phase === 'closed', query]);
+  }, [activeDetails?.id, phase === 'closed', query, showEvents]);
 
-  const hasIssue = !!activeDetails && (!activeDetails.success || !!activeDetails.failure.trim() || !!activeDetails.remediation.trim() || activeDetails.affectedPaths.length > 0);
+  // Only for the run it was worked out for: the dialog keeps the details it shows while it closes.
+  const resolver = activeDetails && !activeDetails.success && details?.id === activeDetails.id ? resolvedBy : undefined;
+  const result = activeDetails ? statusDetails(activeDetails, !!resolver) : null;
+  const hasDetail = !!activeDetails && (!!activeDetails.failure.trim() || !!activeDetails.remediation.trim() || activeDetails.affectedPaths.length > 0);
+  const hasIssue = !!activeDetails && (!activeDetails.success || hasDetail);
+  // What the run recorded that a support person asks for; the run's id and snapshot are listed under it, not in the headline.
   const technical = activeDetails ? [
     ['Phase', activeDetails.phase],
     ['Failure code', activeDetails.failureCode],
     ['Exit code', activeDetails.exitCode],
   ].filter(([, value]) => value.trim()) : [];
-  const result = activeDetails ? statusDetails(activeDetails) : null;
+  const snapshotId = activeDetails && !['-', '—', ''].includes(activeDetails.snapshotId.trim()) ? activeDetails.snapshotId.trim() : '';
+  const eventsOpen = !!activeDetails && (!activeDetails.success || showEvents || !!query || activeDetails.events.length === 0);
+  const tryAgain = 'Choose Back up now to try again; if it fails again, use Save problem report in Settings.';
+  // A zero on a run that did not finish is "nothing counted", not "nothing there".
+  const counted = (value: string) => activeDetails && !activeDetails.success && /^0(\s?B)?$/.test(value.trim()) ? '' : value;
 
   const copy = (command: CommandName, extra?: Record<string, string | boolean>) => {
     if (!activeDetails) return;
@@ -270,15 +288,16 @@ export default function RunDetailsModal({
         <header className="run-detail-header">
           <div className="run-detail-heading">
             <div className={`run-detail-status-icon ${result.tone}`} aria-hidden="true">
-              {result.tone === 'green' ? <Check size={18} /> : result.warning ? <Info size={18} /> : <AlertTriangle size={18} />}
+              {result.tone === 'green' ? <Check size={18} /> : resolver ? <CircleCheck size={18} /> : result.cancelled || result.warning ? <Info size={18} /> : <AlertTriangle size={18} />}
             </div>
             <div>
-              <div className="run-detail-eyebrow">{result.titleStatesResult
-                ? <span>Run details</span>
-                : <><span>{activeDetails.type || 'Run'}</span><span aria-hidden="true">/</span><span className="run-detail-eyebrow-status">{result.status}</span></>}</div>
+              <div className="run-detail-eyebrow">{resolver
+                ? <><span>Run details</span><span aria-hidden="true">/</span><span className="run-detail-eyebrow-status">Resolved</span></>
+                : result.titleStatesResult
+                  ? <span>Run details</span>
+                  : <><span>{typeLabel(activeDetails.type)}</span><span aria-hidden="true">/</span><span className="run-detail-eyebrow-status">{resultLabel(result.status)}</span></>}</div>
               <h2 id="run-details-title">{result.title}</h2>
               <p id="run-details-subtitle" className="run-detail-subtitle"><span>{activeDetails.startedDisplay || 'Date unavailable'}</span><span aria-hidden="true">·</span><span>{activeDetails.durationDisplay || 'Duration unavailable'}</span></p>
-              <code className="run-detail-id">{activeDetails.id}</code>
             </div>
           </div>
           <Button size="icon" variant="quiet" data-autofocus aria-label="Close run details" title="Close run details (Escape)" onClick={() => close(true)}><X size={17} /></Button>
@@ -287,44 +306,53 @@ export default function RunDetailsModal({
         <div className="run-detail-scroll">
           <div className="run-detail-summary">
             <section className="run-detail-stats" aria-label="Run summary">
-              <DetailStat label="Files" value={activeDetails.filesDisplay} icon={<FileText size={13} />} />
-              <DetailStat label="Processed" value={activeDetails.processedDisplay} icon={<Clipboard size={13} />} hint="Data read from your protected folders during this run." />
-              <DetailStat label="Stored" value={activeDetails.storedDisplay} icon={<FolderOpen size={13} />} hint="New data this run added to the repository, after deduplication and compression." />
+              <DetailStat label="Files" value={counted(activeDetails.filesDisplay)} icon={<FileText size={13} />} />
+              <DetailStat label="Size covered" value={counted(activeDetails.processedDisplay)} icon={<Clipboard size={13} />} hint="Everything this run looked through, new and unchanged files alike." />
+              <DetailStat label="New data saved" value={!result.isBackup ? 'Nothing saved' : result.unchanged ? 'Nothing new' : counted(activeDetails.storedDisplay)} icon={<FolderOpen size={13} />} hint="Added to your backup location by this run, after removing duplicates and compressing." />
             </section>
 
-            {activeDetails.snapshotId.trim() && !['-', '—'].includes(activeDetails.snapshotId.trim()) && <section className="run-detail-snapshot surface" aria-labelledby="run-detail-snapshot-heading">
-              <div className="run-detail-section-heading"><div><h3 id="run-detail-snapshot-heading">{result.verified ? 'Verified snapshot' : 'Recorded snapshot'}</h3></div></div>
-              <div className="run-detail-snapshot-row"><code>{activeDetails.snapshotId}</code><Button size="xs" variant="secondary" onClick={() => copy('copyRunSnapshot')}><Copy size={12} />Copy ID</Button></div>
-            </section>}
-
-            {hasIssue && <section className={`run-detail-issue ${result.warning ? 'warning' : 'error'}`} aria-label="Run attention details">
-              <div className="run-detail-issue-title"><AlertTriangle size={15} /><strong>{result.warning ? 'Run needs attention' : 'Run failed'}</strong></div>
-              {activeDetails.failure.trim() && <p><strong>Failure</strong>{activeDetails.failure}</p>}
-              {activeDetails.remediation.trim() && <p><strong>Next step</strong>{activeDetails.remediation}</p>}
+            {hasIssue && <section className={`run-detail-issue ${resolver ? 'resolved' : result.cancelled ? 'stopped' : result.warning ? 'warning' : 'error'}`} aria-label={resolver ? 'What happened in this run' : result.cancelled ? 'Why this run stopped' : 'Run attention details'}>
+              {/* A run a later one put right, or one that was stopped on request, asks for nothing: it says so first. The next step of a
+                  resolved run is advice for the next time. */}
+              <div className="run-detail-issue-title">{resolver ? <CircleCheck size={15} /> : result.cancelled ? <Info size={15} /> : <AlertTriangle size={15} />}<strong>{resolver ? `Resolved by a later ${runNoun(resolver.type)}` : result.cancelled ? 'Stopped before it finished' : result.warning ? 'Run needs attention' : 'Run failed'}</strong></div>
+              {resolver && <p>The {runNoun(resolver.type)} {resolver.finished ? 'that finished on' : 'on'} {resolver.startedDisplay} succeeded, so nothing needs doing about this run.{hasDetail ? ' What went wrong is kept below for reference.' : ''}</p>}
+              {!resolver && result.cancelled && <p>This {result.noun} was stopped on request. Nothing is wrong, and your earlier backups are not affected.</p>}
+              {activeDetails.failure.trim() && <p><strong>What went wrong</strong>{activeDetails.failure}</p>}
+              {activeDetails.remediation.trim() && <p><strong>{resolver ? 'If it happens again' : 'Next step'}</strong>{activeDetails.remediation}</p>}
               {activeDetails.affectedPaths.length > 0 && <div className="run-detail-paths"><strong>Affected paths</strong><ul>{activeDetails.affectedPaths.map(path => <li key={path}><code>{path}</code></li>)}</ul></div>}
-              {!activeDetails.failure.trim() && !activeDetails.remediation.trim() && activeDetails.affectedPaths.length === 0 && <p>No additional issue detail was recorded for this run.</p>}
+              {/* A run that failed always says what to do next, even when the log kept nothing about why. */}
+              {!resolver && !result.cancelled && !activeDetails.success && !activeDetails.remediation.trim() && (hasDetail ? <p><strong>Next step</strong>{tryAgain}</p> : <p>No reason was recorded for this run. {tryAgain}</p>)}
             </section>}
 
             <details className="run-detail-technical">
-              <summary><span><Hash size={14} />Technical details</span><span className="run-detail-summary-hint">{technical.length ? `${technical.length} recorded` : 'No detail recorded'}<ChevronDown size={13} /></span></summary>
-              {technical.length > 0 ? <div className="run-detail-technical-grid">{technical.map(([label, value]) => <div key={label}><span>{label}</span><code>{value}</code></div>)}</div> : <p>No phase, failure code, or exit code was recorded for this run.</p>}
+              <summary><span><Hash size={14} />Technical details</span><span className="run-detail-summary-hint">{technical.length + 1 + (snapshotId ? 1 : 0)} recorded<ChevronDown size={13} /></span></summary>
+              {technical.length > 0 && <div className="run-detail-technical-grid">{technical.map(([label, value]) => <div key={label}><span>{label}</span><code>{value}</code></div>)}</div>}
+              <div className="run-detail-technical-rows">
+                <div><span>Run ID</span><code>{activeDetails.id}</code></div>
+                {/* The snapshot is the backup's name inside the backup location; a support person asks for it, so it is one click to copy. */}
+                {snapshotId && <div><span>Snapshot</span><code title={snapshotId}>{snapshotId.slice(0, 8)}</code><Button size="xs" variant="secondary" onClick={() => copy('copyRunSnapshot')}><Copy size={12} />Copy ID</Button></div>}
+              </div>
             </details>
           </div>
 
-          <section className="run-detail-events surface" aria-labelledby="run-detail-events-heading">
-            <div className="run-detail-events-heading"><div><h3 id="run-detail-events-heading">Event timeline</h3><p>{activeDetails.eventsTruncated ? `Showing the last ${activeDetails.events.length} events of this run's log` : `${activeDetails.events.length} recorded ${activeDetails.events.length === 1 ? 'event' : 'events'}`}</p>{activeDetails.logNote && <p className="run-detail-events-note"><AlertTriangle size={12} />{activeDetails.logNote}</p>}</div><span className="run-detail-event-count"><ValuePill tone={result.tone}>{filteredEvents.length} shown</ValuePill></span></div>
-            <div className="run-detail-filter-row"><label className="run-detail-filter"><Search size={14} /><span className="sr-only">Filter events</span><input value={query} maxLength={4096} onChange={event => setQuery(event.target.value)} placeholder="Filter events" aria-label="Filter events" /><kbd>Ctrl F</kbd></label>{query && <Button size="xs" variant="quiet" onClick={() => setQuery('')}>Clear filter</Button>}</div>
-            <div ref={eventsRef} className="run-detail-event-list" tabIndex={0} role="log" aria-label="Protected log events" aria-live="off">
-              {filteredEvents.length > 0 ? filteredEvents.map(event => <div className="run-detail-event" key={event.n}><span aria-hidden="true">{String(event.n).padStart(3, '0')}</span><code>{event.text}</code></div>) : <div className="run-detail-event-empty"><Search size={18} /><strong>{activeDetails.events.length ? 'No matching events' : activeDetails.hasLog ? 'No events recorded' : 'No protected log is available'}</strong><p>{activeDetails.events.length ? 'Try a different filter or clear the current search.' : activeDetails.hasLog ? activeDetails.logNote || 'This log has no structured events to display.' : 'This run does not have a readable event log.'}</p>{query && <Button size="xs" onClick={() => setQuery('')}>Clear filter</Button>}</div>}
-            </div>
+          <section className={`run-detail-events surface${eventsOpen ? '' : ' is-collapsed'}`} aria-labelledby="run-detail-events-heading">
+            <div className="run-detail-events-heading"><div><h3 id="run-detail-events-heading">Event timeline</h3><p>{activeDetails.eventsTruncated ? `Showing the last ${activeDetails.events.length} events of this run's log` : `${activeDetails.events.length} recorded ${activeDetails.events.length === 1 ? 'event' : 'events'}`}</p>{activeDetails.logNote && <p className="run-detail-events-note"><AlertTriangle size={12} />{activeDetails.logNote}</p>}</div>
+              {eventsOpen ? <span className="run-detail-event-count"><ValuePill>{filteredEvents.length} shown</ValuePill></span>
+                : <Button size="sm" variant="secondary" aria-expanded={false} onClick={() => setShowEvents(true)}>Show log events</Button>}</div>
+            {eventsOpen && <>
+              <div className="run-detail-filter-row"><label className="run-detail-filter"><Search size={14} /><span className="sr-only">Filter events</span><input value={query} maxLength={4096} onChange={event => setQuery(event.target.value)} placeholder="Filter events" aria-label="Filter events" /><kbd>Ctrl F</kbd></label>{query && <Button size="xs" variant="quiet" onClick={() => setQuery('')}>Clear filter</Button>}</div>
+              <div ref={eventsRef} className="run-detail-event-list" tabIndex={0} role="log" aria-label="Log events" aria-live="off">
+                {filteredEvents.length > 0 ? filteredEvents.map(event => <div className="run-detail-event" key={event.n}><span aria-hidden="true">{String(event.n).padStart(3, '0')}</span><code>{event.text}</code></div>) : <div className="run-detail-event-empty"><Search size={18} /><strong>{activeDetails.events.length ? 'No matching events' : activeDetails.hasLog ? 'No events recorded' : 'No log was kept for this run'}</strong><p>{activeDetails.events.length ? 'Try a different filter or clear the current search.' : activeDetails.hasLog ? activeDetails.logNote || 'This log has no events to show.' : 'Rewindle did not keep a readable log for this run.'}</p>{query && <Button size="xs" onClick={() => setQuery('')}>Clear filter</Button>}</div>}
+              </div>
+            </>}
           </section>
         </div>
 
         <footer className="run-detail-footer">
           <div className="run-detail-footer-actions">
-            <DetailIconButton label="Open log location" disabled={!activeDetails.hasLog} onClick={() => copy('openRunLogLocation')}><FolderOpen size={14} /></DetailIconButton>
+            <DetailIconButton label="Open log location" disabled={!activeDetails.hasLog} why="No log was kept for this run" onClick={() => copy('openRunLogLocation')}><FolderOpen size={14} /></DetailIconButton>
             <DetailIconButton label="Copy summary" onClick={() => copy('copyRunSummary')}><ClipboardCheck size={14} /></DetailIconButton>
-            <DetailIconButton label="Copy visible events" disabled={filteredEvents.length === 0} onClick={() => copy('copyRunEvents', { query })}><Copy size={14} /></DetailIconButton>
+            <DetailIconButton label="Copy events" disabled={filteredEvents.length === 0} why="There are no events to copy" onClick={() => copy('copyRunEvents', { query })}><Copy size={14} /></DetailIconButton>
           </div>
           <Button size="md" variant="primary" onClick={() => close(true)}>Close</Button>
         </footer>

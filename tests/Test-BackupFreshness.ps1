@@ -297,7 +297,7 @@ $futureClock = Evaluate-Freshness `
     -NowLocal '2026-07-21T05:00:00' `
     -NowUtc '2026-07-21T05:00:00Z'
 Assert-Match '^ClockAnomaly\|' $futureClock 'A future verified timestamp must be treated as a clock anomaly.'
-Assert-Match '\|Clock needs attention\|' $futureClock 'Clock anomalies must have a non-color status label.'
+Assert-Match '\|Check your PC.s clock\|' $futureClock 'Clock anomalies must have a non-color status label.'
 
 $mismatchedClocks = Evaluate-Freshness `
     -LastVerifiedUtc '2026-07-21T02:30:00Z' `

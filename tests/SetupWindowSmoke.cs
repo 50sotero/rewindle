@@ -58,7 +58,9 @@ namespace Rewindle.Setup.Smoke
             Dictionary<string, object> windows = Volume("C:\\", "Windows", "fixed", 476 * GB, 182 * GB, true, true, true, null, false);
             Dictionary<string, object> data = Volume("D:\\", "Data", "fixed", 465 * GB, 318 * GB, false, true, true, null, false);
             Dictionary<string, object> backup = Volume("E:\\", "Backup Drive", "removable", 1863 * GB, 1652 * GB, false, false, true, null, true);
-            Dictionary<string, object> stick = Volume("F:\\", "USB STICK", "removable", 29 * GB, 21 * GB, false, false, false, "This drive uses FAT32. Backups need a drive formatted as NTFS.", false);
+            Dictionary<string, object> stick = Volume("F:\\", "USB STICK", "removable", 29 * GB, 21 * GB, false, false, false, "not_ntfs", false);
+            // The installer sends a code and its own sentence, as Install-ResticBackuper.ps1 does, so the page shows both and its format help.
+            stick["ineligible_message"] = "This drive uses FAT32. Backups need a drive formatted as NTFS.";
             stick["filesystem"] = "FAT32";
 
             Dictionary<string, object> plan = new Dictionary<string, object>();

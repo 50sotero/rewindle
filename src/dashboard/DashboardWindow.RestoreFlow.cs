@@ -18,7 +18,7 @@ namespace ResticBackuper.Dashboard
         private string restoreFlowStep = "backup";
         private string restoreFlowStatus = "idle";
         private string restoreFlowMessageTitle = "Choose a backup";
-        private string restoreFlowMessageDetail = "Select one immutable snapshot to begin.";
+        private string restoreFlowMessageDetail = "Choose the backup to restore from.";
         private IList<RestoreSnapshot> restoreFlowSnapshots = new List<RestoreSnapshot>();
         private IList<RestoreTreeEntry> restoreFlowTreeEntries = new List<RestoreTreeEntry>();
         private HashSet<string> restoreFlowObservedPaths = new HashSet<string>(StringComparer.Ordinal);
@@ -223,7 +223,7 @@ namespace ResticBackuper.Dashboard
             if (openRestoreCenterButton == null || !openRestoreCenterButton.IsEnabled)
             {
                 error = restoreReadinessDetail == null
-                    ? "The protected Restore Center is currently unavailable."
+                    ? "Restore is not available right now."
                     : restoreReadinessDetail.Text;
                 return false;
             }
@@ -235,7 +235,7 @@ namespace ResticBackuper.Dashboard
             }
             catch (Exception exception)
             {
-                error = "The protected restore configuration could not be loaded. " + exception.Message;
+                error = "Your backup settings could not be read. " + exception.Message;
                 return false;
             }
             string hash;
@@ -245,7 +245,7 @@ namespace ResticBackuper.Dashboard
             }
             catch (Exception exception)
             {
-                error = "The protected restore configuration could not be checked. " + exception.Message;
+                error = "Your backup settings could not be read. " + exception.Message;
                 return false;
             }
 
@@ -273,7 +273,7 @@ namespace ResticBackuper.Dashboard
             restoreFlowStep = "backup";
             restoreFlowStatus = "idle";
             restoreFlowMessageTitle = "Choose a backup";
-            restoreFlowMessageDetail = "Loading the snapshots for this protected backup plan…";
+            restoreFlowMessageDetail = "Opening your list of backups…";
             restoreFlowSnapshots = new List<RestoreSnapshot>();
             restoreFlowTreeEntries = new List<RestoreTreeEntry>();
             restoreFlowObservedPaths = new HashSet<string>(StringComparer.Ordinal);
@@ -317,11 +317,11 @@ namespace ResticBackuper.Dashboard
             restoreFlowStep = "backup";
             restoreFlowStatus = "loading";
             restoreFlowProgressStage = "reading";
-            restoreFlowProgressMessage = "Reading the protected snapshot history.";
+            restoreFlowProgressMessage = "Reading your list of backups.";
             restoreFlowProgressPercent = 0;
             SetRestoreFlowMessage(
-                "Loading snapshots",
-                "Reading snapshots does not change them.");
+                "Loading your backups",
+                "Looking at your backups does not change them.");
             PublishWebPresentationState();
             SourceConfiguration configuration = restoreFlowConfiguration;
             LoadRestoreFlowSnapshotsAsync(configuration, operation);
@@ -349,8 +349,8 @@ namespace ResticBackuper.Dashboard
                                 {
                                     restoreFlowAwaitingApproval = false;
                                     SetRestoreFlowMessage(
-                                        "Reading snapshots",
-                                        "The protected repository is returning immutable backup history.");
+                                        "Reading your backups",
+                                        "Rewindle is reading the list of backups.");
                                     PublishWebPresentationState();
                                 }
                             }));
@@ -374,7 +374,7 @@ namespace ResticBackuper.Dashboard
             if (restoreFlowCancelRequested)
             {
                 restoreFlowFailedOperation = "snapshots";
-                CompleteRestoreFlowCancelled("Snapshot loading was cancelled before any restore operation started.");
+                CompleteRestoreFlowCancelled("Loading your backups was cancelled. Nothing was restored.");
                 return;
             }
             SourceConfiguration freshAfterRead;
@@ -389,8 +389,8 @@ namespace ResticBackuper.Dashboard
             {
                 FailRestoreFlow(
                     "snapshots",
-                    "Windows approval cancelled",
-                    "No repository data was read.",
+                    "Windows permission was not given",
+                    "Nothing was opened or changed. Rewindle needs that permission to read your backup.",
                     "cancelled");
                 PublishWebPresentationState();
                 return;
@@ -399,7 +399,7 @@ namespace ResticBackuper.Dashboard
             {
                 FailRestoreFlow(
                     "snapshots",
-                    "Snapshots unavailable",
+                    "Your backups could not be listed",
                     result.ErrorMessage,
                     "error");
                 PublishWebPresentationState();
@@ -418,13 +418,13 @@ namespace ResticBackuper.Dashboard
             restoreFlowStatus = restoreFlowSnapshots.Count == 0 ? "failed" : "ready";
             restoreFlowStep = "backup";
             SetRestoreFlowMessage(
-                restoreFlowSnapshots.Count == 0 ? "No matching snapshots" : "Choose a backup",
+                restoreFlowSnapshots.Count == 0 ? "No backups to restore from" : "Choose a backup",
                 restoreFlowSnapshots.Count == 0
-                    ? "No plan-bound or exact configuration-matched legacy snapshots are available."
-                    : restoreFlowSnapshots.Count.ToString(CultureInfo.CurrentCulture) +
-                        " immutable snapshot" +
-                        (restoreFlowSnapshots.Count == 1 ? string.Empty : "s") +
-                        " are available. Select one to restore from it.");
+                    ? "Nothing was found to restore from yet."
+                    : restoreFlowSnapshots.Count == 1
+                        ? "1 backup is available."
+                        : restoreFlowSnapshots.Count.ToString(CultureInfo.CurrentCulture) +
+                            " backups are available.");
             PublishWebPresentationState();
         }
 
@@ -446,7 +446,7 @@ namespace ResticBackuper.Dashboard
             RestoreSnapshot snapshot = FindRestoreFlowSnapshot(snapshotId);
             if (snapshot == null)
             {
-                error = "Choose one snapshot from the current protected history.";
+                error = "Choose one of the backups in the list.";
                 return false;
             }
             string path = WebReadString(payload, "path", 2048).Trim();
@@ -497,9 +497,9 @@ namespace ResticBackuper.Dashboard
             restoreFlowStep = "files";
             restoreFlowStatus = "loading";
             restoreFlowProgressStage = "reading";
-            restoreFlowProgressMessage = "Reading the selected snapshot folder.";
+            restoreFlowProgressMessage = "Opening the folder in your backup.";
             restoreFlowProgressPercent = 0;
-            SetRestoreFlowMessage("Loading files", "Reading " + path + " from the immutable snapshot.");
+            SetRestoreFlowMessage("Opening folder", "Opening " + DescribeRestoreFlowFolder(path) + ".");
             int operation = ++restoreFlowOperationGeneration;
             PublishWebPresentationState();
             LoadRestoreFlowTreeAsync(fresh, snapshot, path, operation, previousPath, previousEntries);
@@ -535,7 +535,7 @@ namespace ResticBackuper.Dashboard
                                     restoreFlowAwaitingApproval)
                                 {
                                     restoreFlowAwaitingApproval = false;
-                                    SetRestoreFlowMessage("Loading files", "Reading " + path + " from the immutable snapshot.");
+                                    SetRestoreFlowMessage("Opening folder", "Opening " + DescribeRestoreFlowFolder(path) + ".");
                                     PublishWebPresentationState();
                                 }
                             }));
@@ -560,7 +560,7 @@ namespace ResticBackuper.Dashboard
             {
                 FailRestoreFlowTreeRead(
                     path,
-                    "The folder read was cancelled before any restore operation started.",
+                    "Opening the folder was cancelled. Nothing was restored.",
                     previousPath,
                     previousEntries);
                 return;
@@ -577,7 +577,7 @@ namespace ResticBackuper.Dashboard
             {
                 FailRestoreFlowTreeRead(
                     path,
-                    "Windows approval was cancelled, so this folder was not read.",
+                    "Windows permission was not given, so this folder was not opened.",
                     previousPath,
                     previousEntries);
                 return;
@@ -587,7 +587,7 @@ namespace ResticBackuper.Dashboard
                 FailRestoreFlowTreeRead(
                     path,
                     string.IsNullOrWhiteSpace(result.ErrorMessage)
-                        ? "The snapshot folder could not be read."
+                        ? "That folder in your backup could not be opened."
                         : result.ErrorMessage,
                     previousPath,
                     previousEntries);
@@ -624,8 +624,8 @@ namespace ResticBackuper.Dashboard
             SetRestoreFlowMessage(
                 "Choose files",
                 restoreFlowTreeEntries.Count.ToString(CultureInfo.CurrentCulture) +
-                    " entr" + (restoreFlowTreeEntries.Count == 1 ? "y" : "ies") +
-                    " loaded from " + path + ". Select paths or choose the entire snapshot.");
+                    (restoreFlowTreeEntries.Count == 1 ? " item" : " items") +
+                    " in " + DescribeRestoreFlowFolder(path) + ".");
             PublishWebPresentationState();
         }
 
@@ -692,7 +692,7 @@ namespace ResticBackuper.Dashboard
                 restoreFlowAwaitingApproval = true;
                 if (restoreFlowStep != "progress")
                 {
-                    SetRestoreFlowMessage("Waiting for Windows approval…", RestoreFlowApprovalNotice());
+                    SetRestoreFlowMessage("Waiting for Windows permission…", RestoreFlowApprovalNotice());
                 }
                 PublishWebPresentationState();
             }));
@@ -704,11 +704,11 @@ namespace ResticBackuper.Dashboard
             RestoreSessionHost session = restoreFlowApprovalSession;
             if (session == null)
             {
-                return "Windows asks for approval for each protected step. Reading the backup does not change it.";
+                return "Windows asks for your permission each time Rewindle opens your backup. Looking at it does not change anything.";
             }
             return session.Opened > 0
-                ? "The approved restore session ended, so Windows will ask again to allow Rewindle to read and restore from your backup."
-                : "Windows will ask once to allow Rewindle to read and restore from your backup.";
+                ? "The earlier permission has ended, so Windows will ask for your permission again to let Rewindle read and restore from your backup."
+                : "Windows will ask once for your permission to let Rewindle read and restore from your backup.";
         }
 
         // Whether the next protected step needs a Windows approval: always without a session, and with one only once it ended.
@@ -731,7 +731,7 @@ namespace ResticBackuper.Dashboard
             if (string.IsNullOrWhiteSpace(snapshotId) ||
                 !string.Equals(snapshotId, restoreFlowSelectedSnapshotId, StringComparison.OrdinalIgnoreCase))
             {
-                error = "The file selection belongs to a different snapshot. Choose the current snapshot again.";
+                error = "Those files belong to a different backup. Choose the backup again.";
                 return false;
             }
             bool wholeSnapshot = ReadRestoreFlowBoolean(payload, "wholeSnapshot");
@@ -756,7 +756,7 @@ namespace ResticBackuper.Dashboard
                 {
                     if (!restoreFlowObservedPaths.Contains(path))
                     {
-                        error = "One selected path was not observed in the current snapshot browser. Browse it again before continuing.";
+                        error = "One selected item was not found in the folder list. Open its folder again before continuing.";
                         return false;
                     }
                 }
@@ -767,12 +767,12 @@ namespace ResticBackuper.Dashboard
             restoreFlowStep = "files";
             restoreFlowStatus = "ready";
             SetRestoreFlowMessage(
-                wholeSnapshot ? "Entire snapshot selected" : "Restore scope updated",
+                wholeSnapshot ? "Everything selected" : "Selection updated",
                 wholeSnapshot
-                    ? "Every path in this immutable snapshot will be restored. Review the destination next."
+                    ? "Everything in this backup will be restored."
                     : paths.Count.ToString(CultureInfo.CurrentCulture) +
-                        " snapshot path" + (paths.Count == 1 ? string.Empty : "s") +
-                        " selected. Review the destination next.");
+                        (paths.Count == 1 ? " item" : " items") +
+                        " selected.");
             PublishWebPresentationState();
             return true;
         }
@@ -794,7 +794,7 @@ namespace ResticBackuper.Dashboard
             }
             catch (Exception exception)
             {
-                error = "The destination folder picker could not open. " + exception.Message;
+                error = "The folder chooser could not open. " + exception.Message;
                 return false;
             }
             if (string.IsNullOrWhiteSpace(path))
@@ -818,7 +818,7 @@ namespace ResticBackuper.Dashboard
             {
                 restoreFlowStep = "backup";
                 restoreFlowStatus = "ready";
-                SetRestoreFlowMessage("Choose a backup", "Select one immutable snapshot to continue.");
+                SetRestoreFlowMessage("Choose a backup", "Choose a backup to continue.");
             }
             else if (step == "files")
             {
@@ -830,7 +830,7 @@ namespace ResticBackuper.Dashboard
                     RestoreSnapshot chosen = FindRestoreFlowSnapshot(chosenId);
                     if (chosen == null)
                     {
-                        error = "Choose one snapshot from the current protected history.";
+                        error = "Choose one of the backups in the list.";
                         return false;
                     }
                     if (!string.Equals(chosen.Id, restoreFlowSelectedSnapshotId, StringComparison.OrdinalIgnoreCase))
@@ -840,32 +840,30 @@ namespace ResticBackuper.Dashboard
                 }
                 if (FindRestoreFlowSnapshot(restoreFlowSelectedSnapshotId) == null)
                 {
-                    error = "Choose one immutable snapshot before browsing files.";
+                    error = "Choose a backup before choosing files.";
                     return false;
                 }
                 restoreFlowStep = "files";
                 restoreFlowStatus = "ready";
                 SetRestoreFlowMessage(
                     "Choose files",
-                    restoreFlowTreeLoaded
-                        ? "Select paths from this snapshot or choose the entire snapshot."
-                        : "Restore everything in this snapshot, or browse its folders to choose files.");
+                    "Nothing is restored until the last step.");
             }
             else if (step == "destination")
             {
                 if (FindRestoreFlowSnapshot(restoreFlowSelectedSnapshotId) == null)
                 {
-                    error = "Choose one immutable snapshot before choosing a destination.";
+                    error = "Choose a backup before choosing a folder.";
                     return false;
                 }
                 if (!restoreFlowWholeSnapshotSelected && restoreFlowSelectedPaths.Count == 0)
                 {
-                    error = "Choose one or more snapshot paths, or explicitly choose the entire snapshot first.";
+                    error = "Choose files or folders first, or choose everything in the backup.";
                     return false;
                 }
                 restoreFlowStep = "destination";
                 restoreFlowStatus = "ready";
-                SetRestoreFlowMessage("Choose a destination", "Restore writes only to a new or empty separate folder.");
+                SetRestoreFlowMessage("Choose a folder", "Nothing is restored until the last step.");
             }
             else
             {
@@ -903,12 +901,12 @@ namespace ResticBackuper.Dashboard
             error = string.Empty;
             if (path == null || path.Trim().Length == 0)
             {
-                error = "Choose a new or empty destination folder.";
+                error = "Choose a new or empty folder to restore into.";
                 return false;
             }
             if (path.Trim().Length > 4096)
             {
-                error = "The destination path is too long.";
+                error = "That folder path is too long.";
                 return false;
             }
             SourceConfiguration configuration;
@@ -922,13 +920,13 @@ namespace ResticBackuper.Dashboard
             restoreFlowDestinationChecking = true;
             restoreFlowDestinationValid = false;
             restoreFlowDestinationError = false;
-            restoreFlowDestinationStatus = "Checking that this destination is separate and empty…";
+            restoreFlowDestinationStatus = "Checking that this folder is empty and safe to use…";
             restoreFlowDestinationFreeBytes = null;
             restoreFlowDestinationDrive = string.Empty;
             InvalidateRestoreFlowReview();
             restoreFlowStep = "destination";
             restoreFlowStatus = "loading";
-            SetRestoreFlowMessage("Checking destination", "The restore can write only to a new or empty folder.");
+            SetRestoreFlowMessage("Checking folder", "Restore only writes to a new or empty folder.");
             PublishWebPresentationState();
             ValidateRestoreFlowDestinationAsync(configuration, requestedPath, generation);
             return true;
@@ -953,7 +951,7 @@ namespace ResticBackuper.Dashboard
                 {
                     Valid = false,
                     Error = true,
-                    Message = "The destination could not be checked: " + exception.Message
+                    Message = "That folder could not be checked: " + exception.Message
                 };
             }
             if (!restoreFlowOpen || generation != restoreFlowDestinationValidationGeneration ||
@@ -970,14 +968,15 @@ namespace ResticBackuper.Dashboard
             restoreFlowDestinationValid = inspection != null && inspection.Valid;
             restoreFlowDestinationError = inspection != null && inspection.Error;
             restoreFlowDestinationStatus = inspection == null
-                ? "The destination could not be checked yet."
+                ? "That folder has not been checked yet."
                 : inspection.Message;
             restoreFlowDestinationFreeBytes = inspection == null ? null : inspection.FreeBytes;
             restoreFlowDestinationDrive = inspection == null ? string.Empty : inspection.Drive ?? string.Empty;
             restoreFlowStatus = "ready";
             SetRestoreFlowMessage(
-                restoreFlowDestinationValid ? "Destination ready" : "Choose a safe destination",
-                restoreFlowDestinationStatus);
+                restoreFlowDestinationValid ? "Folder ready" : "Choose another folder",
+                // The verdict itself is in the box under the field; the line under the title only reassures.
+                "Nothing is restored until the last step.");
             PublishWebPresentationState();
         }
 
@@ -1031,7 +1030,7 @@ namespace ResticBackuper.Dashboard
             restoreFlowStatus = "ready";
             SetRestoreFlowMessage(
                 "Review restore",
-                "Confirm the immutable snapshot, restore scope, and separate destination before starting.");
+                "Check your choices, then press Restore now.");
             PublishWebPresentationState();
             return true;
         }
@@ -1047,7 +1046,7 @@ namespace ResticBackuper.Dashboard
             }
             if (!restoreFlowReviewReady || restoreFlowStep != "review")
             {
-                error = "Review the snapshot, restore scope, and destination before starting.";
+                error = "Review your choices before starting.";
                 return false;
             }
             SourceConfiguration configuration;
@@ -1087,13 +1086,13 @@ namespace ResticBackuper.Dashboard
             RestoreSnapshot snapshot = FindRestoreFlowSnapshot(restoreFlowSelectedSnapshotId);
             if (snapshot == null)
             {
-                error = "The selected snapshot is no longer available. Refresh snapshots and choose it again.";
+                error = "That backup is no longer available. Go back and choose a backup again.";
                 return false;
             }
             bool legacyConfirmed = ReadRestoreFlowBoolean(payload, "legacyConfirmed");
             if (snapshot.IsLegacyUnbound && !legacyConfirmed)
             {
-                error = "This legacy snapshot requires explicit confirmation before restore.";
+                error = "Confirm that you want to restore from this older backup first.";
                 return false;
             }
 
@@ -1124,15 +1123,15 @@ namespace ResticBackuper.Dashboard
             restoreFlowProgressStage = "preflight";
             restoreFlowAwaitingApproval = RestoreFlowNextStepNeedsApproval();
             restoreFlowProgressMessage = restoreFlowAwaitingApproval
-                ? "Waiting for Windows approval before writing the alternate folder."
-                : "Starting the restore in the approved restore session.";
+                ? "Waiting for your permission on the Windows prompt before anything is written."
+                : "Starting the restore.";
             restoreFlowProgressPercent = 0;
             restoreFlowResultSnapshotId = snapshot.Id;
             ClearRestoreFlowResult();
             restoreFlowResultSnapshotId = snapshot.Id;
             SetRestoreFlowMessage(
-                "Starting protected restore",
-                "Only the separate destination will be written. Existing files are never overwritten.");
+                "Starting restore",
+                "Files are only added to the folder you chose. Nothing is overwritten.");
             int operation = ++restoreFlowOperationGeneration;
             IList<string> includes = new List<string>(restoreFlowSelectedPaths);
             PublishWebPresentationState();
@@ -1171,8 +1170,8 @@ namespace ResticBackuper.Dashboard
                                 if (restoreFlowOpen && operation == restoreFlowOperationGeneration)
                                 {
                                     restoreFlowAwaitingApproval = true;
-                                    restoreFlowProgressMessage = "Waiting for Windows approval before writing the alternate folder.";
-                                    SetRestoreFlowMessage("Waiting for Windows approval…", RestoreFlowApprovalNotice());
+                                    restoreFlowProgressMessage = "Waiting for your permission on the Windows prompt before anything is written.";
+                                    SetRestoreFlowMessage("Waiting for Windows permission…", RestoreFlowApprovalNotice());
                                     PublishWebPresentationState();
                                 }
                             }));
@@ -1187,10 +1186,10 @@ namespace ResticBackuper.Dashboard
                                     // must not keep saying the approval is still pending.
                                     restoreFlowAwaitingApproval = false;
                                     restoreFlowProgressMessage =
-                                        "Windows approval received. Checking the request and the destination before anything is written.";
+                                        "Permission received. Checking the folder before anything is written.";
                                     SetRestoreFlowMessage(
-                                        "Restore approved",
-                                        "Restoring and verifying the selected snapshot in the alternate folder.");
+                                        "Restoring",
+                                        "Copying your files into the folder you chose, then checking each one.");
                                     PublishWebPresentationState();
                                 }
                             }));
@@ -1216,8 +1215,8 @@ namespace ResticBackuper.Dashboard
             {
                 FailRestoreFlow(
                     "restore",
-                    "Windows approval cancelled",
-                    "No restore was started.",
+                    "Windows permission was not given",
+                    "Nothing was restored. Rewindle needs that permission to read your backup.",
                     "cancelled");
                 PublishWebPresentationState();
                 return;
@@ -1232,7 +1231,7 @@ namespace ResticBackuper.Dashboard
                 restoreFlowResultError = string.Empty;
                 SetRestoreFlowMessage(
                     "Restore complete and verified",
-                    "The restored copy is ready at " + result.Report.Target + ".");
+                    "Your files are in " + result.Report.Target + ".");
                 PublishWebPresentationState();
                 return;
             }
@@ -1244,16 +1243,16 @@ namespace ResticBackuper.Dashboard
                 restoreFlowResultStatus = "partial";
                 restoreFlowResultTarget = result.Report.Target;
                 restoreFlowResultVerified = result.Report.Verified;
-                restoreFlowResultError = result.ErrorMessage ?? "The restore stopped before verification completed.";
+                restoreFlowResultError = result.ErrorMessage ?? "The restore stopped before every file was checked.";
                 SetRestoreFlowMessage(
                     "Restore incomplete",
-                    restoreFlowResultError + " Partial files remain in the alternate destination; live files were not changed.");
+                    restoreFlowResultError + " Some files were copied to the folder you chose; your current files were not changed.");
                 PublishWebPresentationState();
                 return;
             }
             FailRestoreFlow(
                 "restore",
-                "Restore did not complete",
+                "Restore did not finish",
                 result.ErrorMessage,
                 "error");
             PublishWebPresentationState();
@@ -1293,14 +1292,14 @@ namespace ResticBackuper.Dashboard
             {
                 if (restoreFlowStep == "progress")
                 {
-                    error = "The protected restore is already running and cannot be cancelled safely. Keep the flow open until it reaches a final result.";
+                    error = "The restore is running and cannot be stopped safely. Keep this window open until it finishes.";
                     return false;
                 }
                 restoreFlowCancelRequested = true;
                 restoreFlowStatus = "canceling";
                 SetRestoreFlowMessage(
-                    "Cancellation requested",
-                    "The protected operation will finish safely before its final result is shown.");
+                    "Stopping",
+                    "The current step will finish safely, then Restore stops.");
                 PublishWebPresentationState();
                 return true;
             }
@@ -1336,7 +1335,7 @@ namespace ResticBackuper.Dashboard
             {
                 restoreFlowStep = "files";
                 restoreFlowStatus = "ready";
-                SetRestoreFlowMessage("Choose files", "Select paths from this snapshot or choose the entire snapshot.");
+                SetRestoreFlowMessage("Choose files", "Nothing is restored until the last step.");
                 PublishWebPresentationState();
                 return true;
             }
@@ -1350,10 +1349,10 @@ namespace ResticBackuper.Dashboard
             restoreFlowDestinationChecking = false;
             restoreFlowDestinationStatus = string.IsNullOrWhiteSpace(restoreFlowDestinationPath)
                 ? "Choose a new or empty folder."
-                : "Choose a new destination or check the existing path again.";
+                : "Choose a different empty folder, or check this one again.";
             restoreFlowStep = "destination";
             restoreFlowStatus = "ready";
-            SetRestoreFlowMessage("Choose a destination again", restoreFlowDestinationStatus);
+            SetRestoreFlowMessage("Choose a folder again", restoreFlowDestinationStatus);
             PublishWebPresentationState();
             return true;
         }
@@ -1394,7 +1393,7 @@ namespace ResticBackuper.Dashboard
             }
             if (restoreFlowBusy)
             {
-                error = "Wait for the protected restore operation to finish before closing this flow.";
+                error = "Wait for this step to finish before closing Restore.";
                 return false;
             }
             restoreFlowOpen = false;
@@ -1451,7 +1450,7 @@ namespace ResticBackuper.Dashboard
                     restoreFlowDestinationPath ?? string.Empty);
                 if (!RestoreFlowPathWithin(normalizedTarget, normalizedDestination))
                 {
-                    error = "The reported folder is not the destination chosen for this restore.";
+                    error = "That folder is not the one chosen for this restore.";
                     return false;
                 }
                 if (!Directory.Exists(normalizedTarget))
@@ -1514,7 +1513,7 @@ namespace ResticBackuper.Dashboard
         {
             if (!restoreFlowOpen)
             {
-                error = "Open Restore before using the guided restore flow.";
+                error = "Open Restore first.";
                 return false;
             }
             error = string.Empty;
@@ -1525,7 +1524,7 @@ namespace ResticBackuper.Dashboard
         {
             if (sourceOperationInProgress || BackupBlocksSourceChanges() || previewEnabled)
             {
-                error = "Wait for the active backup, protected folder change, repository operation, or schedule operation to finish before restoring.";
+                error = "Wait for the running backup or settings change to finish, then try again.";
                 return false;
             }
             error = string.Empty;
@@ -1538,7 +1537,7 @@ namespace ResticBackuper.Dashboard
             {
                 error = restoreFlowDestinationChecking
                     ? "The destination is still being checked."
-                    : "The protected restore flow is still working.";
+                    : "Restore is still working. Wait for it to finish.";
                 return false;
             }
             error = string.Empty;
@@ -1603,17 +1602,17 @@ namespace ResticBackuper.Dashboard
                     restoreFlowFailedOperation = "config";
                     restoreFlowResultStatus = "error";
                     restoreFlowResultError =
-                        "The protected backup plan changed while Restore was open. Reload Restore to continue with the current plan.";
-                    SetRestoreFlowMessage("Configuration changed", restoreFlowResultError);
+                        "Your backup settings changed while Restore was open. Choose Start again to continue with the current settings.";
+                    SetRestoreFlowMessage("Backup settings changed", restoreFlowResultError);
                     PublishWebPresentationState();
-                    error = "The protected backup configuration changed. Reload Restore to continue with the current plan.";
+                    error = "Your backup settings changed. Choose Start again to continue with the current settings.";
                     return false;
                 }
                 return true;
             }
             catch (Exception exception)
             {
-                error = "The protected backup configuration could not be checked. " + exception.Message;
+                error = "Your backup settings could not be read. " + exception.Message;
                 return false;
             }
         }
@@ -1676,17 +1675,17 @@ namespace ResticBackuper.Dashboard
             }
             catch (Exception exception)
             {
-                return InvalidRestoreFlowDestination("The destination path is invalid: " + exception.Message);
+                return InvalidRestoreFlowDestination("That folder path is not valid: " + exception.Message);
             }
             if (configuration == null)
             {
-                return InvalidRestoreFlowDestination("The protected backup configuration is unavailable.");
+                return InvalidRestoreFlowDestination("Your backup settings are unavailable.");
             }
             if (!HasNormalRestoreFlowDirectoryChain(normalized))
             {
                 return InvalidRestoreFlowDestination(
-                    "This destination uses a reparse point or link, which is common for OneDrive-synced folders, " +
-                    "junctions and symbolic links. Choose a normal local folder.");
+                    "This folder is inside OneDrive or is a shortcut or link, which Rewindle cannot restore into. " +
+                    "Choose a folder that is not synced to OneDrive, for example a new folder on a local drive.");
             }
             try
             {
@@ -1696,7 +1695,7 @@ namespace ResticBackuper.Dashboard
                     (drive.DriveType != DriveType.Fixed && drive.DriveType != DriveType.Removable))
                 {
                     return InvalidRestoreFlowDestination(
-                        "The destination must be on a ready local fixed or removable drive.");
+                        "Choose a folder on a drive that is ready and connected to this computer. Network folders cannot be used.");
                 }
                 driveName = root.TrimEnd('\\', '/');
                 freeBytes = ReadRestoreFlowFreeBytes(drive);
@@ -1704,7 +1703,7 @@ namespace ResticBackuper.Dashboard
             catch
             {
                 return InvalidRestoreFlowDestination(
-                    "The destination drive could not be checked.");
+                    "That drive could not be checked. Make sure it is connected and ready.");
             }
             string[] protectedRoots = new[]
             {
@@ -1716,14 +1715,14 @@ namespace ResticBackuper.Dashboard
                 configuration.Sources.Any(source => RestoreFlowPathsOverlap(normalized, source.SourcePath)))
             {
                 return InvalidRestoreFlowDestination(
-                    "Choose a destination separate from the repository, app state, installation, and protected folders.");
+                    "That folder is part of what Rewindle backs up or where its backups are kept. Choose a different folder, for example a new folder on another drive.");
             }
             try
             {
                 if (File.Exists(normalized))
                 {
                     return InvalidRestoreFlowDestination(
-                        "This path is an existing file. Existing files are never overwritten.");
+                        "That path is a file, not a folder. Rewindle never overwrites files. Choose a new or empty folder.");
                 }
                 if (Directory.Exists(normalized) && Directory.EnumerateFileSystemEntries(normalized).Any())
                 {
@@ -1732,22 +1731,22 @@ namespace ResticBackuper.Dashboard
                         ? "This is a drive root, which usually holds hidden system folders that Explorer does not show. " +
                             "Choose or create a folder on this drive instead, for example " +
                             Path.Combine(Path.GetPathRoot(normalized), "Rewindle restore") + "."
-                        : "This folder is not empty. Choose an empty folder; existing files are never overwritten.");
+                        : "That folder already has files in it. Choose a new or empty folder; Rewindle never overwrites files.");
                 }
                 return new RestoreFlowDestinationInspection
                 {
                     Valid = true,
                     Error = false,
                     Message = Directory.Exists(normalized)
-                        ? "Ready · this existing folder is empty. Existing files will not be overwritten."
-                        : "Ready · this new folder will be used as the separate restore destination.",
+                        ? "Ready · this existing folder is empty and will hold the restored files."
+                        : "Ready · this new folder will be created for the restored files.",
                     FreeBytes = freeBytes,
                     Drive = driveName
                 };
             }
             catch (Exception exception)
             {
-                return InvalidRestoreFlowDestination("The destination could not be checked: " + exception.Message);
+                return InvalidRestoreFlowDestination("That folder could not be checked: " + exception.Message);
             }
         }
 
@@ -1871,7 +1870,7 @@ namespace ResticBackuper.Dashboard
                 normalized.IndexOf('\\') >= 0 || normalized.Length > 1024 ||
                 normalized.IndexOf("//", StringComparison.Ordinal) >= 0)
             {
-                error = "The snapshot folder path is invalid.";
+                error = "That folder path is not valid.";
                 return false;
             }
             normalized = normalized == "/" ? "/" : normalized.TrimEnd('/');
@@ -1879,7 +1878,7 @@ namespace ResticBackuper.Dashboard
             {
                 if (segment == ".." || segment == ".")
                 {
-                    error = "The snapshot folder path is invalid.";
+                    error = "That folder path is not valid.";
                     return false;
                 }
             }
@@ -1901,7 +1900,7 @@ namespace ResticBackuper.Dashboard
                 string error;
                 if (!TryNormalizeRestoreFlowTreePath(path, out normalized, out error) || normalized == "/")
                 {
-                    throw new InvalidDataException("A selected snapshot path is invalid.");
+                    throw new InvalidDataException("A selected item is not valid.");
                 }
                 if (seen.Add(normalized))
                 {
@@ -1912,7 +1911,7 @@ namespace ResticBackuper.Dashboard
             {
                 throw new InvalidDataException(
                     "Select at most " + RestoreFlowMaximumPaths.ToString(CultureInfo.InvariantCulture) +
-                    " paths for one restore.");
+                    " items for one restore. Tick a parent folder to include more.");
             }
             return paths;
         }
@@ -1947,25 +1946,25 @@ namespace ResticBackuper.Dashboard
             RestoreSnapshot snapshot = FindRestoreFlowSnapshot(restoreFlowSelectedSnapshotId);
             if (snapshot == null)
             {
-                errors.Add("Choose one immutable snapshot before continuing.");
+                errors.Add("Choose a backup before continuing.");
             }
             if (!restoreFlowWholeSnapshotSelected && restoreFlowSelectedPaths.Count == 0)
             {
-                errors.Add("Choose one or more snapshot paths, or explicitly choose the entire snapshot.");
+                errors.Add("Choose files or folders, or choose everything in the backup.");
             }
             if (restoreFlowWholeSnapshotSelected && restoreFlowSelectedPaths.Count != 0)
             {
-                errors.Add("Choose either selected paths or the entire snapshot, not both.");
+                errors.Add("Choose either some items or everything in the backup, not both.");
             }
             if (restoreFlowDestinationChecking || !restoreFlowDestinationValid)
             {
                 errors.Add(string.IsNullOrWhiteSpace(restoreFlowDestinationStatus)
-                    ? "Choose a new or empty destination folder."
+                    ? "Choose a new or empty folder to restore into."
                     : restoreFlowDestinationStatus);
             }
             if (snapshot != null && snapshot.IsLegacyUnbound)
             {
-                warnings.Add("This legacy snapshot is not bound to the current plan ID and requires explicit confirmation before restore.");
+                warnings.Add("This backup was made before your current backup settings. Confirm that you want to restore from it.");
             }
             string spaceWarning = BuildRestoreFlowSpaceWarning(snapshot);
             if (spaceWarning != null)
@@ -1993,10 +1992,10 @@ namespace ResticBackuper.Dashboard
                 return null;
             }
             string drive = string.IsNullOrWhiteSpace(restoreFlowDestinationDrive)
-                ? "the destination drive"
+                ? "that drive"
                 : restoreFlowDestinationDrive;
-            return "This snapshot is about " + TelemetryFormat.FormatBytes(snapshot.ByteCount) + ", but only " +
-                TelemetryFormat.FormatBytes(free) + " is free on " + drive + ". The restore may stop part-way.";
+            return "Everything in this backup is about " + TelemetryFormat.FormatBytes(snapshot.ByteCount) + ", but only " +
+                TelemetryFormat.FormatBytes(free) + " is free on " + drive + ". The restore may stop part-way. Choose a drive with more room if you can.";
         }
 
         private string ComputeRestoreFlowReviewFingerprint(
@@ -2031,7 +2030,7 @@ namespace ResticBackuper.Dashboard
             restoreFlowDestinationValid = inspection != null && inspection.Valid;
             restoreFlowDestinationError = inspection != null && inspection.Error;
             restoreFlowDestinationStatus = inspection == null
-                ? "The destination could not be checked yet."
+                ? "That folder has not been checked yet."
                 : inspection.Message;
             restoreFlowDestinationFreeBytes = inspection == null ? null : inspection.FreeBytes;
             restoreFlowDestinationDrive = inspection == null ? string.Empty : inspection.Drive ?? string.Empty;
@@ -2083,7 +2082,7 @@ namespace ResticBackuper.Dashboard
                 FailRestoreFlowTreeRead(requestedPath, freshnessError, previousPath, previousEntries);
                 return;
             }
-            FailRestoreFlow(operation, "Configuration check failed", freshnessError, "error");
+            FailRestoreFlow(operation, "Backup settings could not be read", freshnessError, "error");
             PublishWebPresentationState();
         }
 
@@ -2101,14 +2100,14 @@ namespace ResticBackuper.Dashboard
             restoreFlowTreeEntries = previousEntries ?? new List<RestoreTreeEntry>();
             restoreFlowTreeLoaded = restoreFlowTreeLoadedBeforeRead;
             restoreFlowTreeError = string.IsNullOrWhiteSpace(detail)
-                ? "The snapshot folder could not be read."
+                ? "That folder in your backup could not be opened."
                 : detail;
             restoreFlowTreeErrorPath = requestedPath ?? string.Empty;
             restoreFlowStep = "files";
             restoreFlowStatus = "ready";
             SetRestoreFlowMessage(
                 "Folder unavailable",
-                "That snapshot folder was not opened. Try again, or choose another folder.");
+                "That folder was not opened. Try again, or choose another folder.");
             PublishWebPresentationState();
         }
 
@@ -2125,7 +2124,7 @@ namespace ResticBackuper.Dashboard
             restoreFlowStatus = "failed";
             restoreFlowResultStatus = "cancelled";
             restoreFlowResultError = detail ?? string.Empty;
-            SetRestoreFlowMessage("Restore flow cancelled", detail);
+            SetRestoreFlowMessage("Restore cancelled", detail);
             PublishWebPresentationState();
         }
 
@@ -2141,16 +2140,31 @@ namespace ResticBackuper.Dashboard
                 : restoreFlowSelectedSnapshotId;
         }
 
+        // A folder of the backup as a person writes it: restic keeps C:\Users\you as /C/Users/you, and "/" is the top of the backup.
+        private static string DescribeRestoreFlowFolder(string snapshotPath)
+        {
+            string path = snapshotPath ?? string.Empty;
+            if (path.Length <= 1)
+            {
+                return "the top level of your backup";
+            }
+            if (path.Length >= 2 && path[0] == '/' && char.IsLetter(path[1]) && (path.Length == 2 || path[2] == '/'))
+            {
+                path = path.Substring(1, 1) + ":" + path.Substring(2);
+            }
+            return path.Replace('/', '\\');
+        }
+
         private static string FriendlyRestoreFlowStage(string stage)
         {
             switch ((stage ?? string.Empty).ToLowerInvariant())
             {
-                case "preflight": return "Validating restore safety";
-                case "reading": return "Reading protected snapshot data";
-                case "restoring": return "Restoring and verifying";
-                case "complete": return "Protected restore complete";
-                case "failed": return "Protected restore needs attention";
-                default: return "Protected restore operation";
+                case "preflight": return "Checking everything is ready";
+                case "reading": return "Opening your backup";
+                case "restoring": return "Copying and checking your files";
+                case "complete": return "Finished";
+                case "failed": return "Restore did not finish";
+                default: return "Restoring your files";
             }
         }
 
@@ -2240,7 +2254,7 @@ namespace ResticBackuper.Dashboard
                             : restoreFlowMessageTitle },
                 { "message", restoreFlowResultError },
                 { "retryable", restoreFlowResultStatus == "partial" || restoreFlowResultStatus == "error" || restoreFlowResultStatus == "cancelled" },
-                { "retryLabel", restoreFlowFailedOperation == "config" ? "Reload Restore" : "Try again" }
+                { "retryLabel", restoreFlowFailedOperation == "config" ? "Start again" : "Try again" }
             };
             return new Dictionary<string, object>
             {
@@ -2299,9 +2313,9 @@ namespace ResticBackuper.Dashboard
                         // The warning in `warnings` that is about free space, for the review step, which shows it again.
                         { "spaceWarning", BuildRestoreFlowSpaceWarning(FindRestoreFlowSnapshot(restoreFlowSelectedSnapshotId)) ?? string.Empty },
                         { "scopeLabel", restoreFlowWholeSnapshotSelected
-                            ? "Entire immutable snapshot"
-                            : restoreFlowSelectedPaths.Count.ToString(CultureInfo.CurrentCulture) + " selected path" +
-                                (restoreFlowSelectedPaths.Count == 1 ? string.Empty : "s") },
+                            ? "Everything in this backup"
+                            : restoreFlowSelectedPaths.Count.ToString(CultureInfo.CurrentCulture) +
+                                (restoreFlowSelectedPaths.Count == 1 ? " item" : " items") },
                         { "status", restoreFlowDestinationChecking
                             ? "checking"
                             : errors.Count == 0 ? "ready" : "invalid" },

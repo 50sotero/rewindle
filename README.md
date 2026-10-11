@@ -84,7 +84,7 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
 - Works from the keyboard: arrow keys, `Home`, `End`, `PageUp` and `PageDown`
   move between runs, `Enter` opens details, `/` focuses the search and `Esc`
   clears it.
-- **Export diagnostics** writes a redacted ZIP you can attach to a bug report.
+- **Save problem report** (in Settings) writes a redacted ZIP you can attach to a bug report.
 
 ### Restore
 
@@ -99,17 +99,17 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
 
 ### Settings
 
-- Appearance (System, Dark or Light; Windows High Contrast is respected) and
-  motion (System, Full or Reduced).
+- Appearance (theme System, Light or Dark; Windows High Contrast is respected),
+  animations (Follow Windows, Always on or Reduced) and text size (Smaller, Normal size, Larger; kept for the next launch).
 - **Change location** moves the repository: it copies to an empty folder,
   verifies the copy and then switches, keeping the old repository.
   **Edit schedule** sets daily or selected-day backups and their run conditions.
-- The same three verification cards as Protection, **Export diagnostics**, and
-  **About Rewindle**: version, engine, MIT License, and **Open licenses folder**.
+- Under **Help and about**: **Save problem report** (a redacted support bundle) and
+  **About Rewindle**: version, backup service, MIT License, **Open licenses folder** and the keyboard shortcuts.
 
 Rewindle lives in the notification area. Closing the window never stops a
 running backup. `Ctrl+1` to `Ctrl+4` switch pages, `F5` refreshes, and
-`Ctrl+=` / `Ctrl+-` / `Ctrl+0` zoom between 80% and 200%. Status is never shown
+`Ctrl+=` / `Ctrl+-` / `Ctrl+0` change the text size between 80% and 200% (Settings has buttons for it, and Rewindle remembers the size). Status is never shown
 by color alone, and a screen reader is told when a backup starts, finishes,
 fails or is cancelled.
 
@@ -240,11 +240,12 @@ protection globally to run the installer.
 
 ### The setup wizard
 
-Rewindle Setup is a window with eight pages: **Welcome**, **What to protect**,
-**Backup location**, **Schedule**, **Review**, **Install**, **Recovery key** and
-**Done**. The suggestions on each page suit most people, so you can just choose
-**Next**. Back and Next are in the same place on every page, `Enter` means Next
-and `Esc` means Back, and it follows Windows' light or dark theme and
+Rewindle Setup is a window with eight pages: **Welcome**, **Protected folders**,
+**Backup location**, **Automatic backups**, **Review**, **Install**, **Recovery
+key** and **Done**. The suggestions on each page suit most people, so you can
+just choose **Next**. Back and Next are in the same place on every page, `Enter`
+means Next (except on Review, where Install takes a deliberate click) and `Esc`
+means Back, and it follows Windows' light or dark theme and
 High Contrast.
 
 <p align="center">
@@ -254,7 +255,7 @@ High Contrast.
   </picture>
 </p>
 
-- **What to protect** lists your Windows folders with their sizes, measured
+- **Protected folders** lists your Windows folders with their sizes, measured
   while you look. Add any other folder; a folder that is missing, inside another
   chosen folder, or full of online-only OneDrive files is explained in plain
   words.
@@ -262,7 +263,7 @@ High Contrast.
   is the Windows drive, which is on the same disk as Windows, and which can't
   hold backups and why. It checks that your folders fit, and offers Google
   Drive for desktop when it is running.
-- **Schedule** sets the daily time. Under *Advanced* you can turn off backing up
+- **Automatic backups** sets the daily time. Under *Advanced* you can turn off backing up
   open files.
 - **Review** shows every choice with an Edit link and whether to run the first
   backup right away. Nothing on your PC has changed up to here: the pages only
@@ -276,7 +277,7 @@ High Contrast.
 
 <table>
   <tr>
-    <td><img src="docs/images/setup/folders.png" alt="What to protect: folder cards with their sizes"></td>
+    <td><img src="docs/images/setup/folders.png" alt="Protected folders: folder cards with their sizes"></td>
     <td><img src="docs/images/setup/location.png" alt="Backup location: drive cards with free space, a recommended backup drive and warnings"></td>
   </tr>
   <tr>
@@ -468,7 +469,7 @@ engine profile**:
 - The dashboard picks its engine when it starts: the Rewindle engine if it is
   installed, otherwise the personal edition. `--engine rewindle` or
   `--engine legacy` chooses explicitly. If neither is installed, it shows
-  **Engine not installed** and where it looked.
+  **Backup service not installed** and where it looked.
 - The two engines use different names, so the Rewindle installer neither
   detects nor changes a personal-edition installation.
 - There is no migration. The Rewindle installer will not adopt the personal
@@ -634,7 +635,7 @@ Bug reports, Windows compatibility reports, documentation fixes and focused
 pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) and
 the [Code of Conduct](CODE_OF_CONDUCT.md) first, and report security problems
 privately as described in [SECURITY.md](SECURITY.md). When you open a bug
-report, the diagnostics ZIP from **Activity > Export diagnostics** helps a lot;
+report, the ZIP from **Settings > Save problem report** helps a lot;
 review it before attaching it.
 
 ## License and credits

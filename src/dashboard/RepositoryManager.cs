@@ -98,7 +98,7 @@ namespace ResticBackuper.Dashboard
             return new RepositoryManagerResult
             {
                 ErrorMessage = string.IsNullOrWhiteSpace(message)
-                    ? "The protected repository relocation failed."
+                    ? "Moving the backup location failed."
                     : message,
                 ExitCode = exitCode
             };
@@ -128,7 +128,7 @@ namespace ResticBackuper.Dashboard
             return new RepositoryRecoveryStatus(
                 true,
                 true,
-                "A repository move was interrupted. Repair it before another backup runs.");
+                "Moving your backups to the new location was interrupted. Choose Repair interrupted move before the next backup.");
         }
 
         internal static RepositoryRecoveryStatus Blocked(string message)
@@ -162,7 +162,7 @@ namespace ResticBackuper.Dashboard
             if (configuration == null)
             {
                 return RepositoryManagerResult.Failure(
-                    "The protected backup configuration is unavailable.",
+                    "Rewindle can't read its backup settings right now, so nothing was changed.",
                     -1);
             }
 
@@ -176,20 +176,20 @@ namespace ResticBackuper.Dashboard
             catch (Exception error)
             {
                 return RepositoryManagerResult.Failure(
-                    "The selected repository path is invalid: " + SanitizeError(error.Message),
+                    "That folder can't be used as a backup location: " + SanitizeError(error.Message),
                     -1);
             }
             if (string.Equals(currentRepository, requestedRepository, StringComparison.OrdinalIgnoreCase))
             {
                 return RepositoryManagerResult.Failure(
-                    "Choose a different folder from the current repository.",
+                    "That is already your backup location. Choose a different folder.",
                     -1);
             }
             if (IsWithin(requestedRepository, currentRepository) ||
                 IsWithin(currentRepository, requestedRepository))
             {
                 return RepositoryManagerResult.Failure(
-                    "The new and current repository folders must not contain one another.",
+                    "The new backup location and the current one can't be inside each other. Choose a separate folder.",
                     -1);
             }
 
@@ -199,13 +199,13 @@ namespace ResticBackuper.Dashboard
             if (!IsRegularFile(managerPath))
             {
                 return RepositoryManagerResult.Failure(
-                    "The protected repository manager is missing or is not a regular file.",
+                    "Rewindle's backup-location tool is missing or isn't a normal file, so nothing was changed. " + EngineProfile.Current.ReinstallAdvice(),
                     -1);
             }
             if (!IsRegularFile(configuration.ConfigurationPath))
             {
                 return RepositoryManagerResult.Failure(
-                    "The protected backup configuration is missing or is not a regular file.",
+                    "Rewindle's backup settings file is missing or isn't a normal file, so nothing was changed. " + EngineProfile.Current.ReinstallAdvice(),
                     -1);
             }
 
@@ -217,7 +217,7 @@ namespace ResticBackuper.Dashboard
             catch (Exception error)
             {
                 return RepositoryManagerResult.Failure(
-                    "The protected backup configuration could not be fingerprinted: " +
+                    "Rewindle couldn't check its backup settings file: " +
                         SanitizeError(error.Message),
                     -1);
             }
@@ -257,7 +257,7 @@ namespace ResticBackuper.Dashboard
                 File.Exists(progressPath) || Directory.Exists(progressPath))
             {
                 return RepositoryManagerResult.Failure(
-                    "A protected repository result already uses this request nonce.",
+                    "Rewindle couldn't start this change safely. Nothing was changed; try again.",
                     -1);
             }
 
@@ -306,7 +306,7 @@ namespace ResticBackuper.Dashboard
                     if (process == null)
                     {
                         return RepositoryManagerResult.Failure(
-                            "Windows did not start the protected repository manager.",
+                            "Windows didn't start the change. Nothing was changed.",
                             -1);
                     }
                     InvokeSafely(onElevatedProcessStarted);
@@ -386,20 +386,20 @@ namespace ResticBackuper.Dashboard
                     !HasProtectedResultAcl(journalPath, userSid))
                 {
                     return RepositoryRecoveryStatus.Blocked(
-                        "The interrupted-move journal is not trustworthy. Backups remain paused; repair the protected installation before continuing.");
+                        "Rewindle can't trust the record of the unfinished move (its permissions look wrong). Backups remain paused.");
                 }
                 FileInfo journal = new FileInfo(journalPath);
                 if (journal.Length <= 0 || journal.Length > MaximumJsonBytes)
                 {
                     return RepositoryRecoveryStatus.Blocked(
-                        "The interrupted-move journal has an invalid size. Backups remain paused until it is repaired.");
+                        "The record of the unfinished move has an unexpected size. Backups remain paused.");
                 }
                 return RepositoryRecoveryStatus.Recoverable();
             }
             catch (Exception error)
             {
                 return RepositoryRecoveryStatus.Blocked(
-                    "The interrupted-move journal could not be validated: " +
+                    "Rewindle could not check the record of the unfinished move: " +
                         SanitizeError(error.Message));
             }
         }
@@ -412,7 +412,7 @@ namespace ResticBackuper.Dashboard
             if (!status.Exists)
             {
                 return RepositoryManagerResult.Failure(
-                    "No interrupted repository move needs repair.",
+                    "Nothing to repair: no move of the backup location was interrupted.",
                     -1);
             }
             if (!status.IsRecoverable)
@@ -433,7 +433,7 @@ namespace ResticBackuper.Dashboard
             if (!IsRegularFile(managerPath))
             {
                 return RepositoryManagerResult.Failure(
-                    "The protected repository manager is missing or is not a regular file.",
+                    "Rewindle's backup-location tool is missing or isn't a normal file, so nothing was changed. " + EngineProfile.Current.ReinstallAdvice(),
                     -1);
             }
 
@@ -481,7 +481,7 @@ namespace ResticBackuper.Dashboard
                 File.Exists(progressPath) || Directory.Exists(progressPath))
             {
                 return RepositoryManagerResult.Failure(
-                    "A protected repository result already uses this request nonce.",
+                    "Rewindle couldn't start this change safely. Nothing was changed; try again.",
                     -1);
             }
 
@@ -526,7 +526,7 @@ namespace ResticBackuper.Dashboard
                     if (process == null)
                     {
                         return RepositoryManagerResult.Failure(
-                            "Windows did not start protected repository recovery.",
+                            "Windows didn't start the repair. Nothing was changed.",
                             -1);
                     }
                     InvokeSafely(onElevatedProcessStarted);
@@ -618,7 +618,7 @@ namespace ResticBackuper.Dashboard
             string root = Path.GetPathRoot(fullPath);
             if (string.Equals(fullPath, root, StringComparison.OrdinalIgnoreCase))
             {
-                throw new ArgumentException("A drive root cannot be used as the repository.");
+                throw new ArgumentException("A whole drive can't be the backup location. Choose a folder on it.");
             }
             return fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         }
@@ -642,9 +642,9 @@ namespace ResticBackuper.Dashboard
             if (!File.Exists(resultPath))
             {
                 return RepositoryManagerResult.Failure(
-                    "The protected repository manager returned exit code " +
+                    "Windows didn't finish the change (code " +
                         exitCode.ToString(CultureInfo.InvariantCulture) +
-                        " without a validated result.",
+                        "). If it keeps failing, choose Save problem report in Settings and ask for help.",
                     exitCode);
             }
             string resultRoot = Path.GetDirectoryName(resultPath);
@@ -660,7 +660,7 @@ namespace ResticBackuper.Dashboard
                 !HasProtectedResultAcl(resultRoot, userSid))
             {
                 return RepositoryManagerResult.Failure(
-                    "The protected repository-manager result path is not trustworthy.",
+                    "Rewindle's data folder looks unsafe, so the result of the change was not accepted. " + EngineProfile.Current.ReinstallAdvice(),
                     exitCode);
             }
 
@@ -678,7 +678,7 @@ namespace ResticBackuper.Dashboard
                         stream.Length <= 0 || stream.Length > MaximumJsonBytes)
                     {
                         return RepositoryManagerResult.Failure(
-                            "The protected repository-manager result file is not trustworthy.",
+                            "Rewindle's data folder looks unsafe, so the result of the change was not accepted. " + EngineProfile.Current.ReinstallAdvice(),
                             exitCode);
                     }
                     using (StreamReader reader = new StreamReader(
@@ -708,7 +708,7 @@ namespace ResticBackuper.Dashboard
             catch (Exception error)
             {
                 return RepositoryManagerResult.Failure(
-                    "The protected repository-manager result could not be validated: " +
+                    "Rewindle couldn't verify Windows' answer, so it was not used: " +
                         SanitizeError(error.Message),
                     exitCode);
             }
@@ -1364,7 +1364,7 @@ namespace ResticBackuper.Dashboard
         {
             if (string.IsNullOrWhiteSpace(value))
             {
-                return "The protected repository relocation failed.";
+                return "Moving the backup location failed.";
             }
             StringBuilder clean = new StringBuilder();
             foreach (char character in value)

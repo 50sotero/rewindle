@@ -274,7 +274,7 @@ namespace ResticBackuper.Dashboard
             return new RestoreManagerResult
             {
                 ErrorMessage = string.IsNullOrWhiteSpace(message)
-                    ? "The protected restore operation failed."
+                    ? "The restore step failed."
                     : message,
                 ExitCode = exitCode
             };
@@ -434,7 +434,7 @@ namespace ResticBackuper.Dashboard
             if (configuration == null)
             {
                 return RestoreManagerResult.Failure(
-                    "The protected backup configuration is unavailable.",
+                    "Your backup settings are unavailable.",
                     -1);
             }
             string managerPath = Path.Combine(
@@ -443,14 +443,14 @@ namespace ResticBackuper.Dashboard
             if (!IsRegularFile(managerPath) || !IsRegularFile(configuration.ConfigurationPath))
             {
                 return RestoreManagerResult.Failure(
-                    "The protected restore manager is missing from the installation.",
+                    "A part of Rewindle that restoring needs is missing. " + EngineProfile.Current.ReinstallAdvice(),
                     -1);
             }
             if (configuration.ConfigGeneration <= 0 ||
                 string.IsNullOrWhiteSpace(configuration.PlanId))
             {
                 return RestoreManagerResult.Failure(
-                    "The protected backup plan migration is incomplete.",
+                    "Your backup settings need to be updated before you can restore. Update or repair Rewindle, then try again.",
                     -1);
             }
 
@@ -468,7 +468,7 @@ namespace ResticBackuper.Dashboard
                 if (string.IsNullOrWhiteSpace(userSid))
                 {
                     return RestoreManagerResult.Failure(
-                        "The current Windows user SID could not be determined.",
+                        "Rewindle could not tell which Windows account is signed in. Sign out and back in, then try again.",
                         -1);
                 }
                 if (session != null)
@@ -517,7 +517,7 @@ namespace ResticBackuper.Dashboard
                     File.Exists(progressPath) || Directory.Exists(progressPath))
                 {
                     return RestoreManagerResult.Failure(
-                        "A protected restore result already uses this request nonce.",
+                        "Rewindle could not start this step safely. Close Restore, open it again and try once more.",
                         -1);
                 }
                 string powerShell = Path.Combine(
@@ -528,7 +528,7 @@ namespace ResticBackuper.Dashboard
                 if (!IsRegularFile(powerShell))
                 {
                     return RestoreManagerResult.Failure(
-                        "Windows PowerShell is unavailable in System32.",
+                        "Windows PowerShell could not be found, and Restore needs it.",
                         -1);
                 }
 
@@ -578,7 +578,7 @@ namespace ResticBackuper.Dashboard
                     if (process == null)
                     {
                         return RestoreManagerResult.Failure(
-                            "Windows did not start the protected restore manager.",
+                            "Windows did not start the restore. Try again and choose Yes on the Windows permission prompt.",
                             -1);
                     }
                     InvokeSafely(onElevatedProcessStarted);
@@ -685,7 +685,7 @@ namespace ResticBackuper.Dashboard
                 }
                 if (exchange.Result == null)
                 {
-                    return RestoreManagerResult.Failure(Sanitize(exchange.Error), -1);
+                    return RestoreManagerResult.Failure(SanitizeAnswer(exchange.Error, action), -1);
                 }
                 return ValidateResult(
                     exchange.Result,
@@ -704,7 +704,7 @@ namespace ResticBackuper.Dashboard
                     exchange.ExitCode);
             }
             return RestoreManagerResult.Failure(
-                "The protected restore session ended before it could serve this request. Try again.",
+                "The connection used for restoring ended before this step finished. Try again.",
                 -1);
         }
 
@@ -781,7 +781,7 @@ namespace ResticBackuper.Dashboard
                 !HasProtectedAcl(stateRoot, userSid) || !HasProtectedAcl(resultRoot, userSid))
             {
                 return RestoreManagerResult.Failure(
-                    "The protected restore manager did not return a trustworthy result.",
+                    UnusedResultMessage(action, "Rewindle could not confirm the result of this step, so it was not used."),
                     exitCode);
             }
             try
@@ -798,7 +798,7 @@ namespace ResticBackuper.Dashboard
                         stream.Length <= 0 || stream.Length > MaximumResultBytes)
                     {
                         return RestoreManagerResult.Failure(
-                            "The protected restore result file is not trustworthy.",
+                            UnusedResultMessage(action, "Rewindle could not confirm the result of this step, so it was not used."),
                             exitCode);
                     }
                     using (StreamReader reader = new StreamReader(
@@ -834,9 +834,20 @@ namespace ResticBackuper.Dashboard
             catch (Exception error)
             {
                 return RestoreManagerResult.Failure(
-                    "The protected restore result could not be validated: " + Sanitize(error.Message),
+                    UnusedResultMessage(
+                        action,
+                        "Rewindle could not confirm the result of this step (" + Sanitize(error.Message).TrimEnd('.') + "), so it was not used."),
                     exitCode);
             }
+        }
+
+        // A restore may already have put files in the chosen folder before its result is found wanting, so a result that is not used
+        // never says that nothing changed there. Listing backups only reads, and the recovery drill restores into Rewindle's own folder.
+        private static string UnusedResultMessage(string action, string reason)
+        {
+            return action == "restore"
+                ? reason + " Some files may already be in the folder you chose, so check it before you try again. Your backups were not changed."
+                : reason + " Your files and backups were not changed. Try again.";
         }
 
         private static RestoreManagerResult ValidateResult(
@@ -871,7 +882,7 @@ namespace ResticBackuper.Dashboard
                 !FixedEquals(ReadString(document, "includes_sha256"), includesHash))
             {
                 return RestoreManagerResult.Failure(
-                    "The protected restore result did not match this request.",
+                    UnusedResultMessage(action, "The result did not match what was asked for, so it was not used."),
                     exitCode);
             }
             bool ok = ReadBoolean(document, "ok");
@@ -897,7 +908,7 @@ namespace ResticBackuper.Dashboard
                 if (!IsExactSnapshotId(actualSnapshotId))
                 {
                     return RestoreManagerResult.Failure(
-                        "The protected restore result returned an invalid snapshot identity.",
+                        UnusedResultMessage(action, "The result named a different backup than the one you chose, so it was not used."),
                         exitCode);
                 }
                 ProtectedRestoreReport report = ParseReport(
@@ -947,7 +958,7 @@ namespace ResticBackuper.Dashboard
                 return RestoreManagerResult.Failure(Sanitize(error), exitCode);
             }
             return RestoreManagerResult.Failure(
-                "The protected restore result disagreed with the backend exit status.",
+                "Rewindle could not confirm the result of this step. Try again.",
                 exitCode);
         }
 
@@ -1486,9 +1497,16 @@ namespace ResticBackuper.Dashboard
 
         internal static string Sanitize(string value)
         {
+            return SanitizeAnswer(value, null);
+        }
+
+        // `action` is the request the message answers. A listing that fails changes nothing, but a restore may already have copied
+        // files before its channel failed, so for one the session's failures point at the chosen folder instead of saying nothing changed.
+        internal static string SanitizeAnswer(string value, string action)
+        {
             if (string.IsNullOrWhiteSpace(value))
             {
-                return "The protected restore operation failed.";
+                return "The restore step failed.";
             }
             StringBuilder result = new StringBuilder();
             foreach (char item in value)
@@ -1503,7 +1521,53 @@ namespace ResticBackuper.Dashboard
                 }
             }
             string safe = result.ToString().Trim();
-            return safe.Length == 0 ? "The protected restore operation failed." : safe;
+            return safe.Length == 0 ? "The restore step failed." : PlainBackendMessage(safe, action == "restore");
+        }
+
+        // The restore backend's own refusals of a destination, in the words the destination step uses (it checks these first, so one
+        // reaching here means the folder changed between the check and the restore). Anything else is shown as the backend wrote it.
+        private static string PlainBackendMessage(string message, bool restoring)
+        {
+            string text = message.ToLowerInvariant();
+            string outcome = restoring
+                ? " Some files may already be in the folder you chose, so check it before you try again. If this keeps happening, restart Rewindle."
+                : " Nothing was changed. Try again; if it keeps happening, restart Rewindle.";
+            // The channel to the elevated restore step failed (the session host's own wording is for the log, not for a person).
+            // The two that say something a person can act on come first: a restore step that is not Rewindle's own, and an answer that cannot be trusted.
+            if (text.Contains("restore session") && text.Contains("could not be verified"))
+            {
+                return "Rewindle could not confirm that the restore step is its own, so nothing was sent to it. Try again; if it keeps happening, restart Rewindle.";
+            }
+            if (text.Contains("restore session") &&
+                (text.Contains("size limit") || text.Contains("refused this dashboard") || text.Contains("not the one this dashboard asked for")))
+            {
+                return "The restore step did not answer the way Rewindle expected, so its answer was not used." + outcome;
+            }
+            if (text.Contains("restore session"))
+            {
+                return "Rewindle lost its connection to the restore step." + outcome;
+            }
+            if (text.Contains("restore target must be absent or an empty directory"))
+            {
+                return "That folder already has files in it. Choose a new or empty folder; Rewindle never overwrites files.";
+            }
+            if (text.Contains("restore target must not overlap"))
+            {
+                return "That folder is part of what Rewindle backs up or where its backups are kept. Choose a different folder, for example a new folder on another drive.";
+            }
+            if (text.Contains("reparse point"))
+            {
+                return "This folder is inside OneDrive or is a shortcut or link, which Rewindle cannot restore into. Choose a folder that is not synced to OneDrive, for example a new folder on a local drive.";
+            }
+            if (text.Contains("restore target must be on a") && text.Contains("local drive"))
+            {
+                return "Choose a folder on a drive that is ready and connected to this computer. Network folders cannot be used.";
+            }
+            if (text.Contains("restore target must not be a drive root"))
+            {
+                return "Choose a folder on the drive, not the top of the drive itself. A new folder named Rewindle restore works well.";
+            }
+            return message;
         }
 
         internal static bool FixedEquals(string left, string right)
@@ -2039,7 +2103,7 @@ namespace ResticBackuper.Dashboard
                 "powershell.exe");
             if (!RestoreManagerLauncher.IsRegularFile(managerPath) || !RestoreManagerLauncher.IsRegularFile(powerShell))
             {
-                throw new InvalidOperationException("The protected restore manager is missing from the installation.");
+                throw new InvalidOperationException("A part of Rewindle that restoring needs is missing. " + EngineProfile.Current.ReinstallAdvice());
             }
             string token = RestoreManagerLauncher.CreateNonce();
             RestoreSessionRequest request = new RestoreSessionRequest();
@@ -2063,7 +2127,7 @@ namespace ResticBackuper.Dashboard
             request.Digest = ComputeSessionDigest(request);
             if (File.Exists(request.ResultPath) || Directory.Exists(request.ResultPath))
             {
-                throw new InvalidOperationException("A protected restore result already uses this request nonce.");
+                throw new InvalidOperationException("Rewindle could not start this step safely. Close Restore, open it again and try once more.");
             }
 
             List<string> arguments = new List<string>(new[]

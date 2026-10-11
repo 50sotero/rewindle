@@ -245,11 +245,11 @@ try {
     Invoke-Private $dashboard 'BuildRestoreFlowValidation' $validationArgs | Out-Null
     $validationErrors = $validationArgs[0]
     Assert-True ($validationErrors.Count -ge 2) 'empty restore scope did not produce validation errors'
-    Assert-True ([string]::Join(' | ', $validationErrors) -match 'entire snapshot') 'empty restore scope did not explain explicit whole-snapshot selection'
+    Assert-True ([string]::Join(' | ', $validationErrors) -match 'everything in the backup') 'empty restore scope did not explain explicit whole-snapshot selection'
     Set-PrivateField $dashboard 'restoreFlowWholeSnapshotSelected' $true
     $validationArgs = [object[]]@($null, $null)
     Invoke-Private $dashboard 'BuildRestoreFlowValidation' $validationArgs | Out-Null
-    Assert-True (-not ([string]::Join(' | ', $validationArgs[0]) -match 'one or more snapshot paths')) 'explicit whole-snapshot scope was still rejected as empty'
+    Assert-True (-not ([string]::Join(' | ', $validationArgs[0]) -match 'Choose files or folders')) 'explicit whole-snapshot scope was still rejected as empty'
 
     # A whole snapshot larger than the room the destination check found is warned about, never refused: the warning joins the warnings
     # (the errors, which decide whether the restore can go on, are untouched), and only for a whole-snapshot scope of a snapshot that
@@ -267,7 +267,7 @@ try {
     Set-PrivateField $dashboard 'restoreFlowDestinationChecking' $false
     Set-PrivateField $dashboard 'restoreFlowDestinationDrive' 'E:'
     $tight = Get-SpaceValidation ([long]($gib * 3 / 2))
-    Assert-True ($tight[1].Count -eq 1 -and ([string]$tight[1][0]) -like 'This snapshot is about * but only * is free on E:. The restore may stop part-way.') ('a whole snapshot larger than the free space did not warn: ' + [string]::Join(' | ', $tight[1]))
+    Assert-True ($tight[1].Count -eq 1 -and ([string]$tight[1][0]) -like 'Everything in this backup is about * but only * is free on E:. The restore may stop part-way. Choose a drive with more room if you can.') ('a whole snapshot larger than the free space did not warn: ' + [string]::Join(' | ', $tight[1]))
     Assert-True ($tight[0].Count -eq 0) 'the free-space warning was reported as an error'
     # Five GiB and a twentieth more is what a whole snapshot of five GiB needs: that much room is enough, one byte less is not.
     Assert-True ((Get-SpaceValidation 5637144576L)[1].Count -eq 0) 'a drive with exactly the room a snapshot needs was warned about'
@@ -383,7 +383,7 @@ try {
     Set-PrivateField $dashboard 'restoreFlowStep' 'progress'
     $cancelResult = Invoke-Private $dashboard 'CancelRestoreFlow' $cancelArgs
     Assert-True (-not [bool]$cancelResult) 'active protected restore was reported as cancellable'
-    Assert-True ([string]$cancelArgs[0] -match 'cannot be cancelled') 'active restore cancellation rejection was unclear'
+    Assert-True ([string]$cancelArgs[0] -match 'cannot be stopped safely') 'active restore cancellation rejection was unclear'
 
     # Try again returns to the step that can recover from the failure.
     Set-PrivateField $dashboard 'restoreFlowBusy' $false
@@ -758,7 +758,7 @@ try {
     $gap = $statusFixture.Reader.Load()
     Assert-True ($gap.StateKey -eq 'telemetry_error' -and $gap.IsStatusUnavailable) 'a status that stayed unreadable was still described as the last good one'
     Assert-True ((-not $gap.IsFailure) -and (-not $gap.IsSuccess) -and (-not $gap.IsActive)) 'an unreadable status was called failed, verified or running'
-    Assert-True ($gap.StatusDetail -match 'status\.json is not valid JSON') ('an unreadable status did not name the file and the reason: ' + $gap.StatusDetail)
+    Assert-True ($gap.StatusDetail -match 'status\.json is damaged') ('an unreadable status did not name the file and the reason: ' + $gap.StatusDetail)
     Assert-True ($gap.StatusDetail -notmatch [regex]::Escape($statusFixture.Root) -and $gap.StatusDetail -notmatch 'run-glitch|schema_version') 'the reason for an unreadable status quoted the file or its path'
     [IO.File]::WriteAllText($statusFile, $readableText, $utf8)
     $recovered = $statusFixture.Reader.Load()
@@ -780,7 +780,7 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $absentState)) 'the missing state folder of the fixture exists'
     $notInstalledSnapshot = $absentFixture.Reader.Load()
     Assert-True ($notInstalledSnapshot.StateKey -eq 'not_installed' -and $notInstalledSnapshot.IsStatusUnavailable -and -not $notInstalledSnapshot.IsFailure) 'a missing state folder was not told apart from a first backup that has not happened'
-    Assert-True ($notInstalledSnapshot.StatusLabel -eq 'Engine not installed' -and $notInstalledSnapshot.StatusDetail -match '--state-dir' -and $notInstalledSnapshot.StatusDetail -match 'Requirements') 'a missing state folder did not say what to do'
+    Assert-True ($notInstalledSnapshot.StatusLabel -eq 'Backup service not installed' -and $notInstalledSnapshot.StatusDetail -match '--state-dir' -and $notInstalledSnapshot.StatusDetail -match 'Requirements') 'a missing state folder did not say what to do'
     Assert-True (-not (Test-Path -LiteralPath $absentState)) 'looking for a missing state folder created it'
 
     # The old local-mirror status file is retired evidence: it sits under the user's own profile, where anything running as that user can
@@ -792,10 +792,10 @@ try {
     $legacySnapshot = $legacyFixture.Reader.Load()
     $legacyOffsite = $legacySnapshot.OffsiteStatus
     Assert-True ([string]$legacyOffsite.Kind -eq 'StatusUnavailable' -and -not $legacyOffsite.ProviderUploadConfirmed -and -not $legacyOffsite.RestoreVerified) 'a proof-shaped legacy local file stood for a verified cloud copy'
-    Assert-True ($legacyOffsite.StatusLabel -eq 'Direct cloud verification required' -and $legacyOffsite.StatusDetail -match 'retired') 'the retired legacy evidence did not say it is retired'
+    Assert-True ($legacyOffsite.StatusLabel -eq 'A new Google Drive check is needed' -and $legacyOffsite.StatusDetail -match 'retired') 'the retired legacy evidence did not say it is retired'
     [IO.File]::WriteAllText($legacyProofFile, 'this is not JSON, and is not looked at', $utf8)
     $legacyAgain = $legacyFixture.Reader.Load().OffsiteStatus
-    Assert-True ($legacyAgain.StatusLabel -eq 'Direct cloud verification required') 'the legacy local file was read instead of only noticed'
+    Assert-True ($legacyAgain.StatusLabel -eq 'A new Google Drive check is needed') 'the legacy local file was read instead of only noticed'
     Assert-True ([string]$emptyFixture.Reader.Load().OffsiteStatus.Kind -eq 'NotConfigured') 'a backup with no cloud evidence at all was not left as not configured'
 
     # A run history that exists but cannot be read is never replaced by a guess. It is read again on the next refreshes (a run that finishes
@@ -954,8 +954,8 @@ try {
     Set-PrivateField $dashboard 'restoreFlowAwaitingApproval' $false
     Set-PrivateField $dashboard 'restoreFlowStep' 'error'
     Set-PrivateField $dashboard 'restoreFlowResultStatus' 'cancelled'
-    Set-PrivateField $dashboard 'restoreFlowMessageTitle' 'Windows approval cancelled'
-    Assert-True ((Invoke-Private $dashboard 'BuildWebRestoreFlowState')['result']['title'] -eq 'Windows approval cancelled') 'a cancelled approval did not keep its own headline'
+    Set-PrivateField $dashboard 'restoreFlowMessageTitle' 'Windows permission was not given'
+    Assert-True ((Invoke-Private $dashboard 'BuildWebRestoreFlowState')['result']['title'] -eq 'Windows permission was not given') 'a cancelled approval did not keep its own headline'
     Set-PrivateField $dashboard 'restoreFlowMessageTitle' ''
     Assert-True ($null -eq (Invoke-Private $dashboard 'BuildWebRestoreFlowState')['result']['title']) 'a missing host headline was replaced with a fixed one'
     # The protected manager reports no file counts, so none are published for the page to show as placeholders.
@@ -1027,7 +1027,7 @@ try {
     Assert-True ([string]::IsNullOrEmpty([string]$freeState['startBlocked'])) 'the page was told a restore is blocked while nothing is running'
     Set-PrivateField $dashboard 'backupStartInProgress' $true
     $blockedState = Invoke-Private $dashboard 'BuildWebRestoreFlowState'
-    Assert-True (([string]$blockedState['startBlocked']) -match 'active backup') 'the page was not told why a restore cannot start while a backup is starting'
+    Assert-True (([string]$blockedState['startBlocked']) -match 'running backup') 'the page was not told why a restore cannot start while a backup is starting'
     Set-PrivateField $dashboard 'backupStartInProgress' $false
 
     # The result screen's Open and Copy carry no path: they act on the folder the finished restore reported (restoreFlowResultTarget),
@@ -1100,6 +1100,18 @@ try {
     $sessionLauncherType = $assembly.GetType('ResticBackuper.Dashboard.RestoreSessionLauncher', $true)
     $restoreLauncherType = $assembly.GetType('ResticBackuper.Dashboard.RestoreManagerLauncher', $true)
     $restoreProgressType = $assembly.GetType('ResticBackuper.Dashboard.RestoreManagerProgress', $true)
+    # A restore may already have written to the chosen folder before its result is found wanting, so that result never says nothing changed.
+    $unusedRestore = [string](Invoke-Static $restoreLauncherType 'UnusedResultMessage' @('restore', 'The result did not match what was asked for, so it was not used.'))
+    Assert-True ($unusedRestore -match 'may already be in the folder you chose' -and $unusedRestore -notmatch 'Your files and backups were not changed') ('an unused restore result claimed the chosen folder was untouched: ' + $unusedRestore)
+    $unusedListing = [string](Invoke-Static $restoreLauncherType 'UnusedResultMessage' @('list_snapshots', 'The result did not match what was asked for, so it was not used.'))
+    Assert-True ($unusedListing -match 'Your files and backups were not changed' -and $unusedListing -notmatch 'folder you chose') ('an unused listing result was worded like a restore: ' + $unusedListing)
+    # The same holds when the session channel fails after a restore request was sent: the broker may already have copied files.
+    $droppedRestore = [string](Invoke-Static $restoreLauncherType 'SanitizeAnswer' @('The protected restore session failed: the pipe closed.', 'restore'))
+    Assert-True ($droppedRestore -match 'lost its connection' -and $droppedRestore -match 'may already be in the folder you chose' -and $droppedRestore -notmatch 'Nothing was changed') ('a restore whose session dropped claimed nothing changed: ' + $droppedRestore)
+    $droppedListing = [string](Invoke-Static $restoreLauncherType 'SanitizeAnswer' @('The protected restore session failed: the pipe closed.', 'list_tree'))
+    Assert-True ($droppedListing -match 'lost its connection' -and $droppedListing -match 'Nothing was changed' -and $droppedListing -notmatch 'folder you chose') ('a listing whose session dropped was worded like a restore: ' + $droppedListing)
+    # Only a plan with the "strict" cloud placeholder policy (or none) refuses a folder for online-only files, as the backup does.
+    Assert-True ([bool](Invoke-Static $dashboardType 'RefusesOnlineOnlyFiles' @('strict')) -and -not [bool](Invoke-Static $dashboardType 'RefusesOnlineOnlyFiles' @('allow'))) 'the folder check did not follow the plan''s cloud placeholder policy'
     $rewindleEngine = $engineProfileType.GetProperty('Rewindle', $flags).GetValue($null)
     $legacyEngine = $engineProfileType.GetProperty('Legacy', $flags).GetValue($null)
     $secondSnapshot = [Runtime.Serialization.FormatterServices]::GetUninitializedObject($snapshotType)
@@ -1419,7 +1431,7 @@ namespace RewindleRegression {
         $fakeBroker::WrongServerProcessId = $bystander.Id
         $sessionHost = New-SessionHost
         $squatted = Invoke-SessionList $sessionHost
-        Assert-True (-not $squatted.Succeeded -and $squatted.ErrorMessage -match 'could not be verified' -and $fakeBroker::Hellos -eq 0) ('the dashboard talked to a pipe whose server it did not start: ' + $squatted.ErrorMessage)
+        Assert-True (-not $squatted.Succeeded -and $squatted.ErrorMessage -match 'could not confirm that the restore step is its own' -and $fakeBroker::Hellos -eq 0) ('the dashboard talked to a pipe whose server it did not start: ' + $squatted.ErrorMessage)
         Invoke-Private $sessionHost 'Close' | Out-Null
     }
     finally { try { $bystander.Kill() } catch { } }
@@ -1428,12 +1440,12 @@ namespace RewindleRegression {
     $fakeBroker::Reset('oversized')
     $sessionHost = New-SessionHost
     $oversized = Invoke-SessionList $sessionHost
-    Assert-True (-not $oversized.Succeeded -and $oversized.ErrorMessage -match 'size limit' -and -not [bool](Get-HostValue $sessionHost 'HasLiveSession')) ('an oversized session frame was accepted: ' + $oversized.ErrorMessage)
+    Assert-True (-not $oversized.Succeeded -and $oversized.ErrorMessage -match 'did not answer the way Rewindle expected' -and -not [bool](Get-HostValue $sessionHost 'HasLiveSession')) ('an oversized session frame was accepted: ' + $oversized.ErrorMessage)
     Invoke-Private $sessionHost 'Close' | Out-Null
     $fakeBroker::Reset('foreignNonce')
     $sessionHost = New-SessionHost
     $foreign = Invoke-SessionList $sessionHost
-    Assert-True (-not $foreign.Succeeded -and $foreign.ErrorMessage -match 'did not match this request') ('a session result bound to another request was accepted: ' + $foreign.ErrorMessage)
+    Assert-True (-not $foreign.Succeeded -and $foreign.ErrorMessage -match 'did not match what was asked for') ('a session result bound to another request was accepted: ' + $foreign.ErrorMessage)
     Invoke-Private $sessionHost 'Close' | Out-Null
 
     # The installed engine decides: a session needs the profile's broker and the engine's own capability document.
@@ -1464,19 +1476,19 @@ namespace RewindleRegression {
     Invoke-Private $dashboard 'ResetRestoreFlowSession' @($config, $configHash) | Out-Null
     $openedHost = Get-FieldValue $dashboard 'restoreFlowApprovalSession'
     Assert-True ($null -ne $openedHost -and (Invoke-Private $dashboard 'BuildWebRestoreFlowState')['approval']['session'] -eq $true) 'Restore did not use one session with an engine that serves them'
-    Assert-True ((Invoke-Private $dashboard 'RestoreFlowApprovalNotice') -eq 'Windows will ask once to allow Rewindle to read and restore from your backup.') 'the page was not told Windows asks once'
+    Assert-True ((Invoke-Private $dashboard 'RestoreFlowApprovalNotice') -eq 'Windows will ask once for your permission to let Rewindle read and restore from your backup.') 'the page was not told Windows asks once'
     Remove-Item -LiteralPath (Join-Path $installRoot 'engine-capabilities.json') -Force
     Invoke-Private $dashboard 'ResetRestoreFlowSession' @($config, $configHash) | Out-Null
     Assert-True ([bool](Get-HostValue $openedHost 'IsClosed')) 'reopening Restore kept the previous session'
     Assert-True ($null -eq (Get-FieldValue $dashboard 'restoreFlowApprovalSession') -and (Invoke-Private $dashboard 'BuildWebRestoreFlowState')['approval']['session'] -eq $false) 'an engine without sessions was not given one approval per step'
-    Assert-True ((Invoke-Private $dashboard 'RestoreFlowApprovalNotice') -match 'each protected step') 'the per-step approvals were described as one'
+    Assert-True ((Invoke-Private $dashboard 'RestoreFlowApprovalNotice') -match 'each time Rewindle opens your backup') 'the per-step approvals were described as one'
 
     # The flow's session ends with the flow, and with a plan that changed.
     $fakeBroker::Reset('normal')
     $flowHost = New-SessionHost
     Assert-True ((Invoke-SessionList $flowHost).Succeeded -and [bool](Get-HostValue $flowHost 'HasLiveSession')) 'the flow''s session did not open'
     Set-PrivateField $dashboard 'restoreFlowApprovalSession' $flowHost
-    Assert-True ((Invoke-Private $dashboard 'RestoreFlowApprovalNotice') -match 'ended, so Windows will ask again') 'a session that had been approved was not described as ended when it asks again'
+    Assert-True ((Invoke-Private $dashboard 'RestoreFlowApprovalNotice') -match 'has ended, so Windows will ask for your permission again') 'a session that had been approved was not described as ended when it asks again'
     Set-PrivateField $dashboard 'restoreFlowOpen' $true
     Set-PrivateField $dashboard 'restoreFlowBusy' $false
     [void](Invoke-Private $dashboard 'StoreRestoreFlowTreeListing' @('snapshot', '/', (New-TreeEntries '/' 1)))
@@ -1668,7 +1680,7 @@ namespace RewindleRegression {
         Assert-True ((Get-BalloonTitle 'cancelling' $true $false $false) -eq '(none)') 'a cancel being carried out announced a start'
         Assert-True ((Get-BalloonTitle 'cancelled' $false $false $false) -eq '(none)') 'a cancelled run raised a balloon of its own from the state change'
         Assert-True ((Get-BalloonTitle 'starting' $true $false $false) -eq 'Backup started') 'a backup that starts after a cancelled one did not say Backup started'
-        Assert-True ((Get-BalloonTitle 'failed' $false $false $true) -eq 'Backup needs attention') 'a failed run did not say Backup needs attention'
+        Assert-True ((Get-BalloonTitle 'failed' $false $false $true) -eq ('Backup didn' + [char]0x2019 + 't finish')) 'a failed run did not say that the backup did not finish'
     }
     finally {
         $balloonIcon.Dispose()
@@ -1701,7 +1713,7 @@ namespace RewindleRegression {
         Assert-True ((Get-GapBalloonTitleForUnreadable) -eq '(none)') 'a second unreadable status raised a balloon'
         Assert-True ((Get-GapBalloonTitle 'success' $false $true $false $false 'run-b') -eq 'Backup verified') 'a run that finished while the status could not be read was not announced'
         Assert-True ((Get-GapBalloonTitleForUnreadable) -eq '(none)') 'an unreadable status raised a balloon after a verified run'
-        Assert-True ((Get-GapBalloonTitle 'failed' $false $false $true $false 'run-c') -eq 'Backup needs attention') 'a failure that arrived after a gap in the status was not announced'
+        Assert-True ((Get-GapBalloonTitle 'failed' $false $false $true $false 'run-c') -eq ('Backup didn' + [char]0x2019 + 't finish')) 'a failure that arrived after a gap in the status was not announced'
         Assert-True ((Get-GapBalloonTitleForUnreadable) -eq '(none)') 'an unreadable status raised a balloon after a failed run'
         Assert-True ((Get-GapBalloonTitle 'failed' $false $false $true $false 'run-c') -eq '(none)') 'a failure that was already announced was announced again after a gap in the status'
         Assert-True ((Get-GapBalloonTitle 'backing_up' $true $false $false $false 'run-d') -eq 'Backup started') 'a backup that started was not announced'
@@ -1726,7 +1738,7 @@ namespace RewindleRegression {
         }
         Assert-True ((Get-TrayHoverText { param($snapshot) $snapshot.IsStatusUnavailable = $true }) -eq 'Rewindle - status unavailable') ('the tray did not say that the status is unavailable: ' + $hoverIcon.Text)
         Assert-True ((Get-TrayHoverText { param($snapshot) $snapshot.IsActive = $true; $snapshot.Percent = 0.42 }) -eq 'Rewindle - backup running 42%') ('the tray did not show a running backup: ' + $hoverIcon.Text)
-        Assert-True ((Get-TrayHoverText { param($snapshot) $snapshot.IsFailure = $true }) -eq 'Rewindle - last backup needs attention') ('the tray did not say that the last backup needs attention: ' + $hoverIcon.Text)
+        Assert-True ((Get-TrayHoverText { param($snapshot) $snapshot.IsFailure = $true }) -eq ('Rewindle - last backup didn' + [char]0x2019 + 't finish')) ('the tray did not say that the last backup did not finish: ' + $hoverIcon.Text)
         Assert-True ((Get-TrayHoverText { param($snapshot) $snapshot.LastVerifiedFinishedUtc = [DateTime]::UtcNow.AddHours(-2) }) -eq 'Rewindle - verified 2 h ago') ('the tray did not say how long ago a backup was verified: ' + $hoverIcon.Text)
         Assert-True ((Get-TrayHoverText { param($snapshot) $snapshot.LastVerifiedFinishedUtc = [DateTime]::UtcNow.AddDays(-3) }) -eq 'Rewindle - verified 3 days ago') ('the tray did not count days: ' + $hoverIcon.Text)
         Assert-True ((Get-TrayHoverText { param($snapshot) $snapshot.LastVerifiedFinishedUtc = [DateTime]::UtcNow.AddSeconds(-5) }) -eq 'Rewindle - verified just now') ('the tray did not say a backup was just verified: ' + $hoverIcon.Text)
@@ -1748,7 +1760,7 @@ namespace RewindleRegression {
     $missingSetup = Invoke-Private $setupDashboard 'BuildWebSetupState'
     Assert-True ($missingSetup['engineFound'] -eq $false -and [string]$missingSetup['problem'] -eq 'Engine not installed: Rewindle did not find the backup engine it reports on.') 'the page was not told the service is missing'
     Assert-True (-not [string]::IsNullOrEmpty([string]$missingSetup['appVersion']) -and ([string]$missingSetup['expectedConfig']) -like '*backup-config.json') 'the page was not given what a bug report about a missing service needs'
-    Assert-True ([string]$missingSetup['engine'] -eq 'Rewindle engine' -and [string]$missingSetup['engineProfile'] -eq 'rewindle' -and [string]$missingSetup['engineVersion'] -eq '') ('the page was not told which engine is missing: ' + [string]$missingSetup['engine'])
+    Assert-True ([string]$missingSetup['engine'] -eq 'Rewindle backup service' -and [string]$missingSetup['engineProfile'] -eq 'rewindle' -and [string]$missingSetup['engineVersion'] -eq '') ('the page was not told which engine is missing: ' + [string]$missingSetup['engine'])
     Set-PrivateField $setupDashboard 'currentSourceConfiguration' $config
     $inUseSetup = Invoke-Private $setupDashboard 'BuildWebSetupState'
     Assert-True ([string]$inUseSetup['problem'] -eq '') 'a configuration that is in use still carried a problem'
@@ -1756,7 +1768,7 @@ namespace RewindleRegression {
     $missingError = [Activator]::CreateInstance($missingServiceType, $constructorFlags, $null, [object[]]@('C:\Program Files\RewindleFixture\backup-config.json'), $null)
     Assert-True ($missingError -is [System.IO.FileNotFoundException]) 'a missing installation is no longer a FileNotFoundException, which other callers rely on'
     $missingSentence = [string](Invoke-Static $dashboardType 'DescribeSourceConfigurationProblem' @($missingError))
-    Assert-True ($missingSentence -match 'Engine not installed' -and $missingSentence -match 'did not find the backup engine' -and $missingSentence -match 'Requirements') ('a missing installation was not described in plain words: ' + $missingSentence)
+    Assert-True ($missingSentence -match "backup service isn't installed" -and $missingSentence -match 'Run Rewindle Setup' -and $missingSentence -notmatch 'Engine|Requirements') ('a missing installation was not described in plain words: ' + $missingSentence)
     $leakySentence = [string](Invoke-Static $dashboardType 'DescribeSourceConfigurationProblem' @([System.IO.IOException]::new('The process cannot access the file C:\Users\your-user\secret.json')))
     Assert-True ($leakySentence -notmatch 'your-user|secret' -and $leakySentence -match 'could not be read') ('the words of an exception reached the sentence the page shows: ' + $leakySentence)
     $deniedSentence = [string](Invoke-Static $dashboardType 'DescribeSourceConfigurationProblem' @([System.UnauthorizedAccessException]::new('Access to the path C:\Program Files\RewindleFixture is denied.')))
@@ -2240,6 +2252,128 @@ namespace RewindleRegression {
     Set-ReadinessReport $null
     Assert-True ((Get-ReadinessField 'actionHint').Text -like 'Actions are unavailable*' -and -not (Get-ReadinessField 'keyRotationButton').IsEnabled) 'with no report the actions were not explained as unavailable'
 
+    # The folder picker's pure helpers. What counts as stored only in the cloud is the backup's own attribute mask; the walk for such
+    # files skips the whole-folder rules of excludes.txt, never follows a link, and stops on its entry or time limit without claiming it
+    # saw everything (the picker then does not refuse the folder over files it did not get to see). Only temporary folders are touched.
+    function Invoke-PickerStatic([string]$Name, [Type[]]$ParameterTypes, [object[]]$Arguments) {
+        $method = $dashboardType.GetMethod($Name, $flags, $null, $ParameterTypes, $null)
+        if ($null -eq $method) { throw "Missing folder picker helper: $Name" }
+        $invokeArguments = New-Object object[] $Arguments.Count
+        for ($index = 0; $index -lt $Arguments.Count; $index++) {
+            $argument = $Arguments[$index]
+            if ($argument -is [System.Management.Automation.PSObject]) { $invokeArguments[$index] = $argument.PSObject.BaseObject }
+            else { $invokeArguments[$index] = $argument }
+        }
+        return $method.Invoke($null, $invokeArguments)
+    }
+    $attributesType = [Type]'System.IO.FileAttributes'
+    foreach ($case in @(
+            @(0x00040000, $true), @(0x00400000, $true), @([int][IO.FileAttributes]::Offline, $true), @((0x00040000 + 0x10), $true),
+            @([int][IO.FileAttributes]::Normal, $false), @([int][IO.FileAttributes]::Directory, $false),
+            @(([int][IO.FileAttributes]::Archive + [int][IO.FileAttributes]::ReadOnly), $false), @([int][IO.FileAttributes]::ReparsePoint, $false))) {
+        $onlineOnly = [bool](Invoke-PickerStatic 'IsOnlineOnly' @($attributesType) @([Enum]::ToObject($attributesType, [int]$case[0])))
+        Assert-True ($onlineOnly -eq [bool]$case[1]) ('the attribute value ' + $case[0] + ' was judged online-only = ' + $onlineOnly)
+    }
+
+    $stringSequence = [Collections.Generic.IEnumerable[string]]
+    # The same rules the backup's preflight prunes whole folders by (_literal_directory_exclusion_rules in restic_common.py): every part
+    # literal except one whole "**", which makes a suffix rule ("**/a/b") or an anchored one ("C:/x/**/a"); without "**" only a whole path.
+    $excludedRules = Invoke-PickerStatic 'ParseExcludedFolderRules' @($stringSequence) @(,[string[]]@(
+            '**/node_modules', '**\.git\', '  **/Cache  ', '# **/commented', '*.tmp', '**/a/b', '**/', '**/*cache', 'build/', '**/vendor?', '', '**/.venv',
+            '**/.gradle/caches', 'C:/Data/Skip', '\\nas\share\old', 'D:/Projects/**/.cache', '!**/keep', '**/x/**/y', 'C:/Temp/*'))
+    $excludesMethod = $excludedRules.GetType().GetMethod('Excludes')
+    function Test-Excluded([string]$Path) { return [bool]$excludesMethod.Invoke($excludedRules, [object[]]@($Path)) }
+    $countProperty = $excludedRules.GetType().GetProperty('Count')
+    Assert-True ([int]$countProperty.GetValue($excludedRules, $null) -eq 9) ('the excludes.txt rules were not compiled as the backup compiles them: ' + $countProperty.GetValue($excludedRules, $null) + ' rules')
+    foreach ($excluded in 'C:\Users\you\Code\node_modules', 'D:\repo\.GIT', 'C:\x\cache', 'C:\Users\you\app\.gradle\caches', 'C:\proj\a\b', 'C:\Data\Skip', '\\nas\share\old', 'D:\Projects\.cache', 'D:\Projects\app\deep\.cache') {
+        Assert-True (Test-Excluded $excluded) ('a folder the backup leaves out was not skipped: ' + $excluded)
+    }
+    foreach ($kept in 'C:\Users\you\Documents', 'C:\Users\you\app\.gradle', 'C:\proj\a', 'C:\proj\b', 'C:\Data\Skip\inner', 'C:\Data', 'D:\Other\.cache', 'C:\keep', 'C:\build', 'C:\Temp\x', 'C:\x\y') {
+        Assert-True (-not (Test-Excluded $kept)) ('a folder the backup keeps was skipped: ' + $kept)
+    }
+    $emptyRules = Invoke-PickerStatic 'ParseExcludedFolderRules' @($stringSequence) @($null)
+    Assert-True ([int]$countProperty.GetValue($emptyRules, $null) -eq 0) 'no excludes.txt did not give an empty rule set'
+
+    function Test-InOneDrive([string]$Path, [string[]]$Roots) {
+        return [bool](Invoke-PickerStatic 'IsInsideOneDrive' @([string], $stringSequence) @($Path, $Roots))
+    }
+    $oneDriveRoots = [string[]]@('C:\Users\you\OneDrive', '', $null, 'C:\Users\you\OneDrive - Contoso')
+    Assert-True (Test-InOneDrive 'C:\Users\you\OneDrive\Documents' $oneDriveRoots) 'a folder in OneDrive was not recognised'
+    Assert-True (Test-InOneDrive 'c:\users\YOU\onedrive' $oneDriveRoots) 'the OneDrive folder itself, in other letter case, was not recognised'
+    Assert-True (Test-InOneDrive 'C:\Users\you\OneDrive - Contoso\Team' $oneDriveRoots) 'a folder in a business OneDrive was not recognised'
+    Assert-True (-not (Test-InOneDrive 'C:\Users\you\OneDrive2\Documents' $oneDriveRoots)) 'a sibling folder whose name starts like OneDrive was taken for OneDrive'
+    Assert-True (-not (Test-InOneDrive 'C:\Users\you\Documents' $oneDriveRoots) -and -not (Test-InOneDrive 'D:\OneDrive\x' $oneDriveRoots)) 'a folder outside OneDrive was taken for one inside it'
+    Assert-True (-not (Test-InOneDrive 'C:\Users\you\OneDrive\Documents' $null) -and -not (Test-InOneDrive 'C:\Users\you\OneDrive\Documents' ([string[]]@()))) 'with no OneDrive folder known a path was taken for one inside it'
+
+    function Get-OneDriveSentence([string[]]$Names) {
+        $list = New-StringList $Names
+        return [string](Invoke-PickerStatic 'DescribeOneDriveKnownFolders' @([Collections.Generic.IList[string]]) @(,$list))
+    }
+    Assert-True ((Get-OneDriveSentence @()) -eq '') 'no OneDrive folders still produced a sentence'
+    Assert-True ((Get-OneDriveSentence @('Documents')) -like ' Your Documents folder is inside OneDrive*it isn''t listed.') 'one OneDrive folder was not described in the singular'
+    Assert-True ((Get-OneDriveSentence @('Desktop', 'Documents')) -like ' Your Desktop and Documents folders are inside OneDrive*they aren''t listed.') 'two OneDrive folders were not described with "and"'
+    Assert-True ((Get-OneDriveSentence @('Desktop', 'Documents', 'Pictures')) -like ' Your Desktop, Documents and Pictures folders are inside OneDrive*') 'three OneDrive folders were not listed with commas and a final "and"'
+
+    $pickerRoot = Join-Path ([IO.Path]::GetTempPath()) ('rewindle-picker-' + [guid]::NewGuid().ToString('N'))
+    $pickerLink = Join-Path $pickerRoot 'plain\link'
+    try {
+        foreach ($folder in 'plain\sub', 'cloudtree\sub', 'skipped\node_modules', 'nested\.gradle\caches') { [void][IO.Directory]::CreateDirectory((Join-Path $pickerRoot $folder)) }
+        foreach ($file in 'plain\a.txt', 'plain\sub\b.txt', 'cloudtree\sub\cloud.txt', 'skipped\node_modules\cloud.txt', 'skipped\keep.txt', 'nested\.gradle\caches\cloud.txt', 'nested\.gradle\keep.txt') { [IO.File]::WriteAllText((Join-Path $pickerRoot $file), 'x') }
+        # [IO.File]::GetAttributes throws for a path that is not there, as the host's own reading of an entry's attributes does.
+        $plainAttributes = [Func[IO.FileSystemInfo, IO.FileAttributes]] { param($entry) [IO.File]::GetAttributes($entry.FullName) }
+        $cloudAttributes = [Func[IO.FileSystemInfo, IO.FileAttributes]] { param($entry) $actual = [IO.File]::GetAttributes($entry.FullName); if ($entry.Name -eq 'cloud.txt') { [Enum]::ToObject([IO.FileAttributes], ([int]$actual -bor 0x00400000)) } else { $actual } }
+        $scanTypes = @([string], $excludedRules.GetType(), [int], [TimeSpan], [Func[IO.FileSystemInfo, IO.FileAttributes]])
+        function Invoke-PickerScan([string]$Folder, $Skipped, [int]$Limit, [TimeSpan]$Time, $Attributes) {
+            return Invoke-PickerStatic 'ScanForOnlineOnly' $scanTypes @((Join-Path $pickerRoot $Folder), $Skipped, $Limit, $Time, $Attributes)
+        }
+        $minute = [TimeSpan]::FromMinutes(1)
+        $scan = Invoke-PickerScan 'plain' $null 1000 $minute $plainAttributes
+        Assert-True (-not $scan.Found -and $scan.Complete -and $scan.Scanned -eq 3) ('a folder with nothing in the cloud was not walked completely: found=' + $scan.Found + ' complete=' + $scan.Complete + ' scanned=' + $scan.Scanned)
+        $scan = Invoke-PickerScan 'cloudtree' $null 1000 $minute $cloudAttributes
+        Assert-True ($scan.Found -and -not $scan.Complete) 'a file stored only in the cloud was not found, or the walk did not stop at it'
+        $scan = Invoke-PickerScan 'skipped' $excludedRules 1000 $minute $cloudAttributes
+        Assert-True (-not $scan.Found -and $scan.Complete) 'an online-only file inside a folder the backup skips still counted'
+        $scan = Invoke-PickerScan 'skipped' $null 1000 $minute $cloudAttributes
+        Assert-True ($scan.Found) 'the same file was not found when nothing is skipped'
+        # A rule of more than one folder ("**/.gradle/caches", shipped in excludes.txt) is skipped too, and its parent is still walked.
+        $scan = Invoke-PickerScan 'nested' $excludedRules 1000 $minute $cloudAttributes
+        Assert-True (-not $scan.Found -and $scan.Complete -and $scan.Scanned -eq 3) ('an online-only file under a nested folder the backup skips still counted: found=' + $scan.Found + ' scanned=' + $scan.Scanned)
+        $scan = Invoke-PickerScan 'nested' $null 1000 $minute $cloudAttributes
+        Assert-True ($scan.Found) 'the nested file was not found when nothing is skipped'
+        $scan = Invoke-PickerScan 'plain' $null 1 $minute $plainAttributes
+        Assert-True (-not $scan.Found -and -not $scan.Complete -and $scan.Scanned -eq 1) 'the entry limit did not stop the walk, or the walk claimed to be complete'
+        $scan = Invoke-PickerScan 'plain' $null 1000 ([TimeSpan]::Zero) $plainAttributes
+        Assert-True (-not $scan.Found -and -not $scan.Complete -and $scan.Scanned -eq 0) 'the time limit did not stop the walk, or the walk claimed to be complete'
+        $scan = Invoke-PickerScan 'missing-folder' $null 1000 $minute $plainAttributes
+        Assert-True (-not $scan.Found -and -not $scan.Complete) 'a folder that does not exist was treated as found or as completely walked'
+
+        $chainTestable = $false
+        try {
+            [void](New-Item -ItemType Junction -Path $pickerLink -Target (Join-Path $pickerRoot 'cloudtree') -ErrorAction Stop)
+            $chainTestable = $true
+        }
+        catch {
+            $skipped.Add('SKIPPED: a junction could not be created here, so the walk was not checked against a link')
+        }
+        if ($chainTestable) {
+            $scan = Invoke-PickerScan 'plain' $null 1000 $minute $cloudAttributes
+            Assert-True (-not $scan.Found -and $scan.Complete) 'the walk followed a link into a folder it was not asked about'
+            Assert-True (-not [bool](Invoke-Static $dashboardType 'HasNormalDirectoryChain' @([string]$pickerLink))) 'a folder reached through a link counted as a normal folder'
+            $ancestorIsLink = $false
+            for ($ancestor = Get-Item -LiteralPath (Join-Path $pickerRoot 'plain'); $null -ne $ancestor; $ancestor = $ancestor.Parent) {
+                if ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) { $ancestorIsLink = $true }
+            }
+            if (-not $ancestorIsLink) {
+                Assert-True ([bool](Invoke-Static $dashboardType 'HasNormalDirectoryChain' @([string](Join-Path $pickerRoot 'plain'))) ) 'a normal folder did not count as a normal folder'
+            }
+        }
+    }
+    finally {
+        # A link is removed first and on its own, so deleting the tree can never reach what it points to.
+        if (Test-Path -LiteralPath $pickerLink) { [IO.Directory]::Delete($pickerLink, $false) }
+        if (Test-Path -LiteralPath $pickerRoot) { Remove-Item -LiteralPath $pickerRoot -Recurse -Force }
+    }
+
     # The dialogs draw from the page tokens instead of each choosing its own: the primary button is ink on the canvas (the page's bg-ink with
     # text-canvas) in the schedule, location and readiness dialogs alike, the other buttons are the quiet look, and accent text is one
     # hue in both themes (the page's --accent-ink). Windows High Contrast uses the system colors, so the hues are only checked without it.
@@ -2296,4 +2430,4 @@ finally {
 }
 
 foreach ($note in $skipped) { Write-Output $note }
-Write-Output 'Regressions passed: snapshot scope reset, explicit whole-snapshot validation, observed-path enforcement, review invalidation, reload, retry routing, inline folder-read failures, launch guards, honest cancellation, UNC/reparse/no-overwrite/overlap destination guards and their plain-language refusals, diagnostics redaction of object keys, of whole paths (either slash, any root) and of account IDs, capped run history that is not rewritten for an evicted baseline, no live samples written and the old file removed, readable run-details timelines from long and odd logs, the restore approval wait, one Windows approval per restore session (every listing and one restore, a new session only after one ended, closed with the flow and a changed plan, a declined approval, a pipe served by another process, oversized and foreign frames), no folder read on choosing a backup or restoring all of it, folder listings kept per snapshot and bounded, the session-or-per-step choice from the installed engine, the published reason a restore cannot start, Open and Copy on a restore result acting only on the folder the restore reported once it has finished, an unreadable schedule and the outcome of a schedule change, schedule summaries for every day and lenient schedule times, capped automatic web view reloads, missing-runtime detection, a configuration check that could not complete ending the read it followed, cut-short folder listings and the published path limit, history lists bound again only when a run differs, one not-responding notice per stuck web view, backup freshness across a change of the clocks and of the run times, the tray balloon for a backup starting once per run, the not-started note for an accepted backup request that started nothing, the bounded crash log and its redacted copy in a diagnostic bundle, the installed plan read without keeping its writer out (and still refused when cut short, not an object or too large) with an install root that follows Program Files, the backup-location window''s done/current/failed steps and refused folders, the recovery-readiness window''s explained actions, the free-space warning for a whole snapshot that will not fit (a warning and never an error), the history limit the page is told, the schedule, location and readiness dialogs sharing the page tokens and the schedule wording, a status that cannot be read for a moment, a missing state folder, the retired legacy cloud file, a run history that is never written over while it is unreadable, the tray hover text and first-close hint, the setup state the page is told, and diagnostics that say what they left out and read a log cut inside a character.'
+Write-Output 'Regressions passed: snapshot scope reset, explicit whole-snapshot validation, observed-path enforcement, review invalidation, reload, retry routing, inline folder-read failures, launch guards, honest cancellation, UNC/reparse/no-overwrite/overlap destination guards and their plain-language refusals, diagnostics redaction of object keys, of whole paths (either slash, any root) and of account IDs, capped run history that is not rewritten for an evicted baseline, no live samples written and the old file removed, readable run-details timelines from long and odd logs, the restore approval wait, one Windows approval per restore session (every listing and one restore, a new session only after one ended, closed with the flow and a changed plan, a declined approval, a pipe served by another process, oversized and foreign frames), no folder read on choosing a backup or restoring all of it, folder listings kept per snapshot and bounded, the session-or-per-step choice from the installed engine, the published reason a restore cannot start, Open and Copy on a restore result acting only on the folder the restore reported once it has finished, an unreadable schedule and the outcome of a schedule change, schedule summaries for every day and lenient schedule times, capped automatic web view reloads, missing-runtime detection, a configuration check that could not complete ending the read it followed, cut-short folder listings and the published path limit, history lists bound again only when a run differs, one not-responding notice per stuck web view, backup freshness across a change of the clocks and of the run times, the tray balloon for a backup starting once per run, the not-started note for an accepted backup request that started nothing, the bounded crash log and its redacted copy in a diagnostic bundle, the installed plan read without keeping its writer out (and still refused when cut short, not an object or too large) with an install root that follows Program Files, the backup-location window''s done/current/failed steps and refused folders, the recovery-readiness window''s explained actions, the folder picker''s cloud-only walk (bounded by entries and time, skipping excluded folders and links), OneDrive paths and wording, the free-space warning for a whole snapshot that will not fit (a warning and never an error), the history limit the page is told, the schedule, location and readiness dialogs sharing the page tokens and the schedule wording, a status that cannot be read for a moment, a missing state folder, the retired legacy cloud file, a run history that is never written over while it is unreadable, the tray hover text and first-close hint, the setup state the page is told, and diagnostics that say what they left out and read a log cut inside a character.'

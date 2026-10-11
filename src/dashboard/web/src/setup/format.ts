@@ -1,5 +1,6 @@
 // Figures and names as the wizard writes them. Sizes use the same binary units as the dashboard (KiB, MiB, GiB), shown the
 // way Windows Explorer shows them (KB, MB, GB): a person comparing the wizard with Explorer sees the same numbers.
+import { formatClock } from '../when';
 
 const UNITS = ['bytes', 'KB', 'MB', 'GB', 'TB', 'PB'];
 
@@ -44,11 +45,16 @@ export function joinPath(root: string, name: string): string {
   return root.endsWith('\\') ? root + name : `${root}\\${name}`;
 }
 
-/** "02:00" as the reader's clock writes it ("02:00" or "2:00 AM"). */
+/** "02:00" as the reader's clock writes it ("02:00" or "2:00 AM"), the same way the dashboard writes a time of day. */
 export function formatTime(hhmm: string, locale?: string): string {
   const [h, m] = hhmm.split(':').map(Number);
-  const date = new Date(2026, 0, 1, h, m);
-  return date.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
+  return formatClock(new Date(2026, 0, 1, h, m).toISOString(), locale, hhmm);
+}
+
+/** "today" when the clock time `hhmm` is still ahead of `now`, otherwise "tomorrow": the day a daily backup at that time next runs. */
+export function nextRunDay(hhmm: string, now: Date = new Date()): 'today' | 'tomorrow' {
+  const [h, m] = hhmm.split(':').map(Number);
+  return h * 60 + m > now.getHours() * 60 + now.getMinutes() ? 'today' : 'tomorrow';
 }
 
 /** Whether a path is acceptable to send to the installer: absolute, on a drive letter, nothing the command line cannot carry. */

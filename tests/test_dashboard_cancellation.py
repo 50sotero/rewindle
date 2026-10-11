@@ -177,7 +177,7 @@ class DashboardCancellationTests(unittest.TestCase):
             self.window_source,
         )
         self.assertIn("BackupCancellationController.RequestCancel(", self.window_source)
-        self.assertIn("Previously verified snapshots are not changed", self.window_source)
+        self.assertIn("Your earlier backups are not changed", self.window_source)
         self.assertIn("currentTaskSchedule.State == BackupTaskState.Running", self.window_source)
         for forbidden in ("Stop-ScheduledTask", "schtasks /End", "TerminateProcess"):
             self.assertNotIn(forbidden, self.window_source)
@@ -190,7 +190,7 @@ class DashboardCancellationTests(unittest.TestCase):
         self.assertTrue(self.result["cancelled_flag"])
         self.assertFalse(self.result["cancelled_failure"])
         self.assertFalse(self.result["cancelled_success"])
-        self.assertIn("Previously verified snapshots remain available", self.result["cancelled_detail"])
+        self.assertIn("Your earlier backups are untouched", self.result["cancelled_detail"])
         self.assertEqual(self.result["cancelled_outcome"], "restic_exit_130")
         self.assertTrue(self.result["cancelled_metric"])
 

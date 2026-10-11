@@ -40,11 +40,15 @@ class DashboardSourceAnimationTests(unittest.TestCase):
     def test_pending_copy_is_honest_about_backup_state(self) -> None:
         for marker in (
             "No backup has started.",
-            "The folder is not shown as protected until this check passes.",
-            "Protected list unchanged.",
+            "The folder isn't counted as backed up until this check passes.",
+            "Rewindle can't tell whether the folder was added, so check the folder list before you try again.",
             "Included in the next backup",
         ):
             self.assertIn(marker, self.window)
+        # A failure after the folder tool ran may have changed the list, so the page never adds "was not changed" to its message
+        # (a declined Windows prompt, where nothing ran, still says so).
+        self.assertNotIn('sourceOperationError + " The list of folders was not changed."', self.window)
+        self.assertNotIn(r'"The folder list was not changed.\n\n" + detail', self.window)
         self.assertNotIn("Estimated time remaining for folder add", self.window)
 
     def test_activity_respects_motion_and_accessibility_preferences(self) -> None:

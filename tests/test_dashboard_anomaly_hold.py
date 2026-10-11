@@ -31,14 +31,14 @@ class DashboardAnomalyHoldTests(unittest.TestCase):
     def test_dashboard_describes_review_hold_without_claiming_upload_pause(self) -> None:
         self.assertIn("public bool HasMaintenanceHold", self.telemetry)
         self.assertIn('GetBool(document, "maintenance_hold", false)', self.telemetry)
-        self.assertIn('"Backup verified — review changes"', self.window)
+        self.assertIn('"Backup verified — confirm these changes"', self.window)
         self.assertIn('SetBadge("REVIEW CHANGES"', self.window)
-        # The hold detail is the engine's own sentence; the Rewindle engine never pauses a live DriveFS upload.
+        # The hold detail is the engine's own sentence; the Rewindle engine's hold only holds back clean-up of old backups.
         self.assertIn("EngineProfile.Current.AnomalyReview.HoldDetailSuffix", self.telemetry)
-        self.assertIn(
-            "this hold does not pause a live DriveFS upload",
-            self.rewindle_profile,
-        )
+        self.assertIn("Nothing was deleted from your backups.", self.rewindle_profile)
+        self.assertIn("uploads of your backups carry on as normal", self.rewindle_profile)
+        # Wherever a sentence names the button, it uses the page's label.
+        self.assertIn("choose Confirm these changes", self.rewindle_profile)
         self.assertNotIn("Off-site promotion is paused", self.telemetry)
         self.assertNotIn("off-site promotion is paused", self.window.lower())
         self.assertNotIn("off-site promotion is paused", self.rewindle_profile.lower())

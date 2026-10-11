@@ -25,7 +25,7 @@ export function ValuePill({
   return (
     <span
       className={`mx-0.5 inline-flex items-center rounded-full px-1.5 py-0
-        align-middle text-[12px] font-medium ${t.cls} ${className}`}
+        align-middle whitespace-nowrap text-[12px] font-medium ${t.cls} ${className}`}
       style={{ boxShadow: t.ring }}
     >
       {children}

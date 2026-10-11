@@ -415,5 +415,78 @@ class BuildIntegrationTests(unittest.TestCase):
         self.assertIn("Test-SetupHost.ps1", ci)
 
 
+class WizardWordingTests(unittest.TestCase):
+    """What a first-time home user is told stays true to what the program does, and the real-window smoke test can still find its way."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = read(WIZARD / "SetupApp.tsx")
+        cls.smoke = read(PROJECT / "tests" / "SetupWindowSmoke.cs")
+
+    def test_the_smoke_test_still_finds_every_page_title_and_button_it_waits_for(self) -> None:
+        # tests/SetupWindowSmoke.cs (run by Test-SetupWindow.ps1, a developer tool) drives the real window by these words.
+        titles = " | ".join(re.findall(r"title: '([^']+)'", self.app))
+        for part in re.findall(r"screen-title'\)\.textContent\.indexOf\('([^']+)'\)", self.smoke):
+            with self.subTest(title=part):
+                self.assertIn(part, titles)
+        for label in set(re.findall(r'Click\(view, "([^"]+)"\)', self.smoke)):
+            with self.subTest(button=label):
+                self.assertIn(f"label: '{label}'", self.app)
+
+    def test_the_wizard_never_shows_the_programs_internal_name(self) -> None:
+        for path in WIZARD.rglob("*.ts*"):
+            if "mock" in path.parts:
+                continue
+            code = re.sub(r"/\*.*?\*/|//[^\n]*", "", read(path), flags=re.S)
+            with self.subTest(file=path.name):
+                self.assertNotIn("ResticBackuper", code)
+
+    def test_a_saved_recovery_key_copy_is_only_called_checked_because_the_host_checks_it(self) -> None:
+        bridge = read(SETUP / "SetupBridge.cs")
+        self.assertIn("written[index] != key[index]", bridge)
+        self.assertIn("The copy didn’t match the original.", bridge)
+        recovery = read(WIZARD / "screens" / "Recovery.tsx")
+        self.assertIn("Saved and checked", recovery)
+        # A copy on the Windows drive, or on the backup drive, doesn't survive losing this PC, and the page says so.
+        self.assertIn("copyPlace(", recovery)
+        self.assertIn("on this PC’s own drive, so it won’t help if this PC is lost", recovery)
+        # Google Drive leaves choices.driveRoot empty, so the backups' drive comes from the repository path: a copy in that Drive
+        # is with the backups, never "away", and is never ticked as safe on its own.
+        self.assertIn("driveRoot(wizard.choices?.repository ?? '') || (wizard.choices?.driveRoot ?? '')", recovery)
+        self.assertNotIn("const backupRoot = wizard.choices?.driveRoot ?? '';", recovery)
+        self.assertIn("in the same Google Drive as your backups", recovery)
+
+    def test_a_disabled_next_says_why_and_a_check_in_progress_says_so(self) -> None:
+        for text in ("Fix the problem on this page to continue", "Enter a valid time to continue", "Checking this location…"):
+            with self.subTest(text=text):
+                self.assertIn(text, self.app)
+        # The wait for the installer's last answer on the location page is what keeps Next off while it checks.
+        self.assertRegex(self.app, r"next\('schedule', !choices\?\.repository \|\| errors \|\| checking\)")
+
+    def test_enter_never_starts_the_installation(self) -> None:
+        # The title takes the focus on every page, so Enter outside a control means Next; on Review Next is Install and its permission prompt.
+        self.assertIn("&& screen !== 'review') {", self.app)
+        self.assertIn("footer.next.variant === 'primary' && screen !== 'review'", self.app)
+
+    def test_the_done_page_does_not_claim_protection_that_has_not_happened(self) -> None:
+        done = read(WIZARD / "screens" / "Done.tsx")
+        self.assertNotIn("is protecting", done)
+        self.assertIn("nextRunDay(", done)
+        # What "Skip for now" left undone, and an autostart the installer reported as failed, are both said here.
+        self.assertIn("Your recovery key is still only on this PC.", done)
+        self.assertIn("dashboard_autostart_failed", done)
+        self.assertIn("<Done wizard={wizard} recovery={recovery} />", self.app)
+
+    def test_the_installers_conflict_messages_say_what_to_remove_and_how_to_go_on(self) -> None:
+        installer = read(PROJECT / "installer" / "Install-ResticBackuper.ps1")
+        for code, how in (("start_menu_shortcut_exists", "Delete $startMenuShortcut"), ("task_name_in_use", "Open Task Scheduler")):
+            with self.subTest(code=code):
+                found = re.search(rf"-Code '{code}' -Field 'environment' `\s*-Message (\"[^\"]*\")", installer)
+                self.assertIsNotNone(found)
+                self.assertIn(how, found.group(1))
+                self.assertIn("then try again", found.group(1))
+        self.assertNotIn("Start menu item named ResticBackuper", installer)
+
+
 if __name__ == "__main__":
     unittest.main()

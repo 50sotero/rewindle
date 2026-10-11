@@ -90,7 +90,7 @@
   font-size: var(--type-xs);
   font-variant-numeric: tabular-nums;
 }
-.restore-flow-steps button strong { min-width: 0; overflow: hidden; font-size: var(--type-xs); font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+.restore-flow-steps button strong { min-width: 0; overflow: hidden; font-size: var(--type-sm); font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
 .restore-flow-steps button small { display: none; }
 .restore-flow-steps button.is-active { border-color: color-mix(in srgb, var(--accent) 38%, var(--line)); color: var(--ink); background: var(--accent-tint); }
 .restore-flow-steps button.is-active > span, .restore-flow-steps button.is-done > span { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-tint); }
@@ -108,7 +108,7 @@
 .restore-summary-item > span:last-child, .restore-summary-scope > summary > span:nth-child(2) { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }
 .restore-summary-item small { color: var(--ink-3); font-size: var(--type-xs); letter-spacing: .25px; text-transform: uppercase; }
 .restore-summary-item strong { overflow: hidden; color: var(--ink); font-size: var(--type-sm); font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
-.restore-summary-item em { overflow: hidden; color: var(--ink-3); font-size: var(--type-xs); font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.restore-summary-item em { overflow: hidden; color: var(--ink-3); font-size: var(--type-sm); font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
 .restore-summary-icon { display: grid; width: 24px; height: 24px; flex: 0 0 24px; place-items: center; border-radius: var(--r-chip); color: var(--accent-ink); background: var(--accent-tint); }
 .restore-summary-scope { display: block; padding: 0; }
 .restore-summary-scope > summary { display: flex; min-width: 0; align-items: flex-start; gap: 8px; padding: 8px 9px; cursor: pointer; list-style: none; }
@@ -118,7 +118,7 @@
 .restore-summary-scope[open] .restore-summary-chevron { transform: rotate(90deg); }
 .restore-summary-scope ul { max-height: 120px; margin: 0; padding: 0 8px 8px 40px; overflow-y: auto; scrollbar-gutter: stable; }
 .restore-summary-scope li { display: flex; min-width: 0; align-items: center; gap: 5px; padding: 3px 0; border-top: 1px solid var(--line-soft); }
-.restore-summary-scope li code { min-width: 0; flex: 1; overflow: hidden; color: var(--ink-2); font-family: var(--font-mono-face), monospace; font-size: var(--type-xs); text-overflow: ellipsis; white-space: nowrap; }
+.restore-summary-scope li code { min-width: 0; flex: 1; overflow: hidden; color: var(--ink-2); font-family: var(--font-mono-face), monospace; font-size: var(--type-sm); text-overflow: ellipsis; white-space: nowrap; }
 .restore-summary-scope li button { flex: 0 0 auto; }
 /* The body is the scroll region, and a column the step fills: a list inside a step takes the room left over (never less than
  * its minimum), so the window scrolls only when even that minimum does not fit. */
@@ -127,7 +127,7 @@
 .restore-flow-step { display: flex; min-height: 0; flex-direction: column; }
 .restore-flow-section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
 .restore-flow-section-heading h3 { margin: 6px 0 4px; font-size: var(--type-xl); font-weight: 600; letter-spacing: -.35px; }
-.restore-flow-section-heading p { margin: 0; color: var(--ink-2); font-size: var(--type-xs); line-height: 1.55; }
+.restore-flow-section-heading p { margin: 0; color: var(--ink-2); font-size: var(--type-sm); line-height: 1.55; }
 .restore-flow-muted-icon { color: var(--ink-3); }
 .restore-snapshot-filters { display: flex; align-items: center; gap: 7px; margin-bottom: 12px; }
 .restore-flow-search, .restore-date-field {
@@ -144,10 +144,11 @@
 }
 .restore-flow-search { flex: 1; }
 .restore-flow-search:focus-within, .restore-date-field:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent); }
-.restore-flow-search input, .restore-date-field input { min-width: 0; flex: 1; border: 0; outline: 0; color: var(--ink); background: transparent; font-size: var(--type-xs); }
-.restore-date-field { flex: 0 0 136px; }
+.restore-flow-search input, .restore-date-field input { min-width: 0; flex: 1; border: 0; outline: 0; color: var(--ink); background: transparent; font-size: var(--type-sm); }
+/* Wide enough for the whole yyyy-mm-dd placeholder and the picker button at the larger type. */
+.restore-date-field { flex: 0 0 160px; }
 .restore-date-field input { color-scheme: inherit; }
-.restore-date-separator { color: var(--ink-3); font-size: var(--type-xs); }
+.restore-date-separator { color: var(--ink-3); font-size: var(--type-sm); }
 /* overscroll-behavior: a list that has reached its end does not hand the wheel on to the dialog behind it. The one column is
  * minmax(0, 1fr), not 1fr, so a long source list ellipsizes inside its card instead of widening the list past the dialog. */
 .restore-snapshot-list { display: grid; flex: 1 1 0; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 7px; min-height: 164px; overflow-y: auto; overscroll-behavior: contain; padding: 2px; scrollbar-gutter: stable; }
@@ -172,27 +173,33 @@
 .restore-snapshot-icon { display: grid; width: 32px; height: 32px; flex: 0 0 32px; place-items: center; border-radius: var(--r-control); color: var(--accent-ink); background: var(--accent-tint); }
 .restore-snapshot-main { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 3px; }
 .restore-snapshot-main strong { overflow: hidden; color: var(--ink); font-size: var(--type-sm); font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
-.restore-snapshot-main span, .restore-snapshot-main small { overflow: hidden; color: var(--ink-2); font-size: var(--type-xs); text-overflow: ellipsis; white-space: nowrap; }
+.restore-snapshot-main span, .restore-snapshot-main small { overflow: hidden; color: var(--ink-2); font-size: var(--type-sm); text-overflow: ellipsis; white-space: nowrap; }
 .restore-snapshot-main small { color: var(--ink-3); }
-.restore-snapshot-main code { font-family: var(--font-mono-face), monospace; font-size: var(--type-xs); }
+.restore-snapshot-main code { font-family: var(--font-mono-face), monospace; font-size: var(--type-sm); }
 .restore-snapshot-meta { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; color: var(--ink-3); }
 .restore-flow-empty { display: flex; min-height: 154px; align-items: center; justify-content: center; flex-direction: column; gap: 7px; padding: 24px; color: var(--ink-3); text-align: center; }
 .restore-flow-empty strong { color: var(--ink); font-size: var(--type-sm); font-weight: 550; }
-.restore-flow-empty p { max-width: 390px; margin: 0 0 6px; color: var(--ink-2); font-size: var(--type-xs); line-height: 1.6; }
-.restore-flow-inline-warning { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--orange) 35%, var(--line)); border-radius: var(--r-control); color: var(--ink); background: var(--orange-tint); font-size: var(--type-xs); line-height: 1.5; }
+.restore-flow-empty p { max-width: 440px; margin: 0 0 6px; color: var(--ink-2); font-size: var(--type-sm); line-height: 1.6; }
+.restore-flow-inline-warning { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--orange) 35%, var(--line)); border-radius: var(--r-control); color: var(--ink); background: var(--orange-tint); font-size: var(--type-sm); line-height: 1.5; }
 .restore-flow-inline-warning > svg { flex: 0 0 auto; color: var(--orange-ink); }
 /* Above its content rather than below it (the limit on selected items). */
 .restore-flow-inline-warning.is-above { margin: 0 0 8px; }
+/* Something to know that asks nothing of the person (how the Windows prompts will go, a list cut short): neutral, not the orange of a thing to act on. */
+.restore-flow-note { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 8px; padding: 9px 12px; border: 1px solid var(--line); border-radius: var(--r-control); color: var(--ink-2); background: var(--canvas); font-size: var(--type-sm); line-height: 1.5; }
+.restore-flow-note > svg { flex: 0 0 auto; margin-top: 2px; color: var(--accent-ink); }
+/* Shortcuts to the backed-up folders: a backup lists one folder per read, so a shortcut saves a read (and a Windows prompt) for every level. */
+.restore-jump { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 8px; color: var(--ink-2); font-size: var(--type-sm); }
+.restore-jump > span { margin-right: 2px; }
 .restore-whole-snapshot { display: flex; align-items: center; gap: 10px; padding: 12px 13px; margin-bottom: 10px; border: 1px solid var(--line); border-radius: var(--r-card); color: var(--ink-2); background: var(--surface); cursor: pointer; }
 .restore-whole-snapshot.is-selected { border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); background: var(--accent-tint); }
 .restore-whole-snapshot input, .restore-entry-check input, .restore-legacy-confirmation input { accent-color: var(--accent); }
 .restore-whole-snapshot span { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 3px; }
 .restore-whole-snapshot strong { color: var(--ink); font-size: var(--type-sm); font-weight: 550; }
-.restore-whole-snapshot small { color: var(--ink-2); font-size: var(--type-xs); }
+.restore-whole-snapshot small { color: var(--ink-2); font-size: var(--type-sm); }
 .restore-whole-snapshot > svg { color: var(--accent-ink); }
 /* The step is a flex column, where margins do not collapse: 3px here and the 10px under the card above make the 13px gap it had. */
 .restore-tree-toolbar { display: flex; align-items: center; gap: 10px; margin: 3px 0 8px; }
-.restore-tree-breadcrumb { display: flex; min-width: 0; flex: 1; align-items: center; gap: 6px; color: var(--ink-3); font-size: var(--type-xs); }
+.restore-tree-breadcrumb { display: flex; min-width: 0; flex: 1; align-items: center; gap: 6px; color: var(--ink-3); font-size: var(--type-sm); }
 .restore-tree-up { flex: 0 0 auto; }
 /* The folders from the snapshot root down to where you are. The ones above give way first (their names ellipsize); the
  * snapshot root and the folder you are in keep theirs. */
@@ -203,7 +210,7 @@
 .restore-tree-crumbs > li[aria-hidden="true"] { min-width: 0; flex-shrink: 0; }
 .restore-tree-crumbs > li:last-child { flex-shrink: 0; max-width: 60%; }
 .restore-tree-crumbs > li > svg { flex: 0 0 auto; }
-.restore-crumb { display: inline-flex; align-items: center; gap: 5px; min-width: 0; padding: 2px 4px; border: 0; border-radius: var(--r-chip); color: var(--accent-ink); background: transparent; font-size: var(--type-xs); }
+.restore-crumb { display: inline-flex; align-items: center; gap: 5px; min-width: 0; padding: 2px 4px; border: 0; border-radius: var(--r-chip); color: var(--accent-ink); background: transparent; font-size: var(--type-sm); }
 .restore-crumb > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 button.restore-crumb:hover:not(:disabled) { background: var(--accent-tint); }
 /* A crumb that opens its folder is at least 24px square, whatever its name (a one-letter folder was 14px wide). The toolbar row is taller than
@@ -212,7 +219,7 @@ button.restore-crumb { justify-content: center; min-width: 24px; min-height: 24p
 .restore-crumb.is-current { color: var(--ink); font-weight: 550; }
 .restore-crumb-gap { padding: 0 3px; color: var(--ink-3); }
 .restore-tree-toolbar .restore-flow-search { flex: 0 1 230px; }
-.restore-tree-error { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; padding: 9px 11px; border: 1px solid color-mix(in srgb, var(--red) 38%, var(--line)); border-radius: var(--r-control); color: var(--ink); background: var(--red-tint); font-size: var(--type-xs); line-height: 1.5; }
+.restore-tree-error { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; padding: 9px 11px; border: 1px solid color-mix(in srgb, var(--red) 38%, var(--line)); border-radius: var(--r-control); color: var(--ink); background: var(--red-tint); font-size: var(--type-sm); line-height: 1.5; }
 .restore-tree-error > svg { flex: 0 0 auto; color: var(--red-ink); }
 .restore-tree-error > span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
 .restore-tree-error strong { font-weight: 550; }
@@ -236,7 +243,7 @@ label.restore-entry-name { cursor: pointer; }
 .restore-entry-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .restore-entry-name > svg:first-child { flex: 0 0 auto; color: var(--accent-ink); }
 .restore-entry-name > svg:last-child { flex: 0 0 auto; margin-left: auto; color: var(--ink-3); }
-.restore-entry-size { flex: 0 0 80px; overflow: hidden; color: var(--ink-3); font-family: var(--font-mono-face), monospace; font-size: var(--type-xs); text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.restore-entry-size { flex: 0 0 80px; overflow: hidden; color: var(--ink-3); font-family: var(--font-mono-face), monospace; font-size: var(--type-sm); text-align: right; text-overflow: ellipsis; white-space: nowrap; }
 .restore-destination-card { padding: 17px; border: 1px solid var(--line); border-radius: var(--r-card); background: var(--surface); }
 .restore-destination-card > label { display: block; margin-bottom: 8px; color: var(--ink); font-size: var(--type-sm); font-weight: 550; }
 .restore-destination-entry { display: flex; align-items: center; gap: 9px; padding: 0 11px; border: 1px solid var(--line-strong); border-radius: var(--r-control); color: var(--ink-3); background: var(--inset); }
@@ -244,41 +251,50 @@ label.restore-entry-name { cursor: pointer; }
 .restore-destination-entry input { min-width: 0; flex: 1; padding: 12px 0; border: 0; outline: 0; color: var(--ink); background: transparent; font-size: var(--type-sm); }
 .restore-destination-entry input[aria-invalid="true"] { color: var(--orange-ink); }
 .restore-destination-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; }
-.restore-destination-actions > span { color: var(--ink-3); font-size: var(--type-xs); line-height: 1.5; }
+.restore-destination-actions > span { color: var(--ink-2); font-size: var(--type-sm); line-height: 1.5; }
+.restore-destination-actions > button { flex: none; white-space: nowrap; }
 .restore-validation { display: flex; min-height: 74px; align-items: flex-start; gap: 10px; padding: 14px; margin-top: 13px; border: 1px solid var(--line); border-radius: var(--r-card); color: var(--ink-3); background: var(--canvas); }
 .restore-validation > svg { flex: 0 0 auto; margin-top: 1px; }
 .restore-validation.is-ready { border-color: color-mix(in srgb, var(--green) 38%, var(--line)); color: var(--green-ink); background: var(--green-tint); }
 .restore-validation.is-error { border-color: color-mix(in srgb, var(--orange) 38%, var(--line)); color: var(--orange-ink); background: var(--orange-tint); }
 .restore-validation strong { display: block; color: var(--ink); font-size: var(--type-sm); font-weight: 550; }
-.restore-validation p { margin: 4px 0 0; color: var(--ink-2); font-size: var(--type-xs); line-height: 1.55; overflow-wrap: anywhere; }
+.restore-validation p { margin: 4px 0 0; color: var(--ink-2); font-size: var(--type-sm); line-height: 1.55; overflow-wrap: anywhere; }
 .restore-validation-warning { color: var(--orange-ink) !important; }
+/* Why the restore goes to a separate folder, for the person who expected it in place. */
+.restore-why { margin-top: 12px; color: var(--ink-2); font-size: var(--type-sm); }
+.restore-why summary { width: fit-content; cursor: pointer; color: var(--accent-ink); }
+.restore-why summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-chip); }
+.restore-why p { margin: 6px 0 0; line-height: 1.6; }
 .restore-review-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 1fr); gap: 9px; }
 .restore-review-card { min-width: 0; padding: 13px; border: 1px solid var(--line); border-radius: var(--r-card); background: var(--surface); }
-.restore-review-label { display: flex; align-items: center; gap: 6px; margin-bottom: 9px; color: var(--ink-3); font-size: var(--type-xs); }
+.restore-review-label { display: flex; align-items: center; gap: 6px; margin-bottom: 9px; color: var(--ink-3); font-size: var(--type-sm); }
 .restore-review-label svg { color: var(--accent-ink); }
 .restore-review-card strong { display: block; overflow: hidden; color: var(--ink); font-size: var(--type-sm); font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
 /* The backup's source folders can run long. They wrap here, and past a few lines scroll, so every one of them can be read. */
-.restore-review-card > span:last-child { display: block; max-height: 112px; margin-top: 5px; overflow-y: auto; overflow-wrap: anywhere; color: var(--ink-2); font-size: var(--type-xs); line-height: 1.5; }
+.restore-review-card > span:last-child { display: block; max-height: 112px; margin-top: 5px; overflow-y: auto; overflow-wrap: anywhere; color: var(--ink-2); font-size: var(--type-sm); line-height: 1.5; }
 /* The exact scope: one path to a line, wrapped rather than cut, and scrolling once the list is longer than a few. */
 .restore-review-paths { max-height: 132px; margin: 6px 0 0; padding: 0; overflow-y: auto; list-style: none; }
 .restore-review-paths li + li { margin-top: 3px; }
-.restore-review-paths code { display: block; overflow-wrap: anywhere; color: var(--ink-2); font-family: var(--font-mono-face), monospace; font-size: var(--type-xs); line-height: 1.5; }
+.restore-review-paths code { display: block; overflow-wrap: anywhere; color: var(--ink-2); font-family: var(--font-mono-face), monospace; font-size: var(--type-sm); line-height: 1.5; }
 .restore-review-path { overflow-wrap: anywhere !important; white-space: normal !important; }
 .restore-legacy-confirmation { display: flex; align-items: flex-start; gap: 10px; padding: 12px 13px; margin-top: 11px; border: 1px solid color-mix(in srgb, var(--orange) 38%, var(--line)); border-radius: var(--r-card); background: var(--orange-tint); cursor: pointer; }
 .restore-legacy-confirmation span { display: flex; flex-direction: column; gap: 4px; }
 .restore-legacy-confirmation strong { color: var(--ink); font-size: var(--type-sm); font-weight: 550; }
-.restore-legacy-confirmation small { color: var(--ink-2); font-size: var(--type-xs); line-height: 1.55; }
-.restore-review-safety { display: flex; align-items: flex-start; gap: 8px; padding: 12px 13px; margin-top: 11px; border: 1px solid var(--line); border-radius: var(--r-control); color: var(--ink-2); background: var(--canvas); font-size: var(--type-xs); line-height: 1.55; }
+.restore-legacy-confirmation small { color: var(--ink-2); font-size: var(--type-sm); line-height: 1.55; }
+.restore-review-safety { display: flex; align-items: flex-start; gap: 8px; padding: 12px 13px; margin-top: 11px; border: 1px solid var(--line); border-radius: var(--r-control); color: var(--ink-2); background: var(--canvas); font-size: var(--type-sm); line-height: 1.55; }
 .restore-review-safety svg { flex: 0 0 auto; color: var(--accent-ink); }
+/* On the review it comes first: it is what the person most wants to know before pressing Restore now. */
+.restore-review-safety.is-first { margin: 0 0 12px; }
 .restore-flow-progress { display: flex; min-height: 300px; align-items: center; justify-content: center; gap: 14px; padding: 30px 20px; }
 .restore-progress-emblem { display: grid; width: 54px; height: 54px; flex: 0 0 54px; place-items: center; border-radius: var(--r-panel); color: var(--accent-ink); background: var(--accent-tint); }
 .restore-flow-progress h3 { margin: 7px 0 3px; font-size: var(--type-xl); font-weight: 600; }
-.restore-flow-progress p { max-width: 500px; margin: 0; color: var(--ink-2); font-size: var(--type-xs); line-height: 1.6; }
+.restore-flow-progress p { max-width: 500px; margin: 0; color: var(--ink-2); font-size: var(--type-base); line-height: 1.6; }
 .restore-flow-progress code { display: block; max-width: 500px; margin-top: 8px; overflow: hidden; color: var(--ink-3); font-family: var(--font-mono-face), monospace; font-size: var(--type-xs); text-overflow: ellipsis; white-space: nowrap; }
 .restore-progress-rail { width: min(490px, 55vw); height: 7px; margin-top: 17px; overflow: hidden; border-radius: var(--r-pill); background: var(--line); }
 .restore-progress-rail > div { height: 100%; border-radius: inherit; background: var(--accent); }
-.restore-progress-percent { display: block; margin-top: 6px; color: var(--ink-3); font-family: var(--font-mono-face), monospace; font-size: var(--type-xs); }
-.restore-progress-lock { display: inline-flex; align-items: center; gap: 6px; margin-top: 12px !important; color: var(--ink-3) !important; }
+.restore-progress-percent { display: block; margin-top: 6px; color: var(--ink-3); font-family: var(--font-mono-face), monospace; font-size: var(--type-sm); }
+.restore-progress-lock { display: inline-flex; align-items: center; gap: 6px; margin-top: 12px !important; color: var(--ink-2) !important; }
+.restore-progress-wait { margin-top: 12px !important; }
 .restore-flow-progress .restore-progress-hint { display: flex; align-items: flex-start; gap: 7px; margin-top: 10px; padding: 9px 11px; border-radius: var(--r-control); color: var(--ink); background: var(--accent-tint); }
 .restore-progress-hint svg { flex: 0 0 auto; margin-top: 2px; color: var(--accent-ink); }
 .restore-spin { animation: restore-spin 1s linear infinite; }
@@ -288,18 +304,22 @@ label.restore-entry-name { cursor: pointer; }
 .restore-flow-result.is-orange .restore-result-emblem { color: var(--orange-ink); background: var(--orange-tint); }
 .restore-flow-result.is-red .restore-result-emblem { color: var(--red-ink); background: var(--red-tint); }
 .restore-flow-result h3 { margin: 4px 0 0; font-size: var(--type-xl); font-weight: 600; }
-.restore-flow-result p { max-width: 520px; margin: 0; color: var(--ink-2); font-size: var(--type-xs); line-height: 1.6; }
-.restore-result-stats { display: flex; flex-wrap: wrap; justify-content: center; gap: 9px; margin-top: 7px; color: var(--ink-2); font-size: var(--type-xs); }
+.restore-flow-result p { max-width: 520px; margin: 0; color: var(--ink-2); font-size: var(--type-base); line-height: 1.6; }
+.restore-result-stats { display: flex; flex-wrap: wrap; justify-content: center; gap: 9px; margin-top: 7px; color: var(--ink-2); font-size: var(--type-sm); }
 .restore-result-stats span { display: inline-flex; align-items: center; gap: 4px; padding: 6px 9px; border-radius: var(--r-pill); background: var(--surface); }
 .restore-result-stats strong { color: var(--ink); }
 .restore-result-stats code { margin-top: 0; color: var(--ink); }
 .restore-result-stats .is-verified { color: var(--green-ink); }
 .restore-result-stats .is-unverified { color: var(--orange-ink); }
-.restore-flow-result code { max-width: min(600px, 100%); margin-top: 3px; overflow-wrap: anywhere; color: var(--ink-3); font-family: var(--font-mono-face), monospace; font-size: var(--type-xs); }
+.restore-flow-result code { max-width: min(600px, 100%); margin-top: 3px; overflow-wrap: anywhere; color: var(--ink-3); font-family: var(--font-mono-face), monospace; font-size: var(--type-sm); }
 /* Where the files are: a chip that wraps, so a long path is read in full, and that can be selected and copied, rather than a line of
  * small grey type. The footer opens the folder or copies the path; the page sends no path itself. */
 .restore-result-folder { display: flex; max-width: min(620px, 100%); flex-direction: column; align-items: center; gap: 6px; margin-top: 9px; }
-.restore-result-folder > span { color: var(--ink-3); font-size: var(--type-xs); }
+.restore-result-folder > span { color: var(--ink-3); font-size: var(--type-sm); }
+/* The result sentence is the one thing the person came to this screen for. */
+.restore-flow-result #restore-result-message { color: var(--ink); font-size: var(--type-md); }
+/* Where inside the folder the files are, and what to do next: said under the path it is about. */
+.restore-flow-result p.restore-result-where { max-width: 520px; margin: 4px 0 0; text-align: center; }
 .restore-flow-result .restore-result-path { max-width: 100%; margin: 0; padding: 8px 12px; border: 1px solid var(--line-strong); border-radius: var(--r-control); background: var(--surface); color: var(--ink); font-size: var(--type-sm); line-height: 1.55; overflow-wrap: anywhere; text-align: left; user-select: text; }
 /* The live regions the notice is put into (see RestoreFlowModal). They are always there and empty most of the time, so they take no
  * room of their own, and a short panel does not squeeze the notice they hold. */
@@ -311,8 +331,12 @@ label.restore-entry-name { cursor: pointer; }
 .restore-flow-notice > span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
 .restore-flow-notice.is-error { border-color: color-mix(in srgb, var(--red) 46%, var(--line)); }
 .restore-flow-notice.is-error > svg { color: var(--red-ink); }
+/* The question shown when Escape or Close would forget the choices made; it sits where a notice does. */
+.restore-flow-confirm { display: flex; flex-shrink: 0; align-items: center; gap: 10px; margin: 0 25px 12px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: var(--r-control); color: var(--ink); background: var(--surface); box-shadow: var(--shadow-raised); font-size: var(--type-sm); line-height: 1.45; }
+.restore-flow-confirm > svg { flex: 0 0 auto; color: var(--ink-3); }
+.restore-flow-confirm > span { min-width: 0; flex: 1; }
 .restore-flow-footer { display: flex; align-items: center; justify-content: space-between; gap: 13px; flex-shrink: 0; padding: 14px 25px; border-top: 1px solid var(--line); background: var(--surface); }
-.restore-flow-footnote { display: flex; min-width: 0; align-items: flex-start; gap: 7px; color: var(--ink-3); font-size: var(--type-xs); line-height: 1.45; }
+.restore-flow-footnote { display: flex; min-width: 0; align-items: flex-start; gap: 7px; color: var(--ink-3); font-size: var(--type-sm); line-height: 1.45; }
 .restore-flow-footnote > svg { flex: 0 0 auto; margin-top: 2px; }
 /* The height of a button is reserved even where a step has none, so the footer does not change height from step to step. */
 .restore-flow-actions { display: flex; flex-shrink: 0; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; min-height: 33px; }
@@ -335,7 +359,7 @@ html[data-reduced-motion=true] .restore-spin { animation: none; }
   .restore-flow-section-heading { margin-bottom: 12px; }
   .restore-whole-snapshot { padding-top: 9px; padding-bottom: 9px; }
   .restore-flow-progress, .restore-flow-result { min-height: 220px; }
-  .restore-flow-notice { margin-right: 20px; margin-left: 20px; }
+  .restore-flow-notice, .restore-flow-confirm { margin-right: 20px; margin-left: 20px; }
   .restore-flow-footer { padding: 10px 20px; }
 }
 /* Narrower than the desktop window can be (it stops at 900px), as in a browser showing the sample-data build. */
@@ -347,7 +371,9 @@ html[data-reduced-motion=true] .restore-spin { animation: none; }
   .restore-flow-footnote { align-self: flex-start; }
   .restore-flow-actions { width: 100%; }
   .restore-flow-actions > button { flex: 1; }
-  .restore-flow-notice { margin-right: 17px; margin-left: 17px; }
+  .restore-flow-notice, .restore-flow-confirm { margin-right: 17px; margin-left: 17px; }
+  .restore-flow-confirm { flex-wrap: wrap; }
+  .restore-flow-confirm > span { flex-basis: 100%; }
   .restore-flow-steps { padding-left: 17px; padding-right: 17px; }
   .restore-flow-persistent-summary { display: none; }
   .restore-flow-steps button { justify-content: center; padding: 7px; }
@@ -364,8 +390,18 @@ html[data-reduced-motion=true] .restore-spin { animation: none; }
   .restore-progress-rail { width: min(100%, 490px); }
   .restore-destination-actions { align-items: flex-start; flex-direction: column; }
 }
+/* The Restore page (RestorePage in App.tsx): the card beside the four steps, in the dialog's own order and words. */
+.restore-permission { margin-top: 14px; }
+.restore-readiness { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--line); }
+.restore-readiness p { margin: 8px 0 0; color: var(--ink-2); font-size: var(--type-sm); line-height: 1.55; }
+.restore-howto { display: grid; margin: 0; padding: 0; list-style: none; counter-reset: restore-step; overflow: hidden; border-radius: var(--r-card); background: var(--surface); box-shadow: var(--shadow-card); }
+.restore-howto li { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 2px 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); counter-increment: restore-step; }
+.restore-howto li:last-child { border-bottom: 0; }
+.restore-howto li::before { content: counter(restore-step); display: grid; width: 24px; height: 24px; grid-row: span 2; place-items: center; border: 1px solid var(--accent); border-radius: 50%; color: var(--accent-ink); background: var(--accent-tint); font-size: var(--type-sm); font-variant-numeric: tabular-nums; }
+.restore-howto strong { color: var(--ink); font-size: var(--type-base); font-weight: 550; }
+.restore-howto span { color: var(--ink-2); font-size: var(--type-sm); line-height: 1.55; }
 @media (forced-colors: active) {
-  .restore-flow-panel, .restore-snapshot-card, .restore-tree, .restore-destination-card, .restore-validation, .restore-review-card { border-color: CanvasText; }
+  .restore-flow-panel, .restore-snapshot-card, .restore-tree, .restore-destination-card, .restore-validation, .restore-review-card, .restore-flow-note, .restore-flow-confirm { border-color: CanvasText; }
   .restore-snapshot-card:disabled { opacity: 1; color: GrayText; }
   /* The rail's fill and track are plain backgrounds, which forced colors repaints as Canvas. */
   .restore-progress-rail { outline: 1px solid CanvasText; outline-offset: -1px; }

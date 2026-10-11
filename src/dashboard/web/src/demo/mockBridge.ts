@@ -8,6 +8,7 @@
 // not contain it.
 import type { CommandName, DashboardState, NativeCommand, NativeMessage, NativeWebView } from '../native-types';
 import { createSampleRunDetails, createSampleState, formatBytes, formatDuration } from './demoState';
+import { createRestoreDemo } from './restoreDemo';
 
 const READ_ONLY = 'Sample data is read-only.';
 // The desktop host re-sends state about once a second. The app treats 15 seconds of silence as a lost
@@ -61,6 +62,9 @@ export function installSampleBridge(): void {
     state.updated = `Updated ${new Date().toLocaleTimeString(undefined, { hour12: false })}`;
     post({ type: 'state', state });
   };
+
+  // The Restore flow, with invented backups and folders; it moves `state.restoreFlow` through its steps (see restoreDemo.ts).
+  const restore = createRestoreDemo(() => state, publish);
 
   const togglePreview = () => {
     state.preview = !state.preview;
@@ -118,7 +122,7 @@ export function installSampleBridge(): void {
         togglePreview();
         return null;
       default:
-        return READ_ONLY;
+        return restore.handles(command) ? restore.handle(command, payload) : READ_ONLY;
     }
   };
 
