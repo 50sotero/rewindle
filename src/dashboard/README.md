@@ -302,7 +302,7 @@ these user-facing rules when you change the dashboard:
 | `Ctrl+1` / `Ctrl+2` / `Ctrl+3` / `Ctrl+4` | Open Protection / Activity / Restore / Settings. |
 | `/` | Focus search on Activity, or on Protection once it lists more than eight folders. |
 | `F5` | Refresh dashboard state. |
-| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Zoom in / zoom out / back to 100% (80% to 200%). Works in dialogs too. |
+| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Zoom in / zoom out / back to 100% (80% to 200%). Works in dialogs too. The size is kept in `zoom.json` beside the theme and motion files. Settings > Text size does the same. |
 | `↑` / `↓` / `Home` / `End` / `PageUp` / `PageDown` on an Activity row | Move between runs. `Tab` leaves the table. |
 | `Enter` / `Space` on an Activity row | Open run details / select the run. |
 | `Esc` in the Activity search field | Clear the search and keep focus in the field. |

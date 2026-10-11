@@ -129,6 +129,9 @@ namespace ResticBackuper.Dashboard
         private TextBlock elapsedValue;
         private TextBlock errorsValue;
         private TextBlock lastUpdated;
+        // When the figures on screen were read, for the page to write in the viewer's region ("updatedAt" in the web state); null while the
+        // read is being retried, when `lastUpdated` says so in words instead.
+        private DateTime? lastUpdatedAt;
         private TextBlock runCount;
         private DataGrid historyGrid;
         private Button viewRunDetailsButton;
@@ -3905,6 +3908,7 @@ namespace ResticBackuper.Dashboard
             webTelemetryError = error.Message;
             heroDetail.Text = error.Message;
             SetBadge("DATA RETRY", Amber, BrushFrom("#3A2F18"));
+            lastUpdatedAt = null;
             lastUpdated.Text = "Retrying automatically";
         }
 
@@ -6626,7 +6630,9 @@ namespace ResticBackuper.Dashboard
             }
             historyAnimationSignature = newHistorySignature;
             runCount.Text = history.Count.ToString(CultureInfo.InvariantCulture) + (history.Count == 1 ? " run" : " runs");
-            lastUpdated.Text = "Updated " + snapshot.LastUpdatedLocal.ToString("HH:mm:ss", CultureInfo.CurrentCulture);
+            // To the minute: the page shows this on every screen, and a clock that changes every second reads as noise.
+            lastUpdatedAt = snapshot.LastUpdatedLocal;
+            lastUpdated.Text = "Updated " + snapshot.LastUpdatedLocal.ToString("HH:mm", CultureInfo.CurrentCulture);
             UpdateBackupButton(snapshot);
             UpdateActivityActions();
             WriteHeartbeat(snapshot, true);
@@ -6971,7 +6977,7 @@ namespace ResticBackuper.Dashboard
                 // a cancel being carried out, have nothing new to announce.
                 if (!wasActive)
                 {
-                    ShowTrayMessage("Backup started", "Restic is now protecting your files.", Forms.ToolTipIcon.Info);
+                    ShowTrayMessage("Backup started", "Rewindle is backing up your files.", Forms.ToolTipIcon.Info);
                 }
             }
             else if (snapshot.NeedsAnomalyReview)
