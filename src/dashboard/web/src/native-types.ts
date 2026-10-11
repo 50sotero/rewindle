@@ -93,7 +93,7 @@ export interface RestoreResult {
   title?: string;
   message?: string;
   retryable?: boolean;
-  /** Names the recovery action when it is not a plain retry (for example 'Reload Restore'). */
+  /** Names the recovery action when it is not a plain retry (for example 'Start again'). */
   retryLabel?: string;
 }
 export interface RestoreFlowState {
@@ -221,7 +221,12 @@ export interface DashboardState {
     /** The provider the off-site evidence comes from ("Google Drive"), only when the host's evidence names one. Absent or empty otherwise. */
     provider?: string;
   };
-  recovery: { title: string; detail: string; repairNeeded: boolean; repairMessage: string; repairState: string; repairBusy: boolean; repairPercent: number | null };
+  /**
+   * `next` says what the Restore page offers when restoring is not available: 'refresh' (read the installation again), 'setup' (run
+   * Rewindle Setup again; the detail says how), 'wait' (a backup or a change is running and it unlocks by itself), or empty when
+   * there is nothing to do or the repair banner has the action. Additive: an older host does not send it.
+   */
+  recovery: { title: string; detail: string; repairNeeded: boolean; repairMessage: string; repairState: string; repairBusy: boolean; repairPercent: number | null; next?: 'refresh' | 'setup' | 'wait' | '' };
   actions: Partial<Record<CommandName, ActionState>>;
   runDetails?: RunDetailsState | null;
   restoreFlow?: RestoreFlowState | null;
