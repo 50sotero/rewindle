@@ -739,22 +739,43 @@ function ActivityPage({ state, send, view, setView, openRunDetails, openRestore,
   </>;
 }
 
-function RestorePage({ state, send }: { state: DashboardState; send: Send }) {
-  const steps: TaskRow[] = [
-    { key: 'choose', label: 'Choose a backup', amount: '', step: 1, status: 'guide', details: [{ label: 'Browse your saved backups in Restore Center.', meta: '' }] },
-    { key: 'find', label: 'Find your files', amount: '', step: 2, status: 'guide', details: [{ label: 'Explore the original folder structure and select what you need.', meta: '' }] },
-    { key: 'destination', label: 'Choose an empty folder', amount: '', step: 3, status: 'guide', details: [{ label: 'Restore into a new or empty location. Your original files stay in place.', meta: '' }] },
-    { key: 'verify', label: 'Restore and verify', amount: '', step: 4, status: 'guide', details: [{ label: 'Check the recovered files before using them.', meta: '' }] },
-  ];
-  const note = modeNote(state);
-  if (serviceMissing(state)) return <><Heading title="Restore" description="Choose a saved backup and recover files to a separate folder." note={note} /><SetupNotice state={state} send={send} /></>;
-  return <><Heading title="Restore" description="Choose a saved backup and recover files to a separate folder." note={note} />
+function RestorePage({ state: shown, send }: { state: DashboardState; send: Send }) {
+  const note = modeNote(shown);
+  // The sample data walks the whole flow on invented backups (demo/restoreDemo.ts), so this page's button is the one the sample leaves on.
+  const state: DashboardState = shown.demo && shown.actions.openRestore
+    ? { ...shown, actions: { ...shown.actions, openRestore: { ...shown.actions.openRestore, enabled: true, help: 'Choose a backup and restore files into a separate folder. Windows will ask for your permission.' } } }
+    : shown;
+  const description = 'Get back files you deleted, lost or changed. Rewindle copies them from a backup into a new folder; your current files are never touched.';
+  if (serviceMissing(state)) return <><Heading title="Restore" description={description} note={note} /><SetupNotice state={state} send={send} /></>;
+  const { recovery } = state;
+  const ready = !!state.actions.openRestore?.enabled;
+  // What the page offers while restoring is not available. A host that does not say is taken to need a fresh read (an unavailable
+  // restore with nothing running and no repair to make); the repair banner above has its own button, and the sample note says why itself.
+  const next = recovery.next ?? (ready || recovery.repairNeeded || note ? '' : 'refresh');
+  // Waiting is not a problem (it unlocks by itself) and a sample or preview is paused on purpose, so only the rest is drawn as one.
+  const tone = ready || note ? '' : next === 'wait' ? 'active' : 'warning';
+  // The backup to look at first: the newest one that saved something. The dialog marks it "Newest" in its list.
+  const newest = ready ? state.history.filter(run => run.success && run.snapshot).reduce<RunState | null>((best, run) => !best || Date.parse(run.started) > Date.parse(best.started) ? run : best, null) : null;
+  // The earlier edition (and an older engine) asks Windows for every protected step; a newer one asks once. Only the earlier one is certain from here.
+  const permission = state.setup?.engineProfile === 'legacy'
+    ? 'On this computer Windows asks for your permission each time Rewindle opens your backup: once to list your backups, once for each folder you open, and once to restore. Choose Yes each time.'
+    : 'Windows asks for your permission (a shield prompt) before Rewindle reads your backup. Choose Yes.';
+  return <><Heading title="Restore" description={description} note={note} />
     <Repairs state={state} send={send} />
-    <div className="restore-layout"><section className="surface"><span className="eyebrow">Restore Center</span><div className={`status-emblem ${state.recovery.repairNeeded ? 'warning' : ''}`} style={{ marginTop: 22 }}><ArchiveRestore size={24} /></div>
-      <h2>{state.recovery.title}</h2><p className="muted-copy">{state.recovery.detail}</p>
-      <div className="actions" style={{ marginTop: 22 }}><Action state={state} send={send} command="openRestore" primary size="md" icon={<ArrowUpRight size={14} />} quiet={!!note} /><Action state={state} send={send} command="checkReadiness" quiet={!!note} /></div>
-    </section><div><h2 className="section-title" style={{ marginBottom: 16 }}>How recovery works</h2><TaskRows rows={steps} className="restore-steps" variant="List" /></div></div>
-    <div className="surface surface-pad"><div className="info-heading"><HardDrive size={15} />Backup location</div><div className="info-main">{state.repository.path}</div><p className="muted-copy">Browse a snapshot, select files, and review the destination before restoring. Recovered files are verified after the operation.</p></div>
+    <div className="restore-layout"><section className="surface"><div className={`status-emblem ${tone}`}><ArchiveRestore size={24} aria-hidden="true" /></div>
+      <h2>{recovery.title}</h2><p className="muted-copy">{recovery.repairNeeded ? 'Restore opens once the repair above is finished.' : recovery.detail}</p>
+      {newest && <p className="muted-copy">Newest backup to restore from: <strong>{newest.startedDisplay}</strong>.</p>}
+      <div className="actions" style={{ marginTop: 22 }}><Action state={state} send={send} command="openRestore" primary size="md" icon={<ArrowUpRight size={14} />} quiet />
+        {next === 'refresh' && <Button size="md" variant="secondary" onClick={() => send('refresh')}><RefreshCw size={14} aria-hidden="true" />Check again</Button>}</div>
+      {ready && <p className="muted-copy restore-permission">{permission}</p>}
+      <div className="restore-readiness"><Action state={state} send={send} command="checkReadiness" quiet />
+        <p>Makes sure your backups can be opened and restored. It opens in its own window, only reads, and changes nothing.</p></div>
+    </section><div><h2 className="section-title" style={{ marginBottom: 16 }}>How restoring works</h2><ol className="restore-howto">
+      <li><strong>Choose a backup</strong><span>Pick the newest one from before the files were lost.</span></li>
+      <li><strong>Choose files</strong><span>Open folders and tick what you need, or restore everything.</span></li>
+      <li><strong>Choose a folder</strong><span>A new or empty folder. Your current files are never replaced.</span></li>
+      <li><strong>Review and restore</strong><span>Rewindle copies your files and checks each one.</span></li>
+    </ol></div></div>
   </>;
 }
 
@@ -1073,7 +1094,7 @@ export default function App() {
       <FolderPickerModal picker={state.sourcePicker ?? null} send={send} reducedMotion={state.reducedMotion} availability={availability} notice={notice} dismissNotice={dismissNotice} />
     </ErrorBoundary>
     <ErrorBoundary scope="dialog" label="restore window" resetKey={!!state.restoreFlow?.open} onClose={() => send('restoreFlowClose')} note={failedClose}>
-      <RestoreFlowModal flow={state.restoreFlow ?? null} reducedMotion={state.reducedMotion} availability={availability} send={send} notice={notice} dismissNotice={dismissNotice} holdNotice={holdNotice} />
+      <RestoreFlowModal flow={state.restoreFlow ?? null} reducedMotion={state.reducedMotion} availability={availability} send={send} notice={notice} dismissNotice={dismissNotice} holdNotice={holdNotice} locale={usableLocale(state.locale)} sources={state.sources} />
     </ErrorBoundary>
     <ErrorBoundary scope="dialog" label="run details window" resetKey={!!state.runDetails && dismissedRunDetailsId !== state.runDetails.id} onClose={closeRunDetails}>
       <RunDetailsModal details={state.runDetails ?? null} open={!!state.runDetails && dismissedRunDetailsId !== state.runDetails.id} resolvedBy={detailsResolvedBy} reducedMotion={state.reducedMotion} send={send} notice={notice} dismissNotice={dismissNotice} holdNotice={holdNotice} onRequestClose={closeRunDetails} />
