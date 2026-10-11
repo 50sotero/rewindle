@@ -201,6 +201,8 @@ export interface DashboardState {
     phaseLabel: string; progress: number; estimated: boolean; runId: string;
     files: string; bytes: string; speed: string; elapsed: string; errors: string;
     etaTitle: string; eta: string; etaHint: string;
+    /** Why a backup that was asked for has not started (Windows accepted the request and the task did not run), or empty. Gone once a run appears. */
+    backupNote?: string;
   };
   sources: SourceState[]; sourceStatus: string;
   /** A short-lived outcome of a folder change ("Folder removed…", "Windows approval was cancelled…"); null once it expires. */
@@ -212,12 +214,12 @@ export interface DashboardState {
   historyLimit?: number;
   selectedRunId: string | null;
   /** `error` is why the installed schedule could not be read (empty when it could); `summary` then reads "Schedule unavailable". `notice` is the short-lived outcome of a schedule change; null once it expires. */
-  schedule: { summary: string; nextRun: string; detail: string; error?: string; notice?: { text: string; tone: 'info' | 'success' | 'warning' | 'error' } | null };
+  schedule: { summary: string; nextRun: string; /** The next run as an ISO 8601 timestamp, or empty/absent when there is none; the page formats it like every other time. */ nextRunAt?: string; detail: string; error?: string; notice?: { text: string; tone: 'info' | 'success' | 'warning' | 'error' } | null };
   /** `volumeReady` is false only when the drive itself answered that it is not ready (unplugged, disconnected); true or absent means no such answer. */
   repository: { path: string; volume: string; volumeReady?: boolean };
   freshness: { title: string; detail: string; state: 'Unavailable' | 'Healthy' | 'NoVerifiedBackup' | 'Overdue' | 'Paused' | 'ClockAnomaly'; verifiedAt: string };
   offsite: {
-    title: string; detail: string; evidence: string; kind: 'NotConfigured' | 'StatusUnavailable' | 'Failed' | 'InProgress' | 'LocalVerifiedProviderPending' | 'ProviderConfirmed' | 'RestoreVerified'; checkedAt: string; providerConfirmed: boolean; restoreVerified: boolean;
+    title: string; detail: string; evidence: string; kind: 'NotConfigured' | 'StatusUnavailable' | 'Stale' | 'Failed' | 'InProgress' | 'LocalVerifiedProviderPending' | 'ProviderConfirmed' | 'RestoreVerified'; checkedAt: string; providerConfirmed: boolean; restoreVerified: boolean;
     /** The provider the off-site evidence comes from ("Google Drive"), only when the host's evidence names one. Absent or empty otherwise. */
     provider?: string;
   };
