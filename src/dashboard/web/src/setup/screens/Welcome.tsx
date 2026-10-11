@@ -1,7 +1,7 @@
 import { CalendarClock, FlaskConical, HardDrive, History, Info, ShieldCheck } from 'lucide-react';
-import { Callout } from '../ui';
+import { Button } from '@/components/atoms/Button';
+import { Callout, IssueList, Spinner } from '../ui';
 import type { Wizard } from '../useWizard';
-import { IssueList } from '../ui';
 import { issuesFor } from '../contract';
 
 /** The first screen: what Rewindle is, in three lines, and the honest notice that this is an early release. */
@@ -37,12 +37,20 @@ export function Welcome({ wizard }: { wizard: Wizard }) {
       )}
 
       <IssueList errors={environment.errors} warnings={environment.warnings} />
+      {environment.errors.length > 0 && (
+        // These findings name what to remove; once it is gone, this asks the installer again without starting Setup over.
+        <div className="callout-actions">
+          <Button size="sm" disabled={wizard.refreshing || wizard.validation.checking} onClick={() => void wizard.actions.refreshDrives()}>
+            {(wizard.refreshing || wizard.validation.checking) && <Spinner size={12} />}Check again
+          </Button>
+        </div>
+      )}
 
       <p className="fine-print">
         <HardDrive size={14} aria-hidden="true" />
         <span>
           Free and open source under the MIT license.{' '}
-          <button type="button" className="text-link" onClick={() => wizard.openLink('readme')}>Read the README</button>
+          <button type="button" className="text-link" onClick={() => wizard.openLink('readme')}>How Rewindle works</button>
           {' · '}
           <button type="button" className="text-link" onClick={() => wizard.openLink('license')}>License</button>
         </span>

@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, Clapperboard, CloudOff, Download, FileText, Folder, FolderPlus, Image, Monitor, Music, Star, X } from 'lucide-react';
+import { Check, Clapperboard, CloudOff, Download, FileText, Folder, FolderPlus, Image, Info, Monitor, Music, Star, X } from 'lucide-react';
 import { useId, type ComponentType } from 'react';
 import { Button } from '@/components/atoms/Button';
 import { issuesFor, type KnownFolderKey } from '../contract';
@@ -56,6 +56,10 @@ export function Folders({ wizard }: { wizard: Wizard }) {
   // A re-check that could not open every folder inside keeps the files it found before (see useWizard).
   const partlyChecked = !checking && placeholders.some(folder => { const size = sizeOf(folder); return !!size && size.done && (!!size.error || size.skippedFolders > 0); });
   const denied = choices.folders.filter(folder => folder.selected && (sizeOf(folder)?.skippedFolders ?? 0) > 0);
+  const one = placeholders.length === 1;
+  const placeholderNames = placeholders.map(folder => folder.key ?? folderName(folder.path)).join(', ');
+  const onlineFiles = placeholders.reduce((sum, folder) => sum + (sizeOf(folder)?.placeholderFiles ?? 0), 0);
+  const onlineBytes = placeholders.reduce((sum, folder) => sum + (sizeOf(folder)?.placeholderBytes ?? 0), 0);
   const selectedCount = choices.folders.filter(folder => folder.selected && folder.exists).length;
 
   return (
@@ -103,17 +107,26 @@ export function Folders({ wizard }: { wizard: Wizard }) {
       </section>
 
       {placeholders.length > 0 && (
-        // Not just a warning: the installed engine refuses a folder with online-only files on every backup, so setup waits
-        // until they are on this PC (then Check again) or the folder is no longer protected.
+        // Not just a warning: the installed backup service refuses a folder with online-only files on every backup, so setup waits
+        // until they are on this PC (then Check again) or the folder is no longer protected. Windows 11 keeps OneDrive files
+        // online-only by default, so this is the page a first-time user is most likely to be stopped on: it gives the steps, the size
+        // to download, and the other way out.
         <div className="callout is-error" role="alert">
           <CloudOff size={16} aria-hidden="true" />
-          <span>
-            {placeholders.map(folder => folder.key ?? folderName(folder.path)).join(', ')} {placeholders.length === 1 ? 'has' : 'have'}{' '}
-            {checking ? 'online-only files. Checking again…' : `${plural(placeholders.reduce((sum, folder) => sum + (sizeOf(folder)?.placeholderFiles ?? 0), 0), 'online-only file', 'online-only files')}.`}
-            {' '}Rewindle can only back up files stored on this PC, so backups of {placeholders.length === 1 ? 'that folder' : 'those folders'} would fail.
-            {partlyChecked && ' Setup couldn’t open every folder inside to check again, so it still counts the online-only files it found before.'}
-            {' '}In OneDrive, right-click {placeholders.length === 1 ? 'the folder' : 'each folder'}, choose “Always keep on this device”, wait for the files to download, then choose Check again.
-          </span>
+          <div className="callout-body">
+            <strong className="callout-title">{checking ? 'Checking again…' : 'Some files are only in OneDrive, not on this PC'}</strong>
+            <p>
+              {placeholderNames} {one ? 'has' : 'have'} {plural(onlineFiles, 'file', 'files')} that {onlineFiles === 1 ? 'is' : 'are'} only in OneDrive{onlineBytes > 0 ? ` (about ${formatBytes(onlineBytes, locale)})` : ''}.
+              {' '}Rewindle can only back up files that are stored on this PC.
+              {partlyChecked && ' Setup couldn’t open every folder inside, so this count may be low.'}
+            </p>
+            <ol className="steps-list">
+              <li>In File Explorer, right-click {one ? placeholderNames : 'each folder'} and choose <strong>Always keep on this device</strong>.</li>
+              <li>Wait for the download to finish{onlineBytes > 0 ? `. It needs about ${formatBytes(onlineBytes, locale)} of free space on this PC` : ''}.</li>
+              <li>Come back and choose <strong>Check again</strong>.</li>
+            </ol>
+            <p>Or leave {one ? 'it' : 'them'} out of your backups. Files that are only in OneDrive are already stored in your OneDrive account.</p>
+          </div>
           <div className="issue-action issue-action-group">
             <Button size="sm" className="issue-action" disabled={checking} onClick={() => wizard.actions.recheckFolders(placeholders.map(folder => folder.path))}>Check again</Button>
             {placeholders.map(folder => {
@@ -126,13 +139,13 @@ export function Folders({ wizard }: { wizard: Wizard }) {
         </div>
       )}
       {denied.length > 0 && (
-        // A warning, not a block: setup measures without administrator rights, while the backup task runs with the highest
-        // privileges of this account, so it can usually open these. If it can't either, its preflight stops each backup.
-        <p className="callout is-warning">
-          <AlertTriangle size={16} aria-hidden="true" />
+        // Neutral, not a warning: setup measures without administrator rights, while the backup task runs with the highest
+        // privileges of this account, so it can usually open these. If it can't either, its preflight stops each backup and says so.
+        <p className="callout is-info">
+          <Info size={16} aria-hidden="true" />
           <span>
-            Setup couldn’t open some folders inside {denied.map(folder => folder.key ?? folderName(folder.path)).join(', ')}, so the size shown may be a little low.
-            {' '}Backups run with your administrator rights and can usually open them. If they can’t either, backups of {denied.length === 1 ? 'that folder' : 'those folders'} stop with an error that Rewindle shows you; then check the folder’s permissions or stop protecting it.
+            A few folders inside {denied.map(folder => folder.key ?? folderName(folder.path)).join(', ')} couldn’t be read just now, so the size shown may be a little low.
+            {' '}That’s usually fine: if a file can’t be backed up, Rewindle tells you.
           </span>
         </p>
       )}

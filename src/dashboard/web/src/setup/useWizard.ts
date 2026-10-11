@@ -19,9 +19,9 @@ export type Screen =
 /** The steps the person moves through, in order. The rail shows them; the first five can be revisited until Install. */
 export const STEPS: readonly { screen: Screen; label: string }[] = [
   { screen: 'welcome', label: 'Welcome' },
-  { screen: 'folders', label: 'What to protect' },
+  { screen: 'folders', label: 'Protected folders' },
   { screen: 'location', label: 'Backup location' },
-  { screen: 'schedule', label: 'Schedule' },
+  { screen: 'schedule', label: 'Automatic backups' },
   { screen: 'review', label: 'Review' },
   { screen: 'installing', label: 'Install' },
   { screen: 'recovery', label: 'Recovery key' },
@@ -232,6 +232,8 @@ export function useWizard() {
   // A message for one page: what went wrong with something the person just did there (or why the install did not start).
   const [notice, setNotice] = useState<Notice | null>(null);
   const [maintenance, setMaintenance] = useState(false);
+  // Where the copy removed by a reinstall kept its backups (null on a first install), so Location can say when that drive is not there.
+  const [keptRepository, setKeptRepository] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshNote, setRefreshNote] = useState<string | null>(null);
   // Whether the time field on the Schedule page currently holds a valid time; choices.schedule keeps the last valid one.
@@ -381,6 +383,7 @@ export function useWizard() {
       measured.current.clear();
       setSizes({});
       setChoices(initial);
+      setKeptRepository(preferredRepository ?? null);
       setValidation({ plan, checking: false, error: null });
       setScreen(firstScreen(plan));
       setMaintenance(!!plan.environment.existingInstall.rewindle);
@@ -599,7 +602,7 @@ export function useWizard() {
       setScreen('review');
       setNotice({
         screen: 'review',
-        text: `Setup couldn’t check ${names.join(', ')} once more for files that are only in the cloud. Choose Install to try again, or untick ${unchecked.length === 1 ? 'that folder' : 'those folders'} under What to protect.`,
+        text: `Setup couldn’t check ${names.join(', ')} once more for files that are only in the cloud. Choose Install to try again, or untick ${unchecked.length === 1 ? 'that folder' : 'those folders'} under Protected folders.`,
       });
       return;
     }
@@ -624,7 +627,7 @@ export function useWizard() {
 
   return {
     host, theme, screen, furthest, base, hostError, choices, validation, sizes, operation, notice, maintenance, refreshing, refreshNote,
-    scheduleDraftValid,
+    scheduleDraftValid, keptRepository,
     actions,
     goTo: setScreen,
     /** Scans the chosen folders once more, then installs unless online-only files turned up (then back to Review, saying so). */
