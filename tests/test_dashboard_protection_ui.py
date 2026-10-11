@@ -44,8 +44,8 @@ console.log(JSON.stringify(report));
 """
 
 
-def source(path: str = "C:\\Users\\you\\Documents", *, exists: bool = True) -> dict:
-    return {"path": path, "name": path.rsplit("\\", 1)[-1], "isCanary": False, "exists": exists, "canRemove": True, "detail": ""}
+def source(path: str = "C:\\Users\\you\\Documents", *, exists: bool = True, canary: bool = False) -> dict:
+    return {"path": path, "name": path.rsplit("\\", 1)[-1], "isCanary": canary, "exists": exists, "canRemove": not canary, "detail": ""}
 
 
 def state(
@@ -64,6 +64,7 @@ def state(
     review: bool = False,
     setup_problem: str = "",
     data_error: str = "",
+    engine: str = "rewindle",
 ) -> dict:
     return {
         "status": {"active": active, "success": success, "failure": failure, "cancelled": cancelled, "unavailable": unavailable},
@@ -72,7 +73,7 @@ def state(
         "sources": [source()] if sources is None else sources,
         "freshness": {"state": freshness},
         "actions": {"reviewChanges": {"visible": review, "enabled": True, "label": "Review changes", "help": ""}},
-        "setup": {"problem": setup_problem},
+        "setup": {"problem": setup_problem, "engineProfile": engine},
         "dataError": data_error,
     }
 
@@ -97,6 +98,8 @@ class ProtectionUiTests(unittest.TestCase):
             "unplugged_and_missing": state(volume_ready=False, sources=[source(exists=False)]),
             "one_missing": state(sources=[source(), source("C:\\Users\\you\\Pictures", exists=False)]),
             "two_missing": state(sources=[source(exists=False), source("C:\\Users\\you\\Pictures", exists=False)]),
+            "canary_missing": state(sources=[source(), source("C:\\ProgramData\\Rewindle\\canary", exists=False, canary=True)]),
+            "canary_missing_legacy": state(sources=[source("C:\\ProgramData\\Rewindle\\canary", exists=False, canary=True)], engine="legacy"),
             "no_folders": state(sources=[]),
             "no_folders_unread": state(sources=[], setup_problem="The backup configuration could not be read just now."),
             "no_folders_data_error": state(sources=[], data_error="Rewindle is trying again automatically."),
@@ -173,6 +176,17 @@ class ProtectionUiTests(unittest.TestCase):
         self.assertTrue(two["text"].startswith("2 protected folders can"))
         self.assertIn("they are reconnected or removed", two["text"])
         self.assertEqual(self.tone("one_missing"), "danger")
+
+    def test_a_missing_restore_test_folder_asks_for_a_repair_not_a_removal(self) -> None:
+        # That folder can't be taken out of the backup, so the remedy is the engine's own reinstall, never "removed".
+        rewindle = self.concern("canary_missing")
+        self.assertEqual(rewindle["tone"], "danger")
+        self.assertIn("restore test file is missing", rewindle["text"])
+        self.assertIn("Open Rewindle Setup and choose Reinstall or repair", rewindle["text"])
+        self.assertNotIn("removed", rewindle["text"])
+        legacy = self.concern("canary_missing_legacy")["text"]
+        self.assertIn("Reinstall the backup program", legacy)
+        self.assertNotIn("Rewindle Setup", legacy)
 
     def test_an_empty_plan_is_a_warning_unless_the_host_could_not_read_it(self) -> None:
         concern = self.concern("no_folders")
@@ -267,6 +281,25 @@ class FailureWordingTests(unittest.TestCase):
         detail = self.telemetry[self.telemetry.index("private string BuildStatusDetail("):]
         detail = detail[:detail.index("private static string DescribeFailureCode(")]
         self.assertNotIn('GetString(document, "failure"', detail)
+
+
+class RepairAdviceTests(unittest.TestCase):
+    """Rewindle Setup repairs only its own engine, so a missing part is put right by the engine profile's own advice."""
+
+    def test_the_host_never_sends_the_earlier_edition_to_rewindle_setup_for_a_repair(self) -> None:
+        dashboard = PROJECT / "src" / "dashboard"
+        for name in ("DashboardWindow.cs", "RestoreManager.cs"):
+            with self.subTest(file=name):
+                text = (dashboard / name).read_text(encoding="utf-8")
+                self.assertNotIn("Run Rewindle Setup again and choose Reinstall or repair", text)
+                self.assertNotIn("Open Rewindle Setup and choose Reinstall or repair to put it back", text)
+        window = (dashboard / "DashboardWindow.cs").read_text(encoding="utf-8")
+        self.assertIn("string reinstallAdvice = EngineProfile.Current.ReinstallAdvice();", window)
+
+    def test_the_folder_list_does_not_offer_to_remove_the_restore_test_folder(self) -> None:
+        folders = (WEB / "components" / "primitives" / "ProtectedFolders.tsx").read_text(encoding="utf-8")
+        self.assertIn("reinstallAdvice(state)", folders)
+        self.assertNotIn(": 'Reconnect the drive.'", folders)
 
 
 if __name__ == "__main__":

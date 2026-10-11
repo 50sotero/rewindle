@@ -714,7 +714,7 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
     }
     if (activeStep === 'destination') {
       if (!draftPath) return ['Type a folder, or choose Browse…', true];
-      if (!destinationValid) return ['Press Check folder and continue.', false];
+      if (!destinationValid) return ['Check the folder, then review the restore.', false];
       return ['The folder is ready. Review the restore next.', false];
     }
     if (startBlocked) return ['Restore unlocks when the running backup or change finishes.', true];
@@ -880,7 +880,7 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
           {!restoring && activeStep === 'backup' && <Button size="md" variant="primary" aria-describedby={HINT_ID} disabled={!selectedId || !connected || busy} onClick={openFiles}>Choose files <ArrowRight size={14} /></Button>}
           {!restoring && activeStep === 'files' && <Button size="md" variant="primary" aria-describedby={HINT_ID} disabled={!canContinueFiles || !connected || busy} onClick={goDestination}>Choose folder <ArrowRight size={14} /></Button>}
           {!restoring && activeStep === 'destination' && (needsCheck
-            ? <Button size="md" variant="primary" aria-describedby={HINT_ID} disabled={!connected || busy} onClick={validateDestination}>{destinationChecking ? <LoaderCircle size={14} className="restore-spin" /> : <Check size={14} />}Check folder and continue</Button>
+            ? <Button size="md" variant="primary" aria-describedby={HINT_ID} disabled={!connected || busy} onClick={validateDestination}>{destinationChecking ? <LoaderCircle size={14} className="restore-spin" /> : <Check size={14} />}Check folder</Button>
             : <Button size="md" variant="primary" aria-describedby={HINT_ID} data-review-restore disabled={!destinationValid || !canContinueFiles || !connected || busy} onClick={goReview}>Review restore <ArrowRight size={14} /></Button>)}
           {!restoring && activeStep === 'review' && <Button size="md" variant="primary" aria-describedby={HINT_ID} disabled={!canStart || !connected || busy} onClick={startRestore}><ArchiveRestore size={15} />Restore now</Button>}
           {/* On a restore that worked, opening the folder is the next thing anyone does, so it is the main button and Close steps back. After a

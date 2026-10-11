@@ -443,7 +443,7 @@ namespace ResticBackuper.Dashboard
             if (!IsRegularFile(managerPath) || !IsRegularFile(configuration.ConfigurationPath))
             {
                 return RestoreManagerResult.Failure(
-                    "A part of Rewindle that restoring needs is missing. Run Rewindle Setup again and choose Reinstall or repair.",
+                    "A part of Rewindle that restoring needs is missing. " + EngineProfile.Current.ReinstallAdvice(),
                     -1);
             }
             if (configuration.ConfigGeneration <= 0 ||
@@ -2082,7 +2082,7 @@ namespace ResticBackuper.Dashboard
                 "powershell.exe");
             if (!RestoreManagerLauncher.IsRegularFile(managerPath) || !RestoreManagerLauncher.IsRegularFile(powerShell))
             {
-                throw new InvalidOperationException("A part of Rewindle that restoring needs is missing. Run Rewindle Setup again and choose Reinstall or repair.");
+                throw new InvalidOperationException("A part of Rewindle that restoring needs is missing. " + EngineProfile.Current.ReinstallAdvice());
             }
             string token = RestoreManagerLauncher.CreateNonce();
             RestoreSessionRequest request = new RestoreSessionRequest();

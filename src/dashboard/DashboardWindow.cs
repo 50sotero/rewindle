@@ -4270,7 +4270,7 @@ namespace ResticBackuper.Dashboard
                 {
                     if (!hasCanarySource)
                     {
-                        sourceStatus.Text = "The restore test file is missing, so backups can\u2019t be checked. Open Rewindle Setup and choose Reinstall or repair to put it back.";
+                        sourceStatus.Text = "The restore test file is missing, so backups can\u2019t be checked. " + EngineProfile.Current.ReinstallAdvice();
                         sourceStatus.Foreground = Rose;
                     }
                     else if (!managerAvailable)
@@ -4369,25 +4369,29 @@ namespace ResticBackuper.Dashboard
             checkRecoveryReadinessButton.IsEnabled = healthAvailable && !blocked;
             // What the Restore page offers besides the text (`recovery.next` in native-types.ts).
             restoreReadinessNext = string.Empty;
+            // Rewindle Setup repairs only its own engine; the earlier personal edition is put right by reinstalling that program.
+            string reinstallAdvice = EngineProfile.Current.ReinstallAdvice();
             if (currentSourceConfiguration == null)
             {
                 restoreReadinessTitle.Text = "Rewindle can't read its backup settings";
-                restoreReadinessDetail.Text = "Choose Try again. If this stays, run Rewindle Setup again and choose Reinstall or repair. Your backups are not affected.";
+                restoreReadinessDetail.Text = "Choose Try again. If this stays, " + char.ToLowerInvariant(reinstallAdvice[0]) + reinstallAdvice.Substring(1) +
+                    " Your backups are not affected.";
                 restoreReadinessTitle.Foreground = Rose;
                 restoreReadinessNext = "refresh";
             }
             else if (!managerAvailable)
             {
                 restoreReadinessTitle.Text = "Restore isn't available";
-                restoreReadinessDetail.Text = "A part of Rewindle that restoring needs is missing. Run Rewindle Setup again and choose Reinstall or repair.";
+                restoreReadinessDetail.Text = "A part of Rewindle that restoring needs is missing. " + reinstallAdvice;
                 restoreReadinessTitle.Foreground = Rose;
                 restoreReadinessNext = "setup";
             }
             else if (!hasCanary)
             {
-                // Setup puts the restore test file back: its canary phase recreates the file and the folder entry (Install-ResticBackuper.ps1).
+                // A reinstall puts the restore test file back: Setup's canary phase recreates the file and the folder entry (Install-ResticBackuper.ps1).
                 restoreReadinessTitle.Text = "Restore test file is missing";
-                restoreReadinessDetail.Text = "Rewindle checks every backup by restoring a small test file, and that file is gone. Restore is unavailable until it is back. Run Rewindle Setup again and choose Reinstall or repair to put it back. Your existing backups are not affected.";
+                restoreReadinessDetail.Text = "Rewindle checks every backup by restoring a small test file, and that file is gone. Restore is unavailable until it is back. " +
+                    reinstallAdvice + " Your existing backups are not affected.";
                 restoreReadinessTitle.Foreground = Rose;
                 restoreReadinessNext = "setup";
             }
@@ -4673,7 +4677,7 @@ namespace ResticBackuper.Dashboard
             else if (!hasCanary)
             {
                 label = "Backup unavailable";
-                helpText = "Backups are off because the restore test file is missing. Open Rewindle Setup and choose Reinstall or repair to put it back.";
+                helpText = "Backups are off because the restore test file is missing. " + EngineProfile.Current.ReinstallAdvice();
             }
             else
             {

@@ -5,6 +5,7 @@ import { Button } from '@/components/atoms/Button';
 import { ValuePill } from '@/components/atoms/ValuePill';
 import LoadingState from '@/components/primitives/LoadingState';
 import type { CommandName, DashboardState } from '@/src/native-types';
+import { reinstallAdvice } from '@/src/protectionTone';
 
 export type FolderView = { query: string; unavailable: boolean };
 type Send = (command: CommandName, payload?: Record<string, string | boolean>) => void;
@@ -63,7 +64,8 @@ export default function ProtectedFolders({ state, send, view, setView, lockReaso
         cannot be backed up, which the hero would otherwise not say and a small pill in the list only whispers. */}
     <div role="status">{unavailable > 0 && <div className="attention-note missing-folders">
       <strong><TriangleAlert size={14} className="inline mr-2" aria-hidden="true" />{one ? `${missing[0].name || missing[0].path} cannot be found` : `${unavailable} protected folders cannot be found`}</strong>
-      <p>{removable ? `Reconnect the drive, or stop backing up ${one ? 'this folder' : 'these folders'}.` : 'Reconnect the drive.'}</p>
+      <p>{removable ? `Reconnect the drive, or stop backing up ${one ? 'this folder' : 'these folders'}.`
+        : `The restore test file is in ${one ? 'it' : 'one of them'}. ${reinstallAdvice(state)}${one ? '' : ' Reconnect the drive for the others, or stop backing them up.'}`}</p>
       {!view.unavailable && state.sources.length > 1 && <Button size="xs" onClick={() => setView({ ...view, unavailable: true })}>{one ? 'Show only this folder' : 'Show only these folders'}</Button>}
     </div>}</div>
     {state.sourceStatus && state.sourceStatus !== notice?.text && /missing|unavailable|cannot|failed/i.test(state.sourceStatus) && <p className="source-warning" role="alert">{state.sourceStatus}</p>}

@@ -12,6 +12,12 @@ export type HeroConcern = { tone: 'danger' | 'warning'; text: string };
 /** The drive a path is on ("D:" or "\\server\share"), or '' when the path names none. */
 export const driveOf = (path: string | undefined): string => /^[A-Za-z]:|^\\\\[^\\]+\\[^\\]+/.exec(path ?? '')?.[0] ?? '';
 
+/** How a missing part of the installation is put back. Rewindle Setup repairs only its own engine; the earlier personal edition is
+ *  reinstalled (the host's EngineProfile.ReinstallAdvice says the same). */
+export const reinstallAdvice = (state: Pick<DashboardState, 'setup'>): string => state.setup?.engineProfile === 'legacy'
+  ? 'Reinstall the backup program to put it back.'
+  : 'Open Rewindle Setup and choose Reinstall or repair to put it back.';
+
 /** Something that stops the next backup, or leaves the page unable to judge it, that the host's title does not say. At most one: the most urgent. */
 export function heroConcern(state: DashboardState): HeroConcern | null {
   if (state.status.active || state.recovery.repairNeeded) return null;
@@ -20,7 +26,10 @@ export function heroConcern(state: DashboardState): HeroConcern | null {
     const drive = driveOf(repository.path);
     return { tone: 'danger', text: `The backup drive${drive ? ` (${drive})` : ''} isn’t connected, so the next backup can’t run. Plug it back in.` };
   }
-  const gone = sources.filter(source => !source.exists).length;
+  const missing = sources.filter(source => !source.exists);
+  // The folder that holds the restore test file can't be taken out of the backup, so reconnecting or removing it is no remedy.
+  if (missing.some(source => source.isCanary)) return { tone: 'danger', text: `The restore test file is missing, so backups can’t be checked. ${reinstallAdvice(state)}` };
+  const gone = missing.length;
   if (gone) return { tone: 'danger', text: `${gone === 1 ? 'A protected folder' : `${gone} protected folders`} can’t be found. Backups can’t run until ${gone === 1 ? 'it is' : 'they are'} reconnected or removed (see Protected folders below).` };
   // A host that could not read its folders (the setup problem) is not a plan with nothing in it.
   if (!sources.length && !state.setup?.problem && !state.dataError) return { tone: 'warning', text: 'No folders are being backed up yet. Add a folder below.' };
