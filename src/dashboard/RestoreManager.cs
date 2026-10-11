@@ -781,7 +781,7 @@ namespace ResticBackuper.Dashboard
                 !HasProtectedAcl(stateRoot, userSid) || !HasProtectedAcl(resultRoot, userSid))
             {
                 return RestoreManagerResult.Failure(
-                    "Rewindle could not confirm the result of this step, so it was not used. Your files and backups were not changed. Try again.",
+                    UnusedResultMessage(action, "Rewindle could not confirm the result of this step, so it was not used."),
                     exitCode);
             }
             try
@@ -798,7 +798,7 @@ namespace ResticBackuper.Dashboard
                         stream.Length <= 0 || stream.Length > MaximumResultBytes)
                     {
                         return RestoreManagerResult.Failure(
-                            "Rewindle could not confirm the result of this step, so it was not used. Your files and backups were not changed. Try again.",
+                            UnusedResultMessage(action, "Rewindle could not confirm the result of this step, so it was not used."),
                             exitCode);
                     }
                     using (StreamReader reader = new StreamReader(
@@ -834,9 +834,20 @@ namespace ResticBackuper.Dashboard
             catch (Exception error)
             {
                 return RestoreManagerResult.Failure(
-                    "Rewindle could not confirm the result of this step: " + Sanitize(error.Message),
+                    UnusedResultMessage(
+                        action,
+                        "Rewindle could not confirm the result of this step (" + Sanitize(error.Message).TrimEnd('.') + "), so it was not used."),
                     exitCode);
             }
+        }
+
+        // A restore may already have put files in the chosen folder before its result is found wanting, so a result that is not used
+        // never says that nothing changed there. Listing backups only reads, and the recovery drill restores into Rewindle's own folder.
+        private static string UnusedResultMessage(string action, string reason)
+        {
+            return action == "restore"
+                ? reason + " Some files may already be in the folder you chose, so check it before you try again. Your backups were not changed."
+                : reason + " Your files and backups were not changed. Try again.";
         }
 
         private static RestoreManagerResult ValidateResult(
@@ -871,7 +882,7 @@ namespace ResticBackuper.Dashboard
                 !FixedEquals(ReadString(document, "includes_sha256"), includesHash))
             {
                 return RestoreManagerResult.Failure(
-                    "The result did not match what was asked for, so it was not used. Try again.",
+                    UnusedResultMessage(action, "The result did not match what was asked for, so it was not used."),
                     exitCode);
             }
             bool ok = ReadBoolean(document, "ok");
@@ -897,7 +908,7 @@ namespace ResticBackuper.Dashboard
                 if (!IsExactSnapshotId(actualSnapshotId))
                 {
                     return RestoreManagerResult.Failure(
-                        "The result named a different backup than the one you chose, so it was not used. Try again.",
+                        UnusedResultMessage(action, "The result named a different backup than the one you chose, so it was not used."),
                         exitCode);
                 }
                 ProtectedRestoreReport report = ParseReport(

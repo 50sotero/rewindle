@@ -1100,6 +1100,11 @@ try {
     $sessionLauncherType = $assembly.GetType('ResticBackuper.Dashboard.RestoreSessionLauncher', $true)
     $restoreLauncherType = $assembly.GetType('ResticBackuper.Dashboard.RestoreManagerLauncher', $true)
     $restoreProgressType = $assembly.GetType('ResticBackuper.Dashboard.RestoreManagerProgress', $true)
+    # A restore may already have written to the chosen folder before its result is found wanting, so that result never says nothing changed.
+    $unusedRestore = [string](Invoke-Static $restoreLauncherType 'UnusedResultMessage' @('restore', 'The result did not match what was asked for, so it was not used.'))
+    Assert-True ($unusedRestore -match 'may already be in the folder you chose' -and $unusedRestore -notmatch 'Your files and backups were not changed') ('an unused restore result claimed the chosen folder was untouched: ' + $unusedRestore)
+    $unusedListing = [string](Invoke-Static $restoreLauncherType 'UnusedResultMessage' @('list_snapshots', 'The result did not match what was asked for, so it was not used.'))
+    Assert-True ($unusedListing -match 'Your files and backups were not changed' -and $unusedListing -notmatch 'folder you chose') ('an unused listing result was worded like a restore: ' + $unusedListing)
     $rewindleEngine = $engineProfileType.GetProperty('Rewindle', $flags).GetValue($null)
     $legacyEngine = $engineProfileType.GetProperty('Legacy', $flags).GetValue($null)
     $secondSnapshot = [Runtime.Serialization.FormatterServices]::GetUninitializedObject($snapshotType)
