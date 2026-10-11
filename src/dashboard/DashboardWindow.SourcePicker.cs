@@ -317,15 +317,15 @@ namespace ResticBackuper.Dashboard
                 }
             }
 
-            // The backup refuses a folder that holds files kept only in the cloud (its "strict" policy), so say so now, not on the first
-            // backup. The walk is bounded: a folder too big to finish in time is let through, never refused on a guess.
-            OnlineOnlyScan onlineOnly = ScanForOnlineOnly(
+            // Under the plan's "strict" cloud placeholder policy the backup refuses a folder that holds files kept only in the cloud, so say
+            // so now, not on the first backup; an "allow" plan backs such a folder up, so it is not scanned. The walk is bounded: a folder
+            // too big to finish in time is let through, never refused on a guess.
+            if (RefusesOnlineOnlyFiles(configuration.CloudPlaceholderPolicy) && ScanForOnlineOnly(
                 normalized,
                 ReadExcludedFolderRules(configuration),
                 OnlineOnlyScanEntryLimit,
                 OnlineOnlyScanTimeLimit,
-                delegate(FileSystemInfo entry) { return entry.Attributes; });
-            if (onlineOnly.Found)
+                delegate(FileSystemInfo entry) { return entry.Attributes; }).Found)
             {
                 return InvalidSourcePickerPath(
                     normalized,
@@ -461,6 +461,13 @@ namespace ResticBackuper.Dashboard
             // Everything below the folder was looked at. False when the entry or time limit stopped the walk first; Found then says only
             // what was seen so far, and the caller does not treat the folder as refused for what it did not get to see.
             public bool Complete;
+        }
+
+        // Whether the plan's cloud placeholder policy makes the backup refuse online-only files (preflight_sources in restic_common.py,
+        // where "strict" is also what a plan that does not say means).
+        internal static bool RefusesOnlineOnlyFiles(string cloudPlaceholderPolicy)
+        {
+            return !string.Equals(cloudPlaceholderPolicy, "allow", StringComparison.Ordinal);
         }
 
         internal static bool IsOnlineOnly(FileAttributes attributes)
@@ -950,7 +957,7 @@ namespace ResticBackuper.Dashboard
             {
                 sourcePickerStatus = "failed";
                 sourcePickerMessage = "The folder wasn't added and nothing changed. Choose Try again to check it and add it again. " +
-                    "If it keeps failing, restart Rewindle, or use Export diagnostics in Settings and send the file when you ask for help." +
+                    "If it keeps failing, restart Rewindle, or choose Save problem report in Settings and send the file when you ask for help." +
                     (string.IsNullOrWhiteSpace(sourceOperationError)
                         ? string.Empty
                         : " (Technical detail: " + sourceOperationError + ")");

@@ -84,7 +84,7 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
 - Works from the keyboard: arrow keys, `Home`, `End`, `PageUp` and `PageDown`
   move between runs, `Enter` opens details, `/` focuses the search and `Esc`
   clears it.
-- **Export diagnostics** writes a redacted ZIP you can attach to a bug report.
+- **Save problem report** (in Settings) writes a redacted ZIP you can attach to a bug report.
 
 ### Restore
 
@@ -635,7 +635,7 @@ Bug reports, Windows compatibility reports, documentation fixes and focused
 pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) and
 the [Code of Conduct](CODE_OF_CONDUCT.md) first, and report security problems
 privately as described in [SECURITY.md](SECURITY.md). When you open a bug
-report, the diagnostics ZIP from **Activity > Export diagnostics** helps a lot;
+report, the ZIP from **Settings > Save problem report** helps a lot;
 review it before attaching it.
 
 ## License and credits

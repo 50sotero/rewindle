@@ -685,7 +685,7 @@ namespace ResticBackuper.Dashboard
                 }
                 if (exchange.Result == null)
                 {
-                    return RestoreManagerResult.Failure(Sanitize(exchange.Error), -1);
+                    return RestoreManagerResult.Failure(SanitizeAnswer(exchange.Error, action), -1);
                 }
                 return ValidateResult(
                     exchange.Result,
@@ -1497,6 +1497,13 @@ namespace ResticBackuper.Dashboard
 
         internal static string Sanitize(string value)
         {
+            return SanitizeAnswer(value, null);
+        }
+
+        // `action` is the request the message answers. A listing that fails changes nothing, but a restore may already have copied
+        // files before its channel failed, so for one the session's failures point at the chosen folder instead of saying nothing changed.
+        internal static string SanitizeAnswer(string value, string action)
+        {
             if (string.IsNullOrWhiteSpace(value))
             {
                 return "The restore step failed.";
@@ -1514,14 +1521,17 @@ namespace ResticBackuper.Dashboard
                 }
             }
             string safe = result.ToString().Trim();
-            return safe.Length == 0 ? "The restore step failed." : PlainBackendMessage(safe);
+            return safe.Length == 0 ? "The restore step failed." : PlainBackendMessage(safe, action == "restore");
         }
 
         // The restore backend's own refusals of a destination, in the words the destination step uses (it checks these first, so one
         // reaching here means the folder changed between the check and the restore). Anything else is shown as the backend wrote it.
-        private static string PlainBackendMessage(string message)
+        private static string PlainBackendMessage(string message, bool restoring)
         {
             string text = message.ToLowerInvariant();
+            string outcome = restoring
+                ? " Some files may already be in the folder you chose, so check it before you try again. If this keeps happening, restart Rewindle."
+                : " Nothing was changed. Try again; if it keeps happening, restart Rewindle.";
             // The channel to the elevated restore step failed (the session host's own wording is for the log, not for a person).
             // The two that say something a person can act on come first: a restore step that is not Rewindle's own, and an answer that cannot be trusted.
             if (text.Contains("restore session") && text.Contains("could not be verified"))
@@ -1531,11 +1541,11 @@ namespace ResticBackuper.Dashboard
             if (text.Contains("restore session") &&
                 (text.Contains("size limit") || text.Contains("refused this dashboard") || text.Contains("not the one this dashboard asked for")))
             {
-                return "The restore step did not answer the way Rewindle expected, so its answer was not used and nothing was changed. Try again; if it keeps happening, restart Rewindle.";
+                return "The restore step did not answer the way Rewindle expected, so its answer was not used." + outcome;
             }
             if (text.Contains("restore session"))
             {
-                return "Rewindle lost its connection to the restore step, and nothing was changed. Try again; if it keeps happening, restart Rewindle.";
+                return "Rewindle lost its connection to the restore step." + outcome;
             }
             if (text.Contains("restore target must be absent or an empty directory"))
             {

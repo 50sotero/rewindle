@@ -644,7 +644,7 @@ namespace ResticBackuper.Dashboard
                 return RepositoryManagerResult.Failure(
                     "Windows didn't finish the change (code " +
                         exitCode.ToString(CultureInfo.InvariantCulture) +
-                        "). If it keeps failing, choose Export diagnostics in Settings and ask for help.",
+                        "). If it keeps failing, choose Save problem report in Settings and ask for help.",
                     exitCode);
             }
             string resultRoot = Path.GetDirectoryName(resultPath);

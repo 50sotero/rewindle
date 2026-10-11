@@ -1105,6 +1105,13 @@ try {
     Assert-True ($unusedRestore -match 'may already be in the folder you chose' -and $unusedRestore -notmatch 'Your files and backups were not changed') ('an unused restore result claimed the chosen folder was untouched: ' + $unusedRestore)
     $unusedListing = [string](Invoke-Static $restoreLauncherType 'UnusedResultMessage' @('list_snapshots', 'The result did not match what was asked for, so it was not used.'))
     Assert-True ($unusedListing -match 'Your files and backups were not changed' -and $unusedListing -notmatch 'folder you chose') ('an unused listing result was worded like a restore: ' + $unusedListing)
+    # The same holds when the session channel fails after a restore request was sent: the broker may already have copied files.
+    $droppedRestore = [string](Invoke-Static $restoreLauncherType 'SanitizeAnswer' @('The protected restore session failed: the pipe closed.', 'restore'))
+    Assert-True ($droppedRestore -match 'lost its connection' -and $droppedRestore -match 'may already be in the folder you chose' -and $droppedRestore -notmatch 'Nothing was changed') ('a restore whose session dropped claimed nothing changed: ' + $droppedRestore)
+    $droppedListing = [string](Invoke-Static $restoreLauncherType 'SanitizeAnswer' @('The protected restore session failed: the pipe closed.', 'list_tree'))
+    Assert-True ($droppedListing -match 'lost its connection' -and $droppedListing -match 'Nothing was changed' -and $droppedListing -notmatch 'folder you chose') ('a listing whose session dropped was worded like a restore: ' + $droppedListing)
+    # Only a plan with the "strict" cloud placeholder policy (or none) refuses a folder for online-only files, as the backup does.
+    Assert-True ([bool](Invoke-Static $dashboardType 'RefusesOnlineOnlyFiles' @('strict')) -and -not [bool](Invoke-Static $dashboardType 'RefusesOnlineOnlyFiles' @('allow'))) 'the folder check did not follow the plan''s cloud placeholder policy'
     $rewindleEngine = $engineProfileType.GetProperty('Rewindle', $flags).GetValue($null)
     $legacyEngine = $engineProfileType.GetProperty('Legacy', $flags).GetValue($null)
     $secondSnapshot = [Runtime.Serialization.FormatterServices]::GetUninitializedObject($snapshotType)

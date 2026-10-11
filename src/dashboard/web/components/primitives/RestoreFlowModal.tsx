@@ -684,7 +684,7 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
   const resultNext = resultStatus === 'success' ? []
     : resultStatus === 'partial' ? ['Some files were copied to the folder below; the rest were not. To try again, choose a different empty folder. Rewindle never writes into a folder that already has files in it. Your current files were not changed.']
     : resultStatus === 'cancelled' ? ['Your current files and your backups were not changed.']
-    : ['Your current files and your backups were not changed.', 'If this keeps happening, use Export diagnostics in Settings and send the file when you ask for help.'];
+    : ['Your current files and your backups were not changed.', 'If this keeps happening, choose Save problem report in Settings and send the file when you ask for help.'];
 
   // The steps follow the flow. A finished restore ticks all four; one that stopped marks the step it stopped on (Review, or Backup
   // when no backup was chosen yet) and leaves the others to the Try again button.

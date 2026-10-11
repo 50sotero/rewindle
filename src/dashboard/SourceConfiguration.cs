@@ -699,6 +699,11 @@ namespace ResticBackuper.Dashboard
             }
         }
 
+        // The folder tool has already run when its result is read, so a result that can't be used leaves the change's outcome unknown:
+        // the person is sent to the folder list, never told that nothing changed (a retry of an add or removal that did go through is
+        // the mistake this avoids).
+        private const string UnknownChangeOutcome = " Rewindle can't tell whether the change was made, so check the folder list before you try again.";
+
         private static SourceManagerResult ReadBoundResult(
             string resultPath,
             string requestNonce,
@@ -717,9 +722,9 @@ namespace ResticBackuper.Dashboard
             if (!File.Exists(resultPath))
             {
                 return SourceManagerResult.Failure(
-                    "Windows didn't finish the change (code " +
+                    "Windows didn't report how the change went (code " +
                         exitCode.ToString(CultureInfo.InvariantCulture) +
-                        "). Nothing was changed.",
+                        ")." + UnknownChangeOutcome,
                     exitCode);
             }
             string resultRoot = Path.GetDirectoryName(resultPath);
@@ -747,19 +752,19 @@ namespace ResticBackuper.Dashboard
                 (File.GetAttributes(resultPath) & FileAttributes.ReparsePoint) != 0)
             {
                 return SourceManagerResult.Failure(
-                    "Rewindle's data folder looks unsafe, so the change was refused. " + EngineProfile.Current.ReinstallAdvice(),
+                    "Rewindle's data folder looks unsafe, so the result of the change was not used." + UnknownChangeOutcome + " " + EngineProfile.Current.ReinstallAdvice(),
                     exitCode);
             }
             if (!HasProtectedResultAcl(stateRoot, userSid, true))
             {
                 return SourceManagerResult.Failure(
-                    "Rewindle's data folder has unexpected permissions, so the change was refused for safety. " + EngineProfile.Current.ReinstallAdvice(),
+                    "Rewindle's data folder has unexpected permissions, so the result of the change was not used." + UnknownChangeOutcome + " " + EngineProfile.Current.ReinstallAdvice(),
                     exitCode);
             }
             if (!HasProtectedResultAcl(resultRoot, userSid, true))
             {
                 return SourceManagerResult.Failure(
-                    "Rewindle's data folder has unexpected permissions, so the change was refused for safety. " + EngineProfile.Current.ReinstallAdvice(),
+                    "Rewindle's data folder has unexpected permissions, so the result of the change was not used." + UnknownChangeOutcome + " " + EngineProfile.Current.ReinstallAdvice(),
                     exitCode);
             }
 
@@ -778,13 +783,13 @@ namespace ResticBackuper.Dashboard
                     if (!HasProtectedResultAcl(stream.GetAccessControl(), userSid))
                     {
                         return SourceManagerResult.Failure(
-                            "Rewindle's data folder has unexpected permissions, so the change was refused for safety. " + EngineProfile.Current.ReinstallAdvice(),
+                            "Rewindle's data folder has unexpected permissions, so the result of the change was not used." + UnknownChangeOutcome + " " + EngineProfile.Current.ReinstallAdvice(),
                             exitCode);
                     }
                     if (stream.Length <= 0 || stream.Length > 64 * 1024)
                     {
                         return SourceManagerResult.Failure(
-                            "Windows gave an unreadable answer, so the change was not accepted. Nothing was changed.",
+                            "Windows gave an unreadable answer, so it was not used." + UnknownChangeOutcome,
                             exitCode);
                     }
 
@@ -811,8 +816,8 @@ namespace ResticBackuper.Dashboard
             catch (Exception error)
             {
                 return SourceManagerResult.Failure(
-                    "Rewindle couldn't verify Windows' answer, so the change was not accepted: " +
-                        SanitizeError(error.Message),
+                    "Rewindle couldn't verify Windows' answer (" + SanitizeError(error.Message).TrimEnd('.') + "), so it was not used." +
+                        UnknownChangeOutcome,
                     exitCode);
             }
         }
@@ -842,7 +847,7 @@ namespace ResticBackuper.Dashboard
                         action.ToLowerInvariant()))
                 {
                     return SourceManagerResult.Failure(
-                        "Windows' answer didn't match this request, so it was not accepted. Nothing was changed.",
+                        "Windows' answer didn't match this request, so it was not used." + UnknownChangeOutcome,
                         exitCode);
                 }
 
@@ -864,7 +869,7 @@ namespace ResticBackuper.Dashboard
                         !string.Equals(changedPath, sourcePath, StringComparison.Ordinal))
                     {
                         return SourceManagerResult.Failure(
-                            "Rewindle's backup settings changed in an unexpected way, so the change was not accepted.",
+                            "Rewindle's backup settings changed in an unexpected way, so the result was not used." + UnknownChangeOutcome,
                             exitCode);
                     }
                     return SourceManagerResult.Success(
@@ -880,14 +885,14 @@ namespace ResticBackuper.Dashboard
                         exitCode);
                 }
                 return SourceManagerResult.Failure(
-                    "Windows' answer was unclear, so the change was not accepted. Nothing was changed.",
+                    "Windows' answer was unclear, so it was not used." + UnknownChangeOutcome,
                     exitCode);
             }
             catch (Exception error)
             {
                 return SourceManagerResult.Failure(
-                    "Rewindle couldn't verify Windows' answer, so the change was not accepted: " +
-                        SanitizeError(error.Message),
+                    "Rewindle couldn't verify Windows' answer (" + SanitizeError(error.Message).TrimEnd('.') + "), so it was not used." +
+                        UnknownChangeOutcome,
                     exitCode);
             }
         }

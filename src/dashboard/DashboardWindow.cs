@@ -2510,10 +2510,12 @@ namespace ResticBackuper.Dashboard
                 case SourceOperationStage.Failed:
                     tag = "Needs attention";
                     glyph = "!";
-                    status = "The folder wasn't added";
+                    status = "Adding the folder didn't finish";
+                    // The error says itself whether anything changed: one from before the folder tool ran says nothing did, and one about
+                    // its answer says the outcome is unknown, so nothing is added here that could contradict it.
                     detail = string.IsNullOrWhiteSpace(sourceOperationError)
-                        ? "The list of folders was not changed."
-                        : sourceOperationError + " The list of folders was not changed.";
+                        ? "Rewindle can't tell whether the folder was added, so check the folder list before you try again."
+                        : sourceOperationError;
                     tone = Rose;
                     retryVisible = true;
                     dismissVisible = true;
@@ -3688,7 +3690,7 @@ namespace ResticBackuper.Dashboard
             {
                 state = string.IsNullOrWhiteSpace(repositoryRecoveryOperationMessage)
                     ? "Automatic and manual backups remain blocked. Rewindle can't safely use the record of the unfinished move, and your existing backups were not touched. " +
-                        "Choose Export diagnostics in Settings and send the file when you ask for help (the project page is listed under About). " +
+                        "Choose Save problem report in Settings and send the file when you ask for help (the project page is listed under About). " +
                         "Please don't delete anything in the backup location."
                     : repositoryRecoveryOperationMessage;
             }
@@ -6244,7 +6246,7 @@ namespace ResticBackuper.Dashboard
             if (!result.Succeeded)
             {
                 string detail = string.IsNullOrWhiteSpace(result.ErrorMessage)
-                    ? "Windows didn't finish the change."
+                    ? "Windows didn't finish the change. Rewindle can't tell whether it was made, so check the folder list before you try again."
                     : result.ErrorMessage;
                 if (isAdd && sourceOperationGeneration == operationGeneration)
                 {
@@ -6257,10 +6259,11 @@ namespace ResticBackuper.Dashboard
                 }
                 else
                 {
-                    SetSourceNotice("The folder change didn't go through and nothing was changed. Try again; if it keeps failing, restart Rewindle.", Rose, 15);
+                    // The detail says whether anything changed; the list below is read again, so it shows what the folder list really is.
+                    SetSourceNotice("The folder change didn't finish. Check the folder list before you try again; if it keeps failing, restart Rewindle.", Rose, 15);
                     MessageBox.Show(
                         this,
-                        "The folder list was not changed.\n\n" + detail,
+                        detail,
                         "Folder change failed",
                         MessageBoxButton.OK,
                         MessageBoxImage.Error);
@@ -6764,7 +6767,7 @@ namespace ResticBackuper.Dashboard
                 etaValue.Text = "Paused";
                 etaHint.Text = repositoryRecoveryStatus != null && repositoryRecoveryStatus.IsRecoverable
                     ? "Choose Repair interrupted move. Backups stay paused until it finishes."
-                    : "Backups stay paused. Choose Export diagnostics in Settings and ask for help; don't delete anything in the backup location.";
+                    : "Backups stay paused. Choose Save problem report in Settings and ask for help; don't delete anything in the backup location.";
                 SetBadge("BACKUPS PAUSED", Rose, BrushFrom("#3B1D2A"));
             }
             statusBadge.Visibility = Visibility.Visible;
