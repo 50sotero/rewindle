@@ -82,16 +82,16 @@ class DashboardAnomalyReviewTests(unittest.TestCase):
         ):
             self.assertIn(evidence, self.window)
         for evidence in (
-            "leaves the maintenance hold in place for deletion and retention actions",
-            "does not modify snapshots or repository data",
-            "does not pause or gate Google Drive upload",
-            'RecordedBadge = "REVIEW ACKNOWLEDGED"',
+            "Rewindle keeps holding back clean-up of old backups for now",
+            "nothing in your backups is changed or deleted",
+            "uploads of your backups carry on as normal",
+            'RecordedBadge = "REVIEWED"',
         ):
             self.assertIn(evidence, self.rewindle_profile)
-        # Only the legacy personal edition, whose approval really gates off-site promotion, may say so.
-        self.assertNotIn("off-site promotion is paused", self.window.lower())
-        self.assertNotIn("off-site promotion is paused", self.rewindle_profile.lower())
-        self.assertIn("off-site promotion is paused", self.legacy_profile.lower())
+        # Only the legacy personal edition, whose approval really gates the off-site copy, may say so.
+        self.assertNotIn("off-site copy is on hold", self.window.lower())
+        self.assertNotIn("off-site copy is on hold", self.rewindle_profile.lower())
+        self.assertIn("off-site copy is on hold", self.legacy_profile.lower())
 
     def test_each_engine_accepts_only_its_own_acknowledgement_scope(self) -> None:
         self.assertIn('"anomaly_review_acknowledgement"', self.rewindle_profile)

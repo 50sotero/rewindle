@@ -2156,7 +2156,7 @@ namespace ResticBackuper.Dashboard
                 ? string.Empty
                 : restoreReadinessDetail.Text ?? string.Empty;
             recovery["title"] = string.IsNullOrWhiteSpace(readinessTitle)
-                ? (status.Exists ? "Repository repair required" : "Repository recovery clear")
+                ? (status.Exists ? "Backups paused: backup-location move unfinished" : "Backup location is fine")
                 : readinessTitle;
             recovery["detail"] = string.IsNullOrWhiteSpace(readinessDetail)
                 ? status.Message ?? string.Empty

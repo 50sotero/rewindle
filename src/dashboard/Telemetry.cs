@@ -1938,23 +1938,23 @@ namespace ResticBackuper.Dashboard
             double dataRatio = GetDouble(measurements, "data_added_ratio", -1);
             if (deletionRatio >= 0)
             {
-                evidence.Add((deletionRatio * 100).ToString("0.0", CultureInfo.CurrentCulture)
-                    + "% estimated deletions");
+                evidence.Add("about " + (deletionRatio * 100).ToString("0.#", CultureInfo.CurrentCulture)
+                    + "% of files look deleted");
             }
             if (changeRatio >= 0)
             {
-                evidence.Add((changeRatio * 100).ToString("0.0", CultureInfo.CurrentCulture)
-                    + "% new or changed files");
+                evidence.Add((changeRatio * 100).ToString("0.#", CultureInfo.CurrentCulture)
+                    + "% of files are new or changed");
             }
             if (dataRatio >= 0)
             {
-                evidence.Add((dataRatio * 100).ToString("0.0", CultureInfo.CurrentCulture)
-                    + "% repository data added versus the prior logical size");
+                evidence.Add("the backup grew by " + (dataRatio * 100).ToString("0.#", CultureInfo.CurrentCulture)
+                    + "% of its previous size");
             }
             string measurementsText = evidence.Count == 0
-                ? "an unusually large change set"
+                ? "an unusually large number of changes"
                 : string.Join(", ", evidence.Take(3).ToArray());
-            return "The snapshot was kept and verified, but " + measurementsText
+            return "This backup was saved and checked, but much more changed than usual (" + measurementsText + ")."
                 + EngineProfile.Current.AnomalyReview.HoldDetailSuffix;
         }
 

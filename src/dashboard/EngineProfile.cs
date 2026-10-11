@@ -76,6 +76,15 @@ namespace ResticBackuper.Dashboard
 
         public string Id { get; private set; }
         public string DisplayName { get; private set; }
+
+        // How to put back a missing part of the installation. Rewindle Setup's "Reinstall or repair" copies the whole payload again, but it
+        // leaves the earlier personal edition alone, so that engine is told to reinstall its own program.
+        public string ReinstallAdvice()
+        {
+            return Id == RewindleId
+                ? "Open Rewindle Setup and choose Reinstall or repair."
+                : "Reinstall the backup program (Rewindle Setup doesn't change the earlier personal edition).";
+        }
         // The folder name under Program Files (install root) and under ProgramData (protected state).
         public string ProductDirectoryName { get; private set; }
         public string BackupTaskName { get; private set; }
@@ -492,7 +501,7 @@ namespace ResticBackuper.Dashboard
         {
             EngineProfile profile = CreateCommon("ResticBackuper");
             profile.Id = RewindleId;
-            profile.DisplayName = "Rewindle engine";
+            profile.DisplayName = "Rewindle backup service";
             profile.LauncherFileName = "ResticBackuperTaskLauncher.exe";
             profile.DashboardExecutableName = "ResticBackuperDashboard.exe";
             profile.CloudVerificationProofRelativePath = Path.Combine("evidence", "latest-verification.json");
@@ -508,33 +517,34 @@ namespace ResticBackuper.Dashboard
             profile.CloudProofRequiresAssetBinding = true;
             profile.AnomalyReview = new AnomalyReviewWording
             {
-                ButtonHelp = "Review and acknowledge only this exact generation. The deletion and retention hold remains; DriveFS upload is not paused.",
-                ConfirmQuestion = "Acknowledge this exact verified change set?",
+                ButtonHelp = "Far more changed in this backup than usual. If that's expected, confirm it here. This doesn't delete or change any backup.",
+                ConfirmQuestion = "Confirm that you've looked at these unusual changes?",
                 ConfirmEffects =
-                    "This acknowledgement:\n" +
-                    "\u2022 records that you reviewed this exact generation\n" +
-                    "\u2022 does not pause or gate Google Drive upload from the live DriveFS repository\n" +
-                    "\u2022 leaves the maintenance hold in place for deletion and retention actions\n" +
-                    "\u2022 does not modify snapshots or repository data",
-                RecordingLabel = "Recording acknowledgement...",
-                RecordingName = "Recording exact anomaly acknowledgement",
-                CancelledMessage = "Windows approval was cancelled. No review acknowledgement was recorded, and no snapshot or repository data was changed. DriveFS upload was never paused.",
-                NotRecordedMessage = "The exact change set was not acknowledged.",
-                NotRecordedTitle = "Changes not acknowledged",
-                RecordedTitle = "Changes acknowledged",
-                RecordedDetail = "This exact verified generation was reviewed. The deletion and retention hold remains; DriveFS upload is not paused.",
-                HeroTitle = "Backup verified - changes acknowledged",
+                    "If you continue:\n" +
+                    "\u2022 Rewindle records that you reviewed this backup\n" +
+                    "\u2022 nothing in your backups is changed or deleted\n" +
+                    "\u2022 Rewindle keeps holding back clean-up of old backups for now\n" +
+                    "\u2022 uploads of your backups carry on as normal",
+                RecordingLabel = "Saving your confirmation...",
+                RecordingName = "Saving your confirmation",
+                CancelledMessage = "You didn't allow the change in the Windows permission prompt, so nothing was recorded. No backup was changed.",
+                NotRecordedMessage = "Your confirmation wasn't saved. Nothing in your backups changed.",
+                NotRecordedTitle = "Confirmation not saved",
+                RecordedTitle = "Review confirmed",
+                RecordedDetail = "You've reviewed the unusual changes in this backup. Nothing was deleted.",
+                HeroTitle = "Backup verified \u2014 unusual changes reviewed",
                 HeroCaption = "Review",
-                HeroValue = "Acknowledged",
-                HeroHint = "This exact generation was reviewed; deletion and retention remain on hold. DriveFS upload is not paused",
-                TrayDetail = "This exact generation was reviewed; deletion and retention remain on hold. DriveFS upload is not paused.",
-                HoldHeroDetail = "The snapshot is safe; review is required for future deletion or retention actions. DriveFS upload is not paused",
-                RecordedBadge = "REVIEW ACKNOWLEDGED",
-                StatusLabel = "Backup verified \u2014 changes acknowledged",
-                StatusDetail = "The suspicious change set was explicitly reviewed for this exact generation. The maintenance hold remains for any future deletion or retention action; DriveFS upload is not paused.",
-                HoldDetailSuffix = " triggered a review and maintenance hold. No snapshots were deleted, and this hold does not pause a live DriveFS upload.",
-                HelperStoppedMessage = "Anomaly review stopped safely without recording an acknowledgement.",
-                MismatchMessage = "The suspicious change set could not be acknowledged safely."
+                HeroValue = "Confirmed",
+                HeroHint = "You've looked at this backup's unusual changes. Nothing was deleted.",
+                TrayDetail = "You've reviewed the unusual changes in this backup. Nothing was deleted.",
+                HoldHeroDetail = "Your backup is saved and checked, but far more changed than usual. Look it over, then choose Confirm these changes.",
+                RecordedBadge = "REVIEWED",
+                StatusLabel = "Backup verified \u2014 unusual changes reviewed",
+                StatusDetail = "You reviewed the unusual changes in this backup. Nothing was deleted.",
+                HoldDetailSuffix = " That's normal after a big clean-up or move. If you didn't expect it, check your folders for missing or damaged files. " +
+                    "Nothing was deleted from your backups. When you're happy with it, choose Confirm these changes.",
+                HelperStoppedMessage = "The review stopped safely and nothing was recorded.",
+                MismatchMessage = "Rewindle couldn't record the review safely. Nothing was changed."
             };
             return profile;
         }
@@ -543,7 +553,7 @@ namespace ResticBackuper.Dashboard
         {
             EngineProfile profile = CreateCommon("ResticPersonalBackup");
             profile.Id = LegacyId;
-            profile.DisplayName = "Legacy personal edition";
+            profile.DisplayName = "Rewindle backup service (earlier personal edition)";
             profile.LauncherFileName = "ResticBackupTaskLauncher.exe";
             profile.DashboardExecutableName = "ResticBackupDashboard.exe";
             profile.CloudVerificationProofRelativePath = "latest-verification.json";
@@ -554,32 +564,33 @@ namespace ResticBackuper.Dashboard
             profile.CloudProofRequiresAssetBinding = false;
             profile.AnomalyReview = new AnomalyReviewWording
             {
-                ButtonHelp = "Review and explicitly approve only this exact generation for off-site promotion. The deletion and retention hold remains.",
-                ConfirmQuestion = "Approve this exact verified change set for off-site promotion?",
+                ButtonHelp = "Far more changed in this backup than usual, so sending it to your off-site copy is on hold. If that's expected, approve it here. Nothing is deleted.",
+                ConfirmQuestion = "Send this backup to your off-site copy?",
                 ConfirmEffects =
-                    "This approval:\n" +
-                    "\u2022 permits only this exact generation to enter the off-site copy pipeline\n" +
-                    "\u2022 leaves the maintenance hold in place for deletion and retention actions\n" +
-                    "\u2022 does not modify snapshots or repository data",
-                RecordingLabel = "Recording approval...",
-                RecordingName = "Recording exact anomaly approval",
-                CancelledMessage = "Windows approval was cancelled. Off-site promotion remains paused, and no snapshot or repository data was changed.",
-                NotRecordedMessage = "The exact change set was not approved. Off-site promotion remains paused.",
-                NotRecordedTitle = "Changes not approved",
+                    "If you continue:\n" +
+                    "\u2022 only this backup is allowed into your off-site copy\n" +
+                    "\u2022 nothing in your backups is changed or deleted\n" +
+                    "\u2022 clean-up of old backups stays on hold",
+                RecordingLabel = "Saving your approval...",
+                RecordingName = "Saving your approval",
+                CancelledMessage = "You didn't allow the change in the Windows permission prompt. The off-site copy stays on hold, and no backup was changed.",
+                NotRecordedMessage = "Your approval wasn't saved. The off-site copy stays on hold.",
+                NotRecordedTitle = "Approval not saved",
                 RecordedTitle = "Off-site copy approved",
-                RecordedDetail = "This exact verified generation may be promoted off-site. The deletion and retention hold remains.",
-                HeroTitle = "Backup verified - off-site copy approved",
+                RecordedDetail = "This backup may now go to your off-site copy. Clean-up of old backups stays on hold.",
+                HeroTitle = "Backup verified \u2014 off-site copy approved",
                 HeroCaption = "Off-site approval",
                 HeroValue = "Approved",
-                HeroHint = "This exact generation may be copied off-site; the deletion and retention hold remains",
-                TrayDetail = "This exact generation may be promoted; deletion and retention remain on hold.",
-                HoldHeroDetail = "The snapshot is safe; off-site promotion is paused until the change set is reviewed",
+                HeroHint = "This backup may go to your off-site copy; clean-up of old backups stays on hold",
+                TrayDetail = "This backup may go to your off-site copy; clean-up of old backups stays on hold.",
+                HoldHeroDetail = "Your backup is saved and checked, but far more changed than usual, so the off-site copy is on hold until you review it. Choose Confirm these changes.",
                 RecordedBadge = "OFF-SITE APPROVED",
                 StatusLabel = "Backup verified \u2014 off-site copy approved",
-                StatusDetail = "The suspicious change set was explicitly approved for this exact off-site generation. The maintenance hold remains for any future deletion or retention action.",
-                HoldDetailSuffix = " triggered a safety hold. Off-site promotion is paused; no snapshots were deleted.",
-                HelperStoppedMessage = "Anomaly review stopped safely without approving off-site promotion.",
-                MismatchMessage = "The suspicious change set could not be approved safely."
+                StatusDetail = "You approved sending this backup to your off-site copy. Clean-up of old backups stays on hold.",
+                HoldDetailSuffix = " The off-site copy is on hold until you review this. That's normal after a big clean-up or move; if you didn't expect it, " +
+                    "check your folders for missing or damaged files. Nothing was deleted. When you're happy with it, choose Confirm these changes.",
+                HelperStoppedMessage = "The review stopped safely and nothing was approved. The off-site copy stays on hold.",
+                MismatchMessage = "Rewindle couldn't record your approval safely. The off-site copy stays on hold."
             };
             return profile;
         }
