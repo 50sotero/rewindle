@@ -9,9 +9,9 @@ type Send = (command: CommandName, payload?: Record<string, string | boolean>) =
 const shortcutIcon = (name: string) => /picture/i.test(name) ? Image : /music/i.test(name) ? Music2 : /video/i.test(name) ? Video : /desktop/i.test(name) ? Laptop : Folder;
 // What the review says while protected controls are off, by the reason they are off.
 const UNAVAILABLE: Record<Exclude<Availability, 'ok'>, { title: string; text: string }> = {
-  offline: { title: 'Connection interrupted', text: 'Reconnect to the desktop app before changing protected folders.' },
-  dataError: { title: 'Backup status unavailable', text: 'Backup status cannot be read right now, so protected folders cannot be changed. Try again once it can be read.' },
-  preview: { title: 'Animation preview is running', text: 'Stop the animation preview first. Protected folders cannot be changed while it runs.' },
+  offline: { title: 'Connection interrupted', text: 'Reconnect to the desktop app before changing your folders.' },
+  dataError: { title: 'Backup status unavailable', text: 'Rewindle can’t read its backup status right now, so folders can’t be changed. Try again in a moment.' },
+  preview: { title: 'Animation preview is running', text: 'Stop the animation preview first. Folders can’t be changed while it runs.' },
 };
 
 export default function FolderPickerModal({ picker, send, reducedMotion, availability, notice, dismissNotice }: {
@@ -88,7 +88,7 @@ export default function FolderPickerModal({ picker, send, reducedMotion, availab
     {current && <motion.div className="folder-picker-panel" initial={{ opacity: 0, y: reducedMotion ? 0 : 16, scale: reducedMotion ? 1 : .975 }}
       animate={{ opacity: closing ? 0 : 1, y: closing && !reducedMotion ? 10 : 0, scale: closing && !reducedMotion ? .985 : 1 }} transition={{ duration: reducedMotion ? 0 : .2, ease: [.16, 1, .3, 1] }}>
       <header className="folder-picker-heading"><span className="folder-picker-emblem"><FolderPlus size={23} /></span>
-        <div><span className="eyebrow">Your backup scope</span><h2 id="folder-picker-title">Add a protected folder</h2><p id="folder-picker-description">Choose a location. Its files and subfolders will be included in future backups.</p></div>
+        <div><span className="eyebrow">What is backed up</span><h2 id="folder-picker-title">Add a folder</h2><p id="folder-picker-description">Choose a location. Its files and subfolders will be included in future backups.</p></div>
         <Button size="icon" variant="quiet" disabled={busy} onClick={close} aria-label="Close folder chooser"><X size={18} /></Button>
       </header>
       {/* In the panel from the moment the dialog opens and empty until a folder is added, so the confirmation put into it is announced:
@@ -130,12 +130,12 @@ export default function FolderPickerModal({ picker, send, reducedMotion, availab
           <div role="status" aria-live={!changed && failed ? 'assertive' : 'polite'} aria-atomic="true">
           <AnimatePresence mode="wait" initial={false}><motion.div key={unavailable ? availability : changed ? 'unconfirmed' : current.status} className={`folder-selection-review ${!changed && failed ? 'is-error' : ready ? 'is-ready' : ''}`}
             initial={{ opacity: 0, y: reducedMotion ? 0 : 5 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: reducedMotion ? 0 : .14 }}>
-            {busy || checking ? <LoadingState label={current.message || (busy ? 'Waiting for Windows approval…' : 'Checking folder…')} variant="Orbit" live={false} /> : <>
+            {busy || checking ? <LoadingState label={current.message || (busy ? 'Waiting for the Windows permission prompt…' : 'Checking folder…')} variant="Orbit" live={false} /> : <>
               <span className="folder-review-icon">{!changed && (ready || current.status === 'duplicate' || current.status === 'covered') ? <Check size={18} /> : (!changed && failed) || !connected ? <CircleAlert size={18} /> : <Folder size={18} />}</span>
-              <div><strong>{unavailable ? unavailable.title : changed ? 'Check this folder to continue' : ready ? 'Ready to add' : current.status === 'duplicate' || current.status === 'covered' ? 'Already included in your backup' : current.status === 'cancelled' ? 'Approval cancelled' : failed ? 'Choose another location' : 'Choose a folder to begin'}</strong>
-                <p>{unavailable ? unavailable.text : changed ? 'Rewindle will check the location and your existing backup scope.' : current.message || 'Nothing changes until you choose Add folder and approve the request.'}</p>
+              <div><strong>{unavailable ? unavailable.title : changed ? 'Check this folder to continue' : ready ? 'Ready to add' : current.status === 'duplicate' || current.status === 'covered' ? 'Already included in your backup' : current.status === 'cancelled' ? 'Permission not given' : current.status === 'failed' ? 'The folder wasn’t added' : failed ? 'Choose another location' : 'Choose a folder to begin'}</strong>
+                <p>{unavailable ? unavailable.text : changed ? 'Rewindle will check the folder and what your backup already includes.' : current.message || 'Nothing changes until you choose Add folder and say Yes to the Windows permission prompt.'}</p>
                 {ready && <span className="folder-full-path">{current.path}</span>}
-                {connected && !changed && ['failed', 'cancelled'].includes(current.status) && <Button size="sm" className="folder-review-retry" onClick={() => check(draft)}><ArrowRight size={13} />Review again</Button>}
+                {connected && !changed && ['failed', 'cancelled'].includes(current.status) && <Button size="sm" className="folder-review-retry" onClick={() => check(draft)}><ArrowRight size={13} />Try again</Button>}
               </div>
             </>}
           </motion.div></AnimatePresence></div>
@@ -145,7 +145,7 @@ export default function FolderPickerModal({ picker, send, reducedMotion, availab
             own notice away, and show up on the page once the dialog had closed. */}
         <div role="alert">{notice?.error && <div className="folder-picker-error">{notice.text}<button onClick={dismissNotice} aria-label="Dismiss folder error"><X size={14} /></button></div>}</div>
       </div>
-      <footer className="folder-picker-footer"><span><LockKeyhole size={14} />{success ? 'No backup was started.' : 'Windows approval is required to save.'}</span><div>
+      <footer className="folder-picker-footer"><span><LockKeyhole size={14} />{success ? 'No backup was started.' : 'Windows will ask for your permission.'}</span><div>
         <Button size="md" onClick={close} disabled={busy} data-done={success ? '' : undefined}>{success ? 'Done' : 'Cancel'}</Button>
         {success ? <Button size="md" variant="primary" disabled={!connected} onClick={() => { dismissNotice(); send('addSource'); }}><FolderPlus size={15} />Add another folder</Button>
           : <Button size="md" variant="primary" disabled={!ready || busy || checking} onClick={() => { dismissNotice(); send('confirmSourcePicker', { path: current.path }); }}><FolderPlus size={15} />{busy ? 'Adding folder…' : 'Add folder'}</Button>}

@@ -38,9 +38,8 @@ namespace ResticBackuper.Dashboard
         {
             if (isProtectedCanary)
             {
-                string protectedName = new DirectoryInfo(sourcePath).Name;
-                return (string.IsNullOrWhiteSpace(protectedName) ? sourcePath : protectedName) +
-                    " + restore test file";
+                // The folder is Rewindle's own (its leaf is "Canary"), so it is named for what it is for, not for where it sits.
+                return "Restore test file (added by Rewindle)";
             }
 
             string[,] knownFolders =
@@ -566,7 +565,7 @@ namespace ResticBackuper.Dashboard
         {
             if (configuration == null)
             {
-                return SourceManagerResult.Failure("The protected configuration is unavailable.", -1);
+                return SourceManagerResult.Failure("Rewindle can't read its backup settings right now, so no folder was changed.", -1);
             }
             if (!string.Equals(action, "Add", StringComparison.Ordinal) &&
                 !string.Equals(action, "Remove", StringComparison.Ordinal))
@@ -580,27 +579,32 @@ namespace ResticBackuper.Dashboard
             if (!File.Exists(configuration.ManagerPath))
             {
                 return SourceManagerResult.Failure(
-                    "The protected source manager is missing from the installation.",
+                    "Rewindle's folder tool is missing from this installation, so no folder was changed. " +
+                        EngineProfile.Current.ReinstallAdvice(),
                     -1);
             }
             FileAttributes managerAttributes = File.GetAttributes(configuration.ManagerPath);
             if ((managerAttributes & FileAttributes.ReparsePoint) != 0)
             {
-                return SourceManagerResult.Failure("The protected source manager is not a regular file.", -1);
+                return SourceManagerResult.Failure(
+                    "Rewindle's folder tool is not a normal file, so no folder was changed. " + EngineProfile.Current.ReinstallAdvice(),
+                    -1);
             }
 
             string systemDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System);
             string powerShell = Path.Combine(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
             if (!File.Exists(powerShell))
             {
-                return SourceManagerResult.Failure("Windows PowerShell is unavailable in System32.", -1);
+                return SourceManagerResult.Failure(
+                    "Windows PowerShell, which Rewindle needs to change folders, was not found in the Windows folder. No folder was changed.",
+                    -1);
             }
 
             WindowsIdentity identity = WindowsIdentity.GetCurrent();
             string userSid = identity.User == null ? null : identity.User.Value;
             if (string.IsNullOrEmpty(userSid))
             {
-                return SourceManagerResult.Failure("The current Windows user SID could not be determined.", -1);
+                return SourceManagerResult.Failure("Rewindle couldn't tell which Windows account you are using, so no folder was changed.", -1);
             }
 
             string normalizedSource = SourceConfiguration.NormalizePath(sourcePath);
@@ -615,7 +619,7 @@ namespace ResticBackuper.Dashboard
             if (!IsResultTargetAvailable(resultPath))
             {
                 return SourceManagerResult.Failure(
-                    "A protected source-manager result already uses this request nonce.",
+                    "Rewindle couldn't start this change safely. Nothing was changed; try again.",
                     -1);
             }
 
@@ -655,7 +659,7 @@ namespace ResticBackuper.Dashboard
                 {
                     if (process == null)
                     {
-                        return SourceManagerResult.Failure("Windows did not start the protected source manager.", -1);
+                        return SourceManagerResult.Failure("Windows didn't start the change. Nothing was changed.", -1);
                     }
                     if (onElevatedProcessStarted != null)
                     {
@@ -713,9 +717,9 @@ namespace ResticBackuper.Dashboard
             if (!File.Exists(resultPath))
             {
                 return SourceManagerResult.Failure(
-                    "The protected source manager returned exit code " +
+                    "Windows didn't finish the change (code " +
                         exitCode.ToString(CultureInfo.InvariantCulture) +
-                        " without a validated result.",
+                        "). Nothing was changed.",
                     exitCode);
             }
             string resultRoot = Path.GetDirectoryName(resultPath);
@@ -743,19 +747,19 @@ namespace ResticBackuper.Dashboard
                 (File.GetAttributes(resultPath) & FileAttributes.ReparsePoint) != 0)
             {
                 return SourceManagerResult.Failure(
-                    "The protected source-manager result path is unsafe.",
+                    "Rewindle's data folder looks unsafe, so the change was refused. " + EngineProfile.Current.ReinstallAdvice(),
                     exitCode);
             }
             if (!HasProtectedResultAcl(stateRoot, userSid, true))
             {
                 return SourceManagerResult.Failure(
-                    "The protected backup state ACL is not trustworthy.",
+                    "Rewindle's data folder has unexpected permissions, so the change was refused for safety. " + EngineProfile.Current.ReinstallAdvice(),
                     exitCode);
             }
             if (!HasProtectedResultAcl(resultRoot, userSid, true))
             {
                 return SourceManagerResult.Failure(
-                    "The protected source-manager result directory ACL is not trustworthy.",
+                    "Rewindle's data folder has unexpected permissions, so the change was refused for safety. " + EngineProfile.Current.ReinstallAdvice(),
                     exitCode);
             }
 
@@ -774,13 +778,13 @@ namespace ResticBackuper.Dashboard
                     if (!HasProtectedResultAcl(stream.GetAccessControl(), userSid))
                     {
                         return SourceManagerResult.Failure(
-                            "The protected source-manager result file ACL is not trustworthy.",
+                            "Rewindle's data folder has unexpected permissions, so the change was refused for safety. " + EngineProfile.Current.ReinstallAdvice(),
                             exitCode);
                     }
                     if (stream.Length <= 0 || stream.Length > 64 * 1024)
                     {
                         return SourceManagerResult.Failure(
-                            "The protected source-manager result has an invalid size.",
+                            "Windows gave an unreadable answer, so the change was not accepted. Nothing was changed.",
                             exitCode);
                     }
 
@@ -807,7 +811,7 @@ namespace ResticBackuper.Dashboard
             catch (Exception error)
             {
                 return SourceManagerResult.Failure(
-                    "The protected source-manager result could not be validated: " +
+                    "Rewindle couldn't verify Windows' answer, so the change was not accepted: " +
                         SanitizeError(error.Message),
                     exitCode);
             }
@@ -838,7 +842,7 @@ namespace ResticBackuper.Dashboard
                         action.ToLowerInvariant()))
                 {
                     return SourceManagerResult.Failure(
-                        "The protected source-manager result did not match this request.",
+                        "Windows' answer didn't match this request, so it was not accepted. Nothing was changed.",
                         exitCode);
                 }
 
@@ -860,7 +864,7 @@ namespace ResticBackuper.Dashboard
                         !string.Equals(changedPath, sourcePath, StringComparison.Ordinal))
                     {
                         return SourceManagerResult.Failure(
-                            "The protected source-manager result reported an invalid plan generation transition.",
+                            "Rewindle's backup settings changed in an unexpected way, so the change was not accepted.",
                             exitCode);
                     }
                     return SourceManagerResult.Success(
@@ -876,13 +880,13 @@ namespace ResticBackuper.Dashboard
                         exitCode);
                 }
                 return SourceManagerResult.Failure(
-                    "The protected source-manager result disagreed with its process exit status.",
+                    "Windows' answer was unclear, so the change was not accepted. Nothing was changed.",
                     exitCode);
             }
             catch (Exception error)
             {
                 return SourceManagerResult.Failure(
-                    "The protected source-manager result could not be validated: " +
+                    "Rewindle couldn't verify Windows' answer, so the change was not accepted: " +
                         SanitizeError(error.Message),
                     exitCode);
             }
@@ -1096,7 +1100,7 @@ namespace ResticBackuper.Dashboard
         {
             if (string.IsNullOrWhiteSpace(value))
             {
-                return "The protected source change failed.";
+                return "The folder change failed.";
             }
             StringBuilder result = new StringBuilder();
             foreach (char character in value)
@@ -1112,7 +1116,7 @@ namespace ResticBackuper.Dashboard
             }
             string sanitized = result.ToString().Trim();
             return sanitized.Length == 0
-                ? "The protected source change failed."
+                ? "The folder change failed."
                 : sanitized;
         }
 

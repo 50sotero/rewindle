@@ -176,7 +176,7 @@ export interface SetupState {
   os: string;
   webView2: string;
   /**
-   * The backup engine this window reports on: its name ("Rewindle engine" or "Legacy personal edition"), its profile id, the version its
+   * The backup engine this window reports on: its name ("Rewindle backup service" or "Rewindle backup service (earlier personal edition)"), its profile id, the version its
    * install states (empty while it is not installed), whether --engine or the install roots chose it, and every configuration path an
    * engine was looked for at. Additive: an older host does not send them.
    */
