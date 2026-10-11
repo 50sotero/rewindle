@@ -339,8 +339,14 @@ namespace ResticBackuper.Dashboard
 
                 string userDataFolder = GetWebUserDataFolder();
                 Directory.CreateDirectory(userDataFolder);
+                // The page's date fields and calendar are the browser's own and follow its language, not the page's. Giving it the regional
+                // format the page is sent as `locale` keeps them in the order of the dates beside them, not the browser's default.
+                string webLanguage = CultureInfo.CurrentCulture.Name;
+                CoreWebView2EnvironmentOptions environmentOptions = string.IsNullOrEmpty(webLanguage)
+                    ? null
+                    : new CoreWebView2EnvironmentOptions { Language = webLanguage };
                 CoreWebView2Environment environment =
-                    await CoreWebView2Environment.CreateAsync(null, userDataFolder, null);
+                    await CoreWebView2Environment.CreateAsync(null, userDataFolder, environmentOptions);
                 if (webPresentationClosing || webPresentation == null)
                 {
                     return;
