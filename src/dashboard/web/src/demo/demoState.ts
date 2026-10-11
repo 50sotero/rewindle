@@ -122,15 +122,15 @@ export function createSampleState(now = Date.now()): DashboardState {
       evidence: '', kind: 'NotConfigured', checkedAt: '', providerConfirmed: false, restoreVerified: false,
     },
     recovery: {
-      title: 'Restore Center ready', detail: `Plan 4e1b8c0a · generation 1 · ${repositoryPath}`,
-      repairNeeded: false, repairMessage: '', repairState: '', repairBusy: false, repairPercent: null,
+      title: 'Ready to restore', detail: `Restores from ${repositoryPath} into a new, empty folder. Your original files are not touched.`,
+      repairNeeded: false, repairMessage: '', repairState: '', repairBusy: false, repairPercent: null, next: '',
     },
     actions: {
       togglePreview: action('Preview animation'), backupNow: action('Back up now', true, 'Start a backup now. Windows will ask for approval.'),
       cancelBackup: action('Cancel backup'), addSource: action('Add folder'), retrySourceChange: action('Try again', false),
       dismissSourceChange: action('Dismiss', false), editSchedule: action('Edit schedule'), changeRepository: action('Change location'),
-      repairRepository: action('Repair interrupted move', false), reviewChanges: action('Review changes', false), openRestore: action('Open Restore Center'),
-      checkReadiness: action('Check recovery readiness'), viewRunDetails: action('View run details'), exportDiagnostics: action('Export diagnostics'),
+      repairRepository: action('Repair interrupted move', false), reviewChanges: action('Review changes', false), openRestore: action('Restore files…', true, 'Choose a backup and restore files into a separate folder. Windows will ask for your permission.'),
+      checkReadiness: action('Check recovery readiness', true, 'Check that your backups can be opened and restored. This only reads; it changes nothing.'), viewRunDetails: action('View run details'), exportDiagnostics: action('Export diagnostics'),
     },
     runDetails: null, restoreFlow: null,
   };

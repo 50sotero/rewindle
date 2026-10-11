@@ -2222,6 +2222,8 @@ namespace ResticBackuper.Dashboard
                 ? status.Message ?? string.Empty
                 : readinessDetail;
             recovery["repairNeeded"] = status.Exists;
+            // What the Restore page offers while restoring is unavailable ("refresh", "setup", "wait" or empty).
+            recovery["next"] = restoreReadinessNext ?? string.Empty;
             recovery["repairMessage"] = protectionRepositoryRecoveryMessage == null
                 ? string.Empty
                 : protectionRepositoryRecoveryMessage.Text ?? string.Empty;

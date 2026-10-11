@@ -147,6 +147,8 @@ namespace ResticBackuper.Dashboard
         private Button settingsChangeRepositoryButton;
         private Button openRestoreCenterButton;
         private Button checkRecoveryReadinessButton;
+        // What the Restore page offers while restoring is unavailable: "refresh", "setup", "wait" or empty (set by UpdateRestoreReadiness).
+        private string restoreReadinessNext = string.Empty;
         private TextBlock restoreReadinessTitle;
         private TextBlock restoreReadinessDetail;
         private Border protectionRepositoryRecoveryCard;
@@ -856,14 +858,14 @@ namespace ResticBackuper.Dashboard
             readinessEyebrow.Foreground = BlueText;
             readinessCopy.Children.Add(readinessEyebrow);
             restoreReadinessTitle = new TextBlock();
-            restoreReadinessTitle.Text = "Checking protected restore components";
+            restoreReadinessTitle.Text = "Checking that restore is ready";
             restoreReadinessTitle.FontSize = 18;
             restoreReadinessTitle.FontWeight = FontWeights.SemiBold;
             restoreReadinessTitle.Foreground = PrimaryText;
             restoreReadinessTitle.Margin = new Thickness(0, 5, 0, 0);
             readinessCopy.Children.Add(restoreReadinessTitle);
             restoreReadinessDetail = new TextBlock();
-            restoreReadinessDetail.Text = "Rewindle is validating the stable backup plan and restore manager.";
+            restoreReadinessDetail.Text = "Rewindle is checking that your backups can be restored.";
             restoreReadinessDetail.FontSize = 12;
             restoreReadinessDetail.Foreground = MutedText;
             restoreReadinessDetail.TextWrapping = TextWrapping.Wrap;
@@ -880,9 +882,9 @@ namespace ResticBackuper.Dashboard
             AutomationProperties.SetName(checkRecoveryReadinessButton, "Check recovery readiness");
             AutomationProperties.SetHelpText(
                 checkRecoveryReadinessButton,
-                "Read-only checks validate the repository, both credentials, recovery bundle, capacity, locks, and restore drill.");
+                "Check that your backups can be opened and restored. This only reads; it changes nothing.");
             recoveryActions.Children.Add(checkRecoveryReadinessButton);
-            openRestoreCenterButton = CreateButton("Open Restore Center");
+            openRestoreCenterButton = CreateButton("Restore files…");
             openRestoreCenterButton.MinWidth = 164;
             openRestoreCenterButton.MinHeight = 42;
             openRestoreCenterButton.Background = Blue;
@@ -890,10 +892,10 @@ namespace ResticBackuper.Dashboard
             openRestoreCenterButton.Foreground = themeResolution.Palette.TextOnAccent;
             openRestoreCenterButton.VerticalAlignment = VerticalAlignment.Center;
             openRestoreCenterButton.Click += OnOpenRestoreCenterClick;
-            AutomationProperties.SetName(openRestoreCenterButton, "Open protected Restore Center");
+            AutomationProperties.SetName(openRestoreCenterButton, "Restore files");
             AutomationProperties.SetHelpText(
                 openRestoreCenterButton,
-                "Browse plan-bound snapshots and restore to a new or empty destination. Windows approval is required.");
+                "Choose a backup and restore files into a separate folder. Windows will ask for your permission.");
             recoveryActions.Children.Add(openRestoreCenterButton);
             Grid.SetColumn(recoveryActions, 1);
             readiness.Children.Add(recoveryActions);
@@ -4362,55 +4364,61 @@ namespace ResticBackuper.Dashboard
             bool ready = managerAvailable && hasCanary && !blocked;
             openRestoreCenterButton.IsEnabled = ready;
             checkRecoveryReadinessButton.IsEnabled = healthAvailable && !blocked;
+            // What the Restore page offers besides the text (`recovery.next` in native-types.ts).
+            restoreReadinessNext = string.Empty;
             if (currentSourceConfiguration == null)
             {
-                restoreReadinessTitle.Text = "Protected configuration unavailable";
-                restoreReadinessDetail.Text = "Repair or refresh the protected installation before browsing snapshots.";
+                restoreReadinessTitle.Text = "Rewindle can't read its backup settings";
+                restoreReadinessDetail.Text = "Choose Check again. If this stays, run Rewindle Setup again and choose Reinstall or repair. Your backups are not affected.";
                 restoreReadinessTitle.Foreground = Rose;
+                restoreReadinessNext = "refresh";
             }
             else if (!managerAvailable)
             {
-                restoreReadinessTitle.Text = "Restore Center is not installed";
-                restoreReadinessDetail.Text = "The protected restore manager or backend is missing from the runtime manifest.";
+                restoreReadinessTitle.Text = "Restore isn't available";
+                restoreReadinessDetail.Text = "A part of Rewindle that restoring needs is missing. Run Rewindle Setup again and choose Reinstall or repair.";
                 restoreReadinessTitle.Foreground = Rose;
+                restoreReadinessNext = "setup";
             }
             else if (!hasCanary)
             {
+                // Setup puts the restore test file back: its canary phase recreates the file and the folder entry (Install-ResticBackuper.ps1).
                 restoreReadinessTitle.Text = "Restore test file is missing";
-                restoreReadinessDetail.Text = "A restore test file is required before app-guided recovery is trusted.";
+                restoreReadinessDetail.Text = "Rewindle checks every backup by restoring a small test file, and that file is gone. Restore is unavailable until it is back. Run Rewindle Setup again and choose Reinstall or repair to put it back. Your existing backups are not affected.";
                 restoreReadinessTitle.Foreground = Rose;
+                restoreReadinessNext = "setup";
             }
             else if (repositoryRecoveryStatus.Exists)
             {
-                restoreReadinessTitle.Text = "Repair the interrupted repository move first";
+                restoreReadinessTitle.Text = "Finish moving your backup location first";
                 restoreReadinessDetail.Text = repositoryRecoveryStatus.Message;
                 restoreReadinessTitle.Foreground = Amber;
             }
             else if (blocked)
             {
-                restoreReadinessTitle.Text = "Restore access is temporarily paused";
-                restoreReadinessDetail.Text = "Wait for the active backup or protected configuration change to finish.";
+                restoreReadinessTitle.Text = "Restore will be available in a moment";
+                restoreReadinessDetail.Text = "A backup or settings change is running. Restore unlocks when it finishes.";
                 restoreReadinessTitle.Foreground = Amber;
+                restoreReadinessNext = "wait";
             }
             else
             {
-                restoreReadinessTitle.Text = "Restore Center ready";
-                restoreReadinessDetail.Text = "Plan " +
-                    currentSourceConfiguration.PlanId.Substring(0, 8) + " · generation " +
-                    currentSourceConfiguration.ConfigGeneration.ToString(CultureInfo.CurrentCulture) +
-                    " · " + currentSourceConfiguration.RepositoryPath;
+                restoreReadinessTitle.Text = "Ready to restore";
+                restoreReadinessDetail.Text = "Restores from " + currentSourceConfiguration.RepositoryPath +
+                    " into a new, empty folder. Your original files are not touched.";
                 restoreReadinessTitle.Foreground = Green;
             }
-            AutomationProperties.SetHelpText(
-                openRestoreCenterButton,
-                ready
-                    ? "Browse snapshots and restore to a separate destination. Windows approval is required."
-                    : restoreReadinessDetail.Text);
-            AutomationProperties.SetHelpText(
-                checkRecoveryReadinessButton,
-                checkRecoveryReadinessButton.IsEnabled
-                    ? "Run read-only independent repository and recovery checks."
-                    : restoreReadinessDetail.Text);
+            // A disabled button gives its reason as its help text, and the host refuses a command with the tooltip.
+            string openRestoreHelp = ready
+                ? "Choose a backup and restore files into a separate folder. Windows will ask for your permission."
+                : restoreReadinessDetail.Text;
+            string checkReadinessHelp = checkRecoveryReadinessButton.IsEnabled
+                ? "Check that your backups can be opened and restored. This only reads; it changes nothing."
+                : restoreReadinessDetail.Text;
+            AutomationProperties.SetHelpText(openRestoreCenterButton, openRestoreHelp);
+            openRestoreCenterButton.ToolTip = openRestoreHelp;
+            AutomationProperties.SetHelpText(checkRecoveryReadinessButton, checkReadinessHelp);
+            checkRecoveryReadinessButton.ToolTip = checkReadinessHelp;
         }
 
         private void OnCheckRecoveryReadinessClick(object sender, RoutedEventArgs args)

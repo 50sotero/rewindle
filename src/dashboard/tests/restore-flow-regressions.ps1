@@ -245,11 +245,11 @@ try {
     Invoke-Private $dashboard 'BuildRestoreFlowValidation' $validationArgs | Out-Null
     $validationErrors = $validationArgs[0]
     Assert-True ($validationErrors.Count -ge 2) 'empty restore scope did not produce validation errors'
-    Assert-True ([string]::Join(' | ', $validationErrors) -match 'entire snapshot') 'empty restore scope did not explain explicit whole-snapshot selection'
+    Assert-True ([string]::Join(' | ', $validationErrors) -match 'everything in the backup') 'empty restore scope did not explain explicit whole-snapshot selection'
     Set-PrivateField $dashboard 'restoreFlowWholeSnapshotSelected' $true
     $validationArgs = [object[]]@($null, $null)
     Invoke-Private $dashboard 'BuildRestoreFlowValidation' $validationArgs | Out-Null
-    Assert-True (-not ([string]::Join(' | ', $validationArgs[0]) -match 'one or more snapshot paths')) 'explicit whole-snapshot scope was still rejected as empty'
+    Assert-True (-not ([string]::Join(' | ', $validationArgs[0]) -match 'Choose files or folders')) 'explicit whole-snapshot scope was still rejected as empty'
 
     # A whole snapshot larger than the room the destination check found is warned about, never refused: the warning joins the warnings
     # (the errors, which decide whether the restore can go on, are untouched), and only for a whole-snapshot scope of a snapshot that
@@ -267,7 +267,7 @@ try {
     Set-PrivateField $dashboard 'restoreFlowDestinationChecking' $false
     Set-PrivateField $dashboard 'restoreFlowDestinationDrive' 'E:'
     $tight = Get-SpaceValidation ([long]($gib * 3 / 2))
-    Assert-True ($tight[1].Count -eq 1 -and ([string]$tight[1][0]) -like 'This snapshot is about * but only * is free on E:. The restore may stop part-way.') ('a whole snapshot larger than the free space did not warn: ' + [string]::Join(' | ', $tight[1]))
+    Assert-True ($tight[1].Count -eq 1 -and ([string]$tight[1][0]) -like 'Everything in this backup is about * but only * is free on E:. The restore may stop part-way. Choose a drive with more room if you can.') ('a whole snapshot larger than the free space did not warn: ' + [string]::Join(' | ', $tight[1]))
     Assert-True ($tight[0].Count -eq 0) 'the free-space warning was reported as an error'
     # Five GiB and a twentieth more is what a whole snapshot of five GiB needs: that much room is enough, one byte less is not.
     Assert-True ((Get-SpaceValidation 5637144576L)[1].Count -eq 0) 'a drive with exactly the room a snapshot needs was warned about'
@@ -383,7 +383,7 @@ try {
     Set-PrivateField $dashboard 'restoreFlowStep' 'progress'
     $cancelResult = Invoke-Private $dashboard 'CancelRestoreFlow' $cancelArgs
     Assert-True (-not [bool]$cancelResult) 'active protected restore was reported as cancellable'
-    Assert-True ([string]$cancelArgs[0] -match 'cannot be cancelled') 'active restore cancellation rejection was unclear'
+    Assert-True ([string]$cancelArgs[0] -match 'cannot be stopped safely') 'active restore cancellation rejection was unclear'
 
     # Try again returns to the step that can recover from the failure.
     Set-PrivateField $dashboard 'restoreFlowBusy' $false
@@ -954,8 +954,8 @@ try {
     Set-PrivateField $dashboard 'restoreFlowAwaitingApproval' $false
     Set-PrivateField $dashboard 'restoreFlowStep' 'error'
     Set-PrivateField $dashboard 'restoreFlowResultStatus' 'cancelled'
-    Set-PrivateField $dashboard 'restoreFlowMessageTitle' 'Windows approval cancelled'
-    Assert-True ((Invoke-Private $dashboard 'BuildWebRestoreFlowState')['result']['title'] -eq 'Windows approval cancelled') 'a cancelled approval did not keep its own headline'
+    Set-PrivateField $dashboard 'restoreFlowMessageTitle' 'Windows permission was not given'
+    Assert-True ((Invoke-Private $dashboard 'BuildWebRestoreFlowState')['result']['title'] -eq 'Windows permission was not given') 'a cancelled approval did not keep its own headline'
     Set-PrivateField $dashboard 'restoreFlowMessageTitle' ''
     Assert-True ($null -eq (Invoke-Private $dashboard 'BuildWebRestoreFlowState')['result']['title']) 'a missing host headline was replaced with a fixed one'
     # The protected manager reports no file counts, so none are published for the page to show as placeholders.
@@ -1027,7 +1027,7 @@ try {
     Assert-True ([string]::IsNullOrEmpty([string]$freeState['startBlocked'])) 'the page was told a restore is blocked while nothing is running'
     Set-PrivateField $dashboard 'backupStartInProgress' $true
     $blockedState = Invoke-Private $dashboard 'BuildWebRestoreFlowState'
-    Assert-True (([string]$blockedState['startBlocked']) -match 'active backup') 'the page was not told why a restore cannot start while a backup is starting'
+    Assert-True (([string]$blockedState['startBlocked']) -match 'running backup') 'the page was not told why a restore cannot start while a backup is starting'
     Set-PrivateField $dashboard 'backupStartInProgress' $false
 
     # The result screen's Open and Copy carry no path: they act on the folder the finished restore reported (restoreFlowResultTarget),
@@ -1419,7 +1419,7 @@ namespace RewindleRegression {
         $fakeBroker::WrongServerProcessId = $bystander.Id
         $sessionHost = New-SessionHost
         $squatted = Invoke-SessionList $sessionHost
-        Assert-True (-not $squatted.Succeeded -and $squatted.ErrorMessage -match 'could not be verified' -and $fakeBroker::Hellos -eq 0) ('the dashboard talked to a pipe whose server it did not start: ' + $squatted.ErrorMessage)
+        Assert-True (-not $squatted.Succeeded -and $squatted.ErrorMessage -match 'could not confirm that the restore step is its own' -and $fakeBroker::Hellos -eq 0) ('the dashboard talked to a pipe whose server it did not start: ' + $squatted.ErrorMessage)
         Invoke-Private $sessionHost 'Close' | Out-Null
     }
     finally { try { $bystander.Kill() } catch { } }
@@ -1428,12 +1428,12 @@ namespace RewindleRegression {
     $fakeBroker::Reset('oversized')
     $sessionHost = New-SessionHost
     $oversized = Invoke-SessionList $sessionHost
-    Assert-True (-not $oversized.Succeeded -and $oversized.ErrorMessage -match 'size limit' -and -not [bool](Get-HostValue $sessionHost 'HasLiveSession')) ('an oversized session frame was accepted: ' + $oversized.ErrorMessage)
+    Assert-True (-not $oversized.Succeeded -and $oversized.ErrorMessage -match 'did not answer the way Rewindle expected' -and -not [bool](Get-HostValue $sessionHost 'HasLiveSession')) ('an oversized session frame was accepted: ' + $oversized.ErrorMessage)
     Invoke-Private $sessionHost 'Close' | Out-Null
     $fakeBroker::Reset('foreignNonce')
     $sessionHost = New-SessionHost
     $foreign = Invoke-SessionList $sessionHost
-    Assert-True (-not $foreign.Succeeded -and $foreign.ErrorMessage -match 'did not match this request') ('a session result bound to another request was accepted: ' + $foreign.ErrorMessage)
+    Assert-True (-not $foreign.Succeeded -and $foreign.ErrorMessage -match 'did not match what was asked for') ('a session result bound to another request was accepted: ' + $foreign.ErrorMessage)
     Invoke-Private $sessionHost 'Close' | Out-Null
 
     # The installed engine decides: a session needs the profile's broker and the engine's own capability document.
@@ -1464,19 +1464,19 @@ namespace RewindleRegression {
     Invoke-Private $dashboard 'ResetRestoreFlowSession' @($config, $configHash) | Out-Null
     $openedHost = Get-FieldValue $dashboard 'restoreFlowApprovalSession'
     Assert-True ($null -ne $openedHost -and (Invoke-Private $dashboard 'BuildWebRestoreFlowState')['approval']['session'] -eq $true) 'Restore did not use one session with an engine that serves them'
-    Assert-True ((Invoke-Private $dashboard 'RestoreFlowApprovalNotice') -eq 'Windows will ask once to allow Rewindle to read and restore from your backup.') 'the page was not told Windows asks once'
+    Assert-True ((Invoke-Private $dashboard 'RestoreFlowApprovalNotice') -eq 'Windows will ask once for your permission to let Rewindle read and restore from your backup.') 'the page was not told Windows asks once'
     Remove-Item -LiteralPath (Join-Path $installRoot 'engine-capabilities.json') -Force
     Invoke-Private $dashboard 'ResetRestoreFlowSession' @($config, $configHash) | Out-Null
     Assert-True ([bool](Get-HostValue $openedHost 'IsClosed')) 'reopening Restore kept the previous session'
     Assert-True ($null -eq (Get-FieldValue $dashboard 'restoreFlowApprovalSession') -and (Invoke-Private $dashboard 'BuildWebRestoreFlowState')['approval']['session'] -eq $false) 'an engine without sessions was not given one approval per step'
-    Assert-True ((Invoke-Private $dashboard 'RestoreFlowApprovalNotice') -match 'each protected step') 'the per-step approvals were described as one'
+    Assert-True ((Invoke-Private $dashboard 'RestoreFlowApprovalNotice') -match 'each time Rewindle opens your backup') 'the per-step approvals were described as one'
 
     # The flow's session ends with the flow, and with a plan that changed.
     $fakeBroker::Reset('normal')
     $flowHost = New-SessionHost
     Assert-True ((Invoke-SessionList $flowHost).Succeeded -and [bool](Get-HostValue $flowHost 'HasLiveSession')) 'the flow''s session did not open'
     Set-PrivateField $dashboard 'restoreFlowApprovalSession' $flowHost
-    Assert-True ((Invoke-Private $dashboard 'RestoreFlowApprovalNotice') -match 'ended, so Windows will ask again') 'a session that had been approved was not described as ended when it asks again'
+    Assert-True ((Invoke-Private $dashboard 'RestoreFlowApprovalNotice') -match 'has ended, so Windows will ask for your permission again') 'a session that had been approved was not described as ended when it asks again'
     Set-PrivateField $dashboard 'restoreFlowOpen' $true
     Set-PrivateField $dashboard 'restoreFlowBusy' $false
     [void](Invoke-Private $dashboard 'StoreRestoreFlowTreeListing' @('snapshot', '/', (New-TreeEntries '/' 1)))
