@@ -97,7 +97,8 @@ button.rail-link:hover .rail-label { color: var(--ink); text-decoration: underli
 .issue-action-group > .issue-action { margin-left: 0; }
 .callout:has(.issue-action) { align-items: center; flex-wrap: wrap; }
 /* The message keeps a readable width; its buttons move to their own line when the window is narrow. */
-.callout:has(.issue-action) > span { flex: 1 1 240px; min-width: 0; }
+.callout:has(.issue-action) > span, .callout:has(.issue-action) > .callout-body { flex: 1 1 240px; min-width: 0; }
+.callout-body ol.steps-list { margin: 4px 0; }
 .kept-place { display: flex; flex-direction: column; gap: 1px; margin-bottom: 8px; }
 .kept-place > span:first-child { font-weight: 600; color: var(--ink); }
 .kept-place .inline-path { color: var(--ink-2); font-size: var(--type-sm); }
@@ -117,6 +118,7 @@ button.rail-link:hover .rail-label { color: var(--ink); text-decoration: underli
 .welcome-points, .done-facts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
 .welcome-points li, .done-facts li { display: flex; align-items: flex-start; gap: 14px; font-size: var(--type-md); line-height: 1.6; color: var(--ink-2); }
 .welcome-points strong, .done-facts strong { color: var(--ink); font-weight: 600; }
+.point-icon.is-warning { color: var(--orange-ink); background: var(--orange-tint); }
 .point-icon { flex-shrink: 0; display: grid; place-items: center; width: 38px; height: 38px; border-radius: 11px; color: var(--accent-ink); background: var(--accent-tint); }
 .welcome-points li > span:last-child, .done-facts li > span:last-child { padding-top: 7px; }
 
@@ -161,6 +163,7 @@ button.rail-link:hover .rail-label { color: var(--ink); text-decoration: underli
 .drive-title strong { font-size: var(--type-md); font-weight: 600; }
 .drive-meta { font-size: var(--type-sm); color: var(--ink-2); line-height: 1.5; font-variant-numeric: tabular-nums; }
 .drive-card[data-disabled="true"] .drive-meta { color: var(--ink-3); }
+.drive-help { display: block; margin-top: 3px; line-height: 1.5; }
 .radio-dot { flex-shrink: 0; width: 20px; height: 20px; border-radius: 50%; background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--line-strong); transition: box-shadow .15s; }
 .drive-card[data-selected="true"] .radio-dot { box-shadow: inset 0 0 0 6px var(--accent); }
 .drive-card[data-disabled="true"] .radio-dot { visibility: hidden; }
@@ -350,8 +353,11 @@ button.rail-link:hover .rail-label { color: var(--ink); text-decoration: underli
   .destination-path { flex-basis: calc(100% - 40px); white-space: normal; overflow-wrap: anywhere; }
 }
 @media (max-width: 520px) {
-  .footer-hint { display: none; }
-  .setup-footer { grid-template-columns: auto 1fr; }
+  /* The hint (why Next is off, what is being checked) moves to its own row under the buttons instead of vanishing. */
+  .setup-footer { grid-template-columns: auto 1fr; grid-template-rows: auto auto; height: auto; min-height: var(--footer-height); padding-block: 10px; }
+  .footer-hint { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; text-align: left; }
+  .footer-hint:not(:empty) { margin-top: 6px; }
+  .footer-hint > span { white-space: normal; }
   .footer-next { justify-content: flex-end; }
   .key-explain { flex-direction: column; }
   .done-hero { flex-direction: column; align-items: flex-start; }

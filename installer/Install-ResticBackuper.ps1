@@ -2225,7 +2225,7 @@ function Get-InstallationConflicts {
     }
     if (-not $SkipDashboard -and (Test-Path -LiteralPath $startMenuShortcut)) {
         $conflicts += New-InstallFinding -Code 'start_menu_shortcut_exists' -Field 'environment' `
-            -Message 'A Start menu item named ResticBackuper already exists, so setup will not overwrite it.' `
+            -Message "A Start menu shortcut left over from an earlier installation is in the way, so setup won't overwrite it. Delete $startMenuShortcut, then try again." `
             -Console "A Start Menu item already occupies the ResticBackuper shortcut path: $startMenuShortcut" -Path $startMenuShortcut
     }
     foreach ($taskName in @($backupTaskName, $dashboardTaskName, $cloudVerificationTaskName)) {
@@ -2233,7 +2233,7 @@ function Get-InstallationConflicts {
         try { $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue } catch { }
         if ($existingTask) {
             $conflicts += New-InstallFinding -Code 'task_name_in_use' -Field 'environment' `
-                -Message "A Windows scheduled task named $taskName already exists, so setup will not continue." `
+                -Message "A scheduled task named $taskName is left over from an earlier installation, so setup can't continue. Open Task Scheduler (search for it in the Start menu), delete that task, then try again." `
                 -Console "A scheduled task already uses the product name: $taskName" -Path $taskName
         }
     }

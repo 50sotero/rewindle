@@ -43,7 +43,9 @@ export function OperationView({ wizard, operation }: { wizard: Wizard; operation
   const failed = !!finished && finished.outcome !== 'succeeded';
   const allPhases = listedPhases(operation);
   // After a failure or a cancellation the list says what happened, so the steps that never ran are left out.
-  const phases = failed ? allPhases.filter(phase => phase.state !== 'pending') : allPhases;
+  // Setup runs inside the web view component, so its own install step is never needed: it is listed only if the installer really ran it.
+  const phases = (failed ? allPhases.filter(phase => phase.state !== 'pending') : allPhases)
+    .filter(phase => phase.id !== 'webview2' || (phase.state !== 'pending' && phase.state !== 'skipped'));
   const progress = operationProgress(operation);
   const percent = Math.round(progress * 100);
   const current = [...phases].reverse().find(phase => phase.state === 'started');
@@ -112,6 +114,7 @@ export function OperationView({ wizard, operation }: { wizard: Wizard; operation
               <span className="phase-text">
                 <span className="phase-title">{phase.title}</span>
                 {phase.detail && (phase.state === 'failed' || phase.state === 'completed') && phase.detail !== operation.result?.error?.message && <span className="phase-detail">{phase.detail}</span>}
+                {phase.state === 'skipped' && <span className="phase-detail" aria-hidden="true">Not needed</span>}
               </span>
               <span className="sr-only">, {STATE_WORDS[phase.state]}</span>
             </li>
@@ -152,10 +155,12 @@ function FailureNotice({ wizard, operation, onCopy, copied }: { wizard: Wizard; 
     <Callout tone="error" title="What went wrong">
       <p className="failure-message">{message}</p>
       {notes.map(note => <p key={note}>{note}</p>)}
-      {uninstall && <p>Your backups and recovery key were not touched. Try again, or remove Rewindle from Settings › Apps › Installed apps.</p>}
+      {uninstall
+        ? <p>Your backups and recovery key were not touched. Try again, or remove Rewindle from Settings › Apps › Installed apps.</p>
+        : <p>Choose <strong>Try again</strong>, or <strong>Back to review</strong> to change your choices.</p>}
       <div className="callout-actions">
         <Button size="sm" onClick={onCopy}><Copy size={13} aria-hidden="true" />{copied ? 'Copied' : 'Copy details'}</Button>
-        <button type="button" className="text-link" onClick={() => wizard.openLink('issues')}>Report the problem</button>
+        <button type="button" className="text-link" onClick={() => wizard.openLink('issues')}>Report the problem (opens GitHub)</button>
       </div>
     </Callout>
   );

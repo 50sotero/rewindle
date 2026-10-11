@@ -138,7 +138,7 @@ export const INSTALL_PHASES: readonly { id: string; title: string; weight: numbe
   { id: 'webview2', title: 'Making sure the display component is there', weight: 6 },
   { id: 'payload', title: 'Copying Rewindle onto this PC', weight: 12 },
   { id: 'canary', title: 'Preparing the restore test file', weight: 4 },
-  { id: 'credential', title: 'Creating your encryption password', weight: 4 },
+  { id: 'credential', title: 'Setting up encryption (no password to remember)', weight: 4 },
   { id: 'repository', title: 'Creating the backup location', weight: 14 },
   { id: 'recovery_key', title: 'Writing your recovery key', weight: 5 },
   { id: 'permissions', title: 'Protecting Rewindle’s files', weight: 6 },

@@ -28,8 +28,9 @@ export function Maintenance({ wizard, onReinstall, onUninstall, openDashboard }:
         <div className="installed-card">
           <span className="installed-emblem"><Check size={20} strokeWidth={3} aria-hidden="true" /></span>
           <div className="installed-text">
-            <strong>Rewindle {installed?.version ?? ''} is installed</strong>
-            <span>{installed?.installRoot ?? 'On this PC'}{same ? ' · the same version as this setup' : installed?.version && setupVersion ? ` · this setup has ${setupVersion}` : ''}</span>
+            <strong>Rewindle{installed?.version ? ` ${installed.version}` : ''} is installed</strong>
+            {/* No folder path here: it is the program's internal folder, which a home user has no use for and which carries an old name. */}
+            <span>{same ? 'This is the same version as this setup.' : installed?.version && setupVersion ? `This setup has version ${setupVersion}.` : 'It is installed on this PC.'}</span>
           </div>
           <Button variant="primary" className="setup-button" onClick={openDashboard}><LayoutDashboard size={15} aria-hidden="true" />Open Rewindle<ArrowUpRight size={14} aria-hidden="true" /></Button>
         </div>
@@ -40,7 +41,7 @@ export function Maintenance({ wizard, onReinstall, onUninstall, openDashboard }:
           <span className="choice-icon"><RefreshCw size={18} aria-hidden="true" /></span>
           <span className="choice-text">
             <strong>Reinstall or repair <ShieldIcon size={13} /></strong>
-            <span>Remove the app, then go through the setup steps again. Your existing backups and recovery key stay where they are.</span>
+            <span>Remove the app, then go through the setup steps again. Your backups and recovery key are kept; your folders and schedule start from the suggestions.</span>
           </span>
         </button>
         <button type="button" className="choice" onClick={onUninstall}>

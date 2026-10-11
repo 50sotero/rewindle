@@ -8,7 +8,7 @@ import { Button } from '@/components/atoms/Button';
 import { bridge } from './bridge';
 import LoadingState from '@/components/primitives/LoadingState';
 import { issuesFor, SCHEDULE_PATTERN } from './contract';
-import { formatBytes, plural } from './format';
+import { formatBytes, formatCount, plural } from './format';
 import { ConfirmDialog, ShieldIcon, Spinner } from './ui';
 import { CHOICE_STEPS, STEPS, onlineOnlyPaths, phaseTitle, selectedPaths, selectedTotal, useWizard, type Screen, type Wizard } from './useWizard';
 import { Welcome } from './screens/Welcome';
@@ -36,9 +36,9 @@ function headerFor(wizard: Wizard): Header {
   const eyebrow = step ? `Step ${step} of 8` : undefined;
   switch (wizard.screen) {
     case 'hostError': return { title: 'Setup couldn’t start' };
-    case 'unsupported': return { title: 'Rewindle can’t be installed on this PC', lead: 'This PC is missing something Rewindle needs to run.' };
+    case 'unsupported': return { title: 'Rewindle can’t be installed on this PC', lead: 'This PC doesn’t meet Rewindle’s requirements.' };
     case 'maintenance': return { eyebrow: 'Rewindle Setup', title: 'Rewindle is already on this PC', lead: 'Open it, set it up again, or remove it.' };
-    case 'welcome': return { eyebrow: 'Rewindle Setup', title: 'Backup you can verify', lead: 'Set up daily, encrypted backups of your files in a few steps. The suggestions on each page suit most people, so you can just choose Next.' };
+    case 'welcome': return { eyebrow: 'Rewindle Setup', title: 'Backup you can verify', lead: 'Set up daily, encrypted backups of your files in a few minutes. An external USB drive is the best place to keep them. The suggestions on each page suit most people, so you can just choose Next.' };
     case 'folders': return { eyebrow, title: 'What should Rewindle protect?', lead: 'Your main folders are already chosen. Add anything else you’d hate to lose.' };
     case 'location': return { eyebrow, title: 'Where should backups be kept?', lead: 'Choose a drive. A separate drive, like an external USB drive, keeps your files safest.' };
     case 'schedule': return { eyebrow, title: 'When should Rewindle back up?', lead: 'Rewindle backs up once a day and copies only what changed since the last time.' };
@@ -124,29 +124,39 @@ export default function SetupApp() {
         const onlineOnly = onlineOnlyPaths(choices!, wizard.sizes).length > 0;
         return {
           back: back('welcome'), next: next('location', count === 0 || errors || onlineOnly),
-          hint: count === 0 ? 'Choose at least one folder' : onlineOnly ? 'Online-only files must be on this PC first' : <>{total.measuring && <Spinner size={12} />}<span>{plural(count, 'folder', 'folders')} · {formatBytes(total.bytes, wizard.host?.locale)}</span></>,
+          hint: count === 0 ? 'Choose at least one folder' : onlineOnly ? 'Fix the OneDrive files above to continue' : <>{total.measuring && <Spinner size={12} />}<span>{plural(count, 'folder', 'folders')} · {formatBytes(total.bytes, wizard.host?.locale)}</span></>,
         };
       }
       case 'location': {
+        // The installer checks every change a moment later (a PowerShell run): Next waits for that, and says so, instead of going on
+        // with the last answer. A disabled Next always says why, because the finding itself can be below the fold.
         const errors = issuesFor(plan, 'repository', 'storage_mode').errors.length > 0;
-        return { back: back('folders'), next: next('schedule', !choices?.repository || errors) };
+        const checking = wizard.validation.checking;
+        return {
+          back: back('folders'), next: next('schedule', !choices?.repository || errors || checking),
+          hint: checking ? <><Spinner size={12} /><span>Checking this location…</span></>
+            : errors || !choices?.repository ? 'Fix the problem on this page to continue' : undefined,
+        };
       }
       case 'schedule': {
         const errors = issuesFor(plan, 'schedule').errors.length > 0;
-        return { back: back('location'), next: next('review', !SCHEDULE_PATTERN.test(choices?.schedule ?? '') || !wizard.scheduleDraftValid || errors) };
+        const invalid = !SCHEDULE_PATTERN.test(choices?.schedule ?? '') || !wizard.scheduleDraftValid || errors;
+        return { back: back('location'), next: next('review', invalid), hint: invalid ? 'Enter a valid time to continue' : undefined };
       }
       case 'review': {
         // Install also waits for the first scan of every chosen folder: online-only files are only known once the scan reaches
         // them, and the installed engine refuses such a folder on every backup.
         // Install itself scans them once more before the installer starts (wizard.checkingBeforeInstall meanwhile).
-        const scanning = selectedTotal(choices!, wizard.sizes).measuring;
+        const scan = selectedTotal(choices!, wizard.sizes);
+        const scanning = scan.measuring;
         const problems = (plan?.errors.length ?? 0) > 0 || selectedPaths(choices!).length === 0 || onlineOnlyPaths(choices!, wizard.sizes).length > 0;
         return {
           back: back('schedule'),
           next: { label: 'Install', icon: <ShieldIcon size={16} />, onClick: () => wizard.install(), disabled: problems || scanning, variant: 'primary' },
           hint: problems ? 'Fix the problems above to install'
-            : wizard.checkingBeforeInstall ? <><Spinner size={12} /><span>Checking your folders once more…</span></>
-              : scanning ? <><Spinner size={12} /><span>Checking your folders for online-only files…</span></>
+            // The count is what shows a long scan (a big photo library) is moving.
+            : wizard.checkingBeforeInstall ? <><Spinner size={12} /><span>Checking your folders once more… {formatCount(scan.files, wizard.host?.locale)} files so far</span></>
+              : scanning ? <><Spinner size={12} /><span>Checking your folders for files that are only in OneDrive…</span></>
                 : 'Windows will ask for permission once',
         };
       }
@@ -211,7 +221,8 @@ export default function SetupApp() {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat) return;
-      if (event.key === 'Enter' && !ownsKey(event.target) && footer.next && !footer.next.disabled) {
+      // Not on Review: Enter there would start the installation (and Windows' permission prompt), which takes a deliberate click.
+      if (event.key === 'Enter' && !ownsKey(event.target) && footer.next && !footer.next.disabled && screen !== 'review') {
         event.preventDefault(); footer.next.onClick();
       } else if (event.key === 'Escape' && !ownsKey(event.target) && footer.back && !footer.back.disabled && footer.back.label !== 'Close' && footer.back.label !== 'Skip for now') {
         event.preventDefault(); footer.back.onClick();
@@ -219,7 +230,7 @@ export default function SetupApp() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [footer]);
+  }, [footer, screen]);
 
   // Progress, read aloud: each phase as it finishes, and a failure at once.
   const lastPhase = useRef('');
@@ -258,7 +269,7 @@ export default function SetupApp() {
       case 'review': return <Review wizard={wizard} />;
       case 'installing': case 'uninstalling': return operation ? <OperationView wizard={wizard} operation={operation} /> : null;
       case 'recovery': return <Recovery wizard={wizard} state={recovery} onChange={setRecovery} />;
-      case 'done': return <Done wizard={wizard} />;
+      case 'done': return <Done wizard={wizard} recovery={recovery} />;
       case 'uninstalled': return <Uninstalled wizard={wizard} />;
       default: return null;
     }
@@ -353,7 +364,7 @@ export default function SetupApp() {
             <div className="footer-next">
               {footer.next && (
                 <Button variant={footer.next.variant ?? 'secondary'} className="setup-button" disabled={footer.next.disabled} onClick={footer.next.onClick}
-                  aria-keyshortcuts={footer.next.variant === 'primary' ? 'Enter' : undefined}>
+                  aria-keyshortcuts={footer.next.variant === 'primary' && screen !== 'review' ? 'Enter' : undefined}>
                   {footer.next.icon}{footer.next.label}{footer.next.trailing}
                 </Button>
               )}
@@ -368,8 +379,8 @@ export default function SetupApp() {
         </ConfirmDialog>
         <ConfirmDialog open={confirmReinstall} title="Set up Rewindle again?" confirm="Remove and set up again" cancel="Keep Rewindle" confirmIcon={<ShieldIcon size={15} />}
           onCancel={() => setConfirmReinstall(false)} onConfirm={() => { setConfirmReinstall(false); void wizard.reinstall(); }}>
-          <p>Setup removes the Rewindle app and its scheduled backups first, then takes you through the setup steps again. Windows asks for permission for each part.</p>
-          <p><strong>Your backups and recovery key are kept.</strong> Choose the same backup location in the steps to carry on with them.</p>
+          <p>Setup removes the Rewindle app and its scheduled backups first, then takes you through the setup steps again. Windows asks for your permission again when the new install starts.</p>
+          <p><strong>Your backups and recovery key are kept.</strong> Setup picks your existing backup location again if its drive is connected. Your folders and schedule start from the suggestions, so check them as you go.</p>
         </ConfirmDialog>
         <ConfirmDialog open={confirmSkip} title="Skip saving your recovery key?" confirm="Skip for now" cancel="Go back"
           onCancel={() => setConfirmSkip(false)} onConfirm={() => { setConfirmSkip(false); wizard.goTo('done'); }}>

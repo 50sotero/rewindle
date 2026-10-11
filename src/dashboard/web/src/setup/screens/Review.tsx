@@ -1,11 +1,11 @@
-import { CalendarClock, Cloud, FolderCheck, HardDrive, Pencil, PlayCircle } from 'lucide-react';
+import { CalendarClock, Cloud, CircleCheck, FolderCheck, HardDrive, Pencil, PlayCircle } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Button } from '@/components/atoms/Button';
 import { issuesFor } from '../contract';
-import { driveLetter, folderName, formatBytes, formatTime, plural, samePath } from '../format';
+import { driveLetter, folderName, formatBytes, formatTime, nextRunDay, plural, samePath } from '../format';
 import { Callout, IssueList, Spinner, Switch } from '../ui';
 import { onlineOnlyPaths, selectedPaths, selectedTotal, type Screen, type Wizard } from '../useWizard';
-import { driveName } from './Location';
+import { chosenVolume, driveName, FitCheck } from './Location';
 
 function Row({ icon, title, edit, onEdit, children }: { icon: ReactNode; title: string; edit: string; onEdit: () => void; children: ReactNode }) {
   return (
@@ -33,14 +33,16 @@ export function Review({ wizard }: { wizard: Wizard }) {
   const volume = environment.volumes.find(item => samePath(item.root, choices.driveRoot));
   const go = (screen: Screen) => () => wizard.goTo(screen);
   const all = issuesFor(plan, 'environment', 'sources', 'repository', 'storage_mode', 'schedule');
-  // A folder measured after What to protect was left can turn out to hold online-only files; Install waits for them too.
+  // "The backup folder already holds a backup" is good news on a reinstall, so it is said as such rather than drawn as a warning.
+  const earlier = all.warnings.some(warning => warning.code === 'repository_exists');
+  // A folder measured after Protected folders was left can turn out to hold online-only files; Install waits for them too.
   const onlineOnly = onlineOnlyPaths(choices, wizard.sizes);
 
   return (
     <div className="screen-stack">
       {wizard.notice?.screen === 'review' && <Callout tone="error" title="Nothing was installed">{wizard.notice.text}</Callout>}
       <div className="review-card">
-        <Row icon={<FolderCheck size={18} aria-hidden="true" />} title="What to protect" edit="Edit what to protect" onEdit={go('folders')}>
+        <Row icon={<FolderCheck size={18} aria-hidden="true" />} title="Protected folders" edit="Edit protected folders" onEdit={go('folders')}>
           <p className="review-main">
             {plural(paths.length, 'folder', 'folders')}
             <span className="review-dim"> · {total.measuring ? <><Spinner size={12} /> measuring</> : formatBytes(total.bytes, locale)}</span>
@@ -56,7 +58,7 @@ export function Review({ wizard }: { wizard: Wizard }) {
               : volume ? `${driveName(volume)} · ${formatBytes(volume.freeBytes, locale)} free` : driveLetter(choices.driveRoot)}
           </p>
         </Row>
-        <Row icon={<CalendarClock size={18} aria-hidden="true" />} title="Schedule" edit="Edit the schedule" onEdit={go('schedule')}>
+        <Row icon={<CalendarClock size={18} aria-hidden="true" />} title="Automatic backups" edit="Edit automatic backups" onEdit={go('schedule')}>
           <p className="review-main">Every day at {formatTime(choices.schedule, locale)}</p>
           <p className="review-dim">{choices.vss ? 'Includes files that are open' : 'Files that are open may be skipped'}</p>
         </Row>
@@ -69,8 +71,8 @@ export function Review({ wizard }: { wizard: Wizard }) {
             <Switch checked={choices.startBackup} onChange={value => wizard.actions.setStartBackup(value)}
               label="Run my first backup right after setup"
               description={choices.startBackup
-                ? 'The first one copies everything, so it can take a while. It runs in the background while you use your PC.'
-                : `The first backup will run at ${formatTime(choices.schedule, locale)}, or you can start it from Rewindle.`} />
+                ? `The first one copies everything${total.measuring ? '' : ` (${formatBytes(total.bytes, locale)})`}, so it can take a while. It runs in the background while you use your PC.`
+                : `The first backup will run ${nextRunDay(choices.schedule)} at ${formatTime(choices.schedule, locale)}, or you can start it from Rewindle.`} />
           </div>
         </div>
       </div>
@@ -79,10 +81,18 @@ export function Review({ wizard }: { wizard: Wizard }) {
         <Callout tone="error" title="Some folders have online-only files">
           {onlineOnly.map(path => choices.folders.find(folder => samePath(folder.path, path))?.key ?? folderName(path)).join(', ')}{' '}
           {onlineOnly.length === 1 ? 'has' : 'have'} files that are only in the cloud, so backups of {onlineOnly.length === 1 ? 'it' : 'them'} would fail.{' '}
-          <button type="button" className="text-link" onClick={go('folders')}>Go to What to protect</button> to fix this.
+          <button type="button" className="text-link" onClick={go('folders')}>Go to Protected folders</button> to fix this.
         </Callout>
       )}
-      <IssueList errors={all.errors} warnings={all.warnings} />
+      {/* Location says it too, but a person who clicked past it can still install onto a drive the folders won't fit on. */}
+      <FitCheck bytes={total.bytes} measuring={total.measuring} volume={chosenVolume(environment, choices)} minimumFree={plan?.resolved.minimumFreeBytes ?? 0}
+        cloud={cloud} locale={locale} onFolders={go('folders')} onlyShort />
+      <IssueList errors={all.errors} warnings={all.warnings.filter(warning => warning.code !== 'repository_exists')} />
+      {earlier && (
+        <Callout tone="success" icon={<CircleCheck size={16} aria-hidden="true" />} title="Your earlier backups are here">
+          Setup keeps them and carries on, so every earlier day stays available to restore.
+        </Callout>
+      )}
       {wizard.validation.error && <Callout tone="warning" title="Setup couldn’t check your choices">{wizard.validation.error} They will be checked again when you choose Install.</Callout>}
     </div>
   );
