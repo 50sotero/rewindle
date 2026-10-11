@@ -3858,7 +3858,7 @@ namespace ResticBackuper.Dashboard
             refreshGeneration++;
             RefreshRepositoryRecoveryStatus();
             // A schedule that could not be read is read again on request, not after the usual 30 seconds, so that
-            // "Check again" on the page does what it says.
+            // "Try again" on the Restore page does what it says.
             RefreshSchedule(currentTaskSchedule == null);
             TelemetrySnapshot snapshot = null;
             Exception loadFailure = null;
@@ -4369,7 +4369,7 @@ namespace ResticBackuper.Dashboard
             if (currentSourceConfiguration == null)
             {
                 restoreReadinessTitle.Text = "Rewindle can't read its backup settings";
-                restoreReadinessDetail.Text = "Choose Check again. If this stays, run Rewindle Setup again and choose Reinstall or repair. Your backups are not affected.";
+                restoreReadinessDetail.Text = "Choose Try again. If this stays, run Rewindle Setup again and choose Reinstall or repair. Your backups are not affected.";
                 restoreReadinessTitle.Foreground = Rose;
                 restoreReadinessNext = "refresh";
             }

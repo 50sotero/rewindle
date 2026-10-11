@@ -842,7 +842,7 @@ function RestorePage({ state: shown, send }: { state: DashboardState; send: Send
       <h2>{recovery.title}</h2><p className="muted-copy">{recovery.repairNeeded ? 'Restore opens once the repair above is finished.' : recovery.detail}</p>
       {newest && <p className="muted-copy">Newest backup to restore from: <strong>{newest.startedDisplay}</strong>.</p>}
       <div className="actions" style={{ marginTop: 22 }}><Action state={state} send={send} command="openRestore" primary size="md" icon={<ArrowUpRight size={14} />} quiet />
-        {next === 'refresh' && <Button size="md" variant="secondary" onClick={() => send('refresh')}><RefreshCw size={14} aria-hidden="true" />Check again</Button>}</div>
+        {next === 'refresh' && <Button size="md" variant="secondary" onClick={() => send('refresh')}><RefreshCw size={14} aria-hidden="true" />Try again</Button>}</div>
       {ready && <p className="muted-copy restore-permission">{permission}</p>}
       <div className="restore-readiness"><Action state={state} send={send} command="checkReadiness" quiet />
         <p>Makes sure your backups can be opened and restored. It opens in its own window, only reads, and changes nothing.</p></div>
