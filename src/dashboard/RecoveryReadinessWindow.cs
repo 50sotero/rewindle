@@ -91,11 +91,11 @@ namespace ResticBackuper.Dashboard
             StackPanel headerCopy = new StackPanel();
             TextBlock title = Text("Recovery readiness", 25, palette.TextPrimary, FontWeights.SemiBold);
             headerCopy.Children.Add(title);
-            headline = Text("Preparing independent checks", 15, palette.TextSecondary, FontWeights.SemiBold);
+            headline = Text("Checking your recovery setup", 15, palette.TextSecondary, FontWeights.SemiBold);
             headline.Margin = new Thickness(0, 8, 0, 0);
             headerCopy.Children.Add(headline);
             detail = Text(
-                "Read-only inspection checks the repository, active credential, recovery key, recovery bundle, capacity, locks, and restore path separately.",
+                "These checks only look; they change nothing. They test that Rewindle's saved password and your recovery key each open your backups, that there is free space, that nothing is left locked, and that a restore works.",
                 12,
                 palette.TextSecondary,
                 FontWeights.Normal);
@@ -107,7 +107,7 @@ namespace ResticBackuper.Dashboard
             refreshButton.VerticalAlignment = VerticalAlignment.Center;
             refreshButton.Click += async delegate { await RefreshHealth(); };
             // The accessible name stays the visible label, so a voice command can say it; the longer sentence is the help.
-            AutomationProperties.SetHelpText(refreshButton, "Run the recovery readiness checks again.");
+            AutomationProperties.SetHelpText(refreshButton, "Run the recovery checks again.");
             Grid.SetColumn(refreshButton, 1);
             header.Children.Add(refreshButton);
             root.Children.Add(header);
@@ -121,8 +121,8 @@ namespace ResticBackuper.Dashboard
             repositoryValue = Text("Not checked", 14, palette.TextPrimary, FontWeights.SemiBold);
             capacityValue = Text("Not checked", 14, palette.TextPrimary, FontWeights.SemiBold);
             lockValue = Text("Not checked", 14, palette.TextPrimary, FontWeights.SemiBold);
-            AddFact(facts, 0, "REPOSITORY", repositoryValue);
-            AddFact(facts, 2, "CAPACITY", capacityValue);
+            AddFact(facts, 0, "BACKUP LOCATION", repositoryValue);
+            AddFact(facts, 2, "FREE SPACE", capacityValue);
             AddFact(facts, 4, "LOCKS", lockValue);
             Grid.SetRow(facts, 2);
             root.Children.Add(facts);
@@ -177,7 +177,7 @@ namespace ResticBackuper.Dashboard
             AutomationProperties.SetName(progress, "Recovery readiness check progress");
             AutomationProperties.SetHelpText(
                 progress,
-                "Indicates that the protected read-only readiness inspection is still running.");
+                "The recovery checks are still running.");
             Grid progressRow = new Grid();
             progressRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             progressRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -207,7 +207,7 @@ namespace ResticBackuper.Dashboard
             drillButton.Click += async delegate { await RunRestoreDrill(); };
             SetActionHelp(
                 drillButton,
-                "Restores the latest verified plan-bound snapshot into a new protected folder, verifies the restore test file and a bounded sample of ordinary data, then records readiness evidence.");
+                "Restores the restore test file and a small sample of your files from the latest backup into a new folder, checks them and records the result. Nothing is overwritten.");
             actionBar.Children.Add(drillButton);
             repairButton = Button(RepairLabel, false);
             repairButton.Margin = new Thickness(0, 0, 8, 0);
@@ -215,7 +215,7 @@ namespace ResticBackuper.Dashboard
             repairButton.Click += async delegate { await RepairCredential(); };
             SetActionHelp(
                 repairButton,
-                "Available only when the recovery key works but the active CurrentUser credential does not.");
+                "Available only when your recovery key works but Rewindle's saved password for this Windows account doesn't.");
             actionBar.Children.Add(repairButton);
             lockRepairButton = Button(LockRepairLabel, false);
             lockRepairButton.Margin = new Thickness(0, 0, 8, 0);
@@ -223,7 +223,7 @@ namespace ResticBackuper.Dashboard
             lockRepairButton.Click += async delegate { await RepairStaleLocks(); };
             SetActionHelp(
                 lockRepairButton,
-                "Available only when repository locks are present and the active credential works.");
+                "Available only when leftover locks are present and Rewindle's saved password works.");
             actionBar.Children.Add(lockRepairButton);
             keyRotationButton = Button(RotateLabel, false);
             keyRotationButton.Margin = new Thickness(0, 0, 8, 0);
@@ -231,7 +231,7 @@ namespace ResticBackuper.Dashboard
             keyRotationButton.Click += async delegate { await RotateKey(); };
             SetActionHelp(
                 keyRotationButton,
-                "Adds and verifies a new key first, retains the prior repository and recovery keys, and resumes an interrupted rotation journal.");
+                "Creates a new recovery key and saved password and checks both first, keeps the old ones in case something goes wrong, and finishes an interrupted key change.");
             actionBar.Children.Add(keyRotationButton);
             closeButton = Button("Close", false);
             closeButton.IsCancel = true;
@@ -266,9 +266,9 @@ namespace ResticBackuper.Dashboard
             lastReport = report;
             if (report == null || !report.Loaded)
             {
-                headline.Text = "Readiness inspection unavailable";
+                headline.Text = "The recovery checks couldn't run";
                 headline.Foreground = palette.Danger;
-                detail.Text = report == null ? "No health report was returned." : report.ErrorMessage;
+                detail.Text = report == null ? "Rewindle got no result from the checks. Choose Run checks again." : report.ErrorMessage;
                 checksGrid.ItemsSource = null;
                 repositoryValue.Text = "Unavailable";
                 capacityValue.Text = "Unavailable";
@@ -282,7 +282,7 @@ namespace ResticBackuper.Dashboard
                 SetKeyRotationLabel(false);
                 drillEligible = false;
                 drillButton.IsEnabled = false;
-                const string notInspected = "Unavailable until a readiness inspection completes. Choose Run checks again to retry.";
+                const string notInspected = "Unavailable until the checks finish. Choose Run checks again.";
                 SetActionHelp(drillButton, notInspected);
                 SetActionHelp(repairButton, notInspected);
                 SetActionHelp(lockRepairButton, notInspected);
@@ -293,26 +293,26 @@ namespace ResticBackuper.Dashboard
             }
             if (report.OverallStatus == "healthy")
             {
-                headline.Text = "Recovery path independently verified";
+                headline.Text = "Your recovery setup checks out";
                 headline.Foreground = palette.Success;
-                detail.Text = "All available readiness checks passed without changing the repository.";
+                detail.Text = "Every check passed, and nothing in your backups was changed.";
             }
             else if (report.OverallStatus == "warning")
             {
-                headline.Text = "Recovery is available, with items to review";
+                headline.Text = "You can recover your files, with a few things to look at";
                 headline.Foreground = palette.Warning;
                 detail.Text = report.WarningCheckCount.ToString(CultureInfo.CurrentCulture) +
-                    " readiness check(s) need review.";
+                    " check(s) need a look. See the list below.";
             }
             else
             {
-                headline.Text = "Recovery readiness needs attention";
+                headline.Text = "Recovery needs attention";
                 headline.Foreground = palette.Danger;
                 detail.Text = report.FailedCheckCount.ToString(CultureInfo.CurrentCulture) +
-                    " independent check(s) failed. Review each result before relying on recovery.";
+                    " check(s) failed. Don't rely on recovery until they are fixed; see the list below.";
             }
             repositoryValue.Text = string.IsNullOrWhiteSpace(report.RepositoryId)
-                ? "ID unavailable"
+                ? "Not available"
                 : "Format " + report.RepositoryFormat.ToString(CultureInfo.CurrentCulture) +
                     " · " + report.RepositoryId.Substring(0, Math.Min(10, report.RepositoryId.Length));
             capacityValue.Text = report.FreeBytes.HasValue
@@ -320,8 +320,8 @@ namespace ResticBackuper.Dashboard
                 : "Unavailable";
             lockValue.Text = report.ActiveLockCount.HasValue
                 ? (report.ActiveLockCount.Value == 0
-                    ? "No locks"
-                    : report.ActiveLockCount.Value.ToString(CultureInfo.CurrentCulture) + " require review")
+                    ? "None left over"
+                    : report.ActiveLockCount.Value.ToString(CultureInfo.CurrentCulture) + " left over")
                 : "Unavailable";
             checksGrid.ItemsSource = report.Checks;
             repairEligible = CheckPassed(report, "recovery_key") &&
@@ -345,20 +345,20 @@ namespace ResticBackuper.Dashboard
             SetActionHelp(
                 repairButton,
                 repairEligible
-                    ? "Use the independently verified recovery key to replace only the broken CurrentUser DPAPI envelope."
-                    : "Repair is available only when the recovery key passes and the active credential fails.");
+                    ? "Uses your recovery key to replace Rewindle's saved password for this Windows account. Nothing else changes."
+                    : "Available only when your recovery key works but Rewindle's saved password for this Windows account doesn't.");
             SetActionHelp(
                 lockRepairButton,
                 lockRepairEligible
-                    ? "After Windows approval, block active backup work and ask Restic to remove only locks it classifies as stale."
-                    : "Stale-lock repair is available only when locks are present and the active credential passes.");
+                    ? "Windows will ask for your permission. Rewindle then removes only locks left over from interrupted backups, and only while no backup is running."
+                    : "Available only when leftover locks are present and Rewindle's saved password works.");
             SetActionHelp(
                 keyRotationButton,
                 rotationJournalPending
-                    ? "Resume and verify the protected interrupted key-rotation transaction."
+                    ? "Finishes the key change that was interrupted, and checks it."
                     : keyRotationEligible
-                        ? "Add and prove a new repository key, publish matching active and recovery credentials, and retain the prior key for rollback."
-                        : "Key rotation requires both credentials, no repository locks, and no unrelated pending transaction.");
+                        ? "Creates a new recovery key and saved password, checks that both work, and keeps the old ones in case something goes wrong."
+                        : "Available only when your recovery key and saved password both work, no locks are left over, and no other change is unfinished.");
             drillEligible = CheckNeedsReview(report, "restore_drill") &&
                 CheckPassed(report, "recovery_key") &&
                 CheckPassed(report, "recovery_bundle") &&
@@ -369,8 +369,8 @@ namespace ResticBackuper.Dashboard
             SetActionHelp(
                 drillButton,
                 drillEligible
-                    ? "Restores the latest verified plan-bound snapshot into a new protected folder, verifies the restore test file and a bounded sample of ordinary data, then records readiness evidence."
-                    : "A restore drill is available only when the restore-drill check asks for review, the recovery key, recovery bundle and last verification pass, and no locks or pending changes remain.");
+                    ? "Restores the restore test file and a small sample of your files from the latest backup into a new folder, checks them and records the result. Nothing is overwritten."
+                    : "Available only when a restore drill is due, your recovery key and recovery information check out, the latest backup was checked, and no locks or unfinished changes remain.");
             UpdateActionHint();
             Announce();
         }
@@ -418,7 +418,7 @@ namespace ResticBackuper.Dashboard
         {
             if (report == null || !report.Loaded)
             {
-                return "Actions are unavailable until a readiness inspection completes. Choose Run checks again to retry.";
+                return "Actions are unavailable until the checks finish. Choose Run checks again.";
             }
             List<string> available = new List<string>();
             if (drillEligible) available.Add(DrillLabel);
@@ -504,13 +504,13 @@ namespace ResticBackuper.Dashboard
                 this,
                 palette,
                 "Run a restore drill?",
-                "Rewindle will restore a small sample of your latest verified backup into a new protected folder and check " +
+                "Rewindle will restore a small sample of your latest backup into a new folder and check " +
                     "every restored file. Your original files, backups and keys are not touched.",
                 new[]
                 {
-                    "The latest verified snapshot is used, with the restore test file plus a bounded sample of ordinary data.",
-                    "The protected manager creates a new nonce-bound folder under ProgramData for it, verifies every restored file and records the evidence.",
-                    "It never overwrites or deletes sources, repository data, keys, snapshots, or an existing restore folder. The restored sample is kept so you can inspect it."
+                    "It uses your latest checked backup: the restore test file plus a small sample of your files.",
+                    "Rewindle puts them in a new folder in its own data folder, checks every restored file and records the result.",
+                    "Nothing is overwritten or deleted: not your files, your backups, your keys or an earlier restore folder. The restored sample is kept so you can look at it."
                 },
                 DrillLabel,
                 "Not now",
@@ -518,9 +518,9 @@ namespace ResticBackuper.Dashboard
             if (!confirmed) return;
 
             SetInspecting(true);
-            headline.Text = "Waiting for Windows approval";
+            headline.Text = "Waiting for the Windows permission prompt";
             headline.Foreground = palette.TextPrimary;
-            detail.Text = "The recovery key stays inside the elevated protected restore manager.";
+            detail.Text = "Choose Yes in the Windows permission prompt to continue. Your recovery key stays inside Rewindle's restore tool.";
             Announce();
             RestoreManagerResult result;
             try
@@ -533,8 +533,8 @@ namespace ResticBackuper.Dashboard
                         {
                             Dispatcher.BeginInvoke(new Action(delegate
                             {
-                                headline.Text = "Restore drill approved";
-                                detail.Text = "Restoring and independently verifying the bounded sample.";
+                                headline.Text = "Restore drill started";
+                                detail.Text = "Restoring a small sample of your files and checking it.";
                                 Announce();
                             }));
                         },
@@ -554,9 +554,9 @@ namespace ResticBackuper.Dashboard
             }
             if (result.UserCancelled)
             {
-                headline.Text = "Windows approval cancelled";
+                headline.Text = "Permission not given";
                 headline.Foreground = palette.Warning;
-                detail.Text = "No restore was started and no repository or protected evidence changed.";
+                detail.Text = "You didn't allow the change in the Windows permission prompt. Nothing was restored or changed.";
                 SetInspecting(false);
                 Announce();
                 return;
@@ -564,21 +564,21 @@ namespace ResticBackuper.Dashboard
             if (!result.Succeeded)
             {
                 headline.Text = result.Report != null && result.Report.Verified
-                    ? "Restore verified; evidence recording failed"
-                    : "Restore drill did not complete";
+                    ? "The restore worked, but the result wasn't saved"
+                    : "The restore drill didn't finish";
                 headline.Foreground = palette.Warning;
-                detail.Text = (result.ErrorMessage ?? "The protected restore drill failed.") +
+                detail.Text = (result.ErrorMessage ?? "The restore drill failed.") +
                     (result.Report == null || string.IsNullOrWhiteSpace(result.Report.Target)
                         ? string.Empty
-                        : " Retained target: " + result.Report.Target);
+                        : " The restored files are in: " + result.Report.Target);
                 SetInspecting(false);
                 Announce();
                 return;
             }
 
-            headline.Text = "Restore drill verified and recorded";
+            headline.Text = "Restore drill passed";
             headline.Foreground = palette.Success;
-            detail.Text = "Retained protected sample: " + result.Report.Target;
+            detail.Text = "The restored sample is kept in: " + result.Report.Target;
             Announce();
             RecoveryHealthReport health;
             try
@@ -591,7 +591,7 @@ namespace ResticBackuper.Dashboard
             }
             string retainedTarget = result.Report.Target;
             ApplyReport(health);
-            detail.Text = detail.Text + " Retained protected sample: " + retainedTarget;
+            detail.Text = detail.Text + " The restored sample is kept in: " + retainedTarget;
             SetInspecting(false);
             Announce();
         }
@@ -603,11 +603,11 @@ namespace ResticBackuper.Dashboard
                 this,
                 palette,
                 "Repair the active credential?",
-                "Rewindle will replace the active Windows-protected credential, once your recovery key is proven to unlock " +
-                    "the repository, so scheduled backups can unlock it again.",
+                "Rewindle will replace its saved password for this Windows account, once your recovery key is proven to open " +
+                    "your backups, so scheduled backups can open them again.",
                 new[]
                 {
-                    "Only the CurrentUser DPAPI envelope is replaced, and only after the recovery key is authenticated.",
+                    "Only the saved password is replaced, and only after your recovery key has been checked.",
                     "The repository, repository keys, snapshots and the recovery-key file are not changed."
                 },
                 RepairLabel,
@@ -615,8 +615,8 @@ namespace ResticBackuper.Dashboard
                 true);
             if (!confirmed) return;
             SetInspecting(true);
-            headline.Text = "Waiting for Windows approval";
-            detail.Text = "Credential repair is protected and uses the shared backup-operation lock.";
+            headline.Text = "Waiting for the Windows permission prompt";
+            detail.Text = "Choose Yes in the Windows permission prompt to continue. Rewindle makes sure no backup is running first.";
             Announce();
             CredentialRepairResult result;
             try
@@ -629,8 +629,8 @@ namespace ResticBackuper.Dashboard
                         {
                             Dispatcher.BeginInvoke(new Action(delegate
                             {
-                                headline.Text = "Credential repair approved";
-                                detail.Text = "Authenticating the recovery key before replacing the active envelope.";
+                                headline.Text = "Repair started";
+                                detail.Text = "Checking your recovery key before replacing the saved password.";
                                 Announce();
                             }));
                         });
@@ -642,8 +642,8 @@ namespace ResticBackuper.Dashboard
             }
             if (result.UserCancelled)
             {
-                headline.Text = "Windows approval cancelled";
-                detail.Text = "No credential or repository data was changed.";
+                headline.Text = "Permission not given";
+                detail.Text = "You didn't allow the change in the Windows permission prompt. Nothing was changed.";
                 headline.Foreground = palette.Warning;
                 SetInspecting(false);
                 Announce();
@@ -652,7 +652,7 @@ namespace ResticBackuper.Dashboard
             if (result.Succeeded && result.Health != null)
             {
                 ApplyReport(result.Health);
-                headline.Text = "Active credential repaired and independently verified";
+                headline.Text = "Saved password repaired and checked";
                 headline.Foreground = palette.Success;
                 detail.Text = "The recovery key and the replacement CurrentUser credential both unlock the same repository.";
                 SetInspecting(false);
@@ -665,7 +665,7 @@ namespace ResticBackuper.Dashboard
             }
             else
             {
-                headline.Text = "Credential repair did not complete";
+                headline.Text = "The repair didn't finish";
                 headline.Foreground = palette.Danger;
                 detail.Text = result.ErrorMessage;
             }
@@ -679,12 +679,12 @@ namespace ResticBackuper.Dashboard
             bool confirmed = DashboardDialog.Confirm(
                 this,
                 palette,
-                "Remove stale repository locks?",
-                "Rewindle will ask Restic to remove only the locks it considers stale, so a leftover lock stops blocking " +
-                    "backups. Snapshots and repository data are not changed.",
+                "Remove leftover locks?",
+                "Rewindle will remove only locks left over from interrupted backups, so they stop blocking new " +
+                    "backups. None of your backups is changed.",
                 new[]
                 {
-                    "The protected helper first takes the shared operation lock and stops if any Restic process is running.",
+                    "Rewindle first makes sure no backup is running, and stops if one is.",
                     "It never uses --remove-all, so locks Restic does not classify as stale are left alone."
                 },
                 LockRepairLabel,
@@ -692,8 +692,8 @@ namespace ResticBackuper.Dashboard
                 true);
             if (!confirmed) return;
             SetInspecting(true);
-            headline.Text = "Waiting for Windows approval";
-            detail.Text = "No lock will be removed until activity checks pass.";
+            headline.Text = "Waiting for the Windows permission prompt";
+            detail.Text = "Choose Yes in the Windows permission prompt to continue. No lock is removed until Rewindle has checked that no backup is running.";
             Announce();
             StaleLockRepairResult result;
             try
@@ -706,8 +706,8 @@ namespace ResticBackuper.Dashboard
                         {
                             Dispatcher.BeginInvoke(new Action(delegate
                             {
-                                headline.Text = "Stale-lock repair approved";
-                                detail.Text = "Proving protected operations and Restic processes are inactive.";
+                                headline.Text = "Lock repair started";
+                                detail.Text = "Checking that no backup is running.";
                                 Announce();
                             }));
                         });
@@ -719,9 +719,9 @@ namespace ResticBackuper.Dashboard
             }
             if (result.UserCancelled)
             {
-                headline.Text = "Windows approval cancelled";
+                headline.Text = "Permission not given";
                 headline.Foreground = palette.Warning;
-                detail.Text = "No repository lock or data was changed.";
+                detail.Text = "You didn't allow the change in the Windows permission prompt. Nothing was changed.";
                 SetInspecting(false);
                 Announce();
                 return;
@@ -732,13 +732,13 @@ namespace ResticBackuper.Dashboard
             }
             if (result.Succeeded)
             {
-                headline.Text = "Stale repository locks repaired";
+                headline.Text = "Leftover locks removed";
                 headline.Foreground = palette.Success;
-                detail.Text = "A fresh read-only inspection confirms that no repository locks remain.";
+                detail.Text = "A fresh check confirms that no locks remain.";
             }
             else
             {
-                headline.Text = "Repository locks were not fully repaired";
+                headline.Text = "The locks weren't fully removed";
                 headline.Foreground = palette.Warning;
                 detail.Text = result.ErrorMessage;
             }
@@ -756,10 +756,10 @@ namespace ResticBackuper.Dashboard
                     this,
                     palette,
                     "Resume key rotation?",
-                    "A key rotation was interrupted. Rewindle will finish it safely, or return to the last known-good keys.",
+                    "A key change was interrupted. Rewindle will finish it safely, or go back to the last keys that worked.",
                     new[]
                     {
-                        "The helper authenticates the staged key, then either completes the publish or restores the known-good prior state."
+                        "Rewindle checks the new key first, then either finishes the change or puts the previous keys back."
                     },
                     ResumeLabel,
                     "Cancel",
@@ -768,11 +768,11 @@ namespace ResticBackuper.Dashboard
                     this,
                     palette,
                     "Rotate keys?",
-                    "Rewindle will add a new repository key and recovery key, check that both work, and only then switch " +
+                    "Rewindle will create a new recovery key and saved password, check that both work, and only then switch " +
                         "over. Nothing you have backed up is deleted.",
                     new[]
                     {
-                        "A new Restic key is added and authenticated before any local credential changes.",
+                        "The new key is created and tested before anything on this computer changes.",
                         "The previous repository key and a restricted copy of the previous recovery-key file are kept for rollback.",
                         "After rotating, store the new recovery key away from this computer."
                     },
@@ -781,10 +781,10 @@ namespace ResticBackuper.Dashboard
                     true);
             if (!confirmed) return;
             SetInspecting(true);
-            headline.Text = "Waiting for Windows approval";
+            headline.Text = "Waiting for the Windows permission prompt";
             detail.Text = resuming
-                ? "The protected journal will be validated before recovery continues."
-                : "The prior credential remains active until Restic proves the new repository key.";
+                ? "Rewindle will check the record of the interrupted change before it continues."
+                : "Your current password and key stay in use until the new key has been tested.";
             Announce();
             KeyRotationResult result;
             try
@@ -798,9 +798,9 @@ namespace ResticBackuper.Dashboard
                             Dispatcher.BeginInvoke(new Action(delegate
                             {
                                 headline.Text = resuming
-                                    ? "Key-rotation recovery approved"
-                                    : "Key rotation approved";
-                                detail.Text = "Holding the shared operation lock while repository and recovery credentials are independently verified.";
+                                    ? "Finishing the key change"
+                                    : "Key change started";
+                                detail.Text = "Checking the new key and recovery key. No backup can run until this finishes.";
                                 Announce();
                             }));
                         });
@@ -812,9 +812,9 @@ namespace ResticBackuper.Dashboard
             }
             if (result.UserCancelled)
             {
-                headline.Text = "Windows approval cancelled";
+                headline.Text = "Permission not given";
                 headline.Foreground = palette.Warning;
-                detail.Text = "No key rotation was started.";
+                detail.Text = "You didn't allow the change in the Windows permission prompt. No key was changed.";
                 SetInspecting(false);
                 Announce();
                 return;
@@ -822,13 +822,13 @@ namespace ResticBackuper.Dashboard
             if (result.Health != null && result.Health.Loaded) ApplyReport(result.Health);
             if (result.Succeeded)
             {
-                headline.Text = "New and rollback credentials independently verified";
+                headline.Text = "New key created and checked";
                 headline.Foreground = palette.Success;
-                detail.Text = "The new active and recovery credentials work. The previous recovery file remains beside the configured key and the prior Restic key was not retired.";
+                detail.Text = "The new saved password and recovery key both work. The old recovery key file is still beside the new one, and the old key still works, so you can go back if needed.";
             }
             else
             {
-                headline.Text = "Key rotation needs attention";
+                headline.Text = "The key change needs attention";
                 headline.Foreground = palette.Warning;
                 detail.Text = result.ErrorMessage;
             }
