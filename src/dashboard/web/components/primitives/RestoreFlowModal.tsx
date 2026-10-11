@@ -657,6 +657,8 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
   const destinationGuidance = checkedDraft && !destinationState?.valid && !destinationState?.error && destinationState?.status
     ? destinationState.status
     : draftPath ? 'Press Check folder to make sure it can be used before anything is restored.' : 'Type a folder, or choose Browse. Rewindle checks it before anything is restored.';
+  // Before a folder is typed the step's paragraph, the field and the footer already say what to do, so the box waits for something to report.
+  const showDestinationResult = destinationChecking || destinationTone !== 'idle' || !!draftPath || !!(checkedDraft && destinationState?.status);
   // The footer's main button checks a folder that has not been checked yet, so there is never a disabled button waiting for a second click.
   const needsCheck = activeStep === 'destination' && !!draftPath && !destinationValid;
 
@@ -694,7 +696,7 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
   const reachable: Partial<Record<RestoreStep, boolean>> = { backup: true, files: !!selectedId, destination: canContinueFiles, review: canContinueFiles && destinationValid };
 
   // The footer's line. It names what the step waits for, and the main button points at it, so a disabled button says why.
-  const [hint, hintExplains] = ((): [string, boolean] => {
+  const [hint] = ((): [string, boolean] => {
     if (restoring) return ['Restoring… this window unlocks when it finishes.', false];
     if (activeStep === 'success') return [resultFolder ? 'Done. Open the folder, then copy the files you need back.' : 'Your files were restored and checked.', false];
     if (activeStep === 'partial') return ['Some files were not restored. Your current files were not changed.', false];
@@ -760,8 +762,9 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
           })}
         </nav>
 
-        {/* On the first step nothing has been chosen to recap ("Not selected" three times), and on a short window the room is better spent on the step. */}
-        {activeStep !== 'backup' && <section className="restore-flow-persistent-summary" aria-label="Restore summary">
+        {/* On the first step nothing has been chosen to recap ("Not selected" three times), and on a short window the room is better spent on the step.
+            The review step is that recap, card for card, so the strip would say it all twice. */}
+        {activeStep !== 'backup' && activeStep !== 'review' && <section className="restore-flow-persistent-summary" aria-label="Restore summary">
           <div className="restore-summary-item"><span className="restore-summary-icon"><ArchiveRestore size={14} /></span><span><small>Backup</small><strong title={selectedSnapshot ? backupWhenFull(selectedSnapshot, locale) : undefined}>{selectedSnapshot ? whenOf(selectedSnapshot) : 'Not chosen yet'}</strong><em title={selectedSnapshot ? snapshotSource(selectedSnapshot) : undefined}>{selectedSnapshot ? snapshotSource(selectedSnapshot) : 'Choose a backup to restore from.'}</em></span></div>
           <details className="restore-summary-item restore-summary-scope">
             <summary><span className="restore-summary-icon"><CheckCircle2 size={14} /></span><span><small>What to restore</small><strong>{scopeText}</strong><em>{!selectionAccepted && (paths.length || wholeSnapshot) ? 'Waiting for the selection to be confirmed…' : wholeSnapshot ? 'All your backed-up folders.' : paths.length ? 'Open to review or remove items.' : ''}</em></span><ChevronRight size={14} className="restore-summary-chevron" /></summary>
@@ -822,10 +825,10 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
             <form className="restore-destination-card" noValidate onSubmit={event => { event.preventDefault(); validateDestination(); }}>
               <label htmlFor="restore-destination-path">Folder to restore into</label>
               <div className="restore-destination-entry"><FolderOpen size={17} /><input id="restore-destination-path" value={destinationDraft} maxLength={4096} onChange={event => { destinationPickerPendingRef.current = false; destinationDraftDirtyRef.current = true; setDestinationDraft(event.target.value); setValidatedDestinationPath(''); }} placeholder={'For example D:\\Restored files'} disabled={busy || !connected} spellCheck={false} autoComplete="off" aria-describedby="restore-destination-help restore-destination-result" aria-invalid={destinationFailure ? true : undefined} /><Button size="sm" type="button" onClick={browseDestination} disabled={busy || !connected}><FolderOpen size={14} />Browse…</Button></div>
-              <div className="restore-destination-actions"><span id="restore-destination-help">Pick a folder that does not exist yet, or one that is empty. Rewindle fills it with copies and never overwrites anything. Press Enter to check it.</span><Button size="sm" type="submit" disabled={!draftPath || busy || !connected}>{destinationChecking ? <LoaderCircle size={14} className="restore-spin" /> : <Check size={14} />}Check folder</Button></div>
+              <div className="restore-destination-actions"><span id="restore-destination-help">A new folder, or an empty one. Press Enter to check it.</span><Button size="sm" type="submit" disabled={!draftPath || busy || !connected}>{destinationChecking ? <LoaderCircle size={14} className="restore-spin" /> : <Check size={14} />}Check folder</Button></div>
               <details className="restore-why"><summary>Why can&rsquo;t I restore to the original place?</summary><p>Restoring straight over your current files could replace newer work with older copies, so Rewindle never does it. A separate folder lets you look first, then copy back exactly what you want. Your files keep their original folder names inside it, starting with the drive (for example {exampleInside}).</p></details>
             </form>
-            <AnimatePresence mode="wait" initial={false}><motion.div id="restore-destination-result" key={`${destinationTone}|${destinationChecking}|${destinationProblems.join('|')}|${destinationValid ? destinationState?.status : destinationGuidance}`} className={`restore-validation ${destinationTone === 'ready' ? 'is-ready' : destinationTone === 'error' ? 'is-error' : ''}`} role={destinationTone === 'error' ? 'alert' : 'status'} initial={{ opacity: 0, y: reducedMotion ? 0 : 5 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: reducedMotion ? 0 : .14 }}>
+            <AnimatePresence mode="wait" initial={false}>{showDestinationResult && <motion.div id="restore-destination-result" key={`${destinationTone}|${destinationChecking}|${destinationProblems.join('|')}|${destinationValid ? destinationState?.status : destinationGuidance}`} className={`restore-validation ${destinationTone === 'ready' ? 'is-ready' : destinationTone === 'error' ? 'is-error' : ''}`} role={destinationTone === 'error' ? 'alert' : 'status'} initial={{ opacity: 0, y: reducedMotion ? 0 : 5 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: reducedMotion ? 0 : .14 }}>
               {destinationChecking ? <LoadingState label="Checking the folder" variant="Orbit" /> : <>
                 {destinationTone === 'ready' ? <CheckCircle2 size={18} /> : destinationTone === 'error' ? <CircleAlert size={18} /> : <Info size={18} />}
                 <div>
@@ -834,7 +837,7 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
                     : destinationTone === 'error' ? destinationProblems.map(problem => <p key={problem}>{problem}</p>) : <p>{destinationGuidance}</p>}
                   {validation?.warnings.map(warning => <p className="restore-validation-warning" key={warning}>{warning}</p>)}
                 </div></>}
-            </motion.div></AnimatePresence>
+            </motion.div>}</AnimatePresence>
           </section>}
 
           {activeStep === 'review' && <section className="restore-flow-step" aria-labelledby="restore-review-heading">
@@ -871,7 +874,7 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
         {/* Closing forgets the backup, files and folder chosen, so with any of them chosen it asks first. */}
         {confirmClose && <div className="restore-flow-confirm" role="alert"><Info size={15} aria-hidden="true" /><span><strong>Close Restore?</strong> The files and folder you chose will be forgotten. Nothing has been restored.</span><Button size="xs" variant="secondary" data-keep-going onClick={() => setConfirmClose(false)}>Keep going</Button><Button size="xs" variant="primary" onClick={close}>Close Restore</Button></div>}
 
-        <footer className="restore-flow-footer"><span className="restore-flow-footnote" id={HINT_ID}>{hintExplains ? <Info size={13} /> : <LockKeyhole size={13} />}{hint}</span><div className="restore-flow-actions">
+        <footer className="restore-flow-footer"><span className="restore-flow-footnote" id={HINT_ID}><Info size={13} />{hint}</span><div className="restore-flow-actions">
           {!['backup', 'success', 'partial', 'error'].includes(activeStep) && !restoring && !busy && <Button size="md" variant="secondary" disabled={!connected} onClick={() => { if (activeStep === 'files') move('restoreFlowNavigate', { step: 'backup' }); else if (activeStep === 'destination') move('restoreFlowNavigate', { step: 'files' }); else if (activeStep === 'review') move('restoreFlowNavigate', { step: 'destination' }); }}><ArrowLeft size={14} />Back</Button>}
           {!restoring && activeStep === 'backup' && <Button size="md" variant="secondary" disabled={busy} onClick={requestClose}>Cancel</Button>}
           {!restoring && activeStep === 'backup' && <Button size="md" variant="primary" aria-describedby={HINT_ID} disabled={!selectedId || !connected || busy} onClick={openFiles}>Choose files <ArrowRight size={14} /></Button>}

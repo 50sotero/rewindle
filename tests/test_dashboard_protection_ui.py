@@ -33,6 +33,7 @@ for (const [name, moment] of Object.entries(moments)) {
   };
 }
 report.invalid = when.formatWhenAgo('not a date', 'en-US', 'unknown', local([2026, 9, 11, 18, 0]));
+report.clocks = { us: when.localClocks('Daily at 02:00, and at 14:30', 'en-US'), gb: when.localClocks('Daily at 02:00', 'en-GB'), none: when.localClocks('Every 6 hours', 'en-US') };
 report.drives = {
   letter: tone.driveOf('D:\\\\Backups\\\\Rewindle'),
   share: tone.driveOf('\\\\\\\\server\\\\share\\\\Backups'),
@@ -233,6 +234,12 @@ class ProtectionUiTests(unittest.TestCase):
         moments = self.report["moments"]
         self.assertEqual(moments["three_weeks"]["ago"], moments["three_weeks"]["plain"])
         self.assertEqual(moments["tomorrow"]["ago"], moments["tomorrow"]["plain"])
+
+    def test_the_host_schedule_sentence_is_written_in_the_viewers_clock(self) -> None:
+        clocks = self.report["clocks"]
+        self.assertEqual(self.plain(clocks["us"]), "Daily at 2:00 AM, and at 2:30 PM")
+        self.assertEqual(clocks["gb"], "Daily at 02:00")
+        self.assertEqual(clocks["none"], "Every 6 hours")
 
     def test_yesterday_is_a_calendar_day_not_twenty_four_hours(self) -> None:
         self.assertRegex(self.plain(self.report["moments"]["late_last_night"]["ago"]), r"^yesterday at 11:59 PM$")

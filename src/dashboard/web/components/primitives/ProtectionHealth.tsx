@@ -150,7 +150,7 @@ export function protectionHealthItems(state: DashboardState, context: HealthCont
         : s.active ? (here ? 'A backup is running now. Progress is shown above.' : s.detail)
         : s.failure ? (here ? 'This run is not counted as a backup.' : s.detail)
         : s.cancelled ? (calmStop ? 'You stopped the latest backup before it finished. Your earlier backups are not affected.' : here ? 'The latest backup was stopped before it finished.' : s.detail)
-        : freshness.state === 'Healthy' ? 'Your latest backup is on schedule.'
+        : freshness.state === 'Healthy' ? 'Nothing needs your attention.'
         : (here && FRESHNESS_CAUSE[freshness.state]) || freshness.detail,
       // The hero already says when the last verified backup finished.
       timestamp: unavailable || here ? '' : freshness.verifiedAt, timestampLabel: 'Last verified',

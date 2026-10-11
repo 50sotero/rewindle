@@ -146,7 +146,7 @@ export function createRestoreDemo(getState: () => DashboardState, notify: () => 
         status: error || (/exists/i.test(target) ? 'Ready · this existing folder is empty and will hold the restored files.' : 'Ready · this new folder will be created for the restored files.'),
       };
       validate();
-      say(error ? 'Choose another folder' : 'Folder ready', flow.destination.status);
+      say(error ? 'Choose another folder' : 'Folder ready', 'Nothing is restored until the last step.');
     });
   };
 
@@ -259,7 +259,7 @@ export function createRestoreDemo(getState: () => DashboardState, notify: () => 
         flow.selectedPaths = whole ? [] : paths;
         flow.wholeSnapshotSelected = whole;
         flow.step = 'files'; flow.status = 'ready';
-        say(whole ? 'Everything selected' : 'Selection updated', whole ? 'Everything in this backup will be restored. Choose a folder to restore into next.' : `${plural(paths.length, 'item', 'items')} selected. Choose a folder to restore into next.`);
+        say(whole ? 'Everything selected' : 'Selection updated', whole ? 'Everything in this backup will be restored.' : `${plural(paths.length, 'item', 'items')} selected.`);
         validate();
         return null;
       }

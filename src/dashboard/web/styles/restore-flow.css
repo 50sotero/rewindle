@@ -252,6 +252,7 @@ label.restore-entry-name { cursor: pointer; }
 .restore-destination-entry input[aria-invalid="true"] { color: var(--orange-ink); }
 .restore-destination-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; }
 .restore-destination-actions > span { color: var(--ink-2); font-size: var(--type-sm); line-height: 1.5; }
+.restore-destination-actions > button { flex: none; white-space: nowrap; }
 .restore-validation { display: flex; min-height: 74px; align-items: flex-start; gap: 10px; padding: 14px; margin-top: 13px; border: 1px solid var(--line); border-radius: var(--r-card); color: var(--ink-3); background: var(--canvas); }
 .restore-validation > svg { flex: 0 0 auto; margin-top: 1px; }
 .restore-validation.is-ready { border-color: color-mix(in srgb, var(--green) 38%, var(--line)); color: var(--green-ink); background: var(--green-tint); }

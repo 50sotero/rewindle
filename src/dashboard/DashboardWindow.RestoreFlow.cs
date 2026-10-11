@@ -769,10 +769,10 @@ namespace ResticBackuper.Dashboard
             SetRestoreFlowMessage(
                 wholeSnapshot ? "Everything selected" : "Selection updated",
                 wholeSnapshot
-                    ? "Everything in this backup will be restored. Choose a folder to restore into next."
+                    ? "Everything in this backup will be restored."
                     : paths.Count.ToString(CultureInfo.CurrentCulture) +
                         (paths.Count == 1 ? " item" : " items") +
-                        " selected. Choose a folder to restore into next.");
+                        " selected.");
             PublishWebPresentationState();
             return true;
         }
@@ -975,7 +975,8 @@ namespace ResticBackuper.Dashboard
             restoreFlowStatus = "ready";
             SetRestoreFlowMessage(
                 restoreFlowDestinationValid ? "Folder ready" : "Choose another folder",
-                restoreFlowDestinationStatus);
+                // The verdict itself is in the box under the field; the line under the title only reassures.
+                "Nothing is restored until the last step.");
             PublishWebPresentationState();
         }
 

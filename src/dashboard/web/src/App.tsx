@@ -25,7 +25,7 @@ import {
   attentionText, isCancelled, isProblem, isUnchanged, lastSuccessfulBackup, lastVerified, resolvedByText, resolvedRuns, resultHint, resultLabel,
   typeLabel, unresolvedRuns, usualSeconds, type Verified,
 } from './runProblems';
-import { formatClock, formatWhen, formatWhenAgo } from './when';
+import { formatClock, formatWhen, formatWhenAgo, localClocks } from './when';
 import { driveOf, heroConcern, heroTone } from './protectionTone';
 
 type Send = (command: CommandName, payload?: Record<string, string | boolean>) => void;
@@ -344,7 +344,7 @@ function Protection({ state, send, folders, setFolders, stale, openRunDetails }:
   // time it started. The host sends the figures as display text, so errors are "any digit but zero" rather than a parsed number.
   const metricsRun = state.history.find(run => run.id === s.runId)?.startedDisplay;
   const metricsContext = state.preview ? 'Previewed live run' : s.active ? 'Current run'
-    : !s.runId || !(s.success || s.failure || s.cancelled) ? 'No run recorded yet' : s.success ? 'Latest verified run' : 'Latest recorded run';
+    : !s.runId || !(s.success || s.failure || s.cancelled) ? 'No run recorded yet' : s.success ? 'From the latest verified backup' : 'Latest recorded run';
   const hasErrors = /[1-9]/.test(s.errors || '');
   // One name per step, the same ones the page uses everywhere else: the restore test restores a small test file after every backup. A row says
   // its state once (its mark and pill), so it has no second line of its own; what it does is one line in its details.
@@ -362,7 +362,7 @@ function Protection({ state, send, folders, setFolders, stale, openRunDetails }:
   const showTags = verifiedKnown || (stale && !!state.updated);
   const folderCount = state.sources.length;
   return <>
-    <Heading title="Protection" description={`${folderCount} protected ${folderCount === 1 ? 'folder' : 'folders'} · ${state.schedule.summary}`} note={note}>
+    <Heading title="Protection" description={`${folderCount} protected ${folderCount === 1 ? 'folder' : 'folders'} · ${localClocks(state.schedule.summary, locale)}`} note={note}>
       {s.active && <Action state={state} send={send} command="cancelBackup" icon={<X size={13} />} quiet={quiet} />}
       <Action state={state} send={send} command="backupNow" primary size="md" icon={<Play size={13} fill="currentColor" />} quiet={quiet} />
     </Heading>
@@ -415,7 +415,7 @@ function Protection({ state, send, folders, setFolders, stale, openRunDetails }:
         {/* A status that could not be read has no count of errors: its "0" would say there were none. */}
         <Stat label={s.active ? 'Elapsed' : 'Errors'} value={s.active ? s.elapsed : s.unavailable ? '—' : s.errors} icon={s.active ? <Clock3 size={12} /> : <CircleAlert size={12} />} bad={!s.active && hasErrors} />
       </div>
-      {!state.dataError && !s.unavailable && <p className="stats-caption">{metricsRun && !state.preview ? `${metricsContext} · ${metricsRun}` : metricsContext}</p>}
+      {!state.dataError && !s.unavailable && <p className="stats-caption">{metricsRun && !state.preview && !s.success ? `${metricsContext} · ${metricsRun}` : metricsContext}</p>}
     </section>
     <div className="two-columns backup-destinations">
       <section className="surface surface-pad"><div className="info-heading"><Clock3 size={15} className="text-ink-3" />Next automatic backup</div>
@@ -425,7 +425,7 @@ function Protection({ state, send, folders, setFolders, stale, openRunDetails }:
           <div className="actions"><Button size="xs" onClick={() => send('refresh')}><RefreshCw size={12} aria-hidden="true" />Try again</Button></div>
           <details className="inline-details"><summary>Technical details</summary><p className="muted-copy">{state.schedule.error}</p></details>
         </div> : <>
-          <div className="info-main">{state.schedule.nextRunAt ? formatWhen(state.schedule.nextRunAt, locale, state.schedule.nextRun) : state.schedule.nextRun || 'No upcoming run'}</div><div className="muted-copy">{state.schedule.summary}</div>
+          <div className="info-main">{state.schedule.nextRunAt ? formatWhen(state.schedule.nextRunAt, locale, state.schedule.nextRun) : state.schedule.nextRun || 'No upcoming run'}</div><div className="muted-copy">{localClocks(state.schedule.summary, locale)}</div>
         </>}
         <ScheduleNotice notice={state.schedule.notice} className="schedule-notice-slot" />
         <div className="info-action"><Action state={state} send={send} command="editSchedule" icon={<ArrowUpRight size={12} />} quiet={quiet} /></div></section>
@@ -876,7 +876,7 @@ function SettingsPage({ state, send, stale = false }: { state: DashboardState; s
     {missing ? <SetupNotice state={state} send={send} /> :
     <section className="settings-section"><h2 className="section-title">Backup plan</h2><div className="settings-grid">
       <section className="surface setting-row"><div className="setting-copy"><h3 className="info-heading"><HardDrive size={15} />Backup location</h3><p className="muted-copy path-copy">{state.repository.path}</p><VolumeLine repository={state.repository} /></div><div className="setting-controls"><Action state={state} send={send} command="changeRepository" quiet={quiet} /></div></section>
-      <section className="surface setting-row"><div className="setting-copy"><h3 className="info-heading"><Clock3 size={15} />Automatic backups</h3><p className="info-main">{state.schedule.summary}</p>
+      <section className="surface setting-row"><div className="setting-copy"><h3 className="info-heading"><Clock3 size={15} />Automatic backups</h3><p className="info-main">{localClocks(state.schedule.summary, usableLocale(state.locale))}</p>
         {/* An unreadable schedule is a problem to explain, not a summary: the reason the host reports goes under Details. */}
         {state.schedule.error ? <div className="attention-note schedule-problem" role="alert">
           <strong><CircleAlert size={14} className="inline mr-2" />The schedule could not be read</strong>

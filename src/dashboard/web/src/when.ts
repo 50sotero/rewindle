@@ -42,6 +42,14 @@ export function formatWhen(iso: string | undefined | null, locale?: string, fall
   return format.format(date);
 }
 
+/** Host words with 24-hour times in them ("Daily at 02:00") with each time in the viewer's clock ("Daily at 2:00 AM"). The host writes a
+ *  schedule as a sentence, not a timestamp, so the times in it are the only part the page can put in the viewer's own clock. */
+export function localClocks(text: string, locale?: string): string {
+  if (!text || !usesTwelveHourClock(locale)) return text;
+  return text.replace(/\b([01]\d|2[0-3]):([0-5]\d)\b/g, (_, hour: string, minute: string) =>
+    new Date(2000, 0, 1, Number(hour), Number(minute)).toLocaleTimeString(locale, { hour: 'numeric', minute: '2-digit' }));
+}
+
 /** Only the time of day ("2:05 AM" or "02:05"). */
 export function formatClock(iso: string | undefined | null, locale?: string, fallback = ''): string {
   const date = iso ? new Date(iso) : null;
