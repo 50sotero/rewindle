@@ -450,6 +450,11 @@ class WizardWordingTests(unittest.TestCase):
         # A copy on the Windows drive, or on the backup drive, doesn't survive losing this PC, and the page says so.
         self.assertIn("copyPlace(", recovery)
         self.assertIn("on this PC’s own drive, so it won’t help if this PC is lost", recovery)
+        # Google Drive leaves choices.driveRoot empty, so the backups' drive comes from the repository path: a copy in that Drive
+        # is with the backups, never "away", and is never ticked as safe on its own.
+        self.assertIn("driveRoot(wizard.choices?.repository ?? '') || (wizard.choices?.driveRoot ?? '')", recovery)
+        self.assertNotIn("const backupRoot = wizard.choices?.driveRoot ?? '';", recovery)
+        self.assertIn("in the same Google Drive as your backups", recovery)
 
     def test_a_disabled_next_says_why_and_a_check_in_progress_says_so(self) -> None:
         for text in ("Fix the problem on this page to continue", "Enter a valid time to continue", "Checking this location…"):

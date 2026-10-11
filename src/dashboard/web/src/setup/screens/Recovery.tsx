@@ -36,7 +36,10 @@ export function Recovery({ wizard, state, onChange }: { wizard: Wizard; state: R
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const volumes = wizard.base?.environment.volumes ?? [];
-  const backupRoot = wizard.choices?.driveRoot ?? '';
+  // The drive the backups are written to. Google Drive leaves `driveRoot` empty on purpose (it is not a local drive to pick), so
+  // the repository's own drive is the one to compare: a copy anywhere in that Drive sits in the same account as the backups.
+  const cloud = wizard.choices?.storageMode === 'google_drivefs_stream';
+  const backupRoot = driveRoot(wizard.choices?.repository ?? '') || (wizard.choices?.driveRoot ?? '');
   const place = copyPlace(state.savedTo, volumes, backupRoot);
 
   const save = async () => {
@@ -90,7 +93,7 @@ export function Recovery({ wizard, state, onChange }: { wizard: Wizard; state: R
       <div role="status" aria-live="polite">
         {state.savedTo && (place === 'this-pc' || place === 'with-backups'
           // The host reads every copy back and compares it, so "saved" always means "checked"; whether the place helps is up to the page.
-          ? <p className="fit-line is-tight"><TriangleAlert size={16} aria-hidden="true" /><span><strong>Saved and checked, but not in a safe place.</strong> The copy at <strong className="break-anywhere">{state.savedTo}</strong> is {place === 'this-pc' ? 'on this PC’s own drive, so it won’t help if this PC is lost' : 'on the same drive as your backups, so losing that drive loses both, and anyone who has it could open your backups'}. Save another copy to a USB drive, or open the file and paste it into a password manager.</span></p>
+          ? <p className="fit-line is-tight"><TriangleAlert size={16} aria-hidden="true" /><span><strong>Saved and checked, but not in a safe place.</strong> The copy at <strong className="break-anywhere">{state.savedTo}</strong> is {place === 'this-pc' ? 'on this PC’s own drive, so it won’t help if this PC is lost' : cloud ? 'in the same Google Drive as your backups, so anyone who gets into that account could open your backups' : 'on the same drive as your backups, so losing that drive loses both, and anyone who has it could open your backups'}. Save another copy to a USB drive, or open the file and paste it into a password manager.</span></p>
           : <p className="fit-line is-good"><Check size={16} aria-hidden="true" /><span><strong>Saved and checked.</strong> {place === 'away' ? <>The copy at <strong className="break-anywhere">{state.savedTo}</strong> matches the original. Keep that drive somewhere safe, away from this PC.</> : 'The copy matches the original.'}</span></p>)}
       </div>
       {error && <Callout tone="error" title="The copy wasn’t saved">{error}</Callout>}
