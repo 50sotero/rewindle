@@ -123,7 +123,7 @@ export function createRestoreDemo(getState: () => DashboardState, notify: () => 
     flow.step = 'files';
     flow.status = 'ready';
     const where = path === '/' ? 'the top level of your backup' : path.replace(/^\/([A-Za-z])(?=\/|$)/, '$1:').replace(/\//g, '\\');
-    say('Choose files', `${plural(entries.length, 'item', 'items')} in ${where}. Tick what you need, or restore everything in this backup.`);
+    say('Choose files', `${plural(entries.length, 'item', 'items')} in ${where}.`);
   };
 
   const checkFolder = (path: string) => {
@@ -198,7 +198,7 @@ export function createRestoreDemo(getState: () => DashboardState, notify: () => 
       if (!flow) return;
       flow.snapshots = snapshots;
       flow.status = 'ready';
-      say('Choose a backup', `${snapshots.length} backups are available. Choose one to restore from.`);
+      say('Choose a backup', `${snapshots.length} backups are available.`);
     }, () => say('Loading your backups', 'Looking at your backups does not change them.'));
   };
 
@@ -224,11 +224,11 @@ export function createRestoreDemo(getState: () => DashboardState, notify: () => 
         else if (step === 'files') {
           if (!chosen()) return 'Choose a backup before choosing files.';
           flow.step = 'files'; flow.status = 'ready';
-          say('Choose files', flow.tree.loaded ? 'Tick the files or folders you need, or restore everything in this backup.' : 'Restore everything in this backup, or open its folders to choose files.');
+          say('Choose files', 'Nothing is restored until the last step.');
         } else if (step === 'destination') {
           if (!flow.wholeSnapshotSelected && flow.selectedPaths.length === 0) return 'Choose files or folders first, or choose everything in the backup.';
           flow.step = 'destination'; flow.status = 'ready';
-          say('Choose a folder', 'Restore puts the copies in a new or empty folder. Your original files are not touched.');
+          say('Choose a folder', 'Nothing is restored until the last step.');
         } else return 'The requested restore step is invalid.';
         validate();
         return null;

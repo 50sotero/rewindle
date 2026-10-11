@@ -422,9 +422,9 @@ namespace ResticBackuper.Dashboard
                 restoreFlowSnapshots.Count == 0
                     ? "Nothing was found to restore from yet."
                     : restoreFlowSnapshots.Count == 1
-                        ? "1 backup is available. Choose it to restore from."
+                        ? "1 backup is available."
                         : restoreFlowSnapshots.Count.ToString(CultureInfo.CurrentCulture) +
-                            " backups are available. Choose one to restore from.");
+                            " backups are available.");
             PublishWebPresentationState();
         }
 
@@ -625,7 +625,7 @@ namespace ResticBackuper.Dashboard
                 "Choose files",
                 restoreFlowTreeEntries.Count.ToString(CultureInfo.CurrentCulture) +
                     (restoreFlowTreeEntries.Count == 1 ? " item" : " items") +
-                    " in " + DescribeRestoreFlowFolder(path) + ". Tick what you need, or restore everything in this backup.");
+                    " in " + DescribeRestoreFlowFolder(path) + ".");
             PublishWebPresentationState();
         }
 
@@ -847,9 +847,7 @@ namespace ResticBackuper.Dashboard
                 restoreFlowStatus = "ready";
                 SetRestoreFlowMessage(
                     "Choose files",
-                    restoreFlowTreeLoaded
-                        ? "Tick the files or folders you need, or restore everything in this backup."
-                        : "Restore everything in this backup, or open its folders to choose files.");
+                    "Nothing is restored until the last step.");
             }
             else if (step == "destination")
             {
@@ -865,7 +863,7 @@ namespace ResticBackuper.Dashboard
                 }
                 restoreFlowStep = "destination";
                 restoreFlowStatus = "ready";
-                SetRestoreFlowMessage("Choose a folder", "Restore puts the copies in a new or empty folder. Your original files are not touched.");
+                SetRestoreFlowMessage("Choose a folder", "Nothing is restored until the last step.");
             }
             else
             {
@@ -1336,7 +1334,7 @@ namespace ResticBackuper.Dashboard
             {
                 restoreFlowStep = "files";
                 restoreFlowStatus = "ready";
-                SetRestoreFlowMessage("Choose files", "Tick the files or folders you need, or restore everything in this backup.");
+                SetRestoreFlowMessage("Choose files", "Nothing is restored until the last step.");
                 PublishWebPresentationState();
                 return true;
             }

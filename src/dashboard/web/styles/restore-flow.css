@@ -145,7 +145,8 @@
 .restore-flow-search { flex: 1; }
 .restore-flow-search:focus-within, .restore-date-field:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent); }
 .restore-flow-search input, .restore-date-field input { min-width: 0; flex: 1; border: 0; outline: 0; color: var(--ink); background: transparent; font-size: var(--type-sm); }
-.restore-date-field { flex: 0 0 136px; }
+/* Wide enough for the whole yyyy-mm-dd placeholder and the picker button at the larger type. */
+.restore-date-field { flex: 0 0 160px; }
 .restore-date-field input { color-scheme: inherit; }
 .restore-date-separator { color: var(--ink-3); font-size: var(--type-sm); }
 /* overscroll-behavior: a list that has reached its end does not hand the wheel on to the dialog behind it. The one column is
