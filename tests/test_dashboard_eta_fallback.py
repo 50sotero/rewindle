@@ -216,7 +216,7 @@ class DashboardEtaFallbackTests(unittest.TestCase):
         self.assertTrue(self.result["mismatch_estimated"])
         self.assertEqual(
             self.result["mismatch_confidence"],
-            "Low-confidence estimate from comparable recent runs",
+            "Rough estimate from similar recent backups",
         )
 
     def test_matching_source_history_remains_preferred(self) -> None:
@@ -227,7 +227,7 @@ class DashboardEtaFallbackTests(unittest.TestCase):
         self.assertTrue(self.result["matching_estimated"])
         self.assertEqual(
             self.result["matching_confidence"],
-            "Estimated from matching folder-set history",
+            "Estimated from earlier backups of these folders",
         )
 
 

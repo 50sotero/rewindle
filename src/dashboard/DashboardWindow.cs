@@ -215,8 +215,8 @@ namespace ResticBackuper.Dashboard
         // window ends with no run, this note says so. It rides on the Back up now help until a run shows up or the next
         // request replaces it; the run it was waiting for is remembered so that a run that did start clears it.
         private const string BackupNotStartedNotice =
-            "Windows accepted the last backup request, but the backup did not start. The task may be waiting for AC power " +
-            "or another task condition (see Edit schedule).";
+            "Windows accepted the last backup request, but the backup did not start. It may be waiting for AC power " +
+            "(plug the PC in) or for another condition set in Edit schedule.";
         private string backupNotStartedText = string.Empty;
         private string backupNotStartedBaselineRunId = string.Empty;
         private bool cancellationRequestInProgress;
@@ -3901,10 +3901,12 @@ namespace ResticBackuper.Dashboard
 
         private void ShowTelemetryUnavailable(Exception error)
         {
-            heroTitle.Text = "Dashboard data is temporarily unavailable";
-            webTelemetryError = error.Message;
-            heroDetail.Text = error.Message;
-            SetBadge("DATA RETRY", Amber, BrushFrom("#3A2F18"));
+            // The exception's own words can name a path or quote a file, so the page gets one fixed sentence; the log keeps the rest.
+            CrashLog.Write("Reading the backup status", error);
+            heroTitle.Text = "Backup status can\u2019t be read right now";
+            webTelemetryError = "Rewindle is trying again automatically.";
+            heroDetail.Text = "Rewindle couldn\u2019t read the latest backup status. It is trying again automatically.";
+            SetBadge("STATUS UNAVAILABLE", Amber, BrushFrom("#3A2F18"));
             lastUpdated.Text = "Retrying automatically";
         }
 
@@ -4260,7 +4262,7 @@ namespace ResticBackuper.Dashboard
                 {
                     if (!hasCanarySource)
                     {
-                        sourceStatus.Text = "The required restore test file is missing; backups cannot be verified.";
+                        sourceStatus.Text = "The restore test file is missing, so backups can\u2019t be checked. Open Rewindle Setup and choose Reinstall or repair to put it back.";
                         sourceStatus.Foreground = Rose;
                     }
                     else if (!managerAvailable)
@@ -4658,7 +4660,7 @@ namespace ResticBackuper.Dashboard
             else if (!hasCanary)
             {
                 label = "Backup unavailable";
-                helpText = "The required restore test file must be present before a backup can be requested.";
+                helpText = "Backups are off because the restore test file is missing. Open Rewindle Setup and choose Reinstall or repair to put it back.";
             }
             else
             {
@@ -5162,9 +5164,9 @@ namespace ResticBackuper.Dashboard
             MessageBoxResult confirmation = MessageBox.Show(
                 this,
                 "Cancel this backup?\n\n" +
-                    "Restic will be asked to stop cleanly. Previously verified snapshots are not changed, " +
-                    "and this run will not be marked successful. A run that is already completing may finish " +
-                    "before cancellation takes effect.",
+                    "Rewindle will ask the backup to stop cleanly. Your earlier backups are not changed, " +
+                    "and this one will not count as complete. A backup that is already finishing may " +
+                    "complete before it stops.",
                 "Cancel running backup?",
                 MessageBoxButton.YesNo,
                 MessageBoxImage.Warning,
@@ -5251,8 +5253,8 @@ namespace ResticBackuper.Dashboard
                     15);
                 MessageBox.Show(
                     this,
-                    "The cooperative cancellation request was rejected. The backup was not hard-stopped.\n\n" +
-                        (result.ErrorMessage ?? "The protected cancellation helper did not return a verified result."),
+                    "Rewindle couldn\u2019t stop the backup, so it is still running. Nothing was cut off, and you can try again.\n\n" +
+                        "Details: " + (result.ErrorMessage ?? "no result came back from the cancel request."),
                     "Cancellation not requested",
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
@@ -6407,14 +6409,14 @@ namespace ResticBackuper.Dashboard
                 ? "First backup pending"
                 : (snapshot.Percent * 100).ToString("0.0", CultureInfo.CurrentCulture) + "%";
             estimateBadge.Text = firstBackupPending
-                ? "DRY-RUN BASELINE  •  NOT YET BACKED UP"
+                ? "TEST SCAN ONLY  •  NOT YET BACKED UP"
                 : string.Equals(snapshot.StateKey, "cancelling", StringComparison.OrdinalIgnoreCase)
-                    ? "CANCELLATION REQUESTED  •  COOPERATIVE STOP"
+                    ? "STOP REQUESTED  •  STOPPING SAFELY"
                 : snapshot.IsSuccess
                     ? "FINAL VERIFIED RESULT"
                 : snapshot.ProgressIsEstimated
                     ? "ESTIMATED  •  " + snapshot.ConfidenceLabel.ToUpperInvariant()
-                    : "RESTIC COUNTERS  •  COMPOSED OVERALL";
+                    : "EXACT PROGRESS  •  OVERALL";
             estimateBadge.Foreground = firstBackupPending
                 ? Amber
                 : snapshot.ProgressIsEstimated ? Teal : BlueText;
@@ -6424,7 +6426,7 @@ namespace ResticBackuper.Dashboard
             {
                 etaTitle.Text = "Stopping safely";
                 etaValue.Text = "Please wait";
-                etaHint.Text = "Restic is finishing its current operation and releasing the repository lock";
+                etaHint.Text = "Rewindle is finishing the current step and closing the backup location safely";
             }
             else
             {
@@ -6436,7 +6438,7 @@ namespace ResticBackuper.Dashboard
                     etaValue.Text = FormatDuration(snapshot.Eta.Value);
                     string completion = snapshot.EstimatedCompletion.HasValue
                         ? "Likely around " + snapshot.EstimatedCompletion.Value.ToString("HH:mm", CultureInfo.CurrentCulture)
-                        : "Updates as Restic advances";
+                        : "Updates as the backup moves along";
                     etaHint.Text = snapshot.ProgressIsEstimated
                         ? snapshot.ConfidenceLabel + "  •  " + completion
                         : completion;
@@ -6480,7 +6482,7 @@ namespace ResticBackuper.Dashboard
                 else if (snapshot.IsActive)
                 {
                     etaValue.Text = "Calculating";
-                    etaHint.Text = "Building an estimate from live progress and run history";
+                    etaHint.Text = "Working out an estimate from this backup\u2019s progress so far";
                 }
                 else
                 {
@@ -6526,7 +6528,7 @@ namespace ResticBackuper.Dashboard
             }
             else if (snapshot.IsFailure)
             {
-                SetBadge("NEEDS ATTENTION", Rose, BrushFrom("#3B1D2A"));
+                SetBadge("BACKUP DIDN\u2019T FINISH", Rose, BrushFrom("#3B1D2A"));
                 StopStatusPulse();
             }
             else if (snapshot.IsStatusUnavailable)
@@ -6700,14 +6702,6 @@ namespace ResticBackuper.Dashboard
             {
                 evidence.Add(FormatBytes(status.ByteCount));
             }
-            if (status.LastUpdatedLocal.HasValue)
-            {
-                evidence.Add(
-                    "Updated "
-                    + status.LastUpdatedLocal.Value.ToString(
-                        "yyyy-MM-dd HH:mm",
-                        CultureInfo.CurrentCulture));
-            }
             settingsOffsiteEvidence.Text = evidence.Count == 0
                 ? "No verified off-site inventory or restore evidence is available yet."
                 : string.Join("  \u2022  ", evidence);
@@ -6842,14 +6836,17 @@ namespace ResticBackuper.Dashboard
             if (freshness.State == BackupFreshnessState.Overdue ||
                 freshness.State == BackupFreshnessState.ClockAnomaly)
             {
-                SetBadge("NEEDS ATTENTION", Rose, BrushFrom("#3B1D2A"));
+                SetBadge(
+                    freshness.State == BackupFreshnessState.Overdue ? "BACKUP OVERDUE" : "CHECK THE PC CLOCK",
+                    Rose,
+                    BrushFrom("#3B1D2A"));
                 statusBadge.Visibility = Visibility.Visible;
                 StopStatusPulse();
                 if (!snapshot.IsFailure)
                 {
                     heroTitle.Text = freshness.State == BackupFreshnessState.Overdue
                         ? "Backup overdue"
-                        : "Backup clock needs attention";
+                        : "Check your PC\u2019s clock";
                     heroDetail.Text = freshness.Detail;
                     etaTitle.Text = "Backup freshness";
                     etaValue.Text = freshness.StatusLabel;
@@ -6991,7 +6988,7 @@ namespace ResticBackuper.Dashboard
             }
             else if (snapshot.IsFailure)
             {
-                ShowTrayMessage("Backup needs attention", snapshot.StatusDetail, Forms.ToolTipIcon.Error);
+                ShowTrayMessage("Backup didn\u2019t finish", snapshot.StatusDetail, Forms.ToolTipIcon.Error);
             }
             lastStateKey = snapshot.StateKey;
         }
@@ -7186,7 +7183,7 @@ namespace ResticBackuper.Dashboard
             }
             if (snapshot.IsFailure)
             {
-                return prefix + "last backup needs attention";
+                return prefix + "last backup didn\u2019t finish";
             }
             if (snapshot.NeedsAnomalyReview)
             {
@@ -7231,10 +7228,26 @@ namespace ResticBackuper.Dashboard
             return days.ToString(CultureInfo.CurrentCulture) + (days == 1 ? " day ago" : " days ago");
         }
 
+        // A balloon holds about 250 characters. Longer text is cut at a word, with an ellipsis, rather than in the middle of one.
+        private static string ShortenBalloonText(string message)
+        {
+            const int Limit = 220;
+            if (string.IsNullOrEmpty(message) || message.Length <= Limit)
+            {
+                return message ?? string.Empty;
+            }
+            int cut = message.LastIndexOf(' ', Limit - 2);
+            if (cut < Limit / 2)
+            {
+                cut = Limit - 1;
+            }
+            return message.Substring(0, cut).TrimEnd() + "\u2026";
+        }
+
         private void ShowTrayMessage(string title, string message, Forms.ToolTipIcon icon)
         {
             trayIcon.BalloonTipTitle = title;
-            trayIcon.BalloonTipText = message.Length > 220 ? message.Substring(0, 220) : message;
+            trayIcon.BalloonTipText = ShortenBalloonText(message);
             trayIcon.BalloonTipIcon = icon;
             trayIcon.ShowBalloonTip(4500);
         }

@@ -758,7 +758,7 @@ try {
     $gap = $statusFixture.Reader.Load()
     Assert-True ($gap.StateKey -eq 'telemetry_error' -and $gap.IsStatusUnavailable) 'a status that stayed unreadable was still described as the last good one'
     Assert-True ((-not $gap.IsFailure) -and (-not $gap.IsSuccess) -and (-not $gap.IsActive)) 'an unreadable status was called failed, verified or running'
-    Assert-True ($gap.StatusDetail -match 'status\.json is not valid JSON') ('an unreadable status did not name the file and the reason: ' + $gap.StatusDetail)
+    Assert-True ($gap.StatusDetail -match 'status\.json is damaged') ('an unreadable status did not name the file and the reason: ' + $gap.StatusDetail)
     Assert-True ($gap.StatusDetail -notmatch [regex]::Escape($statusFixture.Root) -and $gap.StatusDetail -notmatch 'run-glitch|schema_version') 'the reason for an unreadable status quoted the file or its path'
     [IO.File]::WriteAllText($statusFile, $readableText, $utf8)
     $recovered = $statusFixture.Reader.Load()
@@ -780,7 +780,7 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $absentState)) 'the missing state folder of the fixture exists'
     $notInstalledSnapshot = $absentFixture.Reader.Load()
     Assert-True ($notInstalledSnapshot.StateKey -eq 'not_installed' -and $notInstalledSnapshot.IsStatusUnavailable -and -not $notInstalledSnapshot.IsFailure) 'a missing state folder was not told apart from a first backup that has not happened'
-    Assert-True ($notInstalledSnapshot.StatusLabel -eq 'Engine not installed' -and $notInstalledSnapshot.StatusDetail -match '--state-dir' -and $notInstalledSnapshot.StatusDetail -match 'Requirements') 'a missing state folder did not say what to do'
+    Assert-True ($notInstalledSnapshot.StatusLabel -eq 'Backup service not installed' -and $notInstalledSnapshot.StatusDetail -match '--state-dir' -and $notInstalledSnapshot.StatusDetail -match 'Requirements') 'a missing state folder did not say what to do'
     Assert-True (-not (Test-Path -LiteralPath $absentState)) 'looking for a missing state folder created it'
 
     # The old local-mirror status file is retired evidence: it sits under the user's own profile, where anything running as that user can
@@ -792,10 +792,10 @@ try {
     $legacySnapshot = $legacyFixture.Reader.Load()
     $legacyOffsite = $legacySnapshot.OffsiteStatus
     Assert-True ([string]$legacyOffsite.Kind -eq 'StatusUnavailable' -and -not $legacyOffsite.ProviderUploadConfirmed -and -not $legacyOffsite.RestoreVerified) 'a proof-shaped legacy local file stood for a verified cloud copy'
-    Assert-True ($legacyOffsite.StatusLabel -eq 'Direct cloud verification required' -and $legacyOffsite.StatusDetail -match 'retired') 'the retired legacy evidence did not say it is retired'
+    Assert-True ($legacyOffsite.StatusLabel -eq 'A new Google Drive check is needed' -and $legacyOffsite.StatusDetail -match 'retired') 'the retired legacy evidence did not say it is retired'
     [IO.File]::WriteAllText($legacyProofFile, 'this is not JSON, and is not looked at', $utf8)
     $legacyAgain = $legacyFixture.Reader.Load().OffsiteStatus
-    Assert-True ($legacyAgain.StatusLabel -eq 'Direct cloud verification required') 'the legacy local file was read instead of only noticed'
+    Assert-True ($legacyAgain.StatusLabel -eq 'A new Google Drive check is needed') 'the legacy local file was read instead of only noticed'
     Assert-True ([string]$emptyFixture.Reader.Load().OffsiteStatus.Kind -eq 'NotConfigured') 'a backup with no cloud evidence at all was not left as not configured'
 
     # A run history that exists but cannot be read is never replaced by a guess. It is read again on the next refreshes (a run that finishes
@@ -1668,7 +1668,7 @@ namespace RewindleRegression {
         Assert-True ((Get-BalloonTitle 'cancelling' $true $false $false) -eq '(none)') 'a cancel being carried out announced a start'
         Assert-True ((Get-BalloonTitle 'cancelled' $false $false $false) -eq '(none)') 'a cancelled run raised a balloon of its own from the state change'
         Assert-True ((Get-BalloonTitle 'starting' $true $false $false) -eq 'Backup started') 'a backup that starts after a cancelled one did not say Backup started'
-        Assert-True ((Get-BalloonTitle 'failed' $false $false $true) -eq 'Backup needs attention') 'a failed run did not say Backup needs attention'
+        Assert-True ((Get-BalloonTitle 'failed' $false $false $true) -eq ('Backup didn' + [char]0x2019 + 't finish')) 'a failed run did not say that the backup did not finish'
     }
     finally {
         $balloonIcon.Dispose()
@@ -1701,7 +1701,7 @@ namespace RewindleRegression {
         Assert-True ((Get-GapBalloonTitleForUnreadable) -eq '(none)') 'a second unreadable status raised a balloon'
         Assert-True ((Get-GapBalloonTitle 'success' $false $true $false $false 'run-b') -eq 'Backup verified') 'a run that finished while the status could not be read was not announced'
         Assert-True ((Get-GapBalloonTitleForUnreadable) -eq '(none)') 'an unreadable status raised a balloon after a verified run'
-        Assert-True ((Get-GapBalloonTitle 'failed' $false $false $true $false 'run-c') -eq 'Backup needs attention') 'a failure that arrived after a gap in the status was not announced'
+        Assert-True ((Get-GapBalloonTitle 'failed' $false $false $true $false 'run-c') -eq ('Backup didn' + [char]0x2019 + 't finish')) 'a failure that arrived after a gap in the status was not announced'
         Assert-True ((Get-GapBalloonTitleForUnreadable) -eq '(none)') 'an unreadable status raised a balloon after a failed run'
         Assert-True ((Get-GapBalloonTitle 'failed' $false $false $true $false 'run-c') -eq '(none)') 'a failure that was already announced was announced again after a gap in the status'
         Assert-True ((Get-GapBalloonTitle 'backing_up' $true $false $false $false 'run-d') -eq 'Backup started') 'a backup that started was not announced'
@@ -1726,7 +1726,7 @@ namespace RewindleRegression {
         }
         Assert-True ((Get-TrayHoverText { param($snapshot) $snapshot.IsStatusUnavailable = $true }) -eq 'Rewindle - status unavailable') ('the tray did not say that the status is unavailable: ' + $hoverIcon.Text)
         Assert-True ((Get-TrayHoverText { param($snapshot) $snapshot.IsActive = $true; $snapshot.Percent = 0.42 }) -eq 'Rewindle - backup running 42%') ('the tray did not show a running backup: ' + $hoverIcon.Text)
-        Assert-True ((Get-TrayHoverText { param($snapshot) $snapshot.IsFailure = $true }) -eq 'Rewindle - last backup needs attention') ('the tray did not say that the last backup needs attention: ' + $hoverIcon.Text)
+        Assert-True ((Get-TrayHoverText { param($snapshot) $snapshot.IsFailure = $true }) -eq ('Rewindle - last backup didn' + [char]0x2019 + 't finish')) ('the tray did not say that the last backup did not finish: ' + $hoverIcon.Text)
         Assert-True ((Get-TrayHoverText { param($snapshot) $snapshot.LastVerifiedFinishedUtc = [DateTime]::UtcNow.AddHours(-2) }) -eq 'Rewindle - verified 2 h ago') ('the tray did not say how long ago a backup was verified: ' + $hoverIcon.Text)
         Assert-True ((Get-TrayHoverText { param($snapshot) $snapshot.LastVerifiedFinishedUtc = [DateTime]::UtcNow.AddDays(-3) }) -eq 'Rewindle - verified 3 days ago') ('the tray did not count days: ' + $hoverIcon.Text)
         Assert-True ((Get-TrayHoverText { param($snapshot) $snapshot.LastVerifiedFinishedUtc = [DateTime]::UtcNow.AddSeconds(-5) }) -eq 'Rewindle - verified just now') ('the tray did not say a backup was just verified: ' + $hoverIcon.Text)

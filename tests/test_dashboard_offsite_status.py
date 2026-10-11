@@ -295,7 +295,7 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
     def test_complete_direct_cloud_proof_is_bound_and_displayed(self) -> None:
         result = self.invoke(proof=self.direct_proof())
         self.assertEqual("RestoreVerified", result["kind"])
-        self.assertEqual("Google Drive repository verified", result["label"])
+        self.assertEqual("Google Drive copy verified", result["label"])
         self.assertTrue(result["provider_confirmed"])
         self.assertTrue(result["restore_verified"])
         self.assertEqual(PLAN_ID, result["plan_id"])
@@ -313,7 +313,7 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
     def test_legacy_mirror_evidence_is_explicitly_rejected(self) -> None:
         result = self.invoke(protected=self.legacy_mirror_status())
         self.assertEqual("StatusUnavailable", result["kind"])
-        self.assertIn("Legacy local-mirror evidence is retired", result["detail"])
+        self.assertIn("retired", result["detail"])
         self.assertFalse(result["provider_confirmed"])
 
     def test_plan_generation_repository_snapshot_and_phase_mismatch_fail(self) -> None:
@@ -329,10 +329,16 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
             "snapshot": {"snapshot_id": "6" * 64},
             "phase": {"verification_phase": "pre_activation"},
         }
+        # A proof of another plan, generation, repository or snapshot than the latest backup's is out of date, and the next check
+        # covers the latest backup: it asks nothing of the person (kind Stale). A proof for another path, or from before the
+        # direct-cloud phase, cannot be counted at all (StatusUnavailable).
         for label, mutation in mutations.items():
             with self.subTest(label=label):
                 result = self.invoke(proof=self.direct_proof(**mutation))
-                self.assertEqual("StatusUnavailable", result["kind"])
+                self.assertEqual(
+                    "StatusUnavailable" if label in ("path", "phase") else "Stale",
+                    result["kind"],
+                )
                 self.assertFalse(result["provider_confirmed"])
 
     def test_newer_backup_attempt_invalidates_an_older_proof(self) -> None:
@@ -344,8 +350,8 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
             snapshot_id=None,
         )
         result = self.invoke(proof=self.direct_proof(), current=current)
-        self.assertEqual("StatusUnavailable", result["kind"])
-        self.assertIn("repository-changing backup attempt", result["detail"])
+        self.assertEqual("Stale", result["kind"])
+        self.assertIn("newer than the last check", result["detail"])
 
     def test_inventory_restore_and_types_must_be_complete(self) -> None:
         mutations = {
@@ -373,8 +379,8 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
         result = self.invoke(
             proof=self.direct_proof(verified_utc="2026-07-28T23:00:00Z")
         )
-        self.assertEqual("StatusUnavailable", result["kind"])
-        self.assertIn("predates", result["detail"])
+        self.assertEqual("Stale", result["kind"])
+        self.assertIn("newer than the last check", result["detail"])
 
     def test_direct_proof_is_preferred_and_malformed_proof_fails_closed(self) -> None:
         result = self.invoke(
@@ -499,7 +505,7 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
                 result = self.plan_bound_case(plan, overrides)
                 self.assertEqual("StatusUnavailable", result["kind"])
                 self.assertFalse(result["provider_confirmed"])
-                self.assertIn("installed backup plan", result["detail"])
+                self.assertIn("current backup", result["detail"])
 
     def test_fixture_wrong_relative_path_is_refused(self) -> None:
         plan = r"G:\My Drive\Backups\Desktop PC"
@@ -545,8 +551,8 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
             last_success=newer,
             configured_repository=plan,
         )
-        self.assertEqual("StatusUnavailable", result["kind"])
-        self.assertEqual("Direct cloud proof is stale", result["label"])
+        self.assertEqual("Stale", result["kind"])
+        self.assertEqual("The Google Drive copy is waiting for its next check", result["label"])
 
     def test_fixture_proof_for_another_repository_than_the_plan_is_refused(self) -> None:
         # Consistent with itself and with the backup telemetry, but not with the installed plan: refused.

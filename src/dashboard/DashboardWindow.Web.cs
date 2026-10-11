@@ -1863,10 +1863,13 @@ namespace ResticBackuper.Dashboard
             status["etaTitle"] = etaTitle == null ? string.Empty : etaTitle.Text ?? string.Empty;
             status["eta"] = etaValue == null ? string.Empty : etaValue.Text ?? string.Empty;
             status["etaHint"] = etaHint == null ? string.Empty : etaHint.Text ?? string.Empty;
+            // Set once a requested backup never started (see UpdateBackupButton); the page shows it beside the Back up now button and
+            // clears it with the next run. Empty otherwise.
+            status["backupNote"] = backupNotStartedText ?? string.Empty;
             if (!string.IsNullOrEmpty(webTelemetryError))
             {
-                status["title"] = "Dashboard data is temporarily unavailable";
-                status["detail"] = webTelemetryError;
+                status["title"] = "Backup status can\u2019t be read right now";
+                status["detail"] = "Rewindle couldn\u2019t read the latest backup status. It is trying again automatically.";
                 status["badge"] = "Status unavailable";
                 foreach (string metric in new[] { "files", "bytes", "speed", "elapsed", "errors", "eta" })
                     status[metric] = "—";
@@ -2052,6 +2055,20 @@ namespace ResticBackuper.Dashboard
             return result;
         }
 
+        // When the task runs next, as an ISO 8601 timestamp: empty when automatic backups are paused, Windows names no time or the
+        // schedule could not be read. Windows gives the time as local wall-clock time without a zone.
+        private static string NextRunIso(TaskSchedule schedule)
+        {
+            if (schedule == null || !schedule.Enabled || schedule.State == BackupTaskState.Disabled ||
+                !schedule.NextRunTime.HasValue || schedule.NextRunTime.Value.Year < 2000)
+            {
+                return string.Empty;
+            }
+            DateTime next = schedule.NextRunTime.Value;
+            DateTime local = next.Kind == DateTimeKind.Utc ? next : DateTime.SpecifyKind(next, DateTimeKind.Local);
+            return local.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture);
+        }
+
         private Dictionary<string, object> BuildWebScheduleState()
         {
             // A schedule that cannot be read has a stable summary. The reason Windows gave can be long and technical
@@ -2061,6 +2078,8 @@ namespace ResticBackuper.Dashboard
             Dictionary<string, object> schedule = new Dictionary<string, object>();
             schedule["summary"] = unreadable ? "Schedule unavailable" : currentTaskSchedule.Summary;
             schedule["nextRun"] = unreadable ? "Unavailable" : currentTaskSchedule.NextRunDisplay;
+            // The same moment as an ISO 8601 timestamp, so the page formats it like every other time (empty when there is none).
+            schedule["nextRunAt"] = NextRunIso(currentTaskSchedule);
             schedule["detail"] = unreadable ? string.Empty : currentTaskSchedule.SettingsSummary;
             schedule["error"] = unreadable
                 ? (string.IsNullOrWhiteSpace(scheduleReadError) ? "The installed schedule could not be verified." : scheduleReadError)
