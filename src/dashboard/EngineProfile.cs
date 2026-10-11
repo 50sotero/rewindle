@@ -695,7 +695,7 @@ namespace ResticBackuper.Dashboard
             get { return State != EngineInstallState.Absent; }
         }
 
-        // Where each engine was looked for, for the "Engine not installed" notice and diagnostics.
+        // Where each engine was looked for, for the "Backup service not installed" notice and diagnostics.
         public IList<string> SearchedConfigurationPaths()
         {
             List<string> paths = new List<string>();

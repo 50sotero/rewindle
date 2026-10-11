@@ -1756,7 +1756,7 @@ namespace RewindleRegression {
     $missingError = [Activator]::CreateInstance($missingServiceType, $constructorFlags, $null, [object[]]@('C:\Program Files\RewindleFixture\backup-config.json'), $null)
     Assert-True ($missingError -is [System.IO.FileNotFoundException]) 'a missing installation is no longer a FileNotFoundException, which other callers rely on'
     $missingSentence = [string](Invoke-Static $dashboardType 'DescribeSourceConfigurationProblem' @($missingError))
-    Assert-True ($missingSentence -match 'Engine not installed' -and $missingSentence -match 'did not find the backup engine' -and $missingSentence -match 'Requirements') ('a missing installation was not described in plain words: ' + $missingSentence)
+    Assert-True ($missingSentence -match "backup service isn't installed" -and $missingSentence -match 'Run Rewindle Setup' -and $missingSentence -notmatch 'Engine|Requirements') ('a missing installation was not described in plain words: ' + $missingSentence)
     $leakySentence = [string](Invoke-Static $dashboardType 'DescribeSourceConfigurationProblem' @([System.IO.IOException]::new('The process cannot access the file C:\Users\your-user\secret.json')))
     Assert-True ($leakySentence -notmatch 'your-user|secret' -and $leakySentence -match 'could not be read') ('the words of an exception reached the sentence the page shows: ' + $leakySentence)
     $deniedSentence = [string](Invoke-Static $dashboardType 'DescribeSourceConfigurationProblem' @([System.UnauthorizedAccessException]::new('Access to the path C:\Program Files\RewindleFixture is denied.')))
