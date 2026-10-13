@@ -274,6 +274,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         help="existing Restic cache directory to read through (the protected backup's own cache)",
     )
+    parser.add_argument(
+        "--no-restic-lock",
+        action="store_true",
+        help="list without Restic's repository lock; only for a caller that holds the protected run lock",
+    )
     return parser.parse_args(argv)
 
 
@@ -1454,6 +1459,8 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("the recovery-drill canary proof is invalid")
     elif any(value is not None for value in drill_proof_fields):
         raise ValueError("drill canary proof fields require --recovery-drill")
+    if args.no_restic_lock and args.target is not None:
+        raise ValueError("--no-restic-lock is only valid for listings")
     if args.cache_dir is not None:
         if args.recovery_drill:
             raise ValueError("a recovery drill reads the repository without a cache")
@@ -1509,10 +1516,11 @@ def main(argv: list[str] | None = None) -> int:
         else:
             if args.cache_dir is not None:
                 command.extend(["--cache-dir", str(args.cache_dir)])
-            if args.target is None:
-                # A listing only reads. A Restic lock would add a write and a delete in the backup location (a
-                # cloud folder for some plans) around every listing, and the protected manager already holds the
-                # run lock that keeps backups and maintenance from changing the repository meanwhile.
+            if args.no_restic_lock:
+                # Only the protected manager asks for this, for a listing, while it holds the run lock that keeps
+                # backups and maintenance from changing the repository. A Restic lock would only add a write and a
+                # delete in the backup location (a cloud folder for some plans) around every listing. Run on its own,
+                # restore.py holds no run lock and keeps Restic's lock.
                 command.append("--no-lock")
         interactive_password = True
         if args.recovery_key_file:

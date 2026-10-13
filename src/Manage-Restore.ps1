@@ -1190,12 +1190,14 @@ function Invoke-RestoreOperation {
             Assert-NormalDirectoryChain -Directory $cachePath
             $arguments += @('--cache-dir',$cachePath)
         }
+        # Listings only read, and the run lock held here keeps backups and maintenance out, so they skip Restic's own
+        # lock (a write and a delete in the backup location around each one).
         if ($requestAction -eq 'list_snapshots') {
-            $arguments += '--list-snapshots-json'
+            $arguments += @('--list-snapshots-json','--no-restic-lock')
             Write-ProgressResult -Stage reading -Message 'Reading plan-bound and safely matched legacy snapshot history.' -Percent 35
         }
         elseif ($requestAction -eq 'list_tree') {
-            $arguments += @('--list-tree-json','--snapshot',$canonicalSnapshotId)
+            $arguments += @('--list-tree-json','--no-restic-lock','--snapshot',$canonicalSnapshotId)
             if ($allowLegacy) { $arguments += '--allow-legacy-unbound' }
             if ($canonicalTreePath) { $arguments += @('--tree-path',$canonicalTreePath) }
             Write-ProgressResult -Stage reading -Message 'Reading the selected snapshot folder.' -Percent 35

@@ -332,20 +332,26 @@ class RestoreBackendTests(unittest.TestCase):
         self.assertNotIn("latest", tree_commands[0])
         self.assertIn("--json", tree_commands[0])
 
-    def test_listings_skip_the_restic_lock_and_restores_keep_it(self) -> None:
+    def test_only_a_caller_holding_the_run_lock_lists_without_the_restic_lock(self) -> None:
+        # Run on its own (as RECOVERY.md documents) nothing holds the run lock, so Restic's lock stays.
         self.assertEqual(self.invoke(["--list-snapshots-json"])[0], 0)
+        self.assertEqual(self.invoke(["--list", "--json"])[0], 0)
+        standalone = self.read_log()
+        self.assertTrue(standalone)
+        self.assertTrue(all("--no-lock" not in args for args in standalone))
+        self.fake_log.unlink()
+        self.assertEqual(self.invoke(["--no-restic-lock", "--list-snapshots-json"])[0], 0)
         self.assertEqual(
-            self.invoke(["--list-tree-json", "--snapshot", "latest", "--tree-path", "C:\\Users"])[0], 0
+            self.invoke(
+                ["--no-restic-lock", "--list-tree-json", "--snapshot", "latest", "--tree-path", "C:\\Users"]
+            )[0],
+            0,
         )
         listings = self.read_log()
         self.assertTrue(listings)
         self.assertTrue(all("--no-lock" in args for args in listings))
-        self.fake_log.unlink()
-        result, _, _ = self.invoke(["--snapshot", "latest", "--target", str(self.root / "locked-restore")])
-        self.assertEqual(result, 0)
-        restore_calls = self.read_log()
-        self.assertTrue(any("restore" in args for args in restore_calls))
-        self.assertTrue(all("--no-lock" not in args for args in restore_calls))
+        with self.assertRaisesRegex(ValueError, "only valid for listings"):
+            self.invoke(["--no-restic-lock", "--snapshot", "latest", "--target", str(self.root / "locked-restore")])
 
     def test_cache_dir_reaches_every_restic_call_but_never_a_drill(self) -> None:
         cache = self.state / "cache"

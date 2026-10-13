@@ -34,6 +34,10 @@ class DashboardRestoreUiTests(unittest.TestCase):
         self.assertIn("$arguments += @('--cache-dir',$cachePath)", self.protected_manager)
         self.assertIn("$requestAction -ne 'restore_drill' -and [IO.Directory]::Exists($cachePath)", self.protected_manager)
         self.assertIn('command.append("--no-lock")', self.restore_backend)
+        # Only the manager, which holds the run lock, asks a listing to skip Restic's lock.
+        self.assertIn("if args.no_restic_lock:", self.restore_backend)
+        self.assertIn("@('--list-snapshots-json','--no-restic-lock')", self.protected_manager)
+        self.assertIn("@('--list-tree-json','--no-restic-lock','--snapshot',$canonicalSnapshotId)", self.protected_manager)
 
     def test_restore_is_a_first_class_navigation_page_and_build_component(self) -> None:
         self.assertIn('BuildNavigationButton("\\uE8F3", "Restore", "Restore")', self.window)
