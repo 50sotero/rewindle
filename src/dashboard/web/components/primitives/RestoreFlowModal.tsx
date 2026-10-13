@@ -704,7 +704,7 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
     if (availability !== 'ok') return [UNAVAILABLE_HINT[availability], true];
     if (activeStep === 'destination' && destinationChecking) return ['Checking the folder…', true];
     if (busy && approvalWaiting) return ['Waiting for you to answer the Windows permission prompt…', true];
-    if (busy) return ['Working… this can take a minute. You can close this window when it finishes.', true];
+    if (busy) return ['Working… this can take a minute.', true];
     if (activeStep === 'backup') return selectedId ? ['Choose files to go on with the selected backup, or pick another.', false] : ['Click the backup you want to restore from.', true];
     if (activeStep === 'files') {
       if (!selectionAccepted && (wholeSnapshot || paths.length > 0)) return ['Waiting for the selection to be confirmed…', true];

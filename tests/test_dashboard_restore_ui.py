@@ -19,6 +19,22 @@ class DashboardRestoreUiTests(unittest.TestCase):
         cls.installer = (PROJECT / "installer" / "Install-ResticBackuper.ps1").read_text(encoding="utf-8")
         cls.builder = (PROJECT / "build" / "Build-Release.ps1").read_text(encoding="utf-8")
 
+    def test_restore_flow_speaks_plainly_while_it_works(self) -> None:
+        flow = (DASHBOARD / "DashboardWindow.RestoreFlow.cs").read_text(encoding="utf-8")
+        modal = (DASHBOARD / "web" / "components" / "primitives" / "RestoreFlowModal.tsx").read_text(encoding="utf-8")
+        # The backup service's progress lines are for its log; the window names each stage in its own words.
+        self.assertIn("FriendlyRestoreFlowStageDetail(progress.Stage, restoreFlowStep)", flow)
+        self.assertNotIn("SetRestoreFlowMessage(FriendlyRestoreFlowStage(progress.Stage), progress.Message)", flow)
+        self.assertIn("Checking that the backup service is intact before it opens your backups.", flow)
+        # Nothing tells the person to close the window while it is still working.
+        self.assertNotIn("You can close this window when it finishes", modal)
+
+    def test_restore_reads_through_the_backup_cache_and_checks_each_runtime_folder_once(self) -> None:
+        self.assertIn("$checkedDirectories.Add($directory)", self.protected_manager)
+        self.assertIn("$arguments += @('--cache-dir',$cachePath)", self.protected_manager)
+        self.assertIn("$requestAction -ne 'restore_drill' -and [IO.Directory]::Exists($cachePath)", self.protected_manager)
+        self.assertIn('command.append("--no-lock")', self.restore_backend)
+
     def test_restore_is_a_first_class_navigation_page_and_build_component(self) -> None:
         self.assertIn('BuildNavigationButton("\\uE8F3", "Restore", "Restore")', self.window)
         self.assertIn("BuildRestorePage()", self.window)

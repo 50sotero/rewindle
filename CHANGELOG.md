@@ -54,6 +54,16 @@ ones a home user reads without a glossary.
   "Always keep on this device", marks the recovery key "Saved and checked",
   ignores Enter on the Review page so a stray key press never installs, and
   uses a slightly larger type scale, shared with the dashboard.
+- **Restore** waits less at every step. The backup service's check of its own
+  files walks each folder once instead of once per file in it (with the full
+  Python library the earlier personal edition ships, that check alone took
+  about 25 seconds). Listing backups and
+  opening folders read through the cache the backup keeps, so only what is new
+  is fetched from the backup location, and they no longer write and remove a
+  lock file there (the run lock already keeps backups out meanwhile); a restore
+  keeps its lock, and the recovery drill still reads only the backup location.
+  While it works, the dialog says what each stage means instead of showing the
+  service's log line.
 
 ## [0.2.0-alpha.2] - 2026-10-08
 

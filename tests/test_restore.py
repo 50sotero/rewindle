@@ -332,6 +332,53 @@ class RestoreBackendTests(unittest.TestCase):
         self.assertNotIn("latest", tree_commands[0])
         self.assertIn("--json", tree_commands[0])
 
+    def test_listings_skip_the_restic_lock_and_restores_keep_it(self) -> None:
+        self.assertEqual(self.invoke(["--list-snapshots-json"])[0], 0)
+        self.assertEqual(
+            self.invoke(["--list-tree-json", "--snapshot", "latest", "--tree-path", "C:\\Users"])[0], 0
+        )
+        listings = self.read_log()
+        self.assertTrue(listings)
+        self.assertTrue(all("--no-lock" in args for args in listings))
+        self.fake_log.unlink()
+        result, _, _ = self.invoke(["--snapshot", "latest", "--target", str(self.root / "locked-restore")])
+        self.assertEqual(result, 0)
+        restore_calls = self.read_log()
+        self.assertTrue(any("restore" in args for args in restore_calls))
+        self.assertTrue(all("--no-lock" not in args for args in restore_calls))
+
+    def test_cache_dir_reaches_every_restic_call_but_never_a_drill(self) -> None:
+        cache = self.state / "cache"
+        cache.mkdir()
+        self.assertEqual(self.invoke(["--cache-dir", str(cache), "--list-snapshots-json"])[0], 0)
+        self.assertEqual(
+            self.invoke(["--cache-dir", str(cache), "--snapshot", "latest", "--target", str(self.root / "cached")])[0],
+            0,
+        )
+        calls = self.read_log()
+        self.assertTrue(calls)
+        for args in calls:
+            self.assertEqual(args[args.index("--cache-dir") + 1], str(cache))
+            self.assertNotIn("--no-cache", args)
+        with self.assertRaisesRegex(ValueError, "existing local directory"):
+            self.invoke(["--cache-dir", str(self.state / "missing"), "--list-snapshots-json"])
+        with self.assertRaisesRegex(ValueError, "without a cache"):
+            self.invoke(
+                [
+                    "--cache-dir",
+                    str(cache),
+                    "--recovery-drill",
+                    "--target",
+                    str(self.root / "drill-target"),
+                    "--report",
+                    str(self.state / "drill-report.json"),
+                    "--drill-canary-sha256",
+                    "0" * 64,
+                    "--drill-canary-bytes",
+                    "1",
+                ]
+            )
+
     def test_plan_listing_browses_old_generations_but_latest_is_current(self) -> None:
         self.enable_plan(generation=2)
         old_source = str(self.root / "retired-source")

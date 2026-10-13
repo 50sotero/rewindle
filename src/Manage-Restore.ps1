@@ -113,6 +113,7 @@ $restorePath = Join-Path $installRoot 'restore.py'
 $pythonPath = Join-Path $installRoot 'Python\python.exe'
 $resticPath = Join-Path $installRoot 'restic.exe'
 $lockPath = Join-Path $stateRoot 'run.lock'
+$cachePath = Join-Path $stateRoot 'cache'
 $resultRoot = Join-Path $stateRoot 'RestoreManagerResults'
 $restoreHistoryPath = Join-Path $stateRoot 'restore-history.json'
 $lastSuccessPath = Join-Path $stateRoot 'last-success.json'
@@ -796,6 +797,10 @@ function Assert-RuntimeManifest {
         throw 'Protected runtime manifest header is invalid.'
     }
     $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    # Every file in a folder shares that folder's chain, so each folder is walked once per check rather than once per
+    # file in it. A runtime with a full Python library holds thousands of files, and walking each file's chain made
+    # this check take tens of seconds before every restore step; what it guarantees is unchanged.
+    $checkedDirectories = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $prefix = $installRoot + '\'
     foreach ($record in $records) {
         if ($record.relative_path -isnot [string]) { throw 'Protected runtime manifest contains an invalid record.' }
@@ -806,7 +811,8 @@ function Assert-RuntimeManifest {
         }
         $file = [IO.Path]::GetFullPath((Join-Path $installRoot $relative))
         if (-not $file.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Runtime manifest path escapes its root.' }
-        Assert-NormalDirectoryChain -Directory ([IO.Path]::GetDirectoryName($file))
+        $directory = [IO.Path]::GetDirectoryName($file)
+        if ($checkedDirectories.Add($directory)) { Assert-NormalDirectoryChain -Directory $directory }
         $item = Assert-NormalFile -File $file
         if ([long]$record.bytes -ne $item.Length -or
             -not [string]::Equals([string]$record.sha256, (Get-FileSha256Hex -File $file), [StringComparison]::OrdinalIgnoreCase)) {
@@ -828,7 +834,7 @@ function Assert-RuntimeManifest {
         throw 'Protected runtime contains unmanifested or missing files.'
     }
     foreach ($file in $actualFiles) {
-        Assert-NormalDirectoryChain -Directory $file.DirectoryName
+        if ($checkedDirectories.Add($file.DirectoryName)) { Assert-NormalDirectoryChain -Directory $file.DirectoryName }
         $relative = $file.FullName.Substring($installRoot.Length + 1)
         if (-not $seen.Contains($relative)) {
             throw "Protected runtime contains an unmanifested file: $relative"
@@ -1176,6 +1182,14 @@ function Invoke-RestoreOperation {
         }
 
         $arguments = @('-I','-S','-B',$restorePath,'--config',$configPath,'--restic',$resticPath)
+        # The backup keeps its Restic cache in the protected state folder, and the run lock held here keeps it out of
+        # that cache meanwhile. Reading through it, only what the backup location holds beyond it is fetched, instead of
+        # every backup record, index and folder listing made since the last restore. A recovery drill still reads only
+        # the backup location itself.
+        if ($requestAction -ne 'restore_drill' -and [IO.Directory]::Exists($cachePath)) {
+            Assert-NormalDirectoryChain -Directory $cachePath
+            $arguments += @('--cache-dir',$cachePath)
+        }
         if ($requestAction -eq 'list_snapshots') {
             $arguments += '--list-snapshots-json'
             Write-ProgressResult -Stage reading -Message 'Reading plan-bound and safely matched legacy snapshot history.' -Percent 35

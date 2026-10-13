@@ -202,6 +202,8 @@ function New-Fixture {
     [IO.File]::WriteAllText((Join-Path $repository 'config'), "repository config sentinel`n", $encoding)
     [IO.File]::WriteAllText((Join-Path $repository 'pack'), "encrypted repository sentinel`n", $encoding)
     [IO.File]::WriteAllBytes((Join-Path $state 'run.lock'), [byte[]](0))
+    # The backup's own Restic cache, which restore requests read through.
+    [void][IO.Directory]::CreateDirectory((Join-Path $state 'cache'))
     $serial = Get-VolumeSerial -Path $repository
     $config = [ordered]@{
         schema_version = 1; plan_id = $planId; config_generation = $generation
@@ -451,6 +453,48 @@ try {
     [IO.File]::WriteAllText((Join-Path $unmanifestedFixture.Install 'injected.txt'), "unexpected`n", $encoding)
     $unmanifested = Invoke-Manager -Fixture $unmanifestedFixture -Action list_snapshots
     Assert-True ($unmanifested.ExitCode -ne 0 -and $unmanifested.Result.error -match 'unmanifested or missing files') 'unmanifested protected runtime file is rejected'
+
+    # A folder link inside the runtime is still refused now that each folder's chain is walked once per check.
+    $junctionFixture = New-Fixture
+    $outside = Join-Path $junctionFixture.Root 'Outside'
+    [void][IO.Directory]::CreateDirectory($outside)
+    [IO.File]::WriteAllText((Join-Path $outside 'module.py'), "# outside the runtime`n", $encoding)
+    [IO.File]::WriteAllText((Join-Path $outside 'second.py'), "# outside the runtime`n", $encoding)
+    $junction = Join-Path $junctionFixture.Install 'Python\Lib'
+    & cmd.exe /d /c mklink /J "$junction" "$outside" | Out-Null
+    Assert-True (([IO.File]::GetAttributes($junction) -band [IO.FileAttributes]::ReparsePoint) -ne 0) 'junction fixture created'
+    $junctionManifestPath = Join-Path $junctionFixture.Install 'runtime-manifest.json'
+    $junctionManifest = Get-Content -LiteralPath $junctionManifestPath -Raw | ConvertFrom-Json
+    $junctionRecords = @($junctionManifest.files) + @(
+        (New-FileRecord -Root $junctionFixture.Install -Path (Join-Path $junction 'module.py')),
+        (New-FileRecord -Root $junctionFixture.Install -Path (Join-Path $junction 'second.py'))
+    )
+    Write-Json -Path $junctionManifestPath -Value ([ordered]@{ schema_version = 1; file_count = $junctionRecords.Count; files = $junctionRecords })
+    $junctioned = Invoke-Manager -Fixture $junctionFixture -Action list_snapshots
+    [IO.Directory]::Delete($junction)
+    Assert-True ($junctioned.ExitCode -ne 0 -and $junctioned.Result.error -match 'reparse point') 'runtime folder link is rejected'
+
+    # Listings read through the backup's cache and take no Restic lock; a restore keeps the lock; a recovery drill
+    # reads only the backup location; and before the first backup has made a cache, Restic keeps its own.
+    $cacheToken = "`t--cache-dir`t" + (Join-Path $fixture.State 'cache') + "`t"
+    $listingFixture = New-Fixture
+    $listingCache = "`t--cache-dir`t" + (Join-Path $listingFixture.State 'cache') + "`t"
+    [void](Invoke-Manager -Fixture $listingFixture -Action list_snapshots)
+    [void](Invoke-Manager -Fixture $listingFixture -Action list_tree -Snapshot $snapshotId -TreePath '/')
+    $listingCalls = @(Get-Content -LiteralPath $listingFixture.Log)
+    Assert-True ($listingCalls.Count -ge 3 -and
+        @($listingCalls | Where-Object { -not $_.Contains($listingCache) -or $_ -notmatch '(^|\t)--no-lock(\t|$)' }).Count -eq 0) 'listings read through the backup cache without a Restic lock'
+    $restoreCalls = @(Get-Content -LiteralPath $fixture.Log | Where-Object { $_ -match '(^|\t)restore(\t|$)' })
+    Assert-True ($restoreCalls.Count -ge 1 -and
+        @($restoreCalls | Where-Object { -not $_.Contains($cacheToken) -or $_ -match '(^|\t)--no-lock(\t|$)' }).Count -eq 0) 'a restore reads through the backup cache and keeps the Restic lock'
+    $drillCalls = @(Get-Content -LiteralPath $drillFixture.Log)
+    Assert-True ($drillCalls.Count -ge 1 -and
+        @($drillCalls | Where-Object { $_ -match '(^|\t)--cache-dir(\t|$)' -or $_ -notmatch '(^|\t)--no-cache(\t|$)' }).Count -eq 0) 'a recovery drill reads only the backup location'
+    $uncachedFixture = New-Fixture
+    [IO.Directory]::Delete((Join-Path $uncachedFixture.State 'cache'))
+    $uncached = Invoke-Manager -Fixture $uncachedFixture -Action list_snapshots
+    Assert-True ($uncached.ExitCode -eq 0 -and $uncached.Result.ok -eq $true -and
+        (Get-Content -LiteralPath $uncachedFixture.Log -Raw) -notmatch '(^|\t)--cache-dir(\t|$)') 'without a backup cache yet, Restic keeps its own'
 
     $logText = Get-Content -LiteralPath $fixture.Log -Raw
     Assert-True ($logText -match '\tcat\tconfig' -and $logText -match '\tsnapshots\t--json' -and $logText -match '\tls\t--json') 'read-only Restic metadata commands used'

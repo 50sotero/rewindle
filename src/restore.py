@@ -269,6 +269,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         help="protected historical byte count for the snapshot canary",
     )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        help="existing Restic cache directory to read through (the protected backup's own cache)",
+    )
     return parser.parse_args(argv)
 
 
@@ -1449,6 +1454,15 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("the recovery-drill canary proof is invalid")
     elif any(value is not None for value in drill_proof_fields):
         raise ValueError("drill canary proof fields require --recovery-drill")
+    if args.cache_dir is not None:
+        if args.recovery_drill:
+            raise ValueError("a recovery drill reads the repository without a cache")
+        if (
+            not args.cache_dir.is_absolute()
+            or not args.cache_dir.is_dir()
+            or path_is_reparse(args.cache_dir)
+        ):
+            raise ValueError("--cache-dir must name an existing local directory")
     report = base_report(args) if args.report is not None else None
     report_path: Path | None = None
     restore_started = False
@@ -1492,6 +1506,14 @@ def main(argv: list[str] | None = None) -> int:
         ]
         if args.recovery_drill:
             command.extend(["--no-cache", "--no-lock"])
+        else:
+            if args.cache_dir is not None:
+                command.extend(["--cache-dir", str(args.cache_dir)])
+            if args.target is None:
+                # A listing only reads. A Restic lock would add a write and a delete in the backup location (a
+                # cloud folder for some plans) around every listing, and the protected manager already holds the
+                # run lock that keeps backups and maintenance from changing the repository meanwhile.
+                command.append("--no-lock")
         interactive_password = True
         if args.recovery_key_file:
             environment["RESTIC_PASSWORD"] = recovery_password(args.recovery_key_file)
