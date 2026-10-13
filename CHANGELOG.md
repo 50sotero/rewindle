@@ -57,7 +57,7 @@ ones a home user reads without a glossary.
 - **Restore** waits less at every step. The backup service's check of its own
   files walks each folder once instead of once per file in it (with the full
   Python library the earlier personal edition ships, that check alone took
-  about 25 seconds). Listing backups and
+  about 7 seconds, and now takes under 1). Listing backups and
   opening folders read through the cache the backup keeps, so only what is new
   is fetched from the backup location, and they no longer write and remove a
   lock file there (the run lock already keeps backups out meanwhile); a restore

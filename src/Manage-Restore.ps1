@@ -799,7 +799,7 @@ function Assert-RuntimeManifest {
     $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     # Every file in a folder shares that folder's chain, so each folder is walked once per check rather than once per
     # file in it. A runtime with a full Python library holds thousands of files, and walking each file's chain made
-    # this check take tens of seconds before every restore step; what it guarantees is unchanged.
+    # this check take several seconds before every restore step; what it guarantees is unchanged.
     $checkedDirectories = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $prefix = $installRoot + '\'
     foreach ($record in $records) {
