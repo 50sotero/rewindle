@@ -1273,10 +1273,11 @@ namespace ResticBackuper.Dashboard
                     return;
                 }
                 restoreFlowProgressStage = progress.Stage ?? string.Empty;
-                restoreFlowProgressMessage = progress.Message ?? string.Empty;
+                restoreFlowProgressMessage = FriendlyRestoreFlowStageDetail(progress.Stage, restoreFlowStep)
+                    ?? progress.Message ?? string.Empty;
                 restoreFlowProgressPercent = Math.Max(0, Math.Min(100, progress.Percent));
                 restoreFlowStatus = restoreFlowStep == "progress" ? "running" : "loading";
-                SetRestoreFlowMessage(FriendlyRestoreFlowStage(progress.Stage), progress.Message);
+                SetRestoreFlowMessage(FriendlyRestoreFlowStage(progress.Stage), restoreFlowProgressMessage);
                 PublishWebPresentationState();
             }));
         }
@@ -2165,6 +2166,20 @@ namespace ResticBackuper.Dashboard
                 case "complete": return "Finished";
                 case "failed": return "Restore did not finish";
                 default: return "Restoring your files";
+            }
+        }
+
+        // The backup service words its progress for its own log ("Validating the protected backup plan and
+        // repository."), so the window says what each stage means instead. Null leaves an unknown stage's line as sent.
+        private static string FriendlyRestoreFlowStageDetail(string stage, string step)
+        {
+            switch ((stage ?? string.Empty).ToLowerInvariant())
+            {
+                case "preflight": return "Checking that the backup service is intact before it opens your backups.";
+                case "reading": return step == "files" ? "Opening the folder in your backup." : "Reading your list of backups.";
+                case "restoring": return "Copying your files into the folder you chose, then checking each one.";
+                case "complete": return "Finished.";
+                default: return null;
             }
         }
 
