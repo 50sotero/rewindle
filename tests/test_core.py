@@ -340,6 +340,145 @@ class CoreSafetyTests(unittest.TestCase):
         self.assertTrue(handle.closed)
         self.assertIsNone(run_lock.handle)
 
+    # run.lock: any handle that can read a file can lock its bytes, so only Administrators and SYSTEM may open it.
+    # These tests run unelevated, where Administrators cannot be made the owner, so they apply the same DACL without
+    # the owner part. create=True lets them run against code that has no such seam and show what it leaves behind.
+    ADMIN_ONLY_DACL = "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
+
+    @staticmethod
+    def _standard_open_error(path: Path, share: int = 0x1 | 0x2) -> tuple[int, int | None]:
+        """Open the file for reading as this process; return the Windows error and any handle left open."""
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        handle = kernel32.CreateFileW(str(path), 0x1, share, None, 3, 0, None)  # FILE_READ_DATA, OPEN_EXISTING
+        if handle is None or handle == ctypes.c_void_p(-1).value:
+            return ctypes.get_last_error(), None
+        return 0, handle
+
+    @staticmethod
+    def _close_handle(handle: int) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.CloseHandle(handle)
+
+    def _assert_admin_only(self, path: Path) -> None:
+        import re
+
+        dacl = secret_store._security_sddl(path)
+        self.assertRegex(dacl, r"^D:P(?:AI)?\(", "the DACL must not inherit from the state folder")
+        self.assertEqual(
+            ["A;;FA;;;BA", "A;;FA;;;SY"], sorted(re.findall(r"\(([^)]*)\)", dacl))
+        )
+        if not restic_common.is_administrator():
+            # A standard-rights process can no longer open it, so it can no longer lock it.
+            error, handle = self._standard_open_error(path)
+            if handle is not None:
+                self._close_handle(handle)
+            self.assertEqual(5, error, "a standard-rights process could still open run.lock")
+
+    def test_run_lock_descriptor_is_admin_owned_only_when_elevated(self) -> None:
+        self.assertEqual("O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)", restic_common.RUN_LOCK_SDDL)
+        with mock.patch.object(restic_common, "is_administrator", return_value=True):
+            self.assertEqual(restic_common.RUN_LOCK_SDDL, restic_common._run_lock_sddl())
+        with mock.patch.object(restic_common, "is_administrator", return_value=False):
+            self.assertIsNone(restic_common._run_lock_sddl())
+
+    def test_new_run_lock_is_created_admin_only(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="resticbackuper-run-lock-") as root_text:
+            lock_path = Path(root_text) / "state" / "run.lock"
+            with mock.patch.object(
+                restic_common, "_run_lock_sddl", return_value=self.ADMIN_ONLY_DACL, create=True
+            ):
+                with restic_common.RunLock(lock_path):
+                    self.assertEqual(1, lock_path.stat().st_size)
+                    self._assert_admin_only(lock_path)
+            self._assert_admin_only(lock_path)
+
+    def test_run_lock_repairs_a_user_readable_file(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="resticbackuper-run-lock-") as root_text:
+            lock_path = Path(root_text) / "run.lock"
+            # As an older version left it: the state folder's inherited permissions, readable by the user.
+            lock_path.write_bytes(b"\0")
+            self.assertNotRegex(secret_store._security_sddl(lock_path), r"^D:P")
+            with mock.patch.object(
+                restic_common, "_run_lock_sddl", return_value=self.ADMIN_ONLY_DACL, create=True
+            ):
+                with restic_common.RunLock(lock_path):
+                    self._assert_admin_only(lock_path)
+            self._assert_admin_only(lock_path)
+
+    def test_run_lock_is_repaired_even_while_another_handle_holds_it(self) -> None:
+        import msvcrt
+
+        with tempfile.TemporaryDirectory(prefix="resticbackuper-run-lock-") as root_text:
+            lock_path = Path(root_text) / "run.lock"
+            lock_path.write_bytes(b"\0")
+            # A program that opened the old, user-readable file and holds byte zero.
+            holder = lock_path.open("rb", buffering=0)
+            try:
+                msvcrt.locking(holder.fileno(), msvcrt.LK_NBLCK, 1)
+                with mock.patch.object(
+                    restic_common, "_run_lock_sddl", return_value=self.ADMIN_ONLY_DACL, create=True
+                ):
+                    with self.assertRaises(restic_common.RunLockUnavailable):
+                        with restic_common.RunLock(lock_path):
+                            pass
+                # The repair does not wait for the lock: once that program lets go, it cannot open the file again.
+                self._assert_admin_only(lock_path)
+            finally:
+                holder.close()
+
+    def test_run_lock_held_open_without_sharing_reports_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="resticbackuper-run-lock-") as root_text:
+            lock_path = Path(root_text) / "run.lock"
+            lock_path.write_bytes(b"\0")
+            error, handle = self._standard_open_error(lock_path, share=0)
+            self.assertEqual(0, error)
+            try:
+                with mock.patch.object(
+                    restic_common, "_run_lock_sddl", return_value=self.ADMIN_ONLY_DACL, create=True
+                ):
+                    # The backup says it did not start (exit 75) instead of failing with a traceback.
+                    with self.assertRaises(restic_common.RunLockUnavailable):
+                        with restic_common.RunLock(lock_path):
+                            pass
+            finally:
+                self._close_handle(handle)
+
+    def test_run_lock_fails_closed_when_its_repair_does_not_hold(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="resticbackuper-run-lock-") as root_text:
+            lock_path = Path(root_text) / "run.lock"
+            lock_path.write_bytes(b"\0")
+            with mock.patch.object(
+                restic_common, "_run_lock_sddl", return_value=self.ADMIN_ONLY_DACL, create=True
+            ), mock.patch.object(
+                restic_common,
+                "_handle_owner_and_dacl_sddl",
+                return_value="D:(A;;FA;;;WD)",
+                create=True,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "still allows other access"):
+                    with restic_common.RunLock(lock_path):
+                        pass
+            # Nothing was left holding the file: an open handle without delete sharing would block this.
+            lock_path.unlink()
+
     def test_atomic_json_write_retries_transient_replace_failure(self) -> None:
         with tempfile.TemporaryDirectory(prefix="resticbackuper-atomic-") as root_text:
             target = Path(root_text) / "status.json"

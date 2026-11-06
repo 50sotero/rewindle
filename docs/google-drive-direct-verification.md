@@ -30,8 +30,9 @@ flowchart LR
 ```
 
 The backup and cloud-verification tasks share
-`C:\ProgramData\ResticBackuper\run.lock`. The verifier opens and byte-locks the
-existing protected file while elevated; it does not weaken the state ACL.
+`C:\ProgramData\ResticBackuper\run.lock`. Only Administrators and SYSTEM may
+open that file. The verifier opens and byte-locks the existing file while
+elevated; it does not change its ACL or the state ACL.
 Consequently, a backup and a cloud inventory/restore cannot inspect and mutate
 the repository concurrently.
 

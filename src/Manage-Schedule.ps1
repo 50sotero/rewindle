@@ -440,17 +440,71 @@ function Write-ManagerResult {
     Assert-ResultAcl -Path $target -UserSid $currentSid
 }
 
+function New-RunLockSecurity {
+    # run.lock is the lock every backup and protected change takes, and any handle that can read a file can lock its
+    # bytes. Only Administrators and SYSTEM may open it, so a program running with standard rights cannot hold it.
+    $security = [Security.AccessControl.FileSecurity]::new()
+    $security.SetAccessRuleProtection($true, $false)
+    $security.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+    foreach ($sidText in @('S-1-5-18', 'S-1-5-32-544')) {
+        $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new($sidText),
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.AccessControl.AccessControlType]::Allow))
+    }
+    return $security
+}
+
+function Test-RunLockSecurity {
+    param([Security.AccessControl.FileSystemSecurity]$Acl)
+    $owner = $Acl.GetOwner([Security.Principal.SecurityIdentifier])
+    if (-not $Acl.AreAccessRulesProtected -or $null -eq $owner -or $owner.Value -ne 'S-1-5-32-544') { return $false }
+    $seen = [Collections.Generic.HashSet[string]]::new()
+    foreach ($rule in $Acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        if ($rule.IsInherited -or
+            $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+            $rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+            -not $seen.Add($rule.IdentityReference.Value)) {
+            return $false
+        }
+    }
+    return $seen.SetEquals([string[]]@('S-1-5-18', 'S-1-5-32-544'))
+}
+
+function Protect-RunLock {
+    param([string]$File, [Security.AccessControl.FileSecurity]$Policy)
+    # An older run.lock, or one an ACL reset touched, may still be readable by the user. Repair it before taking the
+    # lock, so a handle that blocks the lock now cannot be opened again later.
+    $sections = [Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access
+    if (Test-RunLockSecurity -Acl ([IO.File]::GetAccessControl($File, $sections))) { return }
+    [IO.File]::SetAccessControl($File, $Policy)
+    if (-not (Test-RunLockSecurity -Acl ([IO.File]::GetAccessControl($File, $sections)))) {
+        throw 'The run lock could not be limited to Administrators and SYSTEM.'
+    }
+}
+
+function Open-RunLockFile {
+    param([string]$File)
+    $security = New-RunLockSecurity
+    if (-not (Test-RunLockSecurity -Acl $security)) { throw 'The run lock permission policy is invalid.' }
+    if ($isTestMode) {
+        return [IO.File]::Open($File, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite)
+    }
+    # A new run.lock is created with its final permissions, so the user can never open it, not even for a moment.
+    $stream = [IO.FileStream]::new($File, [IO.FileMode]::OpenOrCreate,
+        ([Security.AccessControl.FileSystemRights]::Read -bor [Security.AccessControl.FileSystemRights]::Write),
+        [IO.FileShare]::ReadWrite, 4096, [IO.FileOptions]::None, $security)
+    try { Protect-RunLock -File $File -Policy $security }
+    catch { $stream.Dispose(); throw }
+    return $stream
+}
+
 function Enter-RunLock {
     param([string]$File)
     $parent = Split-Path -Parent $File
     Assert-NormalDirectoryChain -Directory $parent
     if (Test-Path -LiteralPath $File) { Assert-NormalFile -File $File }
-    $stream = [IO.File]::Open(
-        $File,
-        [IO.FileMode]::OpenOrCreate,
-        [IO.FileAccess]::ReadWrite,
-        [IO.FileShare]::ReadWrite
-    )
+    $stream = Open-RunLockFile -File $File
     try {
         if ($stream.Length -eq 0) {
             $stream.WriteByte(0)

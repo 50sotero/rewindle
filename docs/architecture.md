@@ -518,7 +518,14 @@ section 9, and [`SECURITY.md`](../SECURITY.md).
 
 ## Failure behavior
 
-- A process-level run lock prevents concurrent wrapper runs.
+- A process-level run lock prevents concurrent wrapper runs. Every backup,
+  manager and verifier takes byte zero of `run.lock`, and only Administrators
+  and SYSTEM may open that file, so a program running with standard rights
+  cannot hold the lock and keep backups from starting. The dashboard never
+  opens it. A `run.lock` left readable by an older version, or by a reset of
+  the state folder's permissions, is repaired the next time a backup or a
+  manager takes the lock, and the installer protects it again after it
+  resets the state folder.
 - A pending protected source-update journal makes backup runs fail closed. The
   next elevated source-manager invocation uses its undo records to restore and
   verify the complete pre-change metadata set before normal work continues.

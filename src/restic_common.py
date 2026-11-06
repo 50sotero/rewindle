@@ -2446,6 +2446,274 @@ class SourceUpdateJournalPresent(RuntimeError):
     """Raised until the protected source manager reconciles an interrupted update."""
 
 
+# Whoever holds byte zero of run.lock keeps every backup and protected change from
+# starting, and Windows lets any handle that can read a file lock its bytes. So
+# run.lock grants access to Administrators and SYSTEM only, never to the user the
+# state folder is readable by. The dashboard never opens it.
+RUN_LOCK_SDDL = "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)"
+_RUN_LOCK_BUSY_ERRORS = frozenset({32, 33})  # sharing and lock violations
+
+
+def is_administrator() -> bool:
+    """True for an elevated administrator token or SYSTEM."""
+    if os.name != "nt":
+        return False
+    import ctypes
+
+    return bool(ctypes.windll.shell32.IsUserAnAdmin())
+
+
+def _run_lock_sddl() -> str | None:
+    """The descriptor run.lock must carry, or None when this process cannot set it.
+
+    Every protected caller runs elevated. A disposable unelevated run (tests and
+    their fixtures) could not make Administrators the owner, so it keeps the
+    folder's inherited permissions.
+    """
+    return RUN_LOCK_SDDL if is_administrator() else None
+
+
+def _sddl_owner_and_dacl(sddl: str) -> tuple[str | None, bool, tuple[str, ...]]:
+    """Owner, whether the DACL is protected, and its entries in a stable order."""
+    owner = re.search(r"O:(.*?)(?=[GDS]:|$)", sddl)
+    dacl_start = sddl.find("D:")
+    if dacl_start < 0:
+        return (owner.group(1) if owner else None), False, ()
+    dacl = sddl[dacl_start + 2 :]
+    flags = dacl.split("(", 1)[0]
+    protected = re.fullmatch(r"(?:P|AI|AR)*", flags) is not None and "P" in re.findall(
+        r"P|AI|AR", flags
+    )
+    entries = tuple(sorted(re.findall(r"\(([^)]*)\)", dacl)))
+    return (owner.group(1) if owner else None), protected, entries
+
+
+def _run_lock_descriptor_matches(actual: str, expected: str) -> bool:
+    actual_owner, actual_protected, actual_entries = _sddl_owner_and_dacl(actual)
+    expected_owner, _expected_protected, expected_entries = _sddl_owner_and_dacl(expected)
+    return (
+        actual_protected
+        and actual_entries == expected_entries
+        and (expected_owner is None or actual_owner == expected_owner)
+    )
+
+
+def _run_lock_security_api():
+    import ctypes
+    from ctypes import wintypes
+    from types import SimpleNamespace
+
+    class SecurityAttributes(ctypes.Structure):
+        _fields_ = [
+            ("nLength", wintypes.DWORD),
+            ("lpSecurityDescriptor", ctypes.c_void_p),
+            ("bInheritHandle", wintypes.BOOL),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(SecurityAttributes),
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    from_string = advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW
+    from_string.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.ULONG),
+    ]
+    from_string.restype = wintypes.BOOL
+    to_string = advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW
+    to_string.argtypes = [
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.LPWSTR),
+        ctypes.POINTER(wintypes.ULONG),
+    ]
+    to_string.restype = wintypes.BOOL
+    advapi32.GetSecurityInfo.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi32.GetSecurityInfo.restype = wintypes.DWORD
+    advapi32.SetSecurityInfo.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    advapi32.SetSecurityInfo.restype = wintypes.DWORD
+    advapi32.GetSecurityDescriptorOwner.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    advapi32.GetSecurityDescriptorOwner.restype = wintypes.BOOL
+    advapi32.GetSecurityDescriptorDacl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.BOOL),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    advapi32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+    return SimpleNamespace(
+        ctypes=ctypes,
+        wintypes=wintypes,
+        SecurityAttributes=SecurityAttributes,
+        kernel32=kernel32,
+        advapi32=advapi32,
+        from_string=from_string,
+        to_string=to_string,
+        invalid_handle=ctypes.c_void_p(-1).value,
+    )
+
+
+def _security_descriptor_from_sddl(api, sddl: str):
+    descriptor = api.ctypes.c_void_p()
+    if not api.from_string(sddl, 1, api.ctypes.byref(descriptor), None):
+        raise api.ctypes.WinError(api.ctypes.get_last_error())
+    return descriptor
+
+
+def _handle_owner_and_dacl_sddl(api, handle: int) -> str:
+    ctypes = api.ctypes
+    descriptor = ctypes.c_void_p()
+    information = 0x1 | 0x4  # OWNER and DACL
+    error = api.advapi32.GetSecurityInfo(
+        handle,
+        1,  # SE_FILE_OBJECT
+        information,
+        None,
+        None,
+        None,
+        None,
+        ctypes.byref(descriptor),
+    )
+    if error:
+        raise ctypes.WinError(error)
+    try:
+        text = api.wintypes.LPWSTR()
+        if not api.to_string(descriptor, 1, information, ctypes.byref(text), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return text.value
+        finally:
+            api.kernel32.LocalFree(text)
+    finally:
+        api.kernel32.LocalFree(descriptor)
+
+
+def _open_protected_run_lock(path: Path, sddl: str):
+    """Open run.lock so that a new file has the protected descriptor from its first moment."""
+    api = _run_lock_security_api()
+    ctypes = api.ctypes
+    descriptor = _security_descriptor_from_sddl(api, sddl)
+    try:
+        attributes = api.SecurityAttributes(
+            ctypes.sizeof(api.SecurityAttributes), descriptor, False
+        )
+        access = 0x80000000 | 0x40000000 | 0x00040000  # read, write, WRITE_DAC
+        if sddl.startswith("O:"):
+            access |= 0x00080000  # WRITE_OWNER
+        handle = api.kernel32.CreateFileW(
+            str(path),
+            access,
+            0x1 | 0x2,  # the same read and write sharing the managers and verifiers use
+            ctypes.byref(attributes),
+            4,  # OPEN_ALWAYS
+            0x80,  # FILE_ATTRIBUTE_NORMAL
+            None,
+        )
+        if handle is None or handle == api.invalid_handle:
+            error = ctypes.get_last_error()
+            if error in _RUN_LOCK_BUSY_ERRORS:
+                raise RunLockUnavailable(
+                    "another backup process already holds the run lock"
+                )
+            failure = ctypes.WinError(error)
+            failure.filename = str(path)
+            raise failure
+    finally:
+        api.kernel32.LocalFree(descriptor)
+    try:
+        descriptor_number = msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY)
+    except BaseException:
+        api.kernel32.CloseHandle(handle)
+        raise
+    try:
+        return os.fdopen(descriptor_number, "r+b", buffering=0)
+    except BaseException:
+        os.close(descriptor_number)
+        raise
+
+
+def _protect_run_lock(handle, path: Path, sddl: str) -> None:
+    """Give an open run.lock exactly the protected descriptor, or fail closed."""
+    api = _run_lock_security_api()
+    ctypes = api.ctypes
+    os_handle = msvcrt.get_osfhandle(handle.fileno())
+    if _run_lock_descriptor_matches(_handle_owner_and_dacl_sddl(api, os_handle), sddl):
+        return
+    descriptor = _security_descriptor_from_sddl(api, sddl)
+    try:
+        owner = ctypes.c_void_p()
+        owner_defaulted = api.wintypes.BOOL()
+        if not api.advapi32.GetSecurityDescriptorOwner(
+            descriptor, ctypes.byref(owner), ctypes.byref(owner_defaulted)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        dacl_present = api.wintypes.BOOL()
+        dacl = ctypes.c_void_p()
+        dacl_defaulted = api.wintypes.BOOL()
+        if not api.advapi32.GetSecurityDescriptorDacl(
+            descriptor,
+            ctypes.byref(dacl_present),
+            ctypes.byref(dacl),
+            ctypes.byref(dacl_defaulted),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        information = 0x4 | 0x80000000  # DACL, protected from inheritance
+        if owner.value:
+            information |= 0x1  # OWNER
+        error = api.advapi32.SetSecurityInfo(
+            os_handle, 1, information, owner, None, dacl, None
+        )
+    finally:
+        api.kernel32.LocalFree(descriptor)
+    if error:
+        raise RuntimeError(
+            f"could not limit the run lock {path} to Administrators and SYSTEM "
+            f"(Windows error {error}); an administrator can delete it so the next "
+            "backup creates it again"
+        ) from ctypes.WinError(error)
+    actual = _handle_owner_and_dacl_sddl(api, os_handle)
+    if not _run_lock_descriptor_matches(actual, sddl):
+        raise RuntimeError(
+            f"the run lock {path} still allows other access after its repair: {actual}"
+        )
+
+
 class RunLock(AbstractContextManager["RunLock"]):
     def __init__(self, path: Path):
         self.path = path
@@ -2453,19 +2721,31 @@ class RunLock(AbstractContextManager["RunLock"]):
 
     def __enter__(self) -> "RunLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.handle = self.path.open("a+b", buffering=0)
-        self.handle.seek(0, os.SEEK_END)
-        if self.handle.tell() == 0:
-            self.handle.write(b"\0")
-        self.handle.seek(0)
+        sddl = _run_lock_sddl()
+        if sddl is None:
+            self.handle = self.path.open("a+b", buffering=0)
+        else:
+            self.handle = _open_protected_run_lock(self.path, sddl)
         try:
-            msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
-        except OSError as error:
+            if sddl is not None:
+                # An older run.lock, or one an ACL reset touched, may still be
+                # readable by the user. Repair it before taking the lock, so a
+                # handle that blocks the lock now cannot be opened again later.
+                _protect_run_lock(self.handle, self.path, sddl)
+            self.handle.seek(0, os.SEEK_END)
+            if self.handle.tell() == 0:
+                self.handle.write(b"\0")
+            self.handle.seek(0)
+            try:
+                msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as error:
+                raise RunLockUnavailable(
+                    "another backup process already holds the run lock"
+                ) from error
+        except BaseException:
             self.handle.close()
             self.handle = None
-            raise RunLockUnavailable(
-                "another backup process already holds the run lock"
-            ) from error
+            raise
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:

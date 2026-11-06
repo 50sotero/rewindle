@@ -30,6 +30,10 @@ or backup repository.
 - The limited dashboard never writes protected configuration directly. Source
   changes require same-user UAC elevation, the shared backup lock, and strict
   path/overlap validation.
+- The shared backup lock (`run.lock` in the state folder) can be opened only
+  by Administrators and SYSTEM, so a program running with standard rights
+  cannot hold it to stop backups and protected changes. The dashboard never
+  opens it.
 - **Back up now** validates the exact scheduled task, protected launcher,
   principal, working directory, and duplicate-run policy before asking a
   separate UAC-elevated System32 task utility to request it. The dashboard does
