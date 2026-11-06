@@ -135,8 +135,9 @@ PowerShell launchers follow the same rule: `Manage-Restore.ps1` starts
 `restore.py`, and the installer starts `initialize_repository.py`, with the
 Windows values and the user's local application-data folder only (the
 installer adds `TEMP`/`TMP` set to its own administrators-only temporary
-folder), and the Google Drive verifier starts rclone, Restic and its inventory
-helper as described below.
+folder), `Manage-Repository.ps1` starts Restic during a move of the backup
+location with the engine's Restic list, and the Google Drive verifier starts
+rclone, Restic and its inventory helper as described below.
 
 `backup.py` obtains a single-run lock, validates the configured repository
 volume and available space, and invokes Restic with the exact source and

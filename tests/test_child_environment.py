@@ -31,6 +31,7 @@ import recovery_health  # noqa: E402
 import stale_lock_repair  # noqa: E402
 from restic_common import (  # noqa: E402
     CANCEL_ENVIRONMENT_NAMES,
+    CHILD_PATHEXT,
     restic_child_environment,
     run_capture,
     stream_command,
@@ -355,6 +356,29 @@ class PowerShellLauncherTests(unittest.TestCase):
         self.assertIn("$environment['TEMP'] = $TemporaryDirectory", allow_list)
         self.assertIn("$environment['TMP'] = $TemporaryDirectory", allow_list)
         self.assertNotIn("$env:", allow_list)
+
+    def test_repository_manager_starts_restic_with_the_engine_list(self) -> None:
+        # A move of the backup location starts Restic from Manage-Repository.ps1, elevated. Its list must stay the
+        # one restic_child_environment gives every Restic child, with TEMP and TMP in the protected <state>\temp.
+        # tests/Test-ManageRepository.ps1 runs it against a stand-in that refuses anything else.
+        text = (SOURCE / "Manage-Repository.ps1").read_text(encoding="utf-8")
+        capture = _powershell_function(text, "Invoke-ResticCapture")
+        self.assertNotRegex(capture, r"&\s*\$Validated\.ResticExecutable")
+        self.assertIn("$temporary = Join-Path $stateRoot 'temp'", capture)
+        self.assertIn(
+            "Set-AllowListedChildEnvironment -StartInfo $start -TemporaryDirectory $temporary",
+            capture,
+        )
+        allow_list = _powershell_function(text, "Set-AllowListedChildEnvironment")
+        self.assertIn("$StartInfo.EnvironmentVariables.Clear()", allow_list)
+        self.assertNotIn("$env:", allow_list)
+        names = {
+            name.upper()
+            for name in re.findall(r"\$StartInfo\.EnvironmentVariables\['(\w+)'\] =", allow_list)
+        }
+        self.assertEqual(ALLOWED - {"RESTIC_PASSWORD"}, names)
+        self.assertIn(f"'{CHILD_PATHEXT}'", allow_list)
+        self.assertIn("@('AMD64', 'x86', 'ARM64')", allow_list)
 
 
 if __name__ == "__main__":
