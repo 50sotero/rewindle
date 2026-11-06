@@ -32,6 +32,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from typing import Any
 
@@ -64,17 +65,18 @@ SNAPSHOT_BINDING_PLAN = "plan"
 SNAPSHOT_BINDING_LEGACY = "legacy_unbound"
 SNAPSHOT_BINDING_CONFIGURATION = "configuration"
 SYSTEM_FOLDER_REFUSAL = "restore target must not be inside a Windows or program folder"
-# FOLDERID_Windows, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86, FOLDERID_ProgramFilesX64 and
-# FOLDERID_ProgramData. The x86 and x64 folders are optional: a 32-bit process or an older Windows may not
-# report them.
+# FOLDERID_Windows (first: its drive is the system drive below), FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86
+# and FOLDERID_ProgramFilesX64. The x86 and x64 folders are optional: a 32-bit process or an older Windows may
+# not report them. ProgramData is not asked for here: the known-folder API expands its record with the caller's
+# %SystemDrive% (see program_data_folder).
 SYSTEM_KNOWN_FOLDERS = (
     ("F38BF404-1D43-42F2-9305-67DE0B28FC23", True),
     ("905E63B6-C1BF-494E-B29C-65B732D3D21A", True),
     ("7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E", False),
     ("6D809377-6AF0-444B-8957-A3773F02200E", False),
-    ("62AB5D82-FDC1-4DC3-A9DD-070D1D495D97", True),
 )
 KF_FLAG_DONT_VERIFY = 0x00004000
+PROFILE_LIST_KEY = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
 RESTORE_FOLDER_PREFIX = ".rewindle-restore-"
 
 
@@ -1315,11 +1317,44 @@ class _Guid(ctypes.Structure):
     ]
 
 
-def system_folder_roots() -> list[str]:
-    """Windows, Program Files (both) and ProgramData, as the shell's known-folder API names them.
+def program_data_folder(windows_root: str) -> str:
+    """ProgramData from the machine's own record, with %SystemDrive% taken from the Windows folder's drive.
 
-    Environment variables are never consulted: the requesting user can set them for an elevated process. The API
-    reads its own records (KF_FLAG_DONT_VERIFY), so asking does not touch the folders themselves.
+    The record (ProfileList\\ProgramData, normally "%SystemDrive%\\ProgramData") is what the known-folder API
+    reads too, but the API expands it with the calling process's environment, which the requesting user can set
+    for an elevated process. Any other variable in the record is refused rather than expanded.
+    """
+
+    import winreg
+
+    drive = ntpath.splitdrive(windows_root)[0]
+    if not re.fullmatch(r"[A-Za-z]:", drive):
+        raise RuntimeError("Windows and program folders could not be identified")
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            PROFILE_LIST_KEY,
+            0,
+            winreg.KEY_QUERY_VALUE | winreg.KEY_WOW64_64KEY,
+        ) as key:
+            value, kind = winreg.QueryValueEx(key, "ProgramData")
+    except OSError as error:
+        raise RuntimeError("Windows and program folders could not be identified") from error
+    if kind not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ) or not isinstance(value, str):
+        raise RuntimeError("Windows and program folders could not be identified")
+    expanded = re.sub("%systemdrive%", lambda _match: drive, value, flags=re.IGNORECASE)
+    if "%" in expanded or not re.fullmatch(r"[A-Za-z]:\\[^%]*", expanded):
+        raise RuntimeError("Windows and program folders could not be identified")
+    return ntpath.normpath(expanded)
+
+
+def system_folder_roots() -> list[str]:
+    """Windows, Program Files (both) and ProgramData, never taken from environment variables.
+
+    The requesting user can set environment variables for an elevated process, so none is consulted. Windows and
+    the Program Files folders come from the shell's known-folder API, which does not expand them from the
+    environment; it reads its own records (KF_FLAG_DONT_VERIFY), so asking does not touch the folders themselves.
+    ProgramData comes from program_data_folder, because the API would expand it with %SystemDrive%.
     """
 
     if os.name != "nt":
@@ -1350,6 +1385,7 @@ def system_folder_roots() -> list[str]:
             roots.append(value)
         elif required:
             raise RuntimeError("Windows and program folders could not be identified")
+    roots.append(program_data_folder(roots[0]))
     return roots
 
 
@@ -1510,9 +1546,21 @@ _TOKEN_ELEVATION = 20
 _TARGET_ACCESS = _FILE_LIST_DIRECTORY | _FILE_READ_ATTRIBUTES | _READ_CONTROL
 _RESTORE_FOLDER_ACCESS = _TARGET_ACCESS | _FILE_WRITE_ATTRIBUTES | _WRITE_DAC
 _FILE_GENERIC_MAPPING = (0x00120089, 0x00120116, 0x001200A0, 0x001F01FF)
+_ERROR_ACCESS_DENIED = 5
+_ERROR_SHARING_VIOLATION = 32
+_ERROR_ALREADY_EXISTS = 183
+# Moving a restored item into the target is tried again for a short while when another program (an antivirus
+# scan, for example) has a file in it open; the waits of one hand-over add up to a few seconds at most.
+_MOVE_RETRY_DELAYS = (0.1, 0.25, 0.5, 1.0)
+_MOVE_RETRY_BUDGET = 5.0
 _LEFT_IN_RESTORE_FOLDER = (
     "Some restored files could not be moved into the folder you chose, because files with the same names "
     "appeared there while the restore ran. They are in the folder named {name} inside it."
+)
+_LEFT_IN_RESTORE_FOLDER_IN_USE = (
+    "Some restored files could not be moved into the folder you chose; another program may have been using them, "
+    "or a file with the same name was already there. They are in the folder named {name} inside it, and you can "
+    "move them yourself."
 )
 
 
@@ -1858,13 +1906,16 @@ def _dacl_protected(descriptor: Any) -> bool:
     return bool(control.value & _SE_DACL_PROTECTED)
 
 
-def _write_dacl(handle: int, descriptor: Any) -> None:
-    native = _win32()
+def _mark_auto_inherited(descriptor: Any) -> None:
     # In auto-inherit form the folder's inherited entries stay marked as inherited, and so do its children's.
     flags = _SE_DACL_AUTO_INHERIT_REQ | _SE_DACL_AUTO_INHERITED
-    if not native.set_descriptor_control(descriptor, flags, flags):
+    if not _win32().set_descriptor_control(descriptor, flags, flags):
         raise _last_error()
-    if not native.set_security(handle, _DACL_SECURITY_INFORMATION, descriptor):
+
+
+def _write_dacl(handle: int, descriptor: Any) -> None:
+    _mark_auto_inherited(descriptor)
+    if not _win32().set_security(handle, _DACL_SECURITY_INFORMATION, descriptor):
         raise _last_error()
 
 
@@ -1998,7 +2049,12 @@ def _open_target(target: Path) -> int:
 def _hand_back_entry(
     directory: int, parent: Any, name: str, attributes: int, file_id: int
 ) -> tuple[int, ctypes.Array] | None:
-    """Give one restored item the permissions it inherits in the target; returns an open folder to enter."""
+    """Give one restored file the permissions it inherits in the target, or work them out for a folder.
+
+    A folder is returned open, with its new permissions, for the caller to enter. Its permissions are written only
+    after everything below it is handed back (deepest first): until then it keeps those of the restore folder, so
+    nothing can be moved into it from outside while its contents are being handed back.
+    """
 
     if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
         # A link restored from the backup is left exactly as restored, and never followed.
@@ -2036,10 +2092,12 @@ def _hand_back_entry(
         if _dacl_protected(current):
             return None
         updated = _inherited_security(parent, current, is_directory)
-        _write_dacl(handle, updated)
         if is_directory:
+            # The form it will be written in, so the items below inherit from exactly that.
+            _mark_auto_inherited(updated)
             keep = True
             return handle, updated
+        _write_dacl(handle, updated)
         return None
     finally:
         if not keep:
@@ -2047,7 +2105,10 @@ def _hand_back_entry(
 
 
 def _hand_back_tree(directory: int, parent: Any) -> None:
-    """Hand back everything below an open folder, one open folder per level, without following any link."""
+    """Hand back everything below an open folder, one open folder per level, without following any link.
+
+    Each folder below gets its own permissions last, once everything inside it has been handed back.
+    """
 
     stack: list[tuple[int, Any, Any, bool]] = [(directory, parent, iter(_directory_entries(directory)), False)]
     try:
@@ -2057,7 +2118,10 @@ def _hand_back_tree(directory: int, parent: Any) -> None:
             if entry is None:
                 stack.pop()
                 if owned:
-                    _close(handle)
+                    try:
+                        _write_dacl(handle, descriptor)
+                    finally:
+                        _close(handle)
                 continue
             opened = _hand_back_entry(handle, descriptor, *entry)
             if opened is None:
@@ -2104,6 +2168,8 @@ class RestoreFolder:
         self.handle: int | None = None
         self.identity: tuple[int, int] | None = None
         self.permissions = True
+        # True once an item stayed behind for a reason other than a name that appeared in the target meanwhile.
+        self.left_in_use = False
 
     @classmethod
     def open(cls, target: Path) -> "RestoreFolder":
@@ -2163,8 +2229,9 @@ class RestoreFolder:
     def hand_over(self) -> list[str]:
         """Move what Restic restored into the target with the target's inherited permissions.
 
-        Returns the names left in the restore folder because the same name appeared in the target meanwhile; the
-        folder is then left visible and open to the user.
+        Returns the names left in the restore folder, because the same name appeared in the target meanwhile or
+        another program kept using the item (see left_message); the folder is then left visible and open to the
+        user.
         """
 
         try:
@@ -2173,18 +2240,13 @@ class RestoreFolder:
             if self.permissions:
                 _hand_back_tree(self.handle, _read_security(self.target_handle))
             left: list[str] = []
+            deadline = time.monotonic() + _MOVE_RETRY_BUDGET
             for name, _attributes, _file_id in _directory_entries(self.handle):
-                try:
-                    entry = _open_relative(self.handle, name, _DELETE | _FILE_READ_ATTRIBUTES)
-                except OSError:
+                error = self._move_in(name, deadline)
+                if error is not None:
                     left.append(name)
-                    continue
-                try:
-                    _rename_into(entry, self.target_handle, name)
-                except OSError:
-                    left.append(name)
-                finally:
-                    _close(entry)
+                    if error != _ERROR_ALREADY_EXISTS:
+                        self.left_in_use = True
             if left:
                 self._release()
             else:
@@ -2198,6 +2260,37 @@ class RestoreFolder:
             raise
         finally:
             self.close()
+
+    def _move_in(self, name: str, deadline: float) -> int | None:
+        """Rename one top-level item into the target by handle, never replacing anything; None once it moved.
+
+        Otherwise returns the Windows error. Access denied and sharing violations, which a program holding a file
+        below the item open causes, are tried again until the hand-over's short retry budget runs out.
+        """
+
+        delays = list(_MOVE_RETRY_DELAYS)
+        while True:
+            try:
+                entry = _open_relative(self.handle, name, _DELETE | _FILE_READ_ATTRIBUTES)
+                try:
+                    _rename_into(entry, self.target_handle, name)
+                finally:
+                    _close(entry)
+                return None
+            except OSError as error:
+                code = getattr(error, "winerror", None) or -1
+                if code not in (_ERROR_ACCESS_DENIED, _ERROR_SHARING_VIOLATION) or not delays:
+                    return code
+                delay = delays.pop(0)
+                if time.monotonic() + delay > deadline:
+                    return code
+                time.sleep(delay)
+
+    def left_message(self) -> str:
+        """Why items stayed in the restore folder, and where to find them; a name collision only when it was one."""
+
+        template = _LEFT_IN_RESTORE_FOLDER_IN_USE if self.left_in_use else _LEFT_IN_RESTORE_FOLDER
+        return template.format(name=self.name)
 
     def _release(self) -> None:
         """Leave the restore folder visible, with the permissions it would inherit in the target."""
@@ -2762,7 +2855,7 @@ def main(argv: list[str] | None = None) -> int:
             elif returncode == 0:
                 report["result"] = "partial"
                 report["partial_target_retained"] = True
-                report["error"] = _LEFT_IN_RESTORE_FOLDER.format(name=restore_folder.name)
+                report["error"] = restore_folder.left_message()
             else:
                 report["result"] = "partial"
                 report["partial_target_retained"] = True
@@ -2771,7 +2864,7 @@ def main(argv: list[str] | None = None) -> int:
                     "the alternate target was retained for inspection"
                 )
                 if left_in_restore_folder:
-                    report["error"] += "; " + _LEFT_IN_RESTORE_FOLDER.format(name=restore_folder.name)
+                    report["error"] += "; " + restore_folder.left_message()
         if returncode != 0:
             print(
                 f"RESTORE INCOMPLETE: Restic exited with {returncode}; "
@@ -2780,8 +2873,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif left_in_restore_folder:
             print(
-                "RESTORE INCOMPLETE: some restored items were left in "
-                f"{restore_folder.path} because the same names appeared in {target}",
+                "RESTORE INCOMPLETE: some restored items could not be moved into "
+                f"{target}; they are in {restore_folder.path}",
                 file=sys.stderr,
             )
         if report is not None:

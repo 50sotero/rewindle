@@ -27,6 +27,23 @@ must not overlap a source or repository, and must not be inside Windows,
 Program Files or ProgramData. While the restore runs, the files go into a
 hidden folder inside the target and move into the target when it finishes.
 
+If a restore is interrupted (for example by a power cut), that hidden folder,
+named `.rewindle-restore-` followed by 16 letters and digits, can stay behind
+in the target, and only administrators can open it. To delete it, open a
+Command Prompt as an administrator and run (with your folder's names):
+
+```bat
+rmdir /s /q "X:\Restored-Documents\.rewindle-restore-0123456789abcdef"
+```
+
+`rmdir /s` removes links inside the folder without following them. Then
+restore again into a new or empty folder.
+
+A restored file that has more than one name (a hard link) keeps the hidden
+folder's administrator-only permissions, because its other name might be
+outside the restore. An administrator can give it the target's usual
+permissions with `icacls "<file>" /reset`.
+
 ## Recovery-key restore
 
 When only this bundle, the repository, and the offline recovery key remain:

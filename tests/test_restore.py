@@ -6,10 +6,12 @@ from ctypes import wintypes
 import hashlib
 import io
 import json
+import ntpath
 import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -66,6 +68,32 @@ if "ls" in args:
 if "restore" in args:
     target = Path(args[args.index("--target") + 1])
     mode = control.get("restore_mode", "success")
+    if control.get("record_security"):
+        # The owner and permissions of the folder Restic was given, as Windows stores them.
+        import ctypes
+        from ctypes import wintypes
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        advapi32.GetFileSecurityW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)
+        ]
+        advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
+            ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p
+        ]
+        needed = wintypes.DWORD()
+        advapi32.GetFileSecurityW(str(target), 1 | 4, None, 0, ctypes.byref(needed))
+        descriptor = ctypes.create_string_buffer(max(needed.value, 1))
+        if not advapi32.GetFileSecurityW(str(target), 1 | 4, descriptor, needed, ctypes.byref(needed)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        text = ctypes.c_void_p()
+        if not advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor, 1, 1 | 4, ctypes.byref(text), None
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        Path(control["log"]).with_suffix(".target-security.txt").write_text(
+            ctypes.wstring_at(text.value), encoding="utf-8"
+        )
+        if mode == "record_only":
+            raise SystemExit(0)
     if mode == "swap":
         # Act as the requesting user while Restic loads its index: move a folder on the way to the target aside and
         # put a junction to a decoy in its place, so that Restic's writes would land in the decoy.
@@ -1164,25 +1192,86 @@ class RestoreBackendTests(unittest.TestCase):
         if alias is None:
             self.skipTest("this volume does not make short names; the other cases ran")
 
-    def test_system_folders_come_from_known_folders_not_environment(self) -> None:
+    def test_system_folders_do_not_follow_the_environment(self) -> None:
         expected = restore.system_folder_roots()
-        self.assertGreaterEqual(len(expected), 3)
+        self.assertGreaterEqual(len(expected), 4)
+        windows_drive = ntpath.splitdrive(expected[0])[0].upper()
+        # A fresh process whose environment the requesting user has steered: the system drive and every folder variable
+        # point elsewhere. The known-folder API caches what it found, so this cannot be done in this process.
+        other_drive = "Q:" if windows_drive != "Q:" else "R:"
         fake = str(self.root / "environment")
-        names = (
+        environment = dict(os.environ)
+        for name in (
             "ProgramFiles",
             "ProgramFiles(x86)",
             "ProgramW6432",
+            "CommonProgramFiles",
             "SystemRoot",
             "windir",
             "ProgramData",
             "ALLUSERSPROFILE",
+            "PUBLIC",
+        ):
+            environment[name] = fake + "\\" + name
+        environment["SystemDrive"] = other_drive
+        code = (
+            "import json, sys; sys.path.insert(0, sys.argv[1]); import restore; "
+            "print(json.dumps(restore.system_folder_roots()))"
         )
-        with mock.patch.dict(os.environ, {name: fake + "\\" + name for name in names}):
-            patched = restore.system_folder_roots()
-        self.assertEqual(expected, patched)
-        for root in patched:
+        completed = subprocess.run(
+            [sys.executable, "-I", "-c", code, str(SOURCE_ROOT)],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        steered = json.loads(completed.stdout)
+        self.assertEqual(expected, steered)
+        for root in steered:
             self.assertFalse(root.casefold().startswith(fake.casefold()))
+            self.assertFalse(root.upper().startswith(other_drive))
             self.assertRegex(root, r"^[A-Za-z]:\\")
+
+    def test_program_data_comes_from_the_machine_record_with_the_windows_drive(self) -> None:
+        import winreg
+
+        def record(value: str, kind: int = winreg.REG_EXPAND_SZ) -> object:
+            return mock.patch("winreg.QueryValueEx", return_value=(value, kind))
+
+        with record(r"%SystemDrive%\ProgramData"):
+            self.assertEqual(r"D:\ProgramData", restore.program_data_folder(r"D:\Windows"))
+        with record(r"%SYSTEMDRIVE%\Shared Data"):
+            self.assertEqual(r"E:\Shared Data", restore.program_data_folder(r"E:\WINDOWS"))
+        with record(r"F:\ProgramData", winreg.REG_SZ):
+            self.assertEqual(r"F:\ProgramData", restore.program_data_folder(r"C:\Windows"))
+        for value in ("%ALLUSERSPROFILE%", r"%SystemDrive%\%PUBLIC%", "ProgramData", r"\\server\share\ProgramData"):
+            with self.subTest(value=value), record(value):
+                with self.assertRaisesRegex(RuntimeError, "could not be identified"):
+                    restore.program_data_folder(r"C:\Windows")
+        with record(r"%SystemDrive%\ProgramData", winreg.REG_DWORD):
+            with self.assertRaisesRegex(RuntimeError, "could not be identified"):
+                restore.program_data_folder(r"C:\Windows")
+
+    def restore_folder_security(self) -> tuple[str, str, set[tuple[str, ...]]]:
+        """The owner, DACL flags and entries of the folder Restic was given, as the fake Restic read them."""
+
+        text = self.fake_log.with_suffix(".target-security.txt").read_text(encoding="utf-8")
+        match = re.fullmatch(r"O:(.+?)D:([A-Z]*)((?:\([^)]*\))*)", text)
+        self.assertIsNotNone(match, text)
+        owner, flags, entries = match.groups()
+        return owner, flags, {tuple(entry.split(";")) for entry in re.findall(r"\(([^)]*)\)", entries)}
+
+    def assert_restore_folder_security(self, elevated: bool, *, check_owner: bool) -> None:
+        owner, flags, entries = self.restore_folder_security()
+        # Protected: nothing is inherited from the folder the user chose.
+        self.assertIn("P", flags)
+        expected = {("A", "OICI", "FA", "", "", "SY"), ("A", "OICI", "FA", "", "", "BA")}
+        if not elevated:
+            expected.add(("A", "OICI", "FA", "", "", restore.current_user_sid()))
+        self.assertEqual(expected, entries)
+        if check_owner and elevated:
+            self.assertEqual("BA", owner)
 
     def test_restore_folder_is_admin_only_when_elevated(self) -> None:
         administrators_and_system = "(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
@@ -1193,17 +1282,44 @@ class RestoreBackendTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "could not be identified"):
             restore.restore_folder_sddl(False, "BA)(A;OICI;FA;;;WD")
-        # The restore really goes through that folder: Restic was given a new hidden folder inside the target.
+        # What really lands on disk, read by the fake Restic from the folder it was given, as this run is (an
+        # administrator in CI, a standard user locally). The restore really goes through that folder: a new hidden
+        # folder inside the target, gone afterwards.
+        elevated = restore.process_is_elevated()
         target = self.root / "folder-check"
-        with mock.patch.object(restore, "restore_folder_sddl", wraps=restore.restore_folder_sddl) as sddl:
-            result, payload = self.restore_into(target, "folder-report.json")
+        self.write_control(record_security=True)
+        result, payload = self.restore_into(target, "folder-report.json")
         self.assertEqual(0, result)
         self.assertEqual("verified", payload["result"])
-        sddl.assert_called_once_with(restore.process_is_elevated(), restore.current_user_sid())
+        self.assert_restore_folder_security(elevated, check_owner=True)
         written = Path(self.fake_log.with_suffix(".target.txt").read_text(encoding="utf-8"))
         self.assertEqual(target, written.parent)
         self.assertTrue(written.name.startswith(restore.RESTORE_FOLDER_PREFIX))
         self.assertFalse(written.exists())
+        self.assertEqual(["restored.txt"], sorted(item.name for item in target.iterdir()))
+        # And the other kind of run. Only an elevated process may make Administrators the owner, so an unelevated run
+        # leaves the owner out; the fake Restic, running as this user, then only reads the folder.
+        other = not elevated
+        build = restore.restore_folder_sddl
+
+        def without_owner_unless_elevated(is_elevated: bool, user_sid: str | None = None) -> str:
+            text = build(is_elevated, user_sid)
+            return text if elevated else text.replace("O:BA", "", 1)
+
+        self.write_control(record_security=True, restore_mode="record_only")
+        other_target = self.root / "folder-check-other"
+        try:
+            with mock.patch.object(restore, "process_is_elevated", return_value=other), mock.patch.object(
+                restore, "restore_folder_sddl", side_effect=without_owner_unless_elevated
+            ):
+                result, payload = self.restore_into(other_target, "folder-other.json")
+            self.assertEqual(0, result)
+            self.assert_restore_folder_security(other, check_owner=False)
+        finally:
+            # Unelevated, the administrator-only folder cannot be opened again to be deleted; this run owns it, so it
+            # can give it back its inherited permissions for the clean-up.
+            for leftover in other_target.glob(restore.RESTORE_FOLDER_PREFIX + "*"):
+                subprocess.run(["icacls", str(leftover), "/reset"], capture_output=True, check=False)
 
     def test_restored_items_get_the_permissions_of_the_chosen_folder(self) -> None:
         target = self.root / "permissions"
@@ -1238,8 +1354,77 @@ class RestoreBackendTests(unittest.TestCase):
         folders = [item for item in target.iterdir() if item.is_dir()]
         self.assertEqual(1, len(folders))
         self.assertIn(folders[0].name, payload["error"])
+        self.assertIn("same names appeared there", payload["error"])
         self.assertEqual("verified fake data", (folders[0] / "restored.txt").read_text(encoding="utf-8"))
         self.assertFalse(os.stat(folders[0]).st_file_attributes & stat.FILE_ATTRIBUTE_HIDDEN)
+
+    def test_folders_get_their_permissions_after_everything_inside_them(self) -> None:
+        # Until a restored folder's own permissions are written it keeps those of the restore folder, so nothing can be
+        # moved into it from outside while its contents are handed back.
+        target = self.root / "deepest-first"
+        self.write_control(restore_mode="tree")
+        written: list[str] = []
+        write = restore._write_dacl
+
+        def recording(handle: int, descriptor: object) -> None:
+            written.append(restore._final_path(handle).casefold())
+            write(handle, descriptor)
+
+        with mock.patch.object(restore, "_write_dacl", side_effect=recording):
+            result, payload = self.restore_into(target, "deepest-first.json")
+        self.assertEqual(0, result)
+        self.assertEqual("verified", payload["result"])
+        inner = [index for index, path in enumerate(written) if path.endswith(r"\nested\inner.txt")]
+        folder = [index for index, path in enumerate(written) if path.endswith(r"\nested")]
+        self.assertEqual(1, len(inner), written)
+        self.assertEqual(1, len(folder), written)
+        self.assertLess(inner[0], folder[0], written)
+        self.assertEqual("nested fake data", (target / "nested" / "inner.txt").read_text(encoding="utf-8"))
+
+    def busy_rename(self, failures: int, error: int) -> tuple[object, list[str]]:
+        """_rename_into failing `failures` times with a Windows error before it works (-1: always)."""
+
+        calls: list[str] = []
+        rename = restore._rename_into
+
+        def busy(handle: int, directory: int, name: str) -> None:
+            calls.append(name)
+            if failures < 0 or len(calls) <= failures:
+                raise OSError(0, "in use", None, error)
+            rename(handle, directory, name)
+
+        return busy, calls
+
+    def test_an_item_in_use_for_a_moment_still_moves_in(self) -> None:
+        target = self.root / "busy-briefly"
+        busy, calls = self.busy_rename(2, 32)
+        with mock.patch.object(restore, "_rename_into", side_effect=busy), mock.patch.object(
+            restore, "_MOVE_RETRY_DELAYS", (0.0, 0.0, 0.0)
+        ):
+            result, payload = self.restore_into(target, "busy-briefly.json")
+        self.assertEqual(0, result)
+        self.assertEqual("verified", payload["result"])
+        self.assertEqual(["restored.txt"] * 3, calls)
+        self.assertEqual(["restored.txt"], sorted(item.name for item in target.iterdir()))
+
+    def test_an_item_kept_in_use_is_not_called_a_name_clash(self) -> None:
+        for error in (5, 32):
+            with self.subTest(error=error):
+                target = self.root / f"busy-{error}"
+                busy, calls = self.busy_rename(-1, error)
+                with mock.patch.object(restore, "_rename_into", side_effect=busy), mock.patch.object(
+                    restore, "_MOVE_RETRY_DELAYS", (0.0, 0.0)
+                ):
+                    result, payload = self.restore_into(target, f"busy-{error}.json")
+                self.assertEqual(1, result)
+                self.assertEqual("partial", payload["result"])
+                self.assertEqual(3, len(calls))
+                folders = [item for item in target.iterdir() if item.is_dir()]
+                self.assertEqual(1, len(folders))
+                self.assertIn(folders[0].name, payload["error"])
+                self.assertNotIn("same names appeared there", payload["error"])
+                self.assertIn("another program may have been using them", payload["error"])
+                self.assertEqual("verified fake data", (folders[0] / "restored.txt").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
