@@ -102,7 +102,7 @@ ignored. `-ProgressPath` is refused.
     "version": "0.2.0-alpha.2",
     "os": { "caption": "Microsoft Windows 11 Pro", "build": "26100", "x64": true, "supported": true },
     "powershell": "5.1.26100.1", "dotnet_framework_48": true, "elevated": false, "webview2": "126.0.2592.87",
-    "existing_install": { "rewindle": null, "legacy_personal_edition": false },
+    "existing_install": { "rewindle": null, "legacy_personal_edition": false, "kept_repository": null },
     "volumes": [
       { "root": "D:\\", "label": "Data", "filesystem": "NTFS", "drive_type": "fixed", "size_bytes": 1000203091968,
         "free_bytes": 640000000000, "is_system": false, "same_physical_disk_as_system": false,
@@ -141,6 +141,7 @@ Property by property:
 | `environment.webview2` | string or null | Version of the Microsoft Edge WebView2 Runtime, null when missing. |
 | `environment.existing_install.rewindle` | object or null | `{ "version": string or null, "install_root": string }` when Rewindle's program folder, its entry in Installed apps, its Start menu shortcut or its backup or dashboard task exists, otherwise null. Without the program folder (no `already_installed` error) these are leftovers, which the uninstaller clears. |
 | `environment.existing_install.legacy_personal_edition` | boolean | The earlier personal edition (`ResticPersonalBackup`) is installed. An unreadable folder counts as installed. Informational: it does not block Rewindle. |
+| `environment.existing_install.kept_repository` | string or null | The repository folder of an earlier installation, from the state folder an uninstall keeps (`C:\ProgramData\ResticBackuper`): the newest of `repository.json` (written when that repository was set up) and `last-success.json` and `status.json` (written by every backup, so they follow a later move of the repository), judged by their UTC times. Reported whether or not Rewindle is still installed. Null when there is no such record, when the plan's account can't read it (the installer gives only the installing account access), when it is malformed or names anything but a full path below a drive letter, or when the stored password (`repository-password.dpapi.json`) is gone, since setup could not carry on with that repository then. The plan reads only those files, never the repository folder, so the folder may be missing or on a drive that is not connected. Informational: never an error or a warning, and `defaults.repository` does not change. |
 | `environment.volumes[]` | array | Every drive letter Windows reports, in letter order (section 2.5). Strings are never null (`label` and `filesystem` are `""` when unknown). |
 | `environment.drivefs` | object | `detected` is true only for a running Google Drive for desktop with its streaming drive at `G:\My Drive`, which is the only arrangement the installer accepts. |
 | `environment.known_folders[]` | array | `key` in the order Desktop, Documents, Pictures, Music, Videos, Downloads, Favorites. `path` is null when Windows has none, `exists` says whether the folder is there, `default_selected` whether it is in `defaults.sources`. |
@@ -536,6 +537,13 @@ saves and a printout are the supported ways to keep it.
   planned with. A plan with `ok: false` would fail the real install at the same place.
 * **A repository path.** Any new or empty folder on an eligible volume. `RecoveryTools` is created beside it, so prefer a
   folder with a parent that is not a drive root if the drive's top level should stay tidy.
+* **A reinstall.** When `environment.existing_install.kept_repository` is set, propose that folder (in Google Drive mode
+  when it is inside `environment.drivefs.my_drive_root`), even though it is not `defaults.repository`: the reinstall then
+  carries on with the backups already there (`repository_exists`). When the person chooses another folder, say before the
+  install that setup starts a new, empty repository there, which needs room for a full first backup and does not show the
+  earlier backups. An uninstall your wizard ran itself reports the folder it kept (`kept.repository`), read from the
+  installed configuration; prefer that one in the same session. The console installer suggests the same kept folder at its
+  prompt.
 * **Plan again after the user changes a choice.** A plan takes a few seconds (about three on a development machine); most of
   it is reading drives, checking signatures and hashing the payload.
 * **The progress folder.** Create `%TEMP%\RewindleSetup-<guid>\` as the unelevated user, pass
@@ -550,8 +558,9 @@ saves and a printout are the supported ways to keep it.
 
 * **Phase order**: `canary` and `permissions` are emitted at the positions in section 3.3, not at the positions of the
   request's list, for the reasons given there. The twelve ids are unchanged.
-* **Extra properties** (additive): `path` and `detail` on findings; `ineligible_message` on volumes; `schema`, `seq`, `time`
-  and `warnings` on the result line; `operation`, `removed` and `kept` on the uninstall result.
+* **Extra properties** (additive): `path` and `detail` on findings; `ineligible_message` on volumes; `kept_repository` in
+  `environment.existing_install`; `schema`, `seq`, `time` and `warnings` on the result line; `operation`, `removed` and
+  `kept` on the uninstall result.
 * **Extra plan parameters**: `-MinimumFreeGiB`, `-DriveFsCacheDirectory` and `-SkipDashboard` are accepted by `-PlanOnly`.
 * **`-Schedule`** is validated in the script body instead of by a parameter attribute, so that a plan can report it; the
   rule is the same and a real install checks it before anything else.

@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import unittest
 
 
@@ -381,7 +383,7 @@ class SampleDataTests(unittest.TestCase):
 
     def test_every_scenario_the_task_names_exists(self) -> None:
         scenarios = read(WIZARD / "mock" / "scenarios.ts")
-        for name in ("fresh", "no-second-drive", "drivefs", "existing-install", "legacy-installed", "unsupported-os", "plan-errors", "install-failure", "uac-declined", "key-unreadable", "goes-online-only"):
+        for name in ("fresh", "no-second-drive", "drivefs", "existing-install", "legacy-installed", "unsupported-os", "plan-errors", "install-failure", "uac-declined", "key-unreadable", "goes-online-only", "kept-backups"):
             with self.subTest(scenario=name):
                 self.assertIn(f"'{name}'", scenarios)
 
@@ -453,6 +455,93 @@ class BuildIntegrationTests(unittest.TestCase):
     def test_ci_runs_the_host_checks(self) -> None:
         ci = read(PROJECT / ".github" / "workflows" / "ci.yml")
         self.assertIn("Test-SetupHost.ps1", ci)
+
+
+class KeptBackupLocationTests(unittest.TestCase):
+    """A Setup started after a separate uninstall proposes the folder the earlier backups are in, and says what choosing another means."""
+
+    # Runs contract.ts as it is (Node strips its types; it imports nothing) on plans that differ only in kept_repository.
+    RUNNER = """
+const contract = await import(process.argv[1]);
+const cases = JSON.parse(process.argv[2]);
+const plan = kept => ({ schema: 'Rewindle.InstallPlan.v1', ok: true, errors: [], warnings: [], resolved: {}, defaults: {},
+  environment: { existing_install: kept === undefined ? { rewindle: null } : { rewindle: null, kept_repository: kept } } });
+const report = {};
+for (const [name, kept] of Object.entries(cases)) report[name] = contract.parsePlan(plan(kept)).environment.existingInstall.keptRepository;
+report.missing = contract.parsePlan(plan(undefined)).environment.existingInstall.keptRepository;
+console.log(JSON.stringify(report));
+"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.wizard = read(WIZARD / "useWizard.ts")
+        cls.location = read(WIZARD / "screens" / "Location.tsx")
+
+    def test_the_plan_parser_reads_the_kept_location_and_nothing_else(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is unavailable")
+        cases = {
+            "local": "E:\\ResticBackups\\Personal",
+            "cloud": "G:\\My Drive\\Rewindle\\Backups",
+            "null": None,
+            "empty": "",
+            "relative": "Backups\\Rewindle",
+            "network": "\\\\server\\share\\Backups",
+            "root": "E:\\",
+            "quote": 'E:\\Back"ups',
+            "number": 42,
+            "object": {"path": "E:\\Backups"},
+        }
+        completed = subprocess.run(
+            [node, "--no-warnings", "--experimental-strip-types", "--input-type=module", "-e", self.RUNNER,
+             (WIZARD / "contract.ts").as_uri(), json.dumps(cases)],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        if completed.returncode != 0 and "ERR_UNKNOWN_FILE_EXTENSION" in completed.stderr:
+            self.skipTest("this Node.js cannot run TypeScript files")
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        report = json.loads(completed.stdout)
+        self.assertEqual("E:\\ResticBackups\\Personal", report["local"])
+        self.assertEqual("G:\\My Drive\\Rewindle\\Backups", report["cloud"])
+        for name in ("null", "empty", "relative", "network", "root", "quote", "number", "object", "missing"):
+            with self.subTest(case=name):
+                self.assertIsNone(report[name])
+
+    def test_the_wizard_starts_from_the_kept_location(self) -> None:
+        start = self.wizard.index("const start = useCallback(async (preferredRepository?: string) => {")
+        body = self.wizard[start:self.wizard.index("startRef.current = start;", start)]
+        # The removal this session ran (read from the installed configuration) comes first, then what the installer found.
+        kept = body.index("const kept = preferredRepository ?? plan.environment.existingInstall.keptRepository ?? undefined;")
+        self.assertLess(kept, body.index("const initial = initialChoices(plan, kept);"))
+        self.assertIn("setKeptRepository(kept ?? null);", body)
+        self.assertNotIn("initialChoices(plan, preferredRepository)", body)
+        # initialChoices, the way back and the Location page all decide "is it here?" in one place, Google Drive included.
+        choices = self.wizard[self.wizard.index("function initialChoices("):self.wizard.index("function firstScreen(")]
+        self.assertIn("keptPlace(plan, preferredRepository)", choices)
+        place = self.wizard[self.wizard.index("export function keptPlace("):self.wizard.index("function initialDrive(")]
+        self.assertIn("isWithin(kept, myDrive)", place)
+        self.assertIn("volume.eligible && samePath(volume.root, driveRoot(kept))", place)
+        back = self.wizard[self.wizard.index("chooseKeptRepository: () =>"):self.wizard.index("chooseDriveFs: () =>")]
+        self.assertIn("keptPlace(base, keptRepository)", back)
+
+    def test_choosing_another_place_is_warned_about_with_the_way_back(self) -> None:
+        self.assertIn("const keptElsewhere = !!kept && !samePath(choices.repository, kept);", self.location)
+        self.assertIn("const keptHere = !!kept && !!keptPlace(wizard.base!, kept);", self.location)
+        self.assertIn("const keptMissing = keptElsewhere && !keptHere;", self.location)
+        start = self.location.index("{keptElsewhere && keptHere && (")
+        block = self.location[start:self.location.index("\n      )}", start)]
+        self.assertIn("onClick={() => wizard.actions.chooseKeptRepository()}>Use my earlier backups</Button>", block)
+        # What the person reads: the sentence before the button, without its markup.
+        sentence = re.search(r"<span>(Your earlier backups are in .*?)</span>\s*<Button", block, re.S)
+        self.assertIsNotNone(sentence)
+        words = re.sub(r"<[^>]+>|\{[^}]*\}", " ", sentence.group(1))
+        for phrase in ("starts a new backup from scratch", "room for a full copy", "won’t show your earlier backups", "They stay where they are."):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, words)
+        for word in ("repositor", "snapshot", "restic", "engine"):
+            with self.subTest(word=word):
+                self.assertNotIn(word, words.lower())
 
 
 class WizardWordingTests(unittest.TestCase):

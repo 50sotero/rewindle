@@ -307,8 +307,10 @@ window with `tests\Test-SetupWindow.ps1 -Culture en-US`.
 If Rewindle is already installed, Setup opens a maintenance page instead (open
 it, reinstall or repair, or uninstall). This alpha does not upgrade in place, so
 reinstalling removes the app first, asking Windows for permission, and then goes
-through the steps again; your backups and recovery key are kept. The wizard is
-built from
+through the steps again; your backups and recovery key are kept. Setup suggests
+the backup location your earlier backups are in, also when Rewindle was removed
+from Installed apps before, and says before you choose another place that a
+new backup would start there from scratch. The wizard is built from
 [installer/setup](installer/setup/README.md).
 
 ### What the installer does
@@ -318,7 +320,8 @@ The wizard runs the installer unattended with your choices. Started from
 approval, and then:
 
 1. Checks every file in the package against its SHA-256 manifest.
-2. Asks for the **repository folder**. It suggests a folder on the non-system
+2. Asks for the **repository folder**. It suggests the folder an earlier
+   installation kept its backups in, and otherwise a folder on the non-system
    NTFS drive with the most free space.
 3. Asks for the **folders to back up**, separated by semicolons. It suggests
    the standard folders that exist on your PC (Desktop, Documents, Pictures,
@@ -465,7 +468,8 @@ Earlier alphas (0.1.x, published as ResticBackuper) use the same names as this
 release, and this alpha does not upgrade in place: the installer refuses to run
 while an earlier version is installed. Uninstall it from Installed apps (your
 repository, credential, recovery key and recovery tools are kept), then run the
-new installer and choose the same repository folder. The installer reuses the
+new installer and keep the repository folder it suggests, which is the one the
+earlier version used. The installer reuses the
 repository when the credential kept in `C:\ProgramData\ResticBackuper` still
 opens it.
 

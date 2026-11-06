@@ -47,7 +47,11 @@ export interface PlanEnvironment {
   dotnetFramework48: boolean;
   elevated: boolean;
   webview2: string | null;
-  existingInstall: { rewindle: ExistingRewindle | null; legacyPersonalEdition: boolean };
+  /**
+   * `keptRepository`: where an earlier installation's backups are, from the records the state folder keeps after an uninstall
+   * (null when there are none, or this account can't read them). It is a suggestion: the installer still checks the folder.
+   */
+  existingInstall: { rewindle: ExistingRewindle | null; legacyPersonalEdition: boolean; keptRepository: string | null };
   volumes: PlanVolume[];
   drivefs: { detected: boolean; myDriveRoot: string | null };
   knownFolders: KnownFolder[];
@@ -239,6 +243,11 @@ function knownFolders(value: unknown): KnownFolder[] {
     .map(item => ({ key: item.key as KnownFolderKey, path: text(item.path), exists: bool(item.exists), defaultSelected: bool(item.default_selected) }));
 }
 
+/** A folder the wizard may propose: a full path below the root of a lettered drive, nothing the command line can't carry. */
+function drivePathOrNull(value: unknown): string | null {
+  return typeof value === 'string' && /^[A-Za-z]:\\[^\\]/.test(value) && !/["\u0000-\u001f]/.test(value) && value.length <= 1024 ? value : null;
+}
+
 function existingRewindle(value: unknown): ExistingRewindle | null {
   if (value === null || value === undefined || value === false) return null;
   // `true`, or an object without details, still means "installed".
@@ -286,7 +295,11 @@ export function parsePlan(raw: unknown): InstallPlan {
       dotnetFramework48: bool(environment.dotnet_framework_48, true),
       elevated: bool(environment.elevated),
       webview2: textOrNull(environment.webview2),
-      existingInstall: { rewindle: existingRewindle(existing.rewindle), legacyPersonalEdition: bool(existing.legacy_personal_edition) },
+      existingInstall: {
+        rewindle: existingRewindle(existing.rewindle),
+        legacyPersonalEdition: bool(existing.legacy_personal_edition),
+        keptRepository: drivePathOrNull(existing.kept_repository),
+      },
       volumes: volumes(environment.volumes),
       drivefs: { detected: bool(drivefs.detected), myDriveRoot: textOrNull(drivefs.my_drive_root) },
       knownFolders: knownFolders(environment.known_folders),

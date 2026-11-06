@@ -424,9 +424,10 @@ try {
     Assert-True ($environment.dotnet_framework_48 -is [bool]) 'dotnet_framework_48 is a boolean'
     Assert-True ($environment.elevated -eq $isElevated) 'elevated reports the real elevation of the process'
     Assert-True ($null -eq $environment.webview2 -or $environment.webview2 -cmatch '^\d+(\.\d+){1,3}$') 'webview2 is a version or null'
-    Assert-Equal @('rewindle', 'legacy_personal_edition') @($environment.existing_install.PSObject.Properties.Name) 'existing_install properties'
+    Assert-Equal @('rewindle', 'legacy_personal_edition', 'kept_repository') @($environment.existing_install.PSObject.Properties.Name) 'existing_install properties'
     Assert-True ($null -eq $environment.existing_install.rewindle) 'a fresh fixture has no Rewindle installation'
     Assert-True ($environment.existing_install.legacy_personal_edition -eq $false) 'a fresh fixture has no legacy edition'
+    Assert-True ($null -eq $environment.existing_install.kept_repository) 'a fresh fixture has no backups kept from an earlier installation'
     $volumes = @($environment.volumes)
     Assert-True ($volumes.Count -ge 1) 'at least one volume is listed'
     $volumeProperties = @('root', 'label', 'filesystem', 'drive_type', 'size_bytes', 'free_bytes', 'is_system', 'same_physical_disk_as_system', 'eligible', 'ineligible_reason', 'ineligible_message', 'recommended')
@@ -1274,6 +1275,163 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
         Assert-Equal @() @(Get-ChildItem -LiteralPath $protectedParent -Force | ForEach-Object Name) 'and nothing is left behind'
     }
 
+    # ====================================================================================================================
+    # 12. Where an earlier installation kept its backups (the state folder an uninstall leaves)
+    # ====================================================================================================================
+    . ([scriptblock]::Create((Get-InstallerFunctionText -Name @('Test-KeptRepositoryPath', 'ConvertTo-KeptRecordTime', 'Get-KeptRepository', 'Get-RepositoryInput'))))
+    function Write-KeptRecord {
+        param([string]$Folder, [string]$Name, $Record)
+        $text = if ($Record -is [string]) { $Record } else { ConvertTo-Json -InputObject $Record -Depth 4 }
+        Write-Text -Path (Join-Path $Folder $Name) -Text $text
+    }
+    function Set-ReadDenied {
+        param([string]$Path, [bool]$Denied)
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($currentSid), 'ReadData', 'Deny')
+        $security = [IO.File]::GetAccessControl($Path, [Security.AccessControl.AccessControlSections]::Access)
+        if ($Denied) { $security.AddAccessRule($rule) } else { [void]$security.RemoveAccessRule($rule) }
+        [IO.File]::SetAccessControl($Path, $security)
+    }
+    $planId = '11111111-2222-4333-8444-555555555555'
+    $keptFirst = Join-Path $repositoryRoot 'kept\ResticBackups\Personal'
+    $keptMoved = Join-Path $repositoryRoot 'moved\Backups'
+    $setUp = [ordered]@{ schema_version = 1; initialized_utc = '2026-09-01T10:00:00.123456Z'; repository = $keptFirst; repository_storage_mode = 'local_ntfs' }
+    $afterMove = [ordered]@{ schema_version = 1; plan_id = $planId; config_generation = 2; started_utc = '2026-10-02T02:00:00.5Z'; finished_utc = '2026-10-02T02:21:07.250001Z'; repository = $keptMoved; repository_storage_mode = 'local_ntfs' }
+
+    # --- the reader, against a state folder of its own ---
+    $stateRoot = Join-Path $workspace 'kept-unit\ResticBackuper'
+    $secretFile = Join-Path $stateRoot 'repository-password.dpapi.json'
+    function Reset-KeptState {
+        param([hashtable]$Records = @{}, [switch]$NoSecret)
+        if (Test-Path -LiteralPath $stateRoot) { Remove-Item -LiteralPath $stateRoot -Recurse -Force }
+        New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
+        if (-not $NoSecret) { Write-Text -Path $secretFile -Text '{}' }
+        foreach ($name in $Records.Keys) { Write-KeptRecord -Folder $stateRoot -Name $name -Record $Records[$name] }
+    }
+    function Get-KeptPath { $found = Get-KeptRepository; if ($null -eq $found) { return '<none>' } return [string]$found.repository }
+    Remove-Item -LiteralPath (Split-Path -Parent $stateRoot) -Recurse -Force -ErrorAction SilentlyContinue
+    Assert-True ($null -eq (Get-KeptRepository)) 'no state folder: nothing was kept'
+    Reset-KeptState -Records @{ 'repository.json' = $setUp }
+    $found = Get-KeptRepository
+    Assert-Equal @($keptFirst, 'local_ntfs') @($found.repository, $found.storage_mode) 'repository.json names the kept backups and how they are stored'
+    Reset-KeptState -Records @{ 'repository.json' = $setUp } -NoSecret
+    Assert-Equal '<none>' (Get-KeptPath) 'without the stored password setup could not carry on with them, so none is reported'
+    $cloud = [ordered]@{ schema_version = 1; initialized_utc = '2026-09-01T10:00:00Z'; repository = (Join-Path $workspace 'console\My Drive\Rewindle\Backups'); repository_storage_mode = 'google_drivefs_stream' }
+    Reset-KeptState -Records @{ 'repository.json' = $cloud }
+    Assert-Equal 'google_drivefs_stream' (Get-KeptRepository).storage_mode 'backups kept in Google Drive are reported as such'
+    $noMode = [ordered]@{ schema_version = 1; initialized_utc = '2026-09-01T10:00:00Z'; repository = $keptFirst }
+    Reset-KeptState -Records @{ 'repository.json' = $noMode }
+    Assert-Equal 'local_ntfs' (Get-KeptRepository).storage_mode 'a record without a storage mode is local'
+
+    # The newest record wins: a backup after a move of the backup location names the new place, and a later rewrite of
+    # repository.json (updated_utc) wins over older backups.
+    Reset-KeptState -Records @{ 'repository.json' = $setUp; 'last-success.json' = $afterMove; 'status.json' = $afterMove }
+    Assert-Equal $keptMoved (Get-KeptPath) 'a backup after a move names the place the backups were moved to'
+    $rewritten = [ordered]@{ schema_version = 1; initialized_utc = '2026-09-01T10:00:00Z'; updated_utc = '2026-10-03T08:00:00Z'; repository = $keptFirst }
+    Reset-KeptState -Records @{ 'repository.json' = $rewritten; 'last-success.json' = $afterMove }
+    Assert-Equal $keptFirst (Get-KeptPath) 'a later updated_utc in repository.json wins over an older backup'
+    $failedLater = [ordered]@{ schema_version = 1; started_utc = '2026-10-05T02:00:00Z'; finished_utc = $null; repository = (Join-Path $repositoryRoot 'later'); repository_storage_mode = 'local_ntfs' }
+    Reset-KeptState -Records @{ 'repository.json' = $setUp; 'last-success.json' = $afterMove; 'status.json' = $failedLater }
+    Assert-Equal (Join-Path $repositoryRoot 'later') (Get-KeptPath) 'the newest run counts even when it did not finish'
+    Reset-KeptState -Records @{ 'repository.json' = $setUp; 'last-success.json' = '{not json' }
+    Assert-Equal $keptFirst (Get-KeptPath) 'a record that is not JSON is passed over for an older one'
+    Reset-KeptState -Records @{ 'repository.json' = $setUp; 'status.json' = ([ordered]@{ schema_version = 1; started_utc = 'yesterday'; repository = $keptMoved }) }
+    Assert-Equal $keptFirst (Get-KeptPath) 'a record without a readable time is passed over'
+    Reset-KeptState -Records @{ 'repository.json' = $setUp; 'status.json' = $afterMove }
+    Set-ReadDenied -Path (Join-Path $stateRoot 'status.json') -Denied $true
+    try { Assert-Equal $keptFirst (Get-KeptPath) 'a record this account may not read is passed over' }
+    finally { Set-ReadDenied -Path (Join-Path $stateRoot 'status.json') -Denied $false }
+
+    # Anything odd in a record means "not known".
+    $odd = @(
+        @('schema_version 2', ([ordered]@{ schema_version = 2; initialized_utc = '2026-09-01T10:00:00Z'; repository = $keptFirst })),
+        @('no schema_version', ([ordered]@{ initialized_utc = '2026-09-01T10:00:00Z'; repository = $keptFirst })),
+        @('an unknown storage mode', ([ordered]@{ schema_version = 1; initialized_utc = '2026-09-01T10:00:00Z'; repository = $keptFirst; repository_storage_mode = 'network' })),
+        @('no time', ([ordered]@{ schema_version = 1; repository = $keptFirst })),
+        @('a time that is not ISO-8601', ([ordered]@{ schema_version = 1; initialized_utc = '09/01/2026 10:00'; repository = $keptFirst })),
+        @('no repository', ([ordered]@{ schema_version = 1; initialized_utc = '2026-09-01T10:00:00Z' })),
+        @('a number for a repository', ([ordered]@{ schema_version = 1; initialized_utc = '2026-09-01T10:00:00Z'; repository = 42 })),
+        @('a JSON list', '[{"schema_version": 1}]'),
+        @('JSON null', 'null'),
+        @('an empty file', '')
+    )
+    foreach ($case in $odd) {
+        Reset-KeptState -Records @{ 'repository.json' = $case[1] }
+        Assert-Equal '<none>' (Get-KeptPath) "a record with $($case[0]) names no kept backups"
+    }
+    # Only strings are checked here: no drive is opened, and the letters are ones a test PC is unlikely to have.
+    foreach ($bad in @('relative\Backups', '\\server\share\Backups', '\\?\Q:\Backups', 'Q:', 'Q:\', 'Q:Backups', 'Q:\Backups\', 'Q:\Backups\..\Other',
+        'Q:\Backups\.\Rewindle', 'Q:\Backups\\Rewindle', 'Q:\Backups.', 'Q:\Back"ups', "Q:\Back`tups", 'Q:\Backups:stream', 'Q:\Back*ups', '', ('Q:\' + ('x' * 1100)))) {
+        Assert-True (-not (Test-KeptRepositoryPath -Value $bad)) "'$bad' is not a backup folder to suggest"
+        Reset-KeptState -Records @{ 'repository.json' = ([ordered]@{ schema_version = 1; initialized_utc = '2026-09-01T10:00:00Z'; repository = $bad }) }
+        Assert-Equal '<none>' (Get-KeptPath) "a record naming '$bad' names no kept backups"
+    }
+    foreach ($good in @('Q:\ResticBackups\Personal', 'r:\Rewindle\Backups', 'Q:\My Drive\Rewindle Backups', ('Q:\Fotos e v' + [char]0x00ED + 'deos'))) {
+        Assert-True (Test-KeptRepositoryPath -Value $good) "'$good' is a backup folder to suggest"
+    }
+    $utcMoment = [datetime]::new(2026, 10, 2, 2, 21, 7, [DateTimeKind]::Utc)
+    Assert-Equal $utcMoment.Ticks (ConvertTo-KeptRecordTime -Value $utcMoment).UtcTicks 'a time PowerShell already read as a date is used as it is'
+    Assert-Equal $utcMoment.Ticks (ConvertTo-KeptRecordTime -Value '2026-10-02T02:21:07Z').UtcTicks 'an ISO-8601 UTC time is read as UTC'
+    Assert-Equal $utcMoment.Ticks (ConvertTo-KeptRecordTime -Value '2026-10-02T04:21:07+02:00').UtcTicks 'an offset is honored'
+
+    # --- the console installer suggests the kept folder at its prompt ---
+    $script:consoleLines = [Collections.Generic.List[string]]::new()
+    function Invoke-ConsoleRepositoryPrompt {
+        param([string]$Mode)
+        $script:Repository = $null
+        $script:consolePrompt = $null
+        $script:consoleLines.Clear()
+        & {
+            # Stand-ins for the console and for the drive scan, so nothing on this PC is asked or listed.
+            function Read-Host { param([string]$Prompt) $script:consolePrompt = $Prompt; return '' }
+            function Write-Host { param([object]$Object) $script:consoleLines.Add([string]$Object) }
+            function Get-DefaultRepository { return (Join-Path $workspace 'console\Usual\ResticBackups\Personal') }
+            $PlanOnly = $false
+            $Unattended = $false
+            $Repository = $null
+            $RepositoryStorageMode = $Mode
+            $DriveFsMyDriveRoot = Join-Path $workspace 'console\My Drive'
+            $defaultRepositorySuffix = 'ResticBackups\Personal'
+            Get-RepositoryInput
+        }
+        return $script:Repository
+    }
+    Reset-KeptState -Records @{ 'repository.json' = $setUp; 'last-success.json' = $afterMove }
+    Assert-Equal $keptMoved (Invoke-ConsoleRepositoryPrompt -Mode 'local_ntfs') 'pressing Enter at the console keeps the kept backups'
+    Assert-True ([string]$script:consolePrompt).Contains("[$keptMoved]") "the console prompt shows the kept folder as its default (got: $($script:consolePrompt))"
+    Assert-True (@($script:consoleLines | Where-Object { $_.Contains("earlier installation are in $keptMoved.") }).Count -eq 1) 'the console says where the earlier backups are'
+    Assert-Equal (Join-Path $workspace 'console\My Drive\ResticBackups\Personal') (Invoke-ConsoleRepositoryPrompt -Mode 'google_drivefs_stream') 'local backups are not suggested for a Google Drive install'
+    Assert-True (@($script:consoleLines | Where-Object { $_.Contains('-RepositoryStorageMode local_ntfs') }).Count -eq 1) 'the console says how to keep using local backups'
+    Reset-KeptState
+    Assert-Equal (Join-Path $workspace 'console\Usual\ResticBackups\Personal') (Invoke-ConsoleRepositoryPrompt -Mode 'local_ntfs') 'with nothing kept the console suggests the usual folder'
+    Assert-Equal 0 $script:consoleLines.Count 'with nothing kept the console says nothing about earlier backups'
+
+    # --- plan mode reports it, as the wizard's first plan sees it (no choices yet) ---
+    $keptRoots = New-RootsSet -Name 'kept'
+    $keptState = Join-Path $keptRoots.ProgramData 'ResticBackuper'
+    Write-Text -Path (Join-Path $keptState 'repository-password.dpapi.json') -Text '{}'
+    Write-KeptRecord -Folder $keptState -Name 'repository.json' -Record $setUp
+    $keptRun = Invoke-Plan -Bundle $bundle -Roots $keptRoots -Temp $temp -Arguments @('-MinimumFreeGiB', '1')
+    Assert-Equal 0 $keptRun.ExitCode "a plan over the state an uninstall kept is written (stderr: $($keptRun.Error))"
+    Assert-Equal $keptFirst $keptRun.Plan.environment.existing_install.kept_repository 'existing_install.kept_repository names the kept backups'
+    Assert-True ($null -eq $keptRun.Plan.environment.existing_install.rewindle) 'kept state alone is not an installation'
+    Assert-Equal $keptRoots.DefaultRepository $keptRun.Plan.defaults.repository 'defaults.repository stays the recommendation'
+    Assert-Equal @(Get-ErrorCodes $noArguments.Plan) @(Get-ErrorCodes $keptRun.Plan) 'the kept state adds no error'
+    Assert-Equal @(Get-WarningCodes $noArguments.Plan) @(Get-WarningCodes $keptRun.Plan) 'the kept state adds no warning'
+    Write-KeptRecord -Folder $keptState -Name 'last-success.json' -Record $afterMove
+    $movedRun = Invoke-Plan -Bundle $bundle -Roots $keptRoots -Temp $temp -Arguments @('-MinimumFreeGiB', '1')
+    Assert-Equal $keptMoved $movedRun.Plan.environment.existing_install.kept_repository 'after a move of the backup location the plan names the new place'
+    Assert-Equal @(Get-ErrorCodes $noArguments.Plan) @(Get-ErrorCodes $movedRun.Plan) 'the kept plan identity adds no error'
+    # Records this account can't read, or that are malformed, mean "not known": no error, no warning, a plan all the same.
+    Write-KeptRecord -Folder $keptState -Name 'last-success.json' -Record '{not json'
+    Write-KeptRecord -Folder $keptState -Name 'status.json' -Record ([ordered]@{ schema_version = 1; started_utc = '2026-10-05T02:00:00Z'; repository = 'relative\Backups' })
+    Set-ReadDenied -Path (Join-Path $keptState 'repository.json') -Denied $true
+    try { $brokenRun = Invoke-Plan -Bundle $bundle -Roots $keptRoots -Temp $temp -Arguments @('-MinimumFreeGiB', '1') }
+    finally { Set-ReadDenied -Path (Join-Path $keptState 'repository.json') -Denied $false }
+    Assert-Equal 0 $brokenRun.ExitCode "unreadable and malformed records still give a plan (stderr: $($brokenRun.Error))"
+    Assert-True ($null -eq $brokenRun.Plan.environment.existing_install.kept_repository) 'unreadable and malformed records name no kept backups'
+    Assert-Equal @(Get-ErrorCodes $noArguments.Plan) @(Get-ErrorCodes $brokenRun.Plan) 'unreadable and malformed records add no error'
+    Assert-Equal @(Get-WarningCodes $noArguments.Plan) @(Get-WarningCodes $brokenRun.Plan) 'unreadable and malformed records add no warning'
+
     $summary = [pscustomobject]@{
         ok = $true
         tests = $script:assertions
@@ -1290,6 +1448,7 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
         progress_feed = 'passed'
         native_calls_compile_nothing = 'passed'
         downloaded_program_held = 'passed'
+        kept_repository = 'passed'
     }
 }
 catch {

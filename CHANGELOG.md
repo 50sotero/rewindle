@@ -98,6 +98,16 @@ ones a home user reads without a glossary.
   backup location didn't finish", and it offers **Repair interrupted move**
   only once the move has really stopped, also after the dashboard was closed
   and opened again during the move.
+- **Setup remembers where your backups are when you install Rewindle again.**
+  Only the Setup window that had just removed Rewindle knew where its backups
+  were. After removing Rewindle from Installed apps, or closing Setup between
+  the two halves of a reinstall, Setup proposed a new folder, started a second,
+  empty backup there that needed room for a full copy, and rewrote the recovery
+  key to name it. The installer now reads where the backups are from the
+  records Rewindle keeps after an uninstall (`kept_repository` in the plan),
+  Setup and the console installer suggest that folder, and Backup location says
+  what choosing another place means, with a button to go back to the earlier
+  backups.
 
 ### Security
 

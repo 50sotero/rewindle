@@ -1,9 +1,9 @@
 import { Cloud, Disc3, FolderOpen, HardDrive, Info, Network, Usb } from 'lucide-react';
 import { Button } from '@/components/atoms/Button';
 import { ineligibleText, issuesFor, type PlanEnvironment, type PlanVolume } from '../contract';
-import { driveLetter, driveRoot, formatBytes, samePath } from '../format';
+import { driveLetter, formatBytes, samePath } from '../format';
 import { Callout, IssueList, SpaceBar, Spinner } from '../ui';
-import { selectedTotal, type Choices, type Wizard } from '../useWizard';
+import { keptPlace, selectedTotal, type Choices, type Wizard } from '../useWizard';
 import { CircleCheck, TriangleAlert } from 'lucide-react';
 
 export const driveName = (volume: PlanVolume) => `${volume.label || (volume.driveType === 'removable' ? 'USB Drive' : 'Local Disk')} (${driveLetter(volume.root)})`;
@@ -48,10 +48,12 @@ export function Location({ wizard }: { wizard: Wizard }) {
   const volumes = environment.volumes.filter(volume => volume.driveType !== 'cdrom' && volume.driveType !== 'ram');
   const chosen = chosenVolume(environment, choices);
   const anyEligible = volumes.some(volume => volume.eligible) || environment.drivefs.detected;
-  // A reinstall carries on with the backups the removed copy kept, when their drive is there (see initialChoices); when it isn't,
-  // Setup would start a new, empty backup elsewhere, which the person should hear before it happens.
+  // A reinstall carries on with the backups an earlier copy kept, when their drive is there (see keptPlace). Anywhere else, Setup
+  // starts a new, empty backup, which the person should hear before it happens, with the way back.
   const kept = wizard.keptRepository;
-  const keptMissing = !!kept && !samePath(choices.repository, kept) && !environment.volumes.some(volume => volume.eligible && samePath(volume.root, driveRoot(kept)));
+  const keptElsewhere = !!kept && !samePath(choices.repository, kept);
+  const keptHere = !!kept && !!keptPlace(wizard.base!, kept);
+  const keptMissing = keptElsewhere && !keptHere;
   const earlier = warnings.some(warning => warning.code === 'repository_exists');
   const onSystemDisk = warnings.some(warning => warning.code === 'repository_on_system_disk');
 
@@ -144,6 +146,13 @@ export function Location({ wizard }: { wizard: Wizard }) {
           <TriangleAlert size={16} aria-hidden="true" />
           <span>Your earlier backups are at <span className="inline-path">{kept}</span>, but that drive isn’t available. Connect it and choose Look for drives again, or Setup starts a new, empty backup in the location above.</span>
           <Button size="sm" className="issue-action" disabled={wizard.refreshing} onClick={() => void wizard.actions.refreshDrives()}>Look for drives again</Button>
+        </div>
+      )}
+      {keptElsewhere && keptHere && (
+        <div className="callout is-warning" role="status">
+          <TriangleAlert size={16} aria-hidden="true" />
+          <span>Your earlier backups are in <span className="inline-path">{kept}</span>. If you choose this place instead, Setup starts a new backup from scratch. It copies all your folders again, so it needs room for a full copy, and Rewindle won’t show your earlier backups. They stay where they are.</span>
+          <Button size="sm" className="issue-action" onClick={() => wizard.actions.chooseKeptRepository()}>Use my earlier backups</Button>
         </div>
       )}
 

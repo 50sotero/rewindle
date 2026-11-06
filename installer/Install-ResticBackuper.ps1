@@ -1949,6 +1949,88 @@ function Get-RewindleInstallInfo {
     }
 }
 
+# A backup folder as an earlier installation recorded it: a full, normalized path below the root of a lettered drive. Anything
+# else in a record is not trusted as a place to suggest.
+function Test-KeptRepositoryPath {
+    param([object]$Value)
+    if ($Value -isnot [string] -or $Value.Length -lt 4 -or $Value.Length -gt 1024) { return $false }
+    if ($Value -cnotmatch '^[A-Za-z]:\\[^\\]' -or $Value -match '["*?<>|\x00-\x1f]' -or $Value.IndexOf(':', 2) -ge 0) { return $false }
+    try { $full = [IO.Path]::GetFullPath($Value) } catch { return $false }
+    # GetFullPath folds "." and ".." segments, doubled separators and trailing dots, so only a path that was already in that form
+    # comes back unchanged.
+    return ([string]::Equals($full, $Value, [StringComparison]::Ordinal) -and -not $full.EndsWith('\'))
+}
+
+# The time a record was written, from one of its ISO-8601 UTC fields. Windows PowerShell leaves those as text; a newer
+# PowerShell may already have turned them into a [datetime].
+function ConvertTo-KeptRecordTime {
+    param([object]$Value)
+    if ($Value -is [datetime]) {
+        $moment = if ($Value.Kind -eq [DateTimeKind]::Unspecified) { [datetime]::SpecifyKind($Value, [DateTimeKind]::Utc) } else { $Value }
+        return [DateTimeOffset]::new($moment.ToUniversalTime())
+    }
+    if ($Value -isnot [string] -or $Value -cnotmatch '^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,7})?(?:Z|[+-]\d\d:\d\d)$') { return $null }
+    $parsed = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse($Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$parsed)) {
+        return $null
+    }
+    return $parsed
+}
+
+# Where the backups of an earlier installation are, from the records it left in the state folder that an uninstall keeps:
+# repository.json (written when its backup location was set up) and last-success.json and status.json (written by every backup,
+# so they follow a later move of the backup location). The newest record wins. Returns { repository, storage_mode }, or $null
+# when there is no such record, when this account can't read the records (only the account that installed is given access),
+# when they are malformed, or when the stored password those backups need is gone, so setup could not carry on with them. It
+# reads those small files only, never the backup folder (which may be on Google Drive), and never throws.
+function Get-KeptRepository {
+    try {
+        if (-not (Test-Path -LiteralPath $secretFile -PathType Leaf)) { return $null }
+        $kept = $null
+        $keptTime = $null
+        foreach ($record in @(
+            @('repository.json', @('initialized_utc', 'updated_utc')),
+            @('last-success.json', @('started_utc', 'finished_utc')),
+            @('status.json', @('started_utc', 'finished_utc'))
+        )) {
+            try {
+                $path = Join-Path $stateRoot $record[0]
+                if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+                if ((Get-Item -LiteralPath $path -Force).Length -gt 16MB) { continue }
+                $document = [IO.File]::ReadAllText($path, [Text.UTF8Encoding]::new($false)) | ConvertFrom-Json
+                if ($null -eq $document -or $document -isnot [Management.Automation.PSCustomObject]) { continue }
+                $properties = $document.PSObject.Properties
+                if ($null -eq $properties['schema_version'] -or $document.schema_version -ne 1) { continue }
+                if ($null -eq $properties['repository'] -or -not (Test-KeptRepositoryPath -Value $document.repository)) { continue }
+                $mode = 'local_ntfs'
+                if ($null -ne $properties['repository_storage_mode']) {
+                    $mode = $document.repository_storage_mode
+                    if ($mode -isnot [string] -or $mode -cnotin @('local_ntfs', 'google_drivefs_stream')) { continue }
+                }
+                $written = $null
+                foreach ($name in $record[1]) {
+                    if ($null -eq $properties[$name]) { continue }
+                    $time = ConvertTo-KeptRecordTime -Value $document.$name
+                    if ($null -ne $time -and ($null -eq $written -or $time -gt $written)) { $written = $time }
+                }
+                if ($null -eq $written) { continue }
+                if ($null -eq $keptTime -or $written -gt $keptTime) {
+                    $kept = [pscustomobject]@{ repository = [string]$document.repository; storage_mode = $mode }
+                    $keptTime = $written
+                }
+            }
+            catch {
+                # Unreadable for this account, being replaced, or not JSON: this record says nothing.
+                continue
+            }
+        }
+        return $kept
+    }
+    catch {
+        return $null
+    }
+}
+
 function Get-DriveFsInfo {
     $result = [ordered]@{ detected = $false; my_drive_root = $null }
     if (-not (Test-Path -LiteralPath $expectedDriveFsRoot -PathType Container)) {
@@ -2172,7 +2254,19 @@ function Get-RepositoryInput {
         Stop-InstallValidation -Code 'repository_required' -Field 'repository' `
             -Message 'Choose where your backups should be kept.' -Console '-Repository is required with -Unattended.'
     }
-    $defaultRepository = if ($RepositoryStorageMode -eq 'google_drivefs_stream') {
+    # A reinstall suggests the folder that already holds this PC's backups, so it carries on with them instead of starting a
+    # second, empty backup somewhere else.
+    $kept = Get-KeptRepository
+    $keptFits = $null -ne $kept -and $kept.storage_mode -eq $RepositoryStorageMode
+    if ($keptFits) {
+        Write-Host "Backups from an earlier installation are in $($kept.repository). Press Enter to keep using them."
+    }
+    elseif ($null -ne $kept) {
+        Write-Host "Backups from an earlier installation are in $($kept.repository). To keep using them, run setup again with -RepositoryStorageMode $($kept.storage_mode)."
+    }
+    $defaultRepository = if ($keptFits) {
+        $kept.repository
+    } elseif ($RepositoryStorageMode -eq 'google_drivefs_stream') {
         Join-Path $DriveFsMyDriveRoot $defaultRepositorySuffix
     } else {
         Get-DefaultRepository
@@ -2743,6 +2837,8 @@ function Invoke-PlanMode {
     $webView2 = Get-PlanEnvironmentPart -Name 'WebView2' -Default $null -Probe { Get-WebView2RuntimeVersion }
     $rewindleInstall = Get-PlanEnvironmentPart -Name 'existing installation' -Default $null -Probe { Get-RewindleInstallInfo }
     $legacy = Get-PlanEnvironmentPart -Name 'earlier edition' -Default $false -Probe { Test-LegacyEngineInstalled }
+    # Not a probe that can fail: a record this account can't read, or a malformed one, means "not known", with no warning.
+    $keptRepository = Get-KeptRepository
     $driveFs = Get-PlanEnvironmentPart -Name 'Google Drive' -Default ([ordered]@{ detected = $false; my_drive_root = $null }) -Probe { Get-DriveFsInfo }
     $knownFolders = @(Get-PlanEnvironmentPart -Name 'known folders' -Default @() -Probe { Get-PlanKnownFolders })
     $elevated = [bool](Get-PlanEnvironmentPart -Name 'elevation' -Default $false -Probe { Test-Administrator })
@@ -2842,6 +2938,7 @@ function Invoke-PlanMode {
             existing_install = [ordered]@{
                 rewindle = $rewindleInstall
                 legacy_personal_edition = [bool]$legacy
+                kept_repository = if ($null -ne $keptRepository) { $keptRepository.repository } else { $null }
             }
             volumes = @(
                 foreach ($entry in $volumes) {

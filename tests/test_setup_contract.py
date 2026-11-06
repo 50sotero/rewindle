@@ -156,7 +156,10 @@ class PlanModeCannotChangeTheMachineTests(unittest.TestCase):
         cls.reachable = reachable
 
     def test_the_graph_is_not_trivially_small(self) -> None:
-        for name in ("Resolve-RepositorySelection", "Resolve-SourceSelection", "Assert-RepositoryTarget", "Get-PlanVolumes", "Write-PlanDocument"):
+        for name in (
+            "Resolve-RepositorySelection", "Resolve-SourceSelection", "Assert-RepositoryTarget", "Get-PlanVolumes", "Write-PlanDocument",
+            "Get-KeptRepository",
+        ):
             self.assertIn(name, self.reachable)
 
     def test_no_install_only_function_is_reachable(self) -> None:
@@ -258,6 +261,7 @@ class ContractMatchesTheScriptsTests(unittest.TestCase):
              "eligible", "ineligible_reason", "ineligible_message", "recommended"],
             list(plan["environment"]["volumes"][0]),
         )
+        self.assertEqual(["rewindle", "legacy_personal_edition", "kept_repository"], list(plan["environment"]["existing_install"]))
         phase, result = documents[1], documents[2]
         self.assertEqual(["schema", "seq", "time", "type", "phase", "state", "title", "detail"], list(phase))
         self.assertEqual(
@@ -297,6 +301,32 @@ class ContractMatchesTheScriptsTests(unittest.TestCase):
             self.assertIn(text, self.installer)
         for text in ("app components were removed.", "Preserved backup state:", "Uninstall cancelled before any changes were made."):
             self.assertIn(text, self.uninstaller)
+
+    def test_the_kept_backup_location_is_reported_and_never_a_finding(self) -> None:
+        # A reinstall after a separate uninstall is told where the earlier backups are, from the state folder the uninstall kept.
+        defined = functions(self.installer)
+        plan = defined["Invoke-PlanMode"]
+        self.assertIn("$keptRepository = Get-KeptRepository\n", plan)
+        self.assertNotRegex(plan, r"Get-PlanEnvironmentPart[^\n]*Get-KeptRepository")
+        existing = re.search(r"existing_install = \[ordered\]@\{\n(.*?)\n\s+\}", plan, re.S).group(1)
+        self.assertEqual(["rewindle", "legacy_personal_edition", "kept_repository"], re.findall(r"^\s+(\w+) = ", existing, re.M))
+        reader = defined["Get-KeptRepository"]
+        # It reads the three records, needs the stored password, never throws and never raises a finding.
+        for name in ("'repository.json'", "'last-success.json'", "'status.json'", "$secretFile"):
+            self.assertIn(name, reader)
+        self.assertTrue(reader.lstrip().startswith("try {"))
+        for finding in ("Stop-InstallValidation", "New-InstallFinding", "Add-PlanFinding", "throw"):
+            self.assertNotIn(finding, reader)
+        self.assertIn("`environment.existing_install.kept_repository`", self.contract)
+        self.assertIn("**A reinstall.**", self.contract.split("## 6. Notes for the wizard", 1)[1])
+
+    def test_the_console_suggests_the_kept_backup_location(self) -> None:
+        prompt = functions(self.installer)["Get-RepositoryInput"]
+        unattended = prompt.index("if ($Unattended)")
+        self.assertLess(prompt.index("if ($PlanOnly)"), prompt.index("Get-KeptRepository"))
+        self.assertLess(unattended, prompt.index("Get-KeptRepository"))
+        self.assertLess(prompt.index("Get-KeptRepository"), prompt.index("Get-DefaultRepository"))
+        self.assertLess(prompt.index("Get-KeptRepository"), prompt.index("Read-Host"))
 
     def test_the_wizard_facing_deviations_are_written_down(self) -> None:
         section = self.contract.split("## 7. Deviations and additions", 1)[1]

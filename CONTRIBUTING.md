@@ -73,7 +73,8 @@ Set-Location src\dashboard\web
 npm run dev:setup    # http://127.0.0.1:5179/?scenario=fresh
 # other computers: ?scenario=no-second-drive | drivefs | existing-install | legacy-installed |
 #   unsupported-os | plan-errors | install-failure | uac-declined | key-unreadable |
-#   goes-online-only (Documents turns online-only after its first scan)
+#   goes-online-only (Documents turns online-only after its first scan) |
+#   kept-backups (Rewindle was removed, and its backups are in another folder than Setup's own suggestion)
 # also: &theme=dark|light and &motion=reduced
 npm run build:setup-demo   # static copy in src\dashboard\build-output\setup-demo
 ```
