@@ -8,7 +8,7 @@
 //   "full" as a folder that already has files in it, and a path in Documents, Pictures, Desktop, Music or Projects as a folder that
 //   is itself backed up. The page's URL decides how Windows asks: `?session=once` is one prompt for the whole restore; without it,
 //   every folder opened is its own prompt, as on the earlier edition of the backup service.
-import type { DashboardState, RestoreEntry, RestoreFlowState, RestoreSnapshot } from '../native-types';
+import type { BackupRangeState, DashboardState, RestoreEntry, RestoreFlowState, RestoreSnapshot } from '../native-types';
 import { createSampleRuns, formatBytes } from './demoState';
 
 type Payload = Record<string, string | boolean> | undefined;
@@ -50,6 +50,22 @@ function sampleSnapshots(now: number): RestoreSnapshot[] {
     fileCount: run.files, fileCountDisplay: run.files.toLocaleString(), byteCount: run.processedBytes, sizeDisplay: run.processedDisplay,
     sourceSummary: sources, bindingState: index === all.length - 1 ? 'legacy_unbound' : 'plan', isLegacyUnbound: index === all.length - 1,
   }));
+}
+
+/**
+ * How far back the sample's backups go, from the same backups the Restore dialog lists, so the page and the dialog agree. Counted
+ * by the backup service when the newest one finished, unless `asOfDaysEarlier` makes it a Restore-list count from that many days
+ * before (which the page then dates: "· as of …").
+ */
+export function sampleBackupRange(now: number, asOfDaysEarlier = 0): BackupRangeState {
+  const snapshots = sampleSnapshots(now);
+  const times = snapshots.map(snapshot => Date.parse(snapshot.when));
+  const newestRun = createSampleRuns(now).find(run => run.success && run.type === 'Backup');
+  const counted = newestRun ? Date.parse(newestRun.started) + newestRun.durationSeconds * 1000 : Math.max(...times);
+  return {
+    count: snapshots.length, oldestAt: new Date(Math.min(...times)).toISOString(),
+    countedAt: new Date(counted - asOfDaysEarlier * 86_400_000).toISOString(), source: asOfDaysEarlier > 0 ? 'restore' : 'backup',
+  };
 }
 
 export interface RestoreDemo {

@@ -138,6 +138,12 @@ export interface RunState {
   success: boolean; durationSeconds: number; durationDisplay: string; files: number;
   filesDisplay: string; processedBytes: number; processedDisplay: string;
   storedBytes: number; storedDisplay: string; snapshot: string;
+  /**
+   * What the backup found compared with the previous backup of the same folders, in the host's words ("312 new, 41 changed,
+   * 12,040 unchanged"). Absent for a check-only run, a run that stopped before it read the files, a run recorded before this
+   * version, and from an older host: never a zero that stands for "not known".
+   */
+  changesDisplay?: string;
 }
 export interface RunDetailsState {
   id: string;
@@ -151,6 +157,8 @@ export interface RunDetailsState {
   filesDisplay: string;
   processedDisplay: string;
   storedDisplay: string;
+  /** The run's new, changed and unchanged files ("312 new, 41 changed, 12,040 unchanged"), or empty or absent when not known. */
+  changesDisplay?: string;
   phase: string;
   failureCode: string;
   exitCode: string;
@@ -165,6 +173,12 @@ export interface RunDetailsState {
   logNote?: string;
   hasLog: boolean;
 }
+/**
+ * How many backups the backup location holds and when the oldest was made (ISO 8601), as one source counted them: `backup`, the
+ * backup service during the last verified backup, or `restore`, the Restore list when it was last read (`countedAt`). Only shown,
+ * never acted on.
+ */
+export interface BackupRangeState { count: number; oldestAt: string; countedAt: string; source: 'backup' | 'restore' }
 /**
  * Whether the backup service this dashboard reports on is installed, and enough about this computer for a bug report. Additive: a host that
  * does not send it (and the sample data) is taken to have found its service. Nothing here changes what any action may do.
@@ -262,6 +276,8 @@ export interface DashboardState {
   schedule: { summary: string; nextRun: string; /** The next run as an ISO 8601 timestamp, or empty/absent when there is none; the page formats it like every other time. */ nextRunAt?: string; detail: string; /** Set while Windows keeps the run at a fixed UTC time, so it moves an hour when the clocks change; says how to keep it fixed. Additive. */ clockChange?: string; error?: string; notice?: { text: string; tone: 'info' | 'success' | 'warning' | 'error' } | null };
   /** `volumeReady` is false only when the drive itself answered that it is not ready (unplugged, disconnected); true or absent means no such answer. */
   repository: { path: string; volume: string; volumeReady?: boolean; space?: BackupSpaceState | null };
+  /** How far back the backups in the backup location go, or null when that is not known for the plan and location in use. Additive: an older host sends nothing. */
+  backupRange?: BackupRangeState | null;
   /** `CatchingUp`: a backup was missed while the PC was off, asleep or signed out, and Windows starts it by itself shortly (not a problem; an older host never sends it). */
   freshness: { title: string; detail: string; state: 'Unavailable' | 'Healthy' | 'NoVerifiedBackup' | 'Overdue' | 'Paused' | 'ClockAnomaly' | 'CatchingUp'; verifiedAt: string };
   /** Backup alerts (the Settings switch, the tray mark, what Windows last did with the backup). Additive: an older host does not send it. */

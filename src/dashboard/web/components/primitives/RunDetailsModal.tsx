@@ -71,12 +71,18 @@ function statusDetails(details: RunDetailsState, resolved: boolean) {
   return { tone, status, title, warning, verified, unchanged, cancelled, isBackup, noun, titleStatesResult };
 }
 
-function DetailStat({ label, value, icon, hint }: { label: string; value: string; icon: React.ReactNode; hint?: string }) {
+// `sub` is a quieter line under the figure (what a backup found: "312 new, 41 changed, 12,040 unchanged").
+function DetailStat({ label, value, icon, hint, sub }: { label: string; value: string; icon: React.ReactNode; hint?: string; sub?: string }) {
   return <div className="run-detail-stat" title={hint}>
     <span className="run-detail-stat-label">{icon}{label}</span>
     <strong>{value || '—'}</strong>
+    {sub && <span className="run-detail-stat-sub">{sub}</span>}
   </div>;
 }
+
+// What new, changed and unchanged mean, and why a backup after a change to the plan counts every file as new: the plan is part of
+// what a backup is compared with, so the first one after it has nothing to compare with, while the data itself is not copied again.
+const CHANGES_HINT = 'New: not in the previous backup of these folders. Changed: edited since then. Unchanged: already saved. The first backup after you add or remove a folder, or move your backups, counts every file as new; only data that wasn’t already saved is copied.';
 
 // `why` is the tooltip while the button is off, so it never just sits there greyed out with no reason.
 function DetailIconButton({ label, children, onClick, disabled = false, why }: {
@@ -212,8 +218,10 @@ export default function RunDetailsModal({
   const tryAgain = 'Choose Back up now to try again; if it fails again, use Save problem report in Settings.';
   // A zero on a run that did not finish is "nothing counted", not "nothing there".
   const counted = (value: string) => activeDetails && !activeDetails.success && /^0(\s?B)?$/.test(value.trim()) ? '' : value;
+  // What a backup found (new, changed, unchanged files), only when the host knows it: a check-only run and an older run have none.
+  const changes = result?.isBackup ? activeDetails?.changesDisplay?.trim() || undefined : undefined;
 
-  const copy = (command: CommandName, extra?: Record<string, string | boolean>) => {
+  const copy =(command: CommandName, extra?: Record<string, string | boolean>) => {
     if (!activeDetails) return;
     send(command, { runId: activeDetails.id, ...extra });
   };
@@ -306,7 +314,7 @@ export default function RunDetailsModal({
         <div className="run-detail-scroll">
           <div className="run-detail-summary">
             <section className="run-detail-stats" aria-label="Run summary">
-              <DetailStat label="Files" value={counted(activeDetails.filesDisplay)} icon={<FileText size={13} />} />
+              <DetailStat label="Files" value={counted(activeDetails.filesDisplay)} icon={<FileText size={13} />} sub={changes} hint={changes ? CHANGES_HINT : undefined} />
               <DetailStat label="Size covered" value={counted(activeDetails.processedDisplay)} icon={<Clipboard size={13} />} hint="Everything this run looked through, new and unchanged files alike." />
               <DetailStat label="New data saved" value={!result.isBackup ? 'Nothing saved' : result.unchanged ? 'Nothing new' : counted(activeDetails.storedDisplay)} icon={<FolderOpen size={13} />} hint="Added to your backup location by this run, after removing duplicates and compressing." />
             </section>
