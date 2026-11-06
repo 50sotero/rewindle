@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -181,6 +182,91 @@ class AnomalyReviewTests(unittest.TestCase):
                 with self.assertRaises(Exception):
                     fixture.approve()
             self.assertFalse((fixture.state / anomaly_review.ACKNOWLEDGEMENT_NAME).exists())
+
+    def test_evidence_with_the_state_folders_inherited_admin_only_acl_is_accepted(self) -> None:
+        # backup.py writes last-success.json with the permissions it inherits from the state folder, which only
+        # Administrators and SYSTEM can change. A non-elevated test cannot make a file Administrator-owned, so the
+        # descriptors are those of a real install.
+        with tempfile.TemporaryDirectory(prefix="anomaly-review-inherited-") as root_text:
+            fixture = ReviewFixture(Path(root_text))
+            fixture.evidence_path.unlink()
+            atomic_write_json(fixture.evidence_path, fixture.evidence)
+            descriptors = {
+                fixture.evidence_path: INSTALLED_EVIDENCE_SDDL,
+                fixture.state: INSTALLED_STATE_FOLDER_SDDL,
+            }
+            seen: list[Path] = []
+
+            def installed_descriptor(path: Path, *, include_owner: bool = False) -> str:
+                self.assertTrue(include_owner)
+                seen.append(Path(path))
+                return descriptors[Path(path)]
+
+            with mock.patch.object(anomaly_review, "_security_sddl", installed_descriptor):
+                result = fixture.approve()
+            self.assertEqual("approved", result["state"])
+            self.assertEqual([fixture.evidence_path, fixture.state], seen)
+
+    def test_evidence_a_user_could_change_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="anomaly-review-unprotected-") as root_text:
+            fixture = ReviewFixture(Path(root_text))
+            fixture.evidence_path.unlink()
+            atomic_write_json(fixture.evidence_path, fixture.evidence)
+            # The real descriptor of a file in a user's temporary folder: owned by the user.
+            with self.assertRaisesRegex(RuntimeError, "not protected"):
+                fixture.approve()
+            user_writable_folder = INSTALLED_STATE_FOLDER_SDDL.replace(f"0x1200a9;;;{SID}", f"0x1301bf;;;{SID}")
+            descriptors = {
+                fixture.evidence_path: INSTALLED_EVIDENCE_SDDL,
+                fixture.state: user_writable_folder,
+            }
+            with mock.patch.object(
+                anomaly_review,
+                "_security_sddl",
+                lambda path, include_owner=False: descriptors[Path(path)],
+            ):
+                with self.assertRaisesRegex(RuntimeError, "evidence folder is not protected"):
+                    fixture.approve()
+            self.assertFalse((fixture.state / anomaly_review.ACKNOWLEDGEMENT_NAME).exists())
+
+
+class AdminOnlyWritableTests(unittest.TestCase):
+    def test_installed_state_folder_and_evidence_pass(self) -> None:
+        self.assertIsNone(anomaly_review.admin_only_writable_problem(INSTALLED_EVIDENCE_SDDL))
+        self.assertIsNone(anomaly_review.admin_only_writable_problem(INSTALLED_STATE_FOLDER_SDDL))
+        # SYSTEM may own it, and entries that only pass to children or deny access change nothing here.
+        self.assertIsNone(
+            anomaly_review.admin_only_writable_problem(
+                f"O:SYG:SYD:PAI(A;;FA;;;SY)(A;OICIIO;FA;;;CO)(D;;FW;;;{SID})(A;;FR;;;{SID})(A;;GRGX;;;BU)"
+            )
+        )
+
+    def test_anything_another_account_could_change_fails(self) -> None:
+        refused = {
+            "owned by the user": INSTALLED_EVIDENCE_SDDL.replace("O:BA", f"O:{SID}"),
+            "user full control": f"O:BAG:SYD:AI(A;ID;FA;;;BA)(A;ID;FA;;;{SID})",
+            "user write": f"O:BAG:SYD:AI(A;ID;FA;;;BA)(A;ID;FW;;;{SID})",
+            "user delete": f"O:BAG:SYD:AI(A;ID;FA;;;BA)(A;ID;0x1300a9;;;{SID})",
+            "user re-permission": f"O:BAG:SYD:AI(A;ID;FA;;;BA)(A;ID;0x1600a9;;;{SID})",
+            "user generic all": f"O:BAG:SYD:AI(A;ID;FA;;;BA)(A;ID;GA;;;{SID})",
+            "users add a file": "O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;CI;0x100006;;;BU)",
+            "everyone write": "O:BAG:SYD:AI(A;ID;FA;;;BA)(A;ID;0x120116;;;WD)",
+            "flags in another order": f"O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;CIOI;FA;;;{SID})",
+            "unknown rights": f"O:BAG:SYD:AI(A;ID;FA;;;BA)(A;ID;ZZ;;;{SID})",
+            "callback entry": f"O:BAG:SYD:AI(A;ID;FA;;;BA)(XA;;FR;;;{SID};(x))",
+            "no access list": "O:BAG:SYD:NO_ACCESS_CONTROL",
+            "empty access list": "O:BAG:SYD:P",
+            "no owner": "D:P(A;;FA;;;BA)",
+        }
+        for label, sddl in refused.items():
+            with self.subTest(label):
+                self.assertIsNotNone(anomaly_review.admin_only_writable_problem(sddl))
+
+
+INSTALLED_STATE_FOLDER_SDDL = (
+    f"O:BAG:{SID}D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;{SID})"
+)
+INSTALLED_EVIDENCE_SDDL = f"O:BAG:{SID}D:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1200a9;;;{SID})"
 
 
 if __name__ == "__main__":
