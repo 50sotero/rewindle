@@ -1072,6 +1072,10 @@ namespace ResticBackuper.Dashboard
                 }
                 return TrySetMotionPreference(preference, out error);
             }
+            if (string.Equals(command, "setAlerts", StringComparison.Ordinal))
+            {
+                return ExecuteAlertsCommand(payload, out error);
+            }
             if (string.Equals(command, "togglePreview", StringComparison.Ordinal))
             {
                 if (previewButton == null || !previewButton.IsEnabled)
@@ -1802,6 +1806,7 @@ namespace ResticBackuper.Dashboard
             state["schedule"] = BuildWebScheduleState();
             state["repository"] = BuildWebRepositoryState();
             state["freshness"] = BuildWebFreshnessState(snapshot);
+            state["alerts"] = BuildWebAlertsState();
             state["offsite"] = BuildWebOffsiteState(snapshot);
             state["recovery"] = BuildWebRecoveryState();
             state["setup"] = BuildWebSetupState();
