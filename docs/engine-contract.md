@@ -47,6 +47,7 @@ In the tables below `<P>` stands for the engine's product name (`ResticBackuper`
 | Manager scripts | `Manage-Sources.ps1`, `Manage-Schedule.ps1`, `Manage-Backup.ps1`, `Manage-Repository.ps1`, `Manage-Restore.ps1` under `<install>` | same |
 | Python | `<install>\Python\python.exe` with `-E -S -B` and scripts under `<install>` | same |
 | Restore approval session (section 9) | Request domain `ResticBackuper.RestoreRequest.v3`, protocol `ResticBackuper.RestoreSession.v1`, pipe `\\.\pipe\ResticBackuper.RestoreSession.<64 hex>`, capability document `<install>\engine-capabilities.json` (`ResticBackuper.EngineCapabilities.v1`) | None: one elevated request per step |
+| Clean-up of old backups (section 10) | Manager `<install>\Manage-Retention.ps1` (helper `retention.py`), request domain `ResticBackuper.RetentionRequest.v1`, records `ResticBackuper.RetentionPolicy.v1`, `.RetentionPreview.v1`, `.RetentionHistory.v1`, advertised in `engine-capabilities.json` | None: the card says clean-up isn't available and nothing is read |
 
 ## 3. Protected actions (elevated managers)
 
@@ -68,6 +69,7 @@ helper is held to the same rules.
 | Add / remove a protected folder | `-Add <path>` or `-Remove <path>`, `-ResultPath`, `-RequestNonce` | lower-case action, canonical path, nonce | `SourceManagerResults`: `schema_version` 1, `request_nonce`, `request_digest`, `request_user_sid`, `action`, `ok`; on success `plan_id`, `previous_config_generation` = current, `config_generation` = current + 1, `path` = the canonical path | **Ported** (was missing; see section 8) | Yes |
 | List snapshots, list a tree, restore, recovery drill | `-Action list_snapshots\|list_tree\|restore\|restore_drill`, `-IncludesBase64`, `-ExpectedConfigSha256`, `-ExpectedPlanId`, `-ExpectedConfigGeneration`, `-AllowLegacyUnbound 0\|1`, `-ResultPath`, `-RequestNonce`, `-RequestDigest`, optional `-SnapshotId`, `-TreePath`, `-Target` | action, config SHA-256, plan, generation, legacy flag, snapshot, tree path, target, includes SHA-256, nonce | `RestoreManagerResults` (+ `<nonce>.json.progress.json`): binding fields, `ok`, `backend_exit_code`, `payload` (`SnapshotList.v1`, `SnapshotTree.v1` or `RestoreReport.v1`), drill evidence (`history_recorded`, canary and sample fields) | Yes | Yes |
 | Restore approval session: any number of snapshot and folder listings and at most one restore (section 9) | `-Operation session`, `-ExpectedConfigSha256`, `-ExpectedPlanId`, `-ExpectedConfigGeneration`, `-ResultPath`, `-RequestNonce`, `-RequestDigest`, `-DashboardProcessId`, `-PipeName`, `-SessionTokenSha256`, `-IdleTimeoutSeconds`, `-LifetimeSeconds`, `-ConnectTimeoutSeconds` | `session`, config SHA-256, plan, generation, dashboard PID, pipe name, session-token SHA-256, idle, lifetime and connect timeouts, nonce (domain `RestoreRequest.v3`) | Results on the pipe, each the document above bound to the session's nonce and digest; `RestoreManagerResults\<nonce>.json` records how the session ended (`close_reason`, `operations`) | Yes (advertised in `engine-capabilities.json`) | No |
+| Clean-up of old backups: turn on or off, list what would go, remove a confirmed list (section 10) | `-Action configure\|preview\|apply`; only the arguments the action takes of `-Enabled`, `-KeepDaily`, `-KeepWeekly`, `-KeepMonthly`, `-ExpectedPreviewSha256`, `-ExpectedRemoveSetSha256`, `-ExpectedRemoveCount`, `-ConfirmEarlierChanges`; always `-ExpectedUserSid`, `-ExpectedConfigSha256`, `-ExpectedPlanId`, `-ExpectedConfigGeneration`, `-ResultPath`, `-RequestNonce`, `-RequestDigest` | action, config SHA-256, plan, generation, enabled, daily, weekly, monthly, preview SHA-256, remove-set SHA-256, remove count, earlier-changes confirmation, nonce (an argument the action does not take counts as empty; domain `RetentionRequest.v1`) | `RetentionManagerResults` (+ progress): binding fields, `ok` (true exactly when the exit code is 0), `state`, `refusal_code`, `policy_sha256`, `preview_sha256`, `remove_count`, `removed_count`, `removed_set_sha256`, `removal_unverified`, `prune_completed`, `check_completed`, `history_recorded` | Yes (advertised in `engine-capabilities.json`) | No |
 | Move the repository | `-Relocate -NewRepository -ExpectedCurrentRepository -ExpectedConfigSha256 -ResultPath -RequestNonce -RequestDigest` | `relocate`, current, new, config SHA-256, nonce | `RepositoryManagerResults` (+ progress): binding fields, `changed`, `old_repository_retained`, optional generation transition | Yes | Yes |
 | Recover an interrupted move | `-Recover -ExpectedJournalSha256 -ResultPath -RequestNonce -RequestDigest` | `recover`, journal SHA-256, nonce | `RepositoryManagerResults`: binding fields, `plan_id`, generations, repositories | Yes | Yes |
 | Change the schedule | `-Cadence -Time [-Days] -StartWhenAvailable -WakeToRun -AllowStartOnBatteries -StopIfGoingOnBatteries -Enabled -ExpectedCurrentFingerprint -ResultPath -RequestNonce` | `apply`, baseline task fingerprint, cadence, time, days, the five flags, nonce | `ScheduleManagerResults`: binding fields, `backup_started` false, `installed_fingerprint`, `schedule` (8 keys); the dashboard then re-reads the task and requires the same fingerprint | Yes | Yes |
@@ -171,10 +173,13 @@ than overdue until the task has run since the slot, or for at most 45 minutes af
 | --- | --- | --- | --- |
 | `<install>\backup-config.json` (≤ 1 MiB, read with full sharing, retried once) | `plan_id` (canonical UUID), `config_generation` (> 0), `cloud_placeholder_policy`, `repository`, `state_directory`, `sources` (canonical, unique), `source_identities` (one 8-hex serial per source), `canary_file` (inside a source), `topology_paths`, `recovery_tools_directory` (source-picker guard only); for the Backup location card only, and never a reason to refuse the plan: `minimum_free_gib` (the reserve: a number 0 or more, converted to bytes as the engine does; anything else is unknown) and `repository_storage_mode` (`google_drivefs_stream` or anything else, read as a local drive) | Yes (written by the installer and `Manage-Sources.ps1`) | Yes |
 | `<install>\runtime-manifest.json`, `VERSION` | Diagnostics (redacted) and the engine version | Yes | Manifest only |
-| `<install>\engine-capabilities.json` (≤ 16 KiB, no link, strict UTF-8 JSON) | `schema` `<P>.EngineCapabilities.v1`, `schema_version` 1, `restore_session.protocol`, `.request_domain`, `.manager`: whether restore approval sessions are used (section 9) | Yes (shipped in the payload, in the runtime manifest) | Not shipped |
+| `<install>\engine-capabilities.json` (≤ 16 KiB, no link, strict UTF-8 JSON) | `schema` `<P>.EngineCapabilities.v1`, `schema_version` 1, `restore_session.protocol`, `.request_domain`, `.manager`: whether restore approval sessions are used (section 9); `retention.manager`, `.request_domain`, `.policy_schema`, `.preview_schema`, `.history_schema`: whether clean-up of old backups is offered (section 10) | Yes (shipped in the payload, in the runtime manifest) | Not shipped |
 | `<state>\status.json` | Run identity, `state`, progress, summary, errors, cancel channel (`wrapper_pid`, `wrapper_start_filetime`, `launcher_pid`, `launcher_start_filetime`, `cancel_channel_id`, `cancel_channel_fingerprint`), plan binding, `repository_storage_mode`, `maintenance_hold`, `change_anomaly`, `failure_code` (a run stopped by `repository_low_space` is not repeated by the Backup location card's hero sentence). A backup's new, changed and unchanged file counts are Restic's own `summary.files_new`, `.files_changed` and `.files_unmodified` (all three non-negative integers, or none is shown; never for a dry run) | Yes | Yes |
 | `<state>\last-success.json` | Verified run evidence; its SHA-256 binds anomaly reviews. For the Backup location card: `repository_bytes_after` (what the backups take after that run, a whole number of bytes or `null`), otherwise the Google Drive count before the run, `repository_readiness.total_bytes` (Rewindle) or `repository_storage_preflight.total_bytes` (legacy), plus `summary.data_added_packed` (else `data_added`), shown as an estimate. Anything that is not a whole number of bytes 0 or more is unknown. How far back the backups go is `snapshot_inventory` (`schema_version` 1, `count` 1 to 1,000,000, `oldest_utc` no later than `newest_utc`, `counted_utc`, `rule` `restore_browse`: the backups the Restore list offers, counted from the listing the backup already reads), bound to the record's own `plan_id` and `repository`, read only from a verified record and only shown. `status.json` carries the same key, which is not read | Yes (`repository_bytes_after` after every verified backup since this change; `null` when the size could not be measured; `snapshot_inventory` too) | Yes (never `repository_bytes_after`; the Google Drive count only; no `snapshot_inventory`: the backup range comes from the Restore list, section 6) |
 | `<state>\dry-run-latest.json` | Dry-run result and summary | Yes | Yes |
+| `<state>\retention-policy.json` (≤ 16 KiB) | `schema` `<P>.RetentionPolicy.v1`, `schema_version` 1, `enabled`, `keep_daily`, `keep_weekly`, `keep_monthly`, `group_by` `host,paths`, `plan_id`, `repository_id`, `install_id`, `policy_sha256`: clean-up is on only while every binding and the digest hold (section 10) | Yes (written only by `Manage-Retention.ps1`) | Not written |
+| `<state>\retention-preview.json` (≤ 8 MiB) | `schema` `<P>.RetentionPreview.v1`, `state` (`ready`, `blocked`, `error`, `disabled`), `blocked_reason`, `error_code`, plan, generation, `evidence.last_success_sha256`, `policy.policy_sha256`, `remove` and `keep` (ID, time, files, reasons), their counts, `remove_set_sha256` (checked against the listed IDs), `earlier_changes`, `earlier_changes_unknown`, `needs_files_confirmed`, `prune_pending`, `future_dated_utc`; its own SHA-256 binds a removal | Yes (written only by `Manage-Retention.ps1`) | Not written |
+| `<state>\retention-history.json` (≤ 1 MiB) | `schema` `<P>.RetentionHistory.v1`, `plan_id`, the newest entry's `request_nonce`, `outcome`, `confirmed_count`, `removed_count`, `prune_completed`, `check_completed`, `free_bytes_before`, `free_bytes_after` | Yes (written only by `Manage-Retention.ps1`) | Not written |
 | `<state>\anomaly-acknowledgement.json` | `schema` `<P>.AnomalyReview.v1`, `decision` `approved`, the engine's scope, plan, generation, repository, run, snapshot, evidence hash, `maintenance_hold_remains`, no snapshot or repository modification | Yes | Yes |
 | `<state>\repository-relocation.journal.json` | Presence, protected ACL, size and SHA-256 (gates every mutation). Rewindle's manager also writes `owner_process_id` (integer) and `owner_process_creation_filetime_utc` (the process creation FILETIME as an exact decimal string, like `wrapper_start_filetime`) for the process running the move; a journal without them must keep working. The dashboard reports a running move, not an interrupted one (no Repair, every mutation still gated), while it waits for the manager it started itself, or while `OpenProcess`/`GetProcessTimes` find that same process running; otherwise, and for any journal without valid owner fields, it is an interrupted move as before | Yes | Yes (no owner fields: only a move this dashboard started is reported as running) |
 | `<state>\logs\backup-<run>.jsonl.log`, `dry-run-<run>.jsonl.log` | Run details timeline and failure events (newest 4 MB) | Yes | Yes |
@@ -325,3 +330,66 @@ temporary folder, a copy of the script inside that test root (the manager-path c
 root and a non-elevated token, so the installed copy can never run in it.
 `src/dashboard/tests/restore-flow-regressions.ps1` covers the deferred root read, the cache, the session-or-per-step choice
 and the session lifecycle against a stand-in broker.
+
+## 10. Clean-up of old backups
+
+Clean-up keeps the last backup of each of the last N days, weeks and months that have a backup, and removes the rest, but only
+a list the person looked at and confirmed. The elevated manager is `Manage-Retention.ps1`; it runs the helper `retention.py`
+with the embedded Python, the run lock held and a fixed environment. The dashboard side is `RetentionManager.cs` and
+`DashboardWindow.Retention.cs`. Nothing in the scheduled backup task lists or removes backups.
+
+**Off by default.** No setting exists until the person saves one (`-Action configure -Enabled 1`, counts 7–90 days, 4–104 weeks,
+6–120 months; the page suggests 14, 8 and 24). A setting counts only while it names this plan, the repository ID of the latest
+verified backup and this installation, and its `policy_sha256` (SHA-256 over the schema, plan, repository, `install_id`, the
+three counts and `host,paths`, LF-joined) matches. `install_id` is SHA-256 over `ResticBackuper.RetentionInstall.v1`, the runtime
+manifest's `version`, and `<lower-case relative path>\t<sha256>` for every manifested file except `backup-config.json` (which
+folder changes rewrite), sorted. An update or a reinstall with other program files therefore turns clean-up off; the card says
+so, and nothing is removed. Turning it off (`-Enabled 0`) needs neither the backup location nor a clean journal state.
+
+**When the dashboard offers it.** Only when the engine profile names a clean-up manager (the legacy personal edition does not:
+its card says clean-up isn't available, every clean-up command is refused and nothing is read) and `engine-capabilities.json`
+has a `retention` block with the same manager, request domain and schemas (otherwise the card asks for Reinstall or repair).
+Only for a local NTFS backup location: a Google Drive location is refused (`google_drive_not_supported`). The dashboard believes
+a record only when only Administrators or SYSTEM can change it (the same rule as `secret_store.admin_only_writable_problem`,
+with an owner limited by an OWNER RIGHTS entry), and a list only when its IDs give its `remove_set_sha256`.
+
+**Listing.** `preview` (and `configure` when it turns clean-up on) runs `restic --no-lock forget --dry-run --json --host <host>
+--tag restic-backuper-plan:<plan> --group-by host,paths --keep-daily D --keep-weekly W --keep-monthly M`; every other read
+passes `--no-lock` too, so listing writes nothing to the backup location. Backups of other plans or computers are never
+listed. Restic's proposal is then made safer: the latest verified backup stays; a checked backup that is the only checked one
+of a kept day, week or month stays; and the newest backup before each unusual change the person has not confirmed
+(`change_anomaly`) stays until they tick "my files look right". The list is blocked, with one of these reasons, when
+`no_verified_backup`, `last_backup_not_verified`, `folders_changed`, `change_review_open`, `pending_change` (any
+`*.journal.json`), `clock_problem`, `future_dated_backup`, `backup_location_unavailable`, `google_drive_not_supported` or
+`policy_inactive`. A list is stale for the dashboard once `last-success.json` changes; the card then offers Check now.
+
+**Removing.** `apply` is refused unless the preview file's SHA-256, its remove set (`ResticBackuper.RetentionRemoveSet.v1`
+over the sorted IDs) and its count equal the request, the gates above still pass, and the earlier-changes confirmation is
+given when the list asks for it (`preview_mismatch`, `earlier_changes_not_confirmed`, `busy` for a held run lock). A fresh dry
+run must give the identical list; otherwise a new list is written and nothing is removed (exit 3). Then `forget <IDs>` in
+batches of 50 with no keep rules, a fresh list that must show none of the removed and every kept backup, `prune --max-unused 5%`
+(`unlimited` when free space is below the plan's minimum), `check`, and a history entry. These are the only commands that take
+Restic's exclusive lock, and only this approved step runs them. If the list cannot be read back after a removal, the result
+is `partial` with `removal_unverified` and nothing more runs.
+
+| Exit code | State |
+| --- | --- |
+| 0 | `configured`, `disabled`, `previewed`, `removed`, `nothing_to_remove` |
+| 1 | `failed` |
+| 2 | `refused` (with `refusal_code`) |
+| 3 | `preview_changed` |
+| 4 | `partial` |
+| 5 | `space_pending` (removed, space not freed yet) |
+| 6 | `check_failed` (removed, the check found a problem) |
+
+**Dashboard behaviour.** The page gets counts, month totals and one page of 100 rows of the list, never the whole list. While
+the list is open no other command runs; while a step runs, the protected actions are turned off with the reason and refused
+before any other routing. Remove sends the count the person saw and both confirmations; the host re-reads the preview file
+first and binds the request to the list it captured. A result is believed only when every binding matches, `ok` agrees with
+the exit code, the state is one the action can end in, and a fresh read of the records agrees (the setting for `configure`,
+the list for `preview`, the newest history entry for `apply`).
+
+**Tests.** `tests/test_retention.py` (the helper, with a fake Restic), `tests/Test-ManageRetention.ps1` (the manager in its
+disposable mode against a stand-in `restic.exe` that refuses any read without `--no-lock`), `tests/test_dashboard_retention.py`
+(the dashboard's reading, digests and result checks against the helper's, and the page's wording) and the clean-up section
+of `src/dashboard/tests/restore-flow-regressions.ps1`.

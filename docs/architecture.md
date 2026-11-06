@@ -137,6 +137,8 @@ flowchart LR
     X -->|"set protected per-run event"| B
     B -->|"targeted Ctrl-Break"| R
     D -->|"immutable snapshot + one UAC per restore session (pipe)"| E["Protected restore manager"]
+    D -->|"confirmed list + one UAC per clean-up step"| N["Protected clean-up manager"]
+    N -->|"dry-run listing; forget confirmed IDs, prune, check"| Q
     E --> Z["New or empty restore target, held open"]
     D -->|"copy, verify, activate + UAC"| P["Protected repository manager"]
     P --> Q2["Reviewed repository backend/location"]
@@ -251,6 +253,7 @@ branded Rewindle release.
 | `Manage-Backup.ps1` | Revalidates the exact active run and protected task, then signals only that run's protected cancellation event | Per-run event signal and bound result file only |
 | `Manage-Repository.ps1` | Copies Restic's own files into held stages, manifest-checks, and atomically activates a reviewed local or explicit DriveFS repository destination; resumes or rolls back interrupted relocation | New repository, separate protected-NTFS recovery-tools destination, protected configuration, the repository record (`repository.json`), and journal |
 | `Manage-Restore.ps1` and `restore.py` | Bind browsing and restore requests to the current plan, generation, repository, and immutable snapshot ID; restore to a non-overlapping new or empty target outside Windows and program folders, held open while an administrator-only folder inside it receives the files | Explicit restore target and protected restore report only |
+| `Manage-Retention.ps1` and `retention.py` | Save the person's clean-up setting, list with a lock-free dry run which old backups it would remove, and remove only the confirmed list by snapshot ID, then free the space, check the repository and record the outcome | Protected clean-up records (setting, list, history, results); the repository through Restic only during an approved removal |
 | Recovery helpers | Inspect independent recovery paths and perform explicitly approved credential repair, stale-lock cleanup, key rotation, and anomaly acknowledgement | Narrow protected records or Restic credential/lock commands for the selected action |
 | `DiagnosticExporter.cs` | Builds a bounded support ZIP after removing secrets, identities, host names, command lines, and personal paths | User-selected diagnostic ZIP only |
 | Google Drive verifier | Holds the protected run lock, compares the sole DriveFS repository with a read-only API inventory, and restores the canary through a direct cloud backend | Protected verification runs/evidence only; no repository writes |
@@ -272,7 +275,9 @@ lock, status records, structured failure detail, JSONL logs, last-successful
 record, local metrics history, Restic's cache, and the `temp` folder for
 Restic's temporary pack files. During protected changes it may also contain
 source-update, repository-relocation, or credential-rotation journals plus
-bounded result/evidence records. Writers run from the protected scheduled task
+bounded result/evidence records. Once the person turns on clean-up of old
+backups it also holds `retention-policy.json`, `retention-preview.json` and
+`retention-history.json`. Writers run from the protected scheduled task
 or narrowly scoped elevated managers; the dashboard receives read access.
 
 ### User-selected repository
@@ -618,6 +623,26 @@ an `engine-capabilities.json` advertising them; otherwise (including the
 legacy engine profile) it keeps one approval per step. The protocol, bindings
 and threat model are in [`docs/engine-contract.md`](engine-contract.md),
 section 9, and [`SECURITY.md`](../SECURITY.md).
+
+## Clean-up of old backups
+
+Nothing is forgotten or pruned automatically; clean-up removes only a list the
+person confirmed. It is off until the person saves a setting in **Settings >
+Old backups**, and the setting counts only for the plan, repository and
+installed program files it was saved for, so an update or another install
+turns it off. Every step runs in `Manage-Retention.ps1` after a UAC prompt,
+with the run lock held and no pending journal: turning it on or choosing
+Check now lists, with `forget --dry-run --no-lock`, which snapshots of this
+plan and computer the setting would remove; Rewindle then keeps more than
+Restic would (the latest verified snapshot, the only checked snapshot of each
+kept period, and the last snapshot before an unusual change the person has not
+confirmed). A removal needs a verified last backup, no open change review, the
+exact list the person saw and an identical fresh listing; it forgets those
+snapshot IDs only, then prunes, checks and records the outcome. Only this
+approved step takes Restic's exclusive lock, so a backup that is due while it
+runs is skipped. Google Drive locations and the legacy engine profile have
+no clean-up. The requests, records and checks are in
+[`docs/engine-contract.md`](engine-contract.md), section 10.
 
 ## Failure behavior
 
