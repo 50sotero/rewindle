@@ -69,13 +69,14 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
 - **Backup alerts.** When backups are overdue, paused or have failed three
   times in a row, Rewindle shows a Windows notification, once for each problem,
   and marks its icon in the notification area: amber while something needs
-  attention, red while backups keep failing. Selecting the notification opens
-  Protection, which says why the scheduled backup didn't run (from the run
-  history and what Task Scheduler recorded for the task's last run: the PC was
-  off, asleep or signed out, the backup drive was unplugged, or Windows
-  couldn't start it, with its code) and what to do next. The schedule card
-  says when Windows last started the backup. Notifications come from the
-  Rewindle running in the notification area, so they wait until it is running.
+  attention, red while backups keep failing. Selecting the notification while
+  it is on screen opens Protection, which says why the scheduled backup didn't
+  run (from the run history and what Task Scheduler recorded for the task's
+  last run: the PC was off, asleep or signed out, the backup drive was
+  unplugged, or Windows couldn't start it, with its code) and what to do next.
+  The schedule card says when Windows last started the backup. Notifications
+  come from the Rewindle running in the notification area, so they wait until
+  it is running.
 - Separate **Local backup**, **Off-site copy** and **Restore test** cards, each
   with its own evidence and time. With no off-site copy set up, the card is
   replaced by one quiet line: **Off-site copy · Not set up (optional)**. An
