@@ -193,6 +193,9 @@ vulnerability) to discuss it first.
    sharing, for the whole restore, and Restic writes into an
    administrator-only folder inside it, so nothing can be swapped or planted
    between the check and the write. Existing files are never overwritten.
+   Moving the repository holds each copy folder open the same way from its
+   creation until it has its final name, renames it only through that handle
+   after checking its file ID, and copies only Restic's own files.
 4. **Runtime-manifest hashes.** The installer verifies every payload file
    against its SHA-256 manifest, and the managers that check the installed
    runtime against `runtime-manifest.json` keep doing so. Do not add exemptions

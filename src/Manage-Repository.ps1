@@ -31,6 +31,8 @@ param(
     [int]$TestCrashAfterStageCreation = 0,
     [ValidateRange(0, 2)]
     [int]$TestCrashAfterEmptyDestinationRemoval = 0,
+    [ValidateRange(0, 1000000)]
+    [int]$TestPauseDuringCopyAfterFiles = 0,
     [long]$TestAvailableBytes = -1
 )
 
@@ -98,6 +100,13 @@ $progressPath = $null
 $lockStream = $null
 $repositoryStage = $null
 $recoveryStage = $null
+$repositoryStagePin = $null
+$recoveryStagePin = $null
+$repositoryPin = $null
+$recoveryPin = $null
+$repairPins = [Collections.Generic.List[object]]::new()
+$repositoryPromotedIdentity = $null
+$recoveryPromotedIdentity = $null
 $newRecovery = $null
 $journalReady = $false
 $repositoryPromoted = $false
@@ -696,8 +705,222 @@ function Assert-ReadyDriveFsDestination {
     Assert-DriveFsProviderTransaction -Directory (Split-Path -Parent $Destination)
 }
 
+# Held folders. The stages are created in the folder the user chose, which the user can usually rename things in, and
+# the copy then writes into them by path for as long as it takes. A folder is therefore held open from the moment it is
+# checked until the manager is done with it: with list access, so the hold counts for sharing, and without delete
+# sharing, so neither it nor any folder above it can be renamed or swapped for a junction meanwhile. The hold never
+# includes delete access itself, because Restic (a Go program) could then no longer open the folder. Renaming a held
+# folder therefore closes the hold, opens it again with delete access and proves by its file ID that it is still the same
+# folder. The P/Invoke stubs are emitted in memory (Reflection.Emit, run only), never compiled from a temporary folder.
+$stagePinAccess = 0x00100081    # SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY, never DELETE
+$stagePinShare = 0x3            # FILE_SHARE_READ | FILE_SHARE_WRITE, never FILE_SHARE_DELETE
+$stageMoveAccess = 0x00110080   # SYNCHRONIZE | DELETE | FILE_READ_ATTRIBUTES, only for the rename itself
+$stageProbeAccess = 0x00100080  # SYNCHRONIZE | FILE_READ_ATTRIBUTES: no data access, so a hold does not stop it
+$stageOpenFlags = 0x02200000    # FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT: a link is opened, not followed
+$script:stagePinNative = $null
+
+function Get-StagePinNativeMethods {
+    if ($null -ne $script:stagePinNative) { return $script:stagePinNative }
+    $assemblyName = [Reflection.AssemblyName]::new('ResticBackuper.RepositoryManager.StagePin.' + [Guid]::NewGuid().ToString('N'))
+    $assembly = [Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly($assemblyName, [Reflection.Emit.AssemblyBuilderAccess]::Run)
+    $module = $assembly.DefineDynamicModule($assemblyName.Name)
+    $type = $module.DefineType('ResticBackuper.RepositoryManager.StagePinNativeMethods',
+        [Reflection.TypeAttributes]'Public, Class, Sealed, Abstract')
+    $dllImport = [Runtime.InteropServices.DllImportAttribute]
+    $fields = [Reflection.FieldInfo[]]@(
+        $dllImport.GetField('SetLastError'), $dllImport.GetField('CallingConvention'), $dllImport.GetField('CharSet'),
+        $dllImport.GetField('EntryPoint'), $dllImport.GetField('ExactSpelling'))
+    $handleType = [Microsoft.Win32.SafeHandles.SafeFileHandle]
+    foreach ($signature in @(
+        @('CreateFileW', $handleType, [Type[]]@([string], [uint32], [uint32], [IntPtr], [uint32], [uint32], [IntPtr])),
+        @('GetFileInformationByHandle', [bool], [Type[]]@($handleType, [byte[]])),
+        @('GetFinalPathNameByHandleW', [uint32], [Type[]]@($handleType, [byte[]], [uint32], [uint32])),
+        @('SetFileInformationByHandle', [bool], [Type[]]@($handleType, [int], [byte[]], [uint32]))
+    )) {
+        $method = $type.DefineMethod($signature[0], [Reflection.MethodAttributes]'Public, Static, PinvokeImpl, HideBySig',
+            $signature[1], $signature[2])
+        $method.SetCustomAttribute([Reflection.Emit.CustomAttributeBuilder]::new(
+            $dllImport.GetConstructor([Type[]]@([string])), [object[]]@('kernel32.dll'), $fields,
+            [object[]]@($true, [Runtime.InteropServices.CallingConvention]::Winapi,
+                [Runtime.InteropServices.CharSet]::Unicode, $signature[0], $true)))
+    }
+    $script:stagePinNative = $type.CreateType()
+    return $script:stagePinNative
+}
+
+function Open-DirectoryHandle {
+    param([string]$Path, [uint32]$Access, [uint32]$Share)
+    $native = Get-StagePinNativeMethods
+    $handle = $native::CreateFileW($Path, $Access, $Share, [IntPtr]::Zero, 3, $stageOpenFlags, [IntPtr]::Zero)
+    $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    if ($handle.IsInvalid) {
+        $handle.Dispose()
+        throw "Could not hold the folder in place for the move (Windows error $errorCode): $Path"
+    }
+    return $handle
+}
+
+function Get-DirectoryHandleIdentity {
+    param([Microsoft.Win32.SafeHandles.SafeFileHandle]$Handle, [string]$Path)
+    $native = Get-StagePinNativeMethods
+    # BY_HANDLE_FILE_INFORMATION: attributes at 0, volume serial at 28, file index (high, low) at 44 and 48.
+    $buffer = [byte[]]::new(52)
+    if (-not $native::GetFileInformationByHandle($Handle, $buffer)) {
+        $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "Could not read which folder is held for the move (Windows error $errorCode): $Path"
+    }
+    $attributes = [BitConverter]::ToUInt32($buffer, 0)
+    if (($attributes -band 0x10) -eq 0 -or ($attributes -band 0x400) -ne 0) {
+        throw "A folder used for the move is a link or not a folder: $Path"
+    }
+    return [pscustomobject]@{
+        VolumeSerial = [BitConverter]::ToUInt32($buffer, 28).ToString('X8')
+        FileId = [BitConverter]::ToUInt32($buffer, 44).ToString('X8') + [BitConverter]::ToUInt32($buffer, 48).ToString('X8')
+    }
+}
+
+function Get-DirectoryHandlePath {
+    param([Microsoft.Win32.SafeHandles.SafeFileHandle]$Handle, [uint32]$Flags)
+    $native = Get-StagePinNativeMethods
+    $buffer = [byte[]]::new(65536)
+    $length = $native::GetFinalPathNameByHandleW($Handle, $buffer, 32767, $Flags)
+    if ($length -eq 0 -or $length -ge 32767) { return $null }
+    return [Text.Encoding]::Unicode.GetString($buffer, 0, [int]$length * 2)
+}
+
+function Assert-DirectoryHandleAt {
+    # Where the open folder really is, with every link on the way resolved: its path within its volume (short names
+    # expanded) and that volume's serial must name the expected path, and so must its drive-letter path when Windows can
+    # give one. Get-CanonicalLocalPath (.NET Framework GetFullPath) has already expanded short names in the expected path.
+    param([Microsoft.Win32.SafeHandles.SafeFileHandle]$Handle, [string]$Path, [string]$VolumeSerial)
+    $root = [IO.Path]::GetPathRoot($Path)
+    $rootHandle = Open-DirectoryHandle -Path $root -Access $stageProbeAccess -Share 7
+    try { $rootSerial = (Get-DirectoryHandleIdentity -Handle $rootHandle -Path $root).VolumeSerial }
+    finally { $rootHandle.Dispose() }
+    $withinVolume = Get-DirectoryHandlePath -Handle $Handle -Flags 4         # FILE_NAME_NORMALIZED | VOLUME_NAME_NONE
+    if ($null -eq $withinVolume) { $withinVolume = Get-DirectoryHandlePath -Handle $Handle -Flags 12 }  # FILE_NAME_OPENED
+    $located = $null -ne $withinVolume -and $Path.Length -gt 2 -and
+        [string]::Equals($withinVolume, $Path.Substring(2), [StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals($VolumeSerial, $rootSerial, [StringComparison]::Ordinal)
+    $withLetter = Get-DirectoryHandlePath -Handle $Handle -Flags 0              # FILE_NAME_NORMALIZED | VOLUME_NAME_DOS
+    if ($located -and $null -ne $withLetter) {
+        if ($withLetter.StartsWith('\\?\') -and -not $withLetter.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) {
+            $withLetter = $withLetter.Substring(4)
+        }
+        $located = [string]::Equals($withLetter, $Path, [StringComparison]::OrdinalIgnoreCase)
+    }
+    if (-not $located) { throw "A folder used for the move is no longer where it was checked, so the move stopped: $Path" }
+}
+
+function Open-PinnedDirectory {
+    param([string]$Path, [object]$ExpectedIdentity)
+    $handle = Open-DirectoryHandle -Path $Path -Access $stagePinAccess -Share $stagePinShare
+    try {
+        $identity = Get-DirectoryHandleIdentity -Handle $handle -Path $Path
+        if ($null -ne $ExpectedIdentity -and
+            ($identity.VolumeSerial -cne [string]$ExpectedIdentity.VolumeSerial -or
+             $identity.FileId -cne [string]$ExpectedIdentity.FileId)) {
+            throw "A folder used for the move was replaced while it was being prepared: $Path"
+        }
+        Assert-DirectoryHandleAt -Handle $handle -Path $Path -VolumeSerial $identity.VolumeSerial
+    }
+    catch { $handle.Dispose(); throw }
+    return [pscustomobject]@{ Handle = $handle; Path = $Path; VolumeSerial = $identity.VolumeSerial; FileId = $identity.FileId }
+}
+
+function Close-PinnedDirectory {
+    param([object]$Pin)
+    if ($null -ne $Pin -and $null -ne $Pin.Handle) { $Pin.Handle.Dispose() }
+}
+
+function Assert-PinnedDirectory {
+    # The held folder is still where it was checked, and its path, opened afresh, still leads to that same folder.
+    param([object]$Pin)
+    if ($null -eq $Pin -or $null -eq $Pin.Handle -or $Pin.Handle.IsClosed) {
+        throw 'A folder used for the move is no longer held open.'
+    }
+    Assert-DirectoryHandleAt -Handle $Pin.Handle -Path $Pin.Path -VolumeSerial $Pin.VolumeSerial
+    $probe = Open-DirectoryHandle -Path $Pin.Path -Access $stageProbeAccess -Share 7
+    try { $current = Get-DirectoryHandleIdentity -Handle $probe -Path $Pin.Path }
+    finally { $probe.Dispose() }
+    if ($current.VolumeSerial -cne $Pin.VolumeSerial -or $current.FileId -cne $Pin.FileId) {
+        throw "A folder used for the move was replaced while it was being prepared: $($Pin.Path)"
+    }
+}
+
+function Move-PinnedDirectory {
+    # Renames a held folder to its final name in the same parent, through a handle on that very folder, never replacing
+    # anything already there. Returns the moved folder's identity; the caller holds it again with Open-PinnedDirectory.
+    param([object]$Pin, [string]$Destination)
+    Assert-PinnedDirectory -Pin $Pin
+    if (-not (Test-PathEqual -Left (Split-Path -Parent $Pin.Path) -Right (Split-Path -Parent $Destination))) {
+        throw "A held folder can only be renamed within its own parent: $($Pin.Path)"
+    }
+    Close-PinnedDirectory -Pin $Pin
+    $native = Get-StagePinNativeMethods
+    $mover = Open-DirectoryHandle -Path $Pin.Path -Access $stageMoveAccess -Share $stagePinShare
+    try {
+        $identity = Get-DirectoryHandleIdentity -Handle $mover -Path $Pin.Path
+        if ($identity.VolumeSerial -cne $Pin.VolumeSerial -or $identity.FileId -cne $Pin.FileId) {
+            throw "A folder used for the move was replaced just before it was renamed: $($Pin.Path)"
+        }
+        Assert-DirectoryHandleAt -Handle $mover -Path $Pin.Path -VolumeSerial $identity.VolumeSerial
+        # FILE_RENAME_INFO on 64-bit Windows: ReplaceIfExists (FALSE) at 0, RootDirectory (none) at 8, FileNameLength at
+        # 16, the full destination path at 20, followed by a terminating NUL.
+        $nameBytes = [Text.Encoding]::Unicode.GetBytes($Destination)
+        $buffer = [byte[]]::new(24 + $nameBytes.Length)
+        [BitConverter]::GetBytes([uint32]$nameBytes.Length).CopyTo($buffer, 16)
+        [Array]::Copy($nameBytes, 0, $buffer, 20, $nameBytes.Length)
+        if (-not $native::SetFileInformationByHandle($mover, 3, $buffer, [uint32]$buffer.Length)) {
+            $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            throw "Could not give the copied folder its final name (Windows error $errorCode): $Destination"
+        }
+        # From here on the folder has its final name, so the caller must treat it as promoted even if a later check
+        # fails; its own Open-PinnedDirectory checks where it is.
+        $moved = Get-DirectoryHandleIdentity -Handle $mover -Path $Destination
+    }
+    finally { $mover.Dispose() }
+    return $moved
+}
+
+function Get-ResticLayoutVerdict {
+    # Restic's own files in a local repository: the file config; keys, index and snapshots, each holding files named by
+    # 64 hex digits; data, holding folders named by two hex digits, each holding 64-hex files that start with those two.
+    # locks belongs to Restic too but is never copied or compared. Returns Keep, Lock or Other.
+    param([string]$Relative, [bool]$IsDirectory)
+    $parts = $Relative.Split('\')
+    if ($parts.Count -eq 1) {
+        if (-not $IsDirectory) { if ($parts[0] -eq 'config') { return 'Keep' } else { return 'Other' } }
+        if ($parts[0] -eq 'locks') { return 'Lock' }
+        if ($parts[0] -in @('keys', 'index', 'snapshots', 'data')) { return 'Keep' }
+        return 'Other'
+    }
+    if ($parts.Count -eq 2) {
+        if ($parts[0] -eq 'data') {
+            if ($IsDirectory -and $parts[1] -match '^[0-9a-f]{2}$') { return 'Keep' } else { return 'Other' }
+        }
+        if (-not $IsDirectory -and $parts[1] -match '^[0-9a-f]{64}$') { return 'Keep' }
+        return 'Other'
+    }
+    if ($parts.Count -eq 3 -and -not $IsDirectory -and $parts[0] -eq 'data' -and $parts[2] -match '^[0-9a-f]{64}$' -and
+        $parts[2].StartsWith($parts[1], [StringComparison]::OrdinalIgnoreCase)) {
+        return 'Keep'
+    }
+    return 'Other'
+}
+
+function Get-StageLayoutPolicy {
+    # A local stage or backup location is admin-only, so anything outside Restic's layout there means tampering. A Google
+    # Drive folder keeps no permissions, so other files there are left alone and never copied or compared.
+    param([string]$StorageMode)
+    if ($StorageMode -eq $localNtfsMode) { return 'Refuse' }
+    return 'Skip'
+}
+
 function Get-TreeInventory {
-    param([string]$Root, [switch]$ExcludeRepositoryLocks)
+    # -ResticLayout Skip or Refuse limits the inventory to Restic's own files (Get-ResticLayoutVerdict): Skip leaves
+    # anything else out without reading it, Refuse stops. Recovery tools use the whole tree (All).
+    param([string]$Root, [ValidateSet('All', 'Skip', 'Refuse')][string]$ResticLayout = 'All')
     Assert-NormalDirectoryChain -Directory $Root
     $directories = [Collections.Generic.List[string]]::new()
     $files = [Collections.Generic.List[string]]::new()
@@ -713,9 +936,15 @@ function Get-TreeInventory {
                 throw "A repository or recovery path contains a reparse point: $($item.FullName)"
             }
             $relative = $item.FullName.Substring($Root.Length + 1)
-            $top = $relative.Split('\')[0]
-            if ($ExcludeRepositoryLocks -and [string]::Equals($top, 'locks', [StringComparison]::OrdinalIgnoreCase)) {
-                continue
+            if ($ResticLayout -ne 'All') {
+                $verdict = Get-ResticLayoutVerdict -Relative $relative -IsDirectory ([bool]$item.PSIsContainer)
+                if ($verdict -eq 'Lock') { continue }
+                if ($verdict -eq 'Other') {
+                    if ($ResticLayout -eq 'Refuse') {
+                        throw "The copy of the backup holds something that is not part of the backup: $relative"
+                    }
+                    continue
+                }
             }
             if ($item.PSIsContainer) {
                 $directories.Add($relative)
@@ -750,8 +979,25 @@ function Get-TreeInventory {
     }
 }
 
+function Wait-DisposableCopyResume {
+    # Test mode only: lets a test act while the copy is under way, as a program running as the user could.
+    [IO.File]::WriteAllText((Join-Path $testContainer 'copy-paused.signal'), "paused`n")
+    $resumeSignal = Join-Path $testContainer 'copy-resume.signal'
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    while (-not [IO.File]::Exists($resumeSignal)) {
+        if ([DateTime]::UtcNow -gt $deadline) { throw 'The disposable copy pause was never resumed.' }
+        Start-Sleep -Milliseconds 50
+    }
+}
+
 function Copy-Inventory {
-    param([pscustomobject]$Inventory, [string]$Destination, [bool]$ReportProgress)
+    # Writes by path, which is safe only because the destination is held (no rename of it or of any folder above it) and,
+    # for local NTFS, admin-only (nothing can be planted inside it).
+    param([pscustomobject]$Inventory, [string]$Destination, [object]$Pin, [bool]$ReportProgress)
+    if ($null -eq $Pin -or -not (Test-PathEqual -Left $Pin.Path -Right $Destination)) {
+        throw "Refusing to copy into a folder that is not held open: $Destination"
+    }
+    Assert-PinnedDirectory -Pin $Pin
     Assert-NormalDirectoryChain -Directory $Destination
     foreach ($relative in $Inventory.Directories) {
         [void][IO.Directory]::CreateDirectory((Join-Path $Destination $relative))
@@ -773,21 +1019,25 @@ function Copy-Inventory {
             Stop-Process -Id $PID -Force
             throw 'Unreachable after disposable copy crash injection.'
         }
+        if ($isTestMode -and $TestPauseDuringCopyAfterFiles -gt 0 -and $filesCopied -eq $TestPauseDuringCopyAfterFiles) {
+            Wait-DisposableCopyResume
+        }
         if ($ReportProgress -and ([DateTime]::UtcNow - $lastProgressUtc).TotalSeconds -ge 0.75) {
             $fraction = if ($bytesTotal -gt 0) { [double]$bytesCopied / $bytesTotal } else { 1.0 }
             Write-Progress -Stage copying -Message 'Copying the encrypted repository and recovery tools.' `
                 -Percent (5.0 + 70.0 * $fraction) -Cancellable $false
         }
     }
+    Assert-PinnedDirectory -Pin $Pin
 }
 
 function Assert-TreeMatchesInventory {
     param(
         [string]$Root,
         [pscustomobject]$Expected,
-        [switch]$ExcludeRepositoryLocks
+        [ValidateSet('All', 'Skip', 'Refuse')][string]$ResticLayout = 'All'
     )
-    $actual = Get-TreeInventory -Root $Root -ExcludeRepositoryLocks:$ExcludeRepositoryLocks
+    $actual = Get-TreeInventory -Root $Root -ResticLayout $ResticLayout
     if ($actual.Records.Count -ne $Expected.Records.Count -or
         $actual.Bytes -ne $Expected.Bytes -or
         -not [string]::Equals($actual.ManifestSha256, $Expected.ManifestSha256, [StringComparison]::Ordinal)) {
@@ -797,19 +1047,30 @@ function Assert-TreeMatchesInventory {
 }
 
 function New-ProtectedStagingDirectory {
+    # Creates the stage with the protected ACL already in place and holds it before anything else touches it. Outside
+    # tests, its owner must still be Administrators once held: a folder a program running as the user swapped in before
+    # the hold would be the user's own, and the ACL reset below must never run on a tree the user can still change.
+    # Returns the hold.
     param([string]$Path)
     if (Test-Path -LiteralPath $Path) { throw "Protected staging path already exists: $Path" }
     if ($isTestMode) { [void][IO.Directory]::CreateDirectory($Path) }
     else { [void][IO.Directory]::CreateDirectory($Path, (New-ProtectedDirectorySecurity)) }
-    Set-ProtectedTreeAcl -Path $Path
-    Assert-ProtectedTreeAcl -Path $Path
+    $pin = Open-PinnedDirectory -Path $Path
+    try {
+        Assert-ProtectedTreeAcl -Path $Path
+        if (@(Get-ChildItem -LiteralPath $Path -Force).Count -ne 0) { throw "A new folder for the copy is not empty: $Path" }
+        Set-ProtectedTreeAcl -Path $Path -Pin $pin
+        Assert-ProtectedTreeAcl -Path $Path
+    }
+    catch { Close-PinnedDirectory -Pin $pin; throw }
+    return $pin
 }
 
 function New-RepositoryStagingDirectory {
+    # Returns the hold on the new stage.
     param([string]$Path, [string]$StorageMode)
     if ($StorageMode -eq $localNtfsMode) {
-        New-ProtectedStagingDirectory -Path $Path
-        return
+        return (New-ProtectedStagingDirectory -Path $Path)
     }
     if ($StorageMode -ne $driveFsMode) {
         throw "Unsupported repository staging storage mode: $StorageMode"
@@ -818,7 +1079,13 @@ function New-RepositoryStagingDirectory {
         throw "DriveFS repository staging path already exists: $Path"
     }
     [void][IO.Directory]::CreateDirectory($Path)
-    Assert-NormalDirectoryChain -Directory $Path
+    $pin = Open-PinnedDirectory -Path $Path
+    try {
+        Assert-NormalDirectoryChain -Directory $Path
+        if (@(Get-ChildItem -LiteralPath $Path -Force).Count -ne 0) { throw "A new folder for the copy is not empty: $Path" }
+    }
+    catch { Close-PinnedDirectory -Pin $pin; throw }
+    return $pin
 }
 
 function Assert-RepositoryTreeSecurity {
@@ -828,7 +1095,7 @@ function Assert-RepositoryTreeSecurity {
         return
     }
     Assert-NormalDirectoryChain -Directory $Path
-    [void](Get-TreeInventory -Root $Path -ExcludeRepositoryLocks)
+    [void](Get-TreeInventory -Root $Path -ResticLayout (Get-StageLayoutPolicy -StorageMode $StorageMode))
 }
 
 function Restore-EmptyDirectorySecurity {
@@ -838,8 +1105,14 @@ function Restore-EmptyDirectorySecurity {
     [void][IO.Directory]::CreateDirectory($Path)
     $security = [Security.AccessControl.DirectorySecurity]::new()
     $security.SetSecurityDescriptorSddlForm($Sddl, [Security.AccessControl.AccessControlSections]::All)
-    Set-Acl -LiteralPath $Path -AclObject $security
-    [IO.File]::SetAttributes($Path, [IO.FileAttributes]$Attributes)
+    # Held while its ACL is put back, so the user's permissions land on this new folder and never through a junction.
+    $pin = Open-PinnedDirectory -Path $Path
+    try {
+        if (@(Get-ChildItem -LiteralPath $Path -Force).Count -ne 0) { throw "A restored empty folder is not empty: $Path" }
+        Set-Acl -LiteralPath $Path -AclObject $security
+        [IO.File]::SetAttributes($Path, [IO.FileAttributes]$Attributes)
+    }
+    finally { Close-PinnedDirectory -Pin $pin }
 }
 
 function Write-StageOwnershipMarker {
@@ -864,7 +1137,7 @@ function Assert-StageOwnershipMarker {
 }
 
 function Remove-OwnedTree {
-    param([string]$Path, [string]$ExpectedParent)
+    param([string]$Path, [string]$ExpectedParent, [object]$ExpectedIdentity)
     if (-not (Test-Path -LiteralPath $Path)) { return }
     $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
     $parent = [IO.Path]::GetFullPath($ExpectedParent).TrimEnd('\')
@@ -872,7 +1145,27 @@ function Remove-OwnedTree {
         -not $full.StartsWith($parent + '\', [StringComparison]::OrdinalIgnoreCase)) {
         throw "Refusing to remove an unowned relocation path: $full"
     }
-    [IO.Directory]::Delete($full, $true)
+    # Held while its contents go, so neither it nor a folder above it can be swapped for a junction meanwhile, and, given
+    # -ExpectedIdentity (a hold or a moved folder's identity), proven to be the folder this run made. The emptied folder
+    # itself is removed last, which never follows a link.
+    $holder = Open-PinnedDirectory -Path $full -ExpectedIdentity $ExpectedIdentity
+    try {
+        if ($null -eq $ExpectedIdentity -and (Get-StorageModeForPath -Repository $full) -eq $localNtfsMode) {
+            # Not proven to be this run's folder: delete only a tree the user cannot change, so nothing inside it can be
+            # swapped for a junction while it is being emptied.
+            Assert-ProtectedTreeAcl -Path $full
+        }
+        foreach ($entry in @(Get-ChildItem -LiteralPath $full -Force)) {
+            if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                if ($entry.PSIsContainer) { [IO.Directory]::Delete($entry.FullName, $false) }
+                else { [IO.File]::Delete($entry.FullName) }
+            }
+            elseif ($entry.PSIsContainer) { [IO.Directory]::Delete($entry.FullName, $true) }
+            else { [IO.File]::Delete($entry.FullName) }
+        }
+    }
+    finally { Close-PinnedDirectory -Pin $holder }
+    [IO.Directory]::Delete($full, $false)
 }
 
 function New-ProtectedDirectorySecurity {
@@ -960,7 +1253,14 @@ function Assert-ProtectedTreeAcl {
 }
 
 function Set-ProtectedTreeAcl {
-    param([string]$Path)
+    # icacls /T follows a junction planted inside the tree, and Set-Acl and icacls both work by path. So this runs only on
+    # a held stage (nothing can swap it or a folder above it) whose contents only Administrators and SYSTEM can change
+    # (nothing can be planted inside it between the reparse-point check below and icacls).
+    param([string]$Path, [object]$Pin)
+    if ($null -eq $Pin -or -not (Test-PathEqual -Left $Pin.Path -Right $Path)) {
+        throw "Refusing to reset permissions on a folder that is not held open: $Path"
+    }
+    Assert-PinnedDirectory -Pin $Pin
     Assert-NormalDirectoryChain -Directory $Path
     foreach ($item in Get-ChildItem -LiteralPath $Path -Recurse -Force) {
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Refusing ACL changes on a tree containing a reparse point: $($item.FullName)" }
@@ -1565,7 +1865,8 @@ function Assert-ActivationTrees {
     )
     Assert-NormalDirectoryChain -Directory $Repository
     Assert-NormalDirectoryChain -Directory $Recovery
-    [void](Assert-TreeMatchesInventory -Root $Repository -Expected $RepositoryInventory -ExcludeRepositoryLocks)
+    [void](Assert-TreeMatchesInventory -Root $Repository -Expected $RepositoryInventory `
+        -ResticLayout (Get-StageLayoutPolicy -StorageMode $StorageMode))
     [void](Get-TreeInventory -Root $Recovery)
     Assert-RepositoryTreeSecurity -Path $Repository -StorageMode $StorageMode
     Assert-ProtectedTreeAcl -Path $Recovery
@@ -1893,8 +2194,14 @@ function Repair-PendingRelocation {
     if ($recoveryOwned -and (Test-Path -LiteralPath $pendingRecovery -PathType Container)) {
         $candidates.Add([pscustomobject]@{ Path = $pendingRecovery; Kind = 'recovery' })
     }
+    $candidatePins = @{}
     foreach ($candidate in $candidates) {
         if (-not (Test-Path -LiteralPath $candidate.Path)) { continue }
+        # Held from its first check until just before its removal, which then proves by file ID that it is the same
+        # folder, so what is checked here is what goes.
+        $candidatePin = Open-PinnedDirectory -Path $candidate.Path
+        $script:repairPins.Add($candidatePin)
+        $candidatePins[$candidate.Path] = $candidatePin
         $isDriveFsRepositoryCandidate = $candidate.Kind -eq 'repository' -and
             $pendingStorageMode -eq $driveFsMode
         if ($isDriveFsRepositoryCandidate) {
@@ -1926,7 +2233,8 @@ function Repair-PendingRelocation {
         elseif ($candidate.Kind -eq 'repository') {
             $candidateIdentity = Get-ResticIdentity -Validated $validatedOld -Repository $candidate.Path
             Assert-ResticIdentityEqual -Expected $oldIdentity -Actual $candidateIdentity
-            $candidateInventory = Get-TreeInventory -Root $candidate.Path -ExcludeRepositoryLocks
+            $candidateInventory = Get-TreeInventory -Root $candidate.Path `
+                -ResticLayout (Get-StageLayoutPolicy -StorageMode $pendingStorageMode)
             if ($candidateInventory.Records.Count -ne [long]$journal.repository_file_count -or
                 $candidateInventory.Bytes -ne [long]$journal.repository_bytes -or
                 -not [string]::Equals(
@@ -1942,21 +2250,25 @@ function Repair-PendingRelocation {
                 -ExpectedPlan $expectedPendingPlan)
         }
     }
+    foreach ($candidatePin in $candidatePins.Values) { Close-PinnedDirectory -Pin $candidatePin }
     if (Test-Path -LiteralPath $expectedRepositoryStage) {
-        Remove-OwnedTree -Path $expectedRepositoryStage -ExpectedParent $pendingParent
+        Remove-OwnedTree -Path $expectedRepositoryStage -ExpectedParent $pendingParent `
+            -ExpectedIdentity $candidatePins[$expectedRepositoryStage]
     }
     if (Test-Path -LiteralPath $expectedRecoveryStage) {
-        Remove-OwnedTree -Path $expectedRecoveryStage -ExpectedParent $expectedRecoveryParent
+        Remove-OwnedTree -Path $expectedRecoveryStage -ExpectedParent $expectedRecoveryParent `
+            -ExpectedIdentity $candidatePins[$expectedRecoveryStage]
     }
     if ($repoOwned -and (Test-Path -LiteralPath $pendingNew)) {
-        Remove-OwnedTree -Path $pendingNew -ExpectedParent $pendingParent
+        Remove-OwnedTree -Path $pendingNew -ExpectedParent $pendingParent -ExpectedIdentity $candidatePins[$pendingNew]
     }
     if ([bool]$journal.destination_initially_existed -and -not (Test-Path -LiteralPath $pendingNew)) {
         Restore-EmptyDirectorySecurity -Path $pendingNew -Sddl ([string]$journal.destination_original_sddl) `
             -Attributes ([int]$journal.destination_original_attributes)
     }
     if ($recoveryOwned -and (Test-Path -LiteralPath $pendingRecovery)) {
-        Remove-OwnedTree -Path $pendingRecovery -ExpectedParent $expectedRecoveryParent
+        Remove-OwnedTree -Path $pendingRecovery -ExpectedParent $expectedRecoveryParent `
+            -ExpectedIdentity $candidatePins[$pendingRecovery]
     }
     if ([bool]$journal.recovery_initially_existed -and -not (Test-Path -LiteralPath $pendingRecovery)) {
         Restore-EmptyDirectorySecurity -Path $pendingRecovery -Sddl ([string]$journal.recovery_original_sddl) `
@@ -2018,7 +2330,7 @@ try {
     }
     if (-not $isTestMode -and ($TestFailAfterPublish -ne 0 -or $TestCrashAfterPublish -ne 0 -or
         $TestCrashDuringCopyAfterFiles -ne 0 -or $TestCrashAfterStageCreation -ne 0 -or
-        $TestCrashAfterEmptyDestinationRemoval -ne 0 -or
+        $TestCrashAfterEmptyDestinationRemoval -ne 0 -or $TestPauseDuringCopyAfterFiles -ne 0 -or
         $TestAvailableBytes -ne -1)) {
         throw 'Failure and capacity injection are available only for disposable tests.'
     }
@@ -2158,7 +2470,10 @@ try {
         Assert-NoOverlap -Candidate $stage -Other $newRecovery -Message 'Staging overlaps recovery destination'
     }
 
-    $repositoryInventory = Get-TreeInventory -Root $validated.Repository -ExcludeRepositoryLocks
+    # Only Restic's own files are copied. A Google Drive folder keeps no permissions, so anything a program running as
+    # the user drops into the current backup folder is left behind instead of being copied with administrator rights.
+    $repositoryInventory = Get-TreeInventory -Root $validated.Repository -ResticLayout Skip
+    $stageLayout = Get-StageLayoutPolicy -StorageMode $destinationStorageMode
     $recoveryInventory = Get-TreeInventory -Root $validated.RecoveryTools
     $repositoryManifestSha256 = $repositoryInventory.ManifestSha256
     $filesTotal = [long]$repositoryInventory.Files.Count + [long]$recoveryInventory.Files.Count
@@ -2258,14 +2573,16 @@ try {
     $sourceIdentity = Get-ResticIdentity -Validated $validated -Repository $validated.Repository
     $copyStartedUtc = [DateTime]::UtcNow
     Write-Progress -Stage copying -Message 'Copying the encrypted repository and recovery tools.' -Percent 5 -Cancellable $false
-    New-RepositoryStagingDirectory -Path $repositoryStage -StorageMode $destinationStorageMode
+    # Each stage is held from its creation until it has its final name (see Open-PinnedDirectory), so every write below
+    # by path lands in it and nowhere else.
+    $repositoryStagePin = New-RepositoryStagingDirectory -Path $repositoryStage -StorageMode $destinationStorageMode
     Write-StageOwnershipMarker -Directory $repositoryStage
     if ($TestCrashAfterStageCreation -eq 1) { Stop-Process -Id $PID -Force }
-    New-ProtectedStagingDirectory -Path $recoveryStage
+    $recoveryStagePin = New-ProtectedStagingDirectory -Path $recoveryStage
     Write-StageOwnershipMarker -Directory $recoveryStage
     if ($TestCrashAfterStageCreation -eq 2) { Stop-Process -Id $PID -Force }
-    Copy-Inventory -Inventory $repositoryInventory -Destination $repositoryStage -ReportProgress $true
-    Copy-Inventory -Inventory $recoveryInventory -Destination $recoveryStage -ReportProgress $true
+    Copy-Inventory -Inventory $repositoryInventory -Destination $repositoryStage -Pin $repositoryStagePin -ReportProgress $true
+    Copy-Inventory -Inventory $recoveryInventory -Destination $recoveryStage -Pin $recoveryStagePin -ReportProgress $true
     Update-StagedRecoveryBundle -Directory $recoveryStage -Repository $canonicalNew `
         -VolumeSerial $destinationSerial -RecoveryDirectory $newRecovery `
         -ExpectedBefore $validated -ExpectedAfter $stagedPlan
@@ -2279,14 +2596,14 @@ try {
     $copiedIdentity = Get-ResticIdentity -Validated $validated -Repository $repositoryStage
     Assert-ResticIdentityEqual -Expected $sourceIdentity -Actual $copiedIdentity
     [void](Invoke-ResticCapture -Validated $validated -Repository $repositoryStage -CommandArguments @('check'))
-    [void](Assert-TreeMatchesInventory -Root $repositoryStage -Expected $repositoryInventory -ExcludeRepositoryLocks)
-    [void](Assert-TreeMatchesInventory -Root $validated.Repository -Expected $repositoryInventory -ExcludeRepositoryLocks)
+    [void](Assert-TreeMatchesInventory -Root $repositoryStage -Expected $repositoryInventory -ResticLayout $stageLayout)
+    [void](Assert-TreeMatchesInventory -Root $validated.Repository -Expected $repositoryInventory -ResticLayout Skip)
     $sourceIdentityAfterCopy = Get-ResticIdentity -Validated $validated -Repository $validated.Repository
     Assert-ResticIdentityEqual -Expected $sourceIdentity -Actual $sourceIdentityAfterCopy
     if ($destinationStorageMode -eq $localNtfsMode) {
-        Set-ProtectedTreeAcl -Path $repositoryStage
+        Set-ProtectedTreeAcl -Path $repositoryStage -Pin $repositoryStagePin
     }
-    Set-ProtectedTreeAcl -Path $recoveryStage
+    Set-ProtectedTreeAcl -Path $recoveryStage -Pin $recoveryStagePin
     Assert-RepositoryTreeSecurity -Path $repositoryStage -StorageMode $destinationStorageMode
     Assert-ProtectedTreeAcl -Path $recoveryStage
 
@@ -2295,29 +2612,33 @@ try {
 
     Assert-EmptyDestinationUnchanged -Path $canonicalNew -InitiallyExisted $destinationInitiallyExisted -OriginalSddl $destinationOriginalSddl
     Assert-NormalDirectoryChain -Directory $repositoryStage
-    [void](Assert-TreeMatchesInventory -Root $repositoryStage -Expected $repositoryInventory -ExcludeRepositoryLocks)
+    Assert-PinnedDirectory -Pin $repositoryStagePin
+    [void](Assert-TreeMatchesInventory -Root $repositoryStage -Expected $repositoryInventory -ResticLayout $stageLayout)
     Assert-RepositoryTreeSecurity -Path $repositoryStage -StorageMode $destinationStorageMode
     Assert-ResticIdentityEqual -Expected $sourceIdentity -Actual (Get-ResticIdentity -Validated $validated -Repository $repositoryStage)
     if ($destinationInitiallyExisted) { [IO.Directory]::Delete($canonicalNew, $false) }
     if ($TestCrashAfterEmptyDestinationRemoval -eq 1) { Stop-Process -Id $PID -Force }
-    Move-Item -LiteralPath $repositoryStage -Destination $canonicalNew
+    $repositoryPromotedIdentity = Move-PinnedDirectory -Pin $repositoryStagePin -Destination $canonicalNew
     $repositoryStage = $null
     $repositoryPromoted = $true
+    $repositoryPin = Open-PinnedDirectory -Path $canonicalNew -ExpectedIdentity $repositoryPromotedIdentity
     Assert-RepositoryTreeSecurity -Path $canonicalNew -StorageMode $destinationStorageMode
     Write-Journal -State repository_promoted
     Assert-InjectionAllowed -Point 1
 
     Assert-EmptyDestinationUnchanged -Path $newRecovery -InitiallyExisted $recoveryInitiallyExisted -OriginalSddl $recoveryOriginalSddl
     Assert-NormalDirectoryChain -Directory $recoveryStage
+    Assert-PinnedDirectory -Pin $recoveryStagePin
     [void](Get-TreeInventory -Root $recoveryStage)
     Assert-ProtectedTreeAcl -Path $recoveryStage
     [void](Get-ValidatedRecoveryBundle -Directory $recoveryStage -ExpectedRepository $canonicalNew `
         -ExpectedPlan $stagedPlan)
     if ($recoveryInitiallyExisted) { [IO.Directory]::Delete($newRecovery, $false) }
     if ($TestCrashAfterEmptyDestinationRemoval -eq 2) { Stop-Process -Id $PID -Force }
-    Move-Item -LiteralPath $recoveryStage -Destination $newRecovery
+    $recoveryPromotedIdentity = Move-PinnedDirectory -Pin $recoveryStagePin -Destination $newRecovery
     $recoveryStage = $null
     $recoveryPromoted = $true
+    $recoveryPin = Open-PinnedDirectory -Path $newRecovery -ExpectedIdentity $recoveryPromotedIdentity
     Assert-ProtectedTreeAcl -Path $newRecovery
     Write-Journal -State recovery_promoted
     Assert-InjectionAllowed -Point 2
@@ -2350,7 +2671,9 @@ try {
         -ExpectedPlan $stagedPlan)
     $finalIdentity = Get-ResticIdentity -Validated $validated -Repository $canonicalNew
     Assert-ResticIdentityEqual -Expected $sourceIdentity -Actual $finalIdentity
-    [void](Assert-TreeMatchesInventory -Root $canonicalNew -Expected $repositoryInventory -ExcludeRepositoryLocks)
+    [void](Assert-TreeMatchesInventory -Root $canonicalNew -Expected $repositoryInventory -ResticLayout $stageLayout)
+    Assert-PinnedDirectory -Pin $repositoryPin
+    Assert-PinnedDirectory -Pin $recoveryPin
     if ($destinationStorageMode -eq $driveFsMode) {
         Assert-DriveFsProviderTransaction -Directory (Split-Path -Parent $canonicalNew)
     }
@@ -2360,6 +2683,8 @@ try {
     Write-Journal -State committed
     [IO.File]::Delete($journalPath)
     $journalReady = $false
+    Close-PinnedDirectory -Pin $repositoryPin
+    Close-PinnedDirectory -Pin $recoveryPin
     Write-Progress -Stage complete -Message 'Repository relocation completed; the old repository was retained.' -Percent 100 -Cancellable $false
     Write-FinalResult -Ok $true -Changed $true -ErrorMessage $null
     exit 0
@@ -2367,6 +2692,11 @@ try {
 catch {
     $failure = $_.Exception.Message
     $rollbackErrors = [Collections.Generic.List[string]]::new()
+    # Removing a folder needs delete access, which a hold shuts out. Remove-OwnedTree holds each folder again and proves
+    # by its file ID that it is the one this run made before anything in it goes.
+    foreach ($pin in @($repositoryStagePin, $recoveryStagePin, $repositoryPin, $recoveryPin) + @($repairPins)) {
+        Close-PinnedDirectory -Pin $pin
+    }
     if ($journalReady) {
         try {
             if ($null -ne $originalConfigBytes -and (Test-Path -LiteralPath $configPath -PathType Leaf)) {
@@ -2382,7 +2712,8 @@ catch {
         catch { $rollbackErrors.Add("runtime manifest: $($_.Exception.Message)") }
         try {
             if ($repositoryPromoted) {
-                Remove-OwnedTree -Path $canonicalNew -ExpectedParent (Split-Path -Parent $canonicalNew)
+                Remove-OwnedTree -Path $canonicalNew -ExpectedParent (Split-Path -Parent $canonicalNew) `
+                    -ExpectedIdentity $repositoryPromotedIdentity
             }
             if ($destinationInitiallyExisted -and -not (Test-Path -LiteralPath $canonicalNew)) {
                 Restore-EmptyDirectorySecurity -Path $canonicalNew -Sddl $destinationOriginalSddl `
@@ -2392,7 +2723,8 @@ catch {
         catch { $rollbackErrors.Add("new repository: $($_.Exception.Message)") }
         try {
             if ($recoveryPromoted) {
-                Remove-OwnedTree -Path $newRecovery -ExpectedParent (Split-Path -Parent $newRecovery)
+                Remove-OwnedTree -Path $newRecovery -ExpectedParent (Split-Path -Parent $newRecovery) `
+                    -ExpectedIdentity $recoveryPromotedIdentity
             }
             if ($recoveryInitiallyExisted -and -not (Test-Path -LiteralPath $newRecovery)) {
                 Restore-EmptyDirectorySecurity -Path $newRecovery -Sddl $recoveryOriginalSddl `
@@ -2405,9 +2737,13 @@ catch {
             catch { $rollbackErrors.Add("journal cleanup: $($_.Exception.Message)") }
         }
     }
-    foreach ($stage in @($repositoryStage, $recoveryStage)) {
-        if (-not [string]::IsNullOrWhiteSpace($stage) -and (Test-Path -LiteralPath $stage)) {
-            try { Remove-OwnedTree -Path $stage -ExpectedParent (Split-Path -Parent $stage) }
+    foreach ($stage in @(
+        [pscustomobject]@{ Path = $repositoryStage; Pin = $repositoryStagePin },
+        [pscustomobject]@{ Path = $recoveryStage; Pin = $recoveryStagePin })) {
+        if (-not [string]::IsNullOrWhiteSpace($stage.Path) -and (Test-Path -LiteralPath $stage.Path)) {
+            try {
+                Remove-OwnedTree -Path $stage.Path -ExpectedParent (Split-Path -Parent $stage.Path) -ExpectedIdentity $stage.Pin
+            }
             catch { $rollbackErrors.Add("staging cleanup: $($_.Exception.Message)") }
         }
     }
@@ -2430,5 +2766,8 @@ catch {
     exit 1
 }
 finally {
+    foreach ($pin in @($repositoryStagePin, $recoveryStagePin, $repositoryPin, $recoveryPin) + @($repairPins)) {
+        Close-PinnedDirectory -Pin $pin
+    }
     if ($null -ne $lockStream) { Exit-RunLock -Stream $lockStream }
 }

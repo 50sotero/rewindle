@@ -99,6 +99,19 @@ was being prepared` and `restore target must be on a drive that keeps folder per
 that can hold links). The dashboard words all three plainly and refuses the same system folders at the destination step
 for both profiles; the legacy engine's own `restore.py` does neither.
 
+**Moving the repository (Rewindle `Manage-Repository.ps1`).** The stages `.restic-repository-<nonce>.staging` and
+`.restic-recovery-<nonce>.staging` are held open (list access, read and write sharing, no delete access, no delete
+sharing) from their creation until they have their final names, so neither a stage nor any folder above it can be
+renamed or swapped for a junction during the copy, the ACL reset or the checks. A held folder's path within its volume,
+its volume serial and, when Windows gives one, its drive-letter path must equal the checked path. Promotion reopens the
+stage with delete access, requires the same file ID and renames it through that handle without replacing anything; the
+promoted folders stay held until the move is committed. Rollback and recovery hold a folder and prove its file ID before
+emptying it. Only Restic's own files are copied: `config`, 64-hex files in `keys`, `index` and `snapshots`, and 64-hex
+files in `data\<two hex>` that start with those two digits; `locks` is skipped as before. Anything else is left in the
+current repository, refused in a local stage or destination (`The copy of the backup holds something that is not part of
+the backup: <relative path>`) and ignored in a DriveFS folder. The result documents are unchanged. The legacy engine's
+`Manage-Repository.ps1` does neither.
+
 ## 4. Task Scheduler contract
 
 Read with `schtasks.exe /Query /TN "<backup task>" /XML` (as the user, 15 s, 256 K characters) and the

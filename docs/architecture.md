@@ -179,7 +179,7 @@ branded Rewindle release.
 | `Manage-Sources.ps1` | Validates and transactionally adds/removes future backup sources while holding the run lock; a durable undo journal coordinates atomic per-file replacements | Protected configuration, protected journal, and recovery-tools metadata |
 | `Manage-Schedule.ps1` | Applies a reviewed daily or selected-day trigger and supported task settings with fingerprint binding, verification, and rollback | Exact backup task definition only |
 | `Manage-Backup.ps1` | Revalidates the exact active run and protected task, then signals only that run's protected cancellation event | Per-run event signal and bound result file only |
-| `Manage-Repository.ps1` | Copies, manifest-checks, and atomically activates a reviewed local or explicit DriveFS repository destination; resumes or rolls back interrupted relocation | New repository, separate protected-NTFS recovery-tools destination, protected configuration, and journal |
+| `Manage-Repository.ps1` | Copies Restic's own files into held stages, manifest-checks, and atomically activates a reviewed local or explicit DriveFS repository destination; resumes or rolls back interrupted relocation | New repository, separate protected-NTFS recovery-tools destination, protected configuration, and journal |
 | `Manage-Restore.ps1` and `restore.py` | Bind browsing and restore requests to the current plan, generation, repository, and immutable snapshot ID; restore to a non-overlapping new or empty target outside Windows and program folders, held open while an administrator-only folder inside it receives the files | Explicit restore target and protected restore report only |
 | Recovery helpers | Inspect independent recovery paths and perform explicitly approved credential repair, stale-lock cleanup, key rotation, and anomaly acknowledgement | Narrow protected records or Restic credential/lock commands for the selected action |
 | `DiagnosticExporter.cs` | Builds a bounded support ZIP after removing secrets, identities, host names, command lines, and personal paths | User-selected diagnostic ZIP only |
@@ -216,14 +216,16 @@ provider process, fixed FAT32 mount and remote-storage capability, at least
 10 GiB of cache headroom, an atomic provider transaction, and repository
 objects strictly smaller than 4 GiB.
 
-The repository must not overlap a source. Relocation copies into a nonce-bound
-sibling stage and records an exact path/byte/SHA-256 commit-manifest digest in
-the protected journal. It verifies that inventory before and after copy,
-verifies repository ID, snapshot history, and structure, and only then
-same-parent-renames the stage and switches protected metadata atomically. A
-DriveFS destination must be absent, not merely empty, so rollback never depends
-on synthetic FAT32 ACL restoration. The old repository is retained. No
-automatic `forget`, `prune`, or repository deletion occurs.
+The repository must not overlap a source. Relocation copies only Restic's own
+files (`config` and the 64-hex files in `keys`, `index`, `snapshots` and
+`data\<two hex>`; never `locks` or anything else) into a nonce-bound sibling
+stage and records an exact path/byte/SHA-256 commit-manifest digest in the
+protected journal. It verifies that inventory before and after copy, verifies
+repository ID, snapshot history, and structure, and only then renames the stage
+within its parent, through its own handle, and switches protected metadata
+atomically. A DriveFS destination must be absent, not merely empty, so rollback
+never depends on synthetic FAT32 ACL restoration. The old repository is
+retained. No automatic `forget`, `prune`, or repository deletion occurs.
 
 ### Recovery material
 
@@ -416,6 +418,15 @@ independent read before reporting success.
 
 Repository relocation uses the same global byte-range lock and plan binding.
 Local repository and recovery stages retain the protected NTFS ACL policy.
+Every stage is held open, with list access and without delete sharing, from
+its creation until it has its final name, so neither it nor any folder above
+it can be renamed or swapped for a junction while the manager copies into it
+by path or resets its ACL. A new stage must still be owned by Administrators
+once held. Promotion closes the hold, reopens the stage with delete access,
+proves by its file ID that it is the same folder, renames it through that
+handle without replacing anything, and holds the promoted folder again until
+the move is committed. Anything outside Restic's layout is refused in a local
+stage or destination and left alone in a DriveFS folder.
 DriveFS repository stages instead use an exact nonce path, ownership marker,
 and commit-manifest digest because its synthetic FAT32 ACL cannot carry that
 policy; the recovery stage still uses protected NTFS. The manager copies
@@ -534,6 +545,9 @@ section 9, and [`SECURITY.md`](../SECURITY.md).
   Windows, Program Files or ProgramData, hold the target open while Restic
   writes into an administrator-only folder inside it, and never need to modify
   the repository.
+- Repository relocation copies only Restic's own files into stages it holds
+  open from creation to promotion, so a stage cannot be swapped for a junction
+  while files are written into it.
 
 ## Boundaries and non-goals for the alpha
 
