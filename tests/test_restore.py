@@ -1711,6 +1711,27 @@ class RestoreBackendTests(unittest.TestCase):
         self.assertNotIn("  /C/Users/plain.txt", stderr)
         self.assertEqual(["C/Users/plain.txt"], self.restored_files(target))
 
+    def test_items_left_in_the_restore_folder_are_not_also_called_missing(self) -> None:
+        # The chosen items are looked for in the chosen folder after the hand-over. When the hand-over left them in the
+        # restore folder, the restore already ends as incomplete with a message that says where they are, and that
+        # message is the one the report keeps.
+        busy, calls = self.busy_rename(-1, 32)
+        with mock.patch.object(restore, "_rename_into", side_effect=busy), mock.patch.object(
+            restore, "_MOVE_RETRY_DELAYS", (0.0, 0.0)
+        ):
+            result, stderr, payload, target = self.restore_selection("left-behind", ["/C/Users/plain.txt"])
+        self.assertEqual(1, result)
+        self.assertEqual(3, len(calls))
+        self.assertEqual(("partial", False, 0), (payload["result"], payload["verified"], payload["restic_exit_code"]))
+        self.assertIn("another program may have been using them", payload["error"])
+        self.assertNotIn("without restoring every chosen item", payload["error"])
+        self.assertIn("could not be moved into", stderr)
+        self.assertNotIn("Not restored", stderr)
+        folders = [item for item in target.iterdir() if item.is_dir()]
+        self.assertEqual(1, len(folders))
+        self.assertIn(folders[0].name, payload["error"])
+        self.assertEqual(["C/Users/plain.txt"], self.restored_files(folders[0]))
+
     def test_a_restored_item_beyond_the_windows_path_limit_counts_as_restored(self) -> None:
         deep = "/C/Users/" + "/".join(f"a-rather-long-folder-name-{index:02d}" for index in range(9))
         chosen = deep + "/report [final].txt"
