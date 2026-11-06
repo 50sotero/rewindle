@@ -132,6 +132,7 @@ class DashboardCancellationTests(unittest.TestCase):
                 f"/reference:{framework / 'System.Web.Extensions.dll'}",
                 str(DASHBOARD / "EngineProfile.cs"),
                 str(DASHBOARD / "AtomicFile.cs"),
+                str(DASHBOARD / "ElevatedRequestSecurity.cs"),
                 str(DASHBOARD / "SourceConfiguration.cs"),
                 str(DASHBOARD / "Telemetry.cs"),
                 str(harness),

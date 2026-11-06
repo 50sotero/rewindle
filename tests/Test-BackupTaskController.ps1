@@ -14,6 +14,7 @@ function Join-DashboardSources {
     return ($usings -join [Environment]::NewLine) + [Environment]::NewLine + ($bodies -join [Environment]::NewLine)
 }
 $engineProfileSource = Get-Content -LiteralPath (Join-Path $project 'src\dashboard\EngineProfile.cs') -Raw -Encoding UTF8
+$elevatedRequestSecuritySource = Get-Content -LiteralPath (Join-Path $project 'src\dashboard\ElevatedRequestSecurity.cs') -Raw -Encoding UTF8
 $harnessSource = @'
 namespace ResticBackuper.Dashboard
 {
@@ -34,7 +35,7 @@ namespace ResticBackuper.Dashboard
     }
 }
 '@
-Add-Type -TypeDefinition ((Join-DashboardSources @($engineProfileSource, $scheduleSource, $controllerSource)) + [Environment]::NewLine + $harnessSource) `
+Add-Type -TypeDefinition ((Join-DashboardSources @($engineProfileSource, $elevatedRequestSecuritySource, $scheduleSource, $controllerSource)) + [Environment]::NewLine + $harnessSource) `
     -ReferencedAssemblies @('System.dll', 'System.Core.dll', 'System.Xml.dll')
 
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value

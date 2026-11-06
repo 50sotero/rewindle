@@ -148,6 +148,10 @@ ones a home user reads without a glossary.
   backup from starting. Now only Administrators and Windows can open it. An
   older lock file is repaired the next time a backup or a protected change
   runs, and Setup protects it again after it sets the folder's permissions.
+  The dashboard now prepares every request for administrator approval, and
+  checks every answer it gets back, with one shared set of checks. Two older
+  copies had fallen behind the rest: one quoted line breaks loosely, and one
+  accepted a restore answer with weaker permissions than the others allow.
   The GitHub workflows now run only actions pinned to an exact commit, and the
   release workflow publishes a signed record of how each download was built,
   which `gh attestation verify` checks. Releases are still not code-signed.

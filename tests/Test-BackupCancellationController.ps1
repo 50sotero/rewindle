@@ -15,6 +15,7 @@ function Join-DashboardSources {
     return ($usings -join [Environment]::NewLine) + [Environment]::NewLine + ($bodies -join [Environment]::NewLine)
 }
 $engineProfileSource = Get-Content -LiteralPath (Join-Path $project 'src\dashboard\EngineProfile.cs') -Raw -Encoding UTF8
+$elevatedRequestSecuritySource = Get-Content -LiteralPath (Join-Path $project 'src\dashboard\ElevatedRequestSecurity.cs') -Raw -Encoding UTF8
 $harness = @'
 namespace ResticBackuper.Dashboard
 {
@@ -92,7 +93,7 @@ namespace ResticBackuper.Dashboard
     }
 }
 '@
-Add-Type -TypeDefinition ((Join-DashboardSources @($engineProfileSource, $scheduleSource, $controllerSource)) + [Environment]::NewLine + $harness) `
+Add-Type -TypeDefinition ((Join-DashboardSources @($engineProfileSource, $elevatedRequestSecuritySource, $scheduleSource, $controllerSource)) + [Environment]::NewLine + $harness) `
     -ReferencedAssemblies @(
         'System.dll',
         'System.Core.dll',
@@ -298,7 +299,7 @@ foreach ($marker in @(
     'private const string StatusFileName = "status.json"',
     'new UTF8Encoding(false, true)',
     'stream.Length <= 0 || stream.Length > MaximumStatusBytes',
-    'HasProtectedResultAcl(stream.GetAccessControl(), userSid)',
+    'ElevatedRequestSecurity.HasProtectedResultAcl(stream.GetAccessControl(), userSid)',
     'startInfo.Verb = "runas"',
     '"-Action"',
     '"Cancel"',

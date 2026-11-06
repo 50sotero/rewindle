@@ -127,7 +127,7 @@ namespace ResticBackuper.Dashboard
 
                 ProcessStartInfo start = new ProcessStartInfo();
                 start.FileName = python;
-                start.Arguments = JoinArguments(new[]
+                start.Arguments = ElevatedRequestSecurity.BuildArgumentString(new[]
                 {
                     "-E", "-S", "-B", health, "--config", config
                 });
@@ -274,34 +274,6 @@ namespace ResticBackuper.Dashboard
                 checked((int)failed),
                 checked((int)warnings),
                 checks);
-        }
-
-        private static string JoinArguments(IEnumerable<string> arguments)
-        {
-            List<string> quoted = new List<string>();
-            foreach (string argument in arguments) quoted.Add(Quote(argument ?? string.Empty));
-            return string.Join(" ", quoted.ToArray());
-        }
-
-        private static string Quote(string value)
-        {
-            if (value.Length > 0 && value.IndexOfAny(new[] { ' ', '\t', '"' }) < 0) return value;
-            StringBuilder result = new StringBuilder("\"");
-            int slashes = 0;
-            foreach (char item in value)
-            {
-                if (item == '\\') { slashes++; continue; }
-                if (item == '"')
-                {
-                    result.Append('\\', slashes * 2 + 1).Append('"');
-                    slashes = 0;
-                    continue;
-                }
-                if (slashes > 0) { result.Append('\\', slashes); slashes = 0; }
-                result.Append(item);
-            }
-            if (slashes > 0) result.Append('\\', slashes * 2);
-            return result.Append('"').ToString();
         }
 
         private static bool IsChildPath(string candidate, string parent)
@@ -504,7 +476,7 @@ namespace ResticBackuper.Dashboard
                 };
                 ProcessStartInfo start = new ProcessStartInfo();
                 start.FileName = python;
-                start.Arguments = JoinArguments(arguments);
+                start.Arguments = ElevatedRequestSecurity.BuildArgumentString(arguments);
                 start.WorkingDirectory = installRoot;
                 start.UseShellExecute = true;
                 start.Verb = "runas";
@@ -570,34 +542,6 @@ namespace ResticBackuper.Dashboard
             }
         }
 
-        private static string JoinArguments(IEnumerable<string> arguments)
-        {
-            List<string> values = new List<string>();
-            foreach (string value in arguments) values.Add(Quote(value ?? string.Empty));
-            return string.Join(" ", values.ToArray());
-        }
-
-        private static string Quote(string value)
-        {
-            if (value.Length > 0 && value.IndexOfAny(new[] { ' ', '\t', '"' }) < 0) return value;
-            StringBuilder result = new StringBuilder("\"");
-            int slashes = 0;
-            foreach (char item in value)
-            {
-                if (item == '\\') { slashes++; continue; }
-                if (item == '"')
-                {
-                    result.Append('\\', slashes * 2 + 1).Append('"');
-                    slashes = 0;
-                    continue;
-                }
-                if (slashes > 0) { result.Append('\\', slashes); slashes = 0; }
-                result.Append(item);
-            }
-            if (slashes > 0) result.Append('\\', slashes * 2);
-            return result.Append('"').ToString();
-        }
-
         private static string Sanitize(string message)
         {
             string value = string.IsNullOrWhiteSpace(message)
@@ -660,7 +604,7 @@ namespace ResticBackuper.Dashboard
                 string hash = FileSha256(config);
                 ProcessStartInfo start = new ProcessStartInfo();
                 start.FileName = python;
-                start.Arguments = JoinArguments(new[]
+                start.Arguments = ElevatedRequestSecurity.BuildArgumentString(new[]
                 {
                     "-E", "-S", "-B", script,
                     "--config", config,
@@ -719,34 +663,6 @@ namespace ResticBackuper.Dashboard
                 foreach (byte value in digest) builder.Append(value.ToString("x2", CultureInfo.InvariantCulture));
                 return builder.ToString();
             }
-        }
-
-        private static string JoinArguments(IEnumerable<string> arguments)
-        {
-            List<string> values = new List<string>();
-            foreach (string value in arguments) values.Add(Quote(value ?? string.Empty));
-            return string.Join(" ", values.ToArray());
-        }
-
-        private static string Quote(string value)
-        {
-            if (value.Length > 0 && value.IndexOfAny(new[] { ' ', '\t', '"' }) < 0) return value;
-            StringBuilder result = new StringBuilder("\"");
-            int slashes = 0;
-            foreach (char item in value)
-            {
-                if (item == '\\') { slashes++; continue; }
-                if (item == '"')
-                {
-                    result.Append('\\', slashes * 2 + 1).Append('"');
-                    slashes = 0;
-                    continue;
-                }
-                if (slashes > 0) { result.Append('\\', slashes); slashes = 0; }
-                result.Append(item);
-            }
-            if (slashes > 0) result.Append('\\', slashes * 2);
-            return result.Append('"').ToString();
         }
 
         private static string Sanitize(string message)
@@ -835,7 +751,7 @@ namespace ResticBackuper.Dashboard
                 string evidenceHash = FileSha256(evidencePath);
                 ProcessStartInfo start = new ProcessStartInfo();
                 start.FileName = python;
-                start.Arguments = JoinArguments(new[]
+                start.Arguments = ElevatedRequestSecurity.BuildArgumentString(new[]
                 {
                     "-E", "-S", "-B", script,
                     "--config", config,
@@ -1033,35 +949,6 @@ namespace ResticBackuper.Dashboard
             }
         }
 
-        private static string JoinArguments(IEnumerable<string> arguments)
-        {
-            List<string> values = new List<string>();
-            foreach (string value in arguments) values.Add(Quote(value ?? string.Empty));
-            return string.Join(" ", values.ToArray());
-        }
-
-        private static string Quote(string value)
-        {
-            if (value.Length > 0 && value.IndexOfAny(new[] { ' ', '\t', '"' }) < 0)
-                return value;
-            StringBuilder result = new StringBuilder("\"");
-            int slashes = 0;
-            foreach (char item in value)
-            {
-                if (item == '\\') { slashes++; continue; }
-                if (item == '"')
-                {
-                    result.Append('\\', slashes * 2 + 1).Append('"');
-                    slashes = 0;
-                    continue;
-                }
-                if (slashes > 0) { result.Append('\\', slashes); slashes = 0; }
-                result.Append(item);
-            }
-            if (slashes > 0) result.Append('\\', slashes * 2);
-            return result.Append('"').ToString();
-        }
-
         private static string Sanitize(string message)
         {
             string value = string.IsNullOrWhiteSpace(message)
@@ -1124,7 +1011,7 @@ namespace ResticBackuper.Dashboard
                 string hash = FileSha256(config);
                 ProcessStartInfo start = new ProcessStartInfo();
                 start.FileName = python;
-                start.Arguments = JoinArguments(new[]
+                start.Arguments = ElevatedRequestSecurity.BuildArgumentString(new[]
                 {
                     "-E", "-S", "-B", script,
                     "--config", config,
@@ -1195,34 +1082,6 @@ namespace ResticBackuper.Dashboard
                 foreach (byte value in digest) builder.Append(value.ToString("x2", CultureInfo.InvariantCulture));
                 return builder.ToString();
             }
-        }
-
-        private static string JoinArguments(IEnumerable<string> arguments)
-        {
-            List<string> values = new List<string>();
-            foreach (string value in arguments) values.Add(Quote(value ?? string.Empty));
-            return string.Join(" ", values.ToArray());
-        }
-
-        private static string Quote(string value)
-        {
-            if (value.Length > 0 && value.IndexOfAny(new[] { ' ', '\t', '"' }) < 0) return value;
-            StringBuilder result = new StringBuilder("\"");
-            int slashes = 0;
-            foreach (char item in value)
-            {
-                if (item == '\\') { slashes++; continue; }
-                if (item == '"')
-                {
-                    result.Append('\\', slashes * 2 + 1).Append('"');
-                    slashes = 0;
-                    continue;
-                }
-                if (slashes > 0) { result.Append('\\', slashes); slashes = 0; }
-                result.Append(item);
-            }
-            if (slashes > 0) result.Append('\\', slashes * 2);
-            return result.Append('"').ToString();
         }
 
         private static string Sanitize(string message)

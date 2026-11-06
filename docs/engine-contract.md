@@ -59,7 +59,9 @@ DACL, full control for SYSTEM and Administrators and read/execute only for the r
 dashboard rejects a result unless the state root is named `<P>`, the result folder and file names match, no component is
 a reparse point, those ACLs hold on the state root, the result folder and the open result handle, the size is within its
 limit, and every binding field below equals the request. A digest is SHA-256 over UTF-8 (no BOM) of the listed fields
-joined by LF.
+joined by LF. The dashboard builds every elevated command line, makes every nonce and checks these ACLs (also on the
+restore and relocation progress files) in one place, `src/dashboard/ElevatedRequestSecurity.cs`, so every manager and
+helper is held to the same rules.
 
 | Action | Manager arguments | Digest fields (after the domain and SID) | Result folder, fields the dashboard binds | Rewindle | Legacy |
 | --- | --- | --- | --- | --- | --- |

@@ -177,6 +177,7 @@ class DashboardEtaFallbackTests(unittest.TestCase):
                 f"/reference:{framework / 'System.Web.Extensions.dll'}",
                 str(TELEMETRY_SOURCE.parent / "EngineProfile.cs"),
                 str(TELEMETRY_SOURCE.parent / "AtomicFile.cs"),
+                str(TELEMETRY_SOURCE.parent / "ElevatedRequestSecurity.cs"),
                 str(TELEMETRY_SOURCE.parent / "SourceConfiguration.cs"),
                 str(TELEMETRY_SOURCE),
                 str(harness),

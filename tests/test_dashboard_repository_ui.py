@@ -124,10 +124,13 @@ class DashboardRepositoryUiTests(unittest.TestCase):
         ):
             self.assertIn(argument, self.manager)
         self.assertIn('GetRecoveryStatus()', self.manager)
-        self.assertIn('!HasProtectedResultAcl(journalPath, userSid)', self.manager)
-        self.assertIn('!FixedEquals(ReadString(document, "action"), "recover")', self.manager)
+        self.assertIn('!ElevatedRequestSecurity.HasProtectedResultAcl(journalPath, userSid, false)', self.manager)
         self.assertIn(
-            '!FixedEquals(ReadString(document, "expected_journal_sha256"), journalSha256)',
+            '!ElevatedRequestSecurity.FixedEquals(ReadString(document, "action"), "recover")',
+            self.manager,
+        )
+        self.assertIn(
+            '!ElevatedRequestSecurity.FixedEquals(ReadString(document, "expected_journal_sha256"), journalSha256)',
             self.manager,
         )
 
@@ -239,7 +242,7 @@ class DashboardRepositoryUiTests(unittest.TestCase):
         ):
             self.assertIn(f'"{field}"', self.manager)
         self.assertIn('string progressPath = resultPath + ".progress.json";', self.manager)
-        self.assertIn('!HasProtectedResultAcl(progressPath, userSid)', self.manager)
+        self.assertIn('!ElevatedRequestSecurity.HasProtectedResultAcl(progressPath, userSid, false)', self.manager)
         for field in (
             "schema_version",
             "stage",

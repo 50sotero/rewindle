@@ -206,7 +206,7 @@ namespace ResticBackuper.Dashboard
                     -1);
             }
 
-            string requestNonce = CreateNonce();
+            string requestNonce = ElevatedRequestSecurity.CreateNonce();
             string requestDigest = ComputeRequestDigest(
                 userSid,
                 expectedRunId,
@@ -251,7 +251,7 @@ namespace ResticBackuper.Dashboard
 
             ProcessStartInfo startInfo = new ProcessStartInfo();
             startInfo.FileName = powerShell;
-            startInfo.Arguments = BuildArgumentString(arguments);
+            startInfo.Arguments = ElevatedRequestSecurity.BuildArgumentString(arguments);
             startInfo.WorkingDirectory = installRoot;
             startInfo.UseShellExecute = true;
             startInfo.Verb = "runas";
@@ -473,7 +473,7 @@ namespace ResticBackuper.Dashboard
                         "The protected backup cancellation channel metadata is invalid.");
                 }
                 string cancelEventName = EngineProfile.Current.CancelEventName(cancelChannelId);
-                if (!FixedEquals(
+                if (!ElevatedRequestSecurity.FixedEquals(
                     ComputeSha256Text(cancelEventName),
                     cancelChannelFingerprint))
                 {
@@ -505,7 +505,7 @@ namespace ResticBackuper.Dashboard
                     throw new InvalidDataException(
                         "The protected terminal status has invalid completion fields.");
                 }
-                if (!FixedEquals(runId, expectedRunId) || terminal)
+                if (!ElevatedRequestSecurity.FixedEquals(runId, expectedRunId) || terminal)
                 {
                     alreadyFinished = true;
                     return true;
@@ -611,8 +611,8 @@ namespace ResticBackuper.Dashboard
                     error = "The protected backup-control result path is unsafe.";
                     return false;
                 }
-                if (!HasProtectedResultAcl(stateRoot, userSid, true) ||
-                    !HasProtectedResultAcl(resultRoot, userSid, true))
+                if (!ElevatedRequestSecurity.HasProtectedResultAcl(stateRoot, userSid, true) ||
+                    !ElevatedRequestSecurity.HasProtectedResultAcl(resultRoot, userSid, true))
                 {
                     error = "The protected backup-control result directory ACL is not trustworthy.";
                     return false;
@@ -626,7 +626,7 @@ namespace ResticBackuper.Dashboard
                     4096,
                     FileOptions.SequentialScan))
                 {
-                    if (!HasProtectedResultAcl(stream.GetAccessControl(), userSid))
+                    if (!ElevatedRequestSecurity.HasProtectedResultAcl(stream.GetAccessControl(), userSid))
                     {
                         error = "The protected backup-control result file ACL is not trustworthy.";
                         return false;
@@ -684,11 +684,11 @@ namespace ResticBackuper.Dashboard
                 IDictionary<string, object> document =
                     new JavaScriptSerializer().DeserializeObject(json) as IDictionary<string, object>;
                 if (document == null || ReadStrictInteger(document, "schema_version") != 1 ||
-                    !FixedEquals(ReadString(document, "request_nonce"), requestNonce) ||
-                    !FixedEquals(ReadString(document, "request_digest"), requestDigest) ||
-                    !FixedEquals(ReadString(document, "request_user_sid"), userSid) ||
-                    !FixedEquals(ReadString(document, "action"), "cancel") ||
-                    !FixedEquals(ReadString(document, "run_id"), runId))
+                    !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_nonce"), requestNonce) ||
+                    !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_digest"), requestDigest) ||
+                    !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_user_sid"), userSid) ||
+                    !ElevatedRequestSecurity.FixedEquals(ReadString(document, "action"), "cancel") ||
+                    !ElevatedRequestSecurity.FixedEquals(ReadString(document, "run_id"), runId))
                 {
                     throw new InvalidDataException(
                         "The protected backup-control result did not match this request.");
@@ -774,95 +774,6 @@ namespace ResticBackuper.Dashboard
                 }
             }
             return true;
-        }
-
-        private static bool HasProtectedResultAcl(
-            string path,
-            string userSid,
-            bool directory)
-        {
-            try
-            {
-                FileSystemSecurity security = directory
-                    ? (FileSystemSecurity)new DirectoryInfo(path).GetAccessControl(
-                        AccessControlSections.Owner | AccessControlSections.Access)
-                    : (FileSystemSecurity)new FileInfo(path).GetAccessControl(
-                        AccessControlSections.Owner | AccessControlSections.Access);
-                return HasProtectedResultAcl(security, userSid);
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        private static bool HasProtectedResultAcl(
-            FileSystemSecurity security,
-            string userSid)
-        {
-            try
-            {
-                SecurityIdentifier owner = security.GetOwner(
-                    typeof(SecurityIdentifier)) as SecurityIdentifier;
-                if (owner == null || owner.Value != "S-1-5-32-544" ||
-                    !security.AreAccessRulesProtected)
-                {
-                    return false;
-                }
-                HashSet<string> required = new HashSet<string>(
-                    new[] { "S-1-5-18", "S-1-5-32-544", userSid },
-                    StringComparer.OrdinalIgnoreCase);
-                HashSet<string> allowed = new HashSet<string>(
-                    required,
-                    StringComparer.OrdinalIgnoreCase);
-                allowed.Add("S-1-3-4");
-                HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                FileSystemRights dangerous = FileSystemRights.WriteData |
-                    FileSystemRights.CreateFiles |
-                    FileSystemRights.AppendData |
-                    FileSystemRights.CreateDirectories |
-                    FileSystemRights.WriteAttributes |
-                    FileSystemRights.WriteExtendedAttributes |
-                    FileSystemRights.Delete |
-                    FileSystemRights.DeleteSubdirectoriesAndFiles |
-                    FileSystemRights.ChangePermissions |
-                    FileSystemRights.TakeOwnership;
-                AuthorizationRuleCollection rules = security.GetAccessRules(
-                    true,
-                    true,
-                    typeof(SecurityIdentifier));
-                foreach (FileSystemAccessRule rule in rules)
-                {
-                    SecurityIdentifier sid = rule.IdentityReference as SecurityIdentifier;
-                    string value = sid == null ? null : sid.Value;
-                    if (value == null || rule.IsInherited ||
-                        rule.AccessControlType != AccessControlType.Allow ||
-                        !allowed.Contains(value))
-                    {
-                        return false;
-                    }
-                    if (value == "S-1-5-18" || value == "S-1-5-32-544")
-                    {
-                        if ((rule.FileSystemRights & FileSystemRights.FullControl) !=
-                            FileSystemRights.FullControl)
-                        {
-                            return false;
-                        }
-                    }
-                    else if ((rule.FileSystemRights & dangerous) != 0 ||
-                        (rule.FileSystemRights & FileSystemRights.ReadAndExecute) !=
-                            FileSystemRights.ReadAndExecute)
-                    {
-                        return false;
-                    }
-                    seen.Add(value);
-                }
-                return required.IsSubsetOf(seen);
-            }
-            catch
-            {
-                return false;
-            }
         }
 
         private static int ReadStrictInteger(
@@ -967,21 +878,6 @@ namespace ResticBackuper.Dashboard
             return (string)value;
         }
 
-        private static string CreateNonce()
-        {
-            byte[] bytes = new byte[32];
-            using (RandomNumberGenerator generator = RandomNumberGenerator.Create())
-            {
-                generator.GetBytes(bytes);
-            }
-            StringBuilder value = new StringBuilder(bytes.Length * 2);
-            foreach (byte item in bytes)
-            {
-                value.Append(item.ToString("x2", CultureInfo.InvariantCulture));
-            }
-            return value.ToString();
-        }
-
         private static bool IsLowerHexDigest(string value)
         {
             if (string.IsNullOrEmpty(value) || value.Length != 64)
@@ -1012,71 +908,6 @@ namespace ResticBackuper.Dashboard
                 }
                 return digest.ToString();
             }
-        }
-
-        private static bool FixedEquals(string left, string right)
-        {
-            if (left == null || right == null || left.Length != right.Length)
-            {
-                return false;
-            }
-            int difference = 0;
-            for (int index = 0; index < left.Length; index++)
-            {
-                difference |= left[index] ^ right[index];
-            }
-            return difference == 0;
-        }
-
-        private static string BuildArgumentString(IEnumerable<string> arguments)
-        {
-            StringBuilder result = new StringBuilder();
-            foreach (string argument in arguments)
-            {
-                if (result.Length > 0)
-                {
-                    result.Append(' ');
-                }
-                result.Append(QuoteWindowsArgument(argument));
-            }
-            return result.ToString();
-        }
-
-        private static string QuoteWindowsArgument(string value)
-        {
-            if (value == null)
-            {
-                throw new ArgumentNullException("value");
-            }
-            if (value.Length > 0 &&
-                value.IndexOfAny(new[] { ' ', '\t', '\n', '\v', '"' }) < 0)
-            {
-                return value;
-            }
-            StringBuilder result = new StringBuilder();
-            result.Append('"');
-            int backslashes = 0;
-            foreach (char character in value)
-            {
-                if (character == '\\')
-                {
-                    backslashes++;
-                    continue;
-                }
-                if (character == '"')
-                {
-                    result.Append('\\', backslashes * 2 + 1);
-                    result.Append('"');
-                    backslashes = 0;
-                    continue;
-                }
-                result.Append('\\', backslashes);
-                backslashes = 0;
-                result.Append(character);
-            }
-            result.Append('\\', backslashes * 2);
-            result.Append('"');
-            return result.ToString();
         }
 
         internal sealed class ActiveBackupStatus

@@ -15,6 +15,7 @@ function Join-DashboardSources {
     return ($usings -join [Environment]::NewLine) + [Environment]::NewLine + ($bodies -join [Environment]::NewLine)
 }
 $engineProfileSource = Get-Content -LiteralPath (Join-Path $project 'src\dashboard\EngineProfile.cs') -Raw -Encoding UTF8
+$elevatedRequestSecuritySource = Get-Content -LiteralPath (Join-Path $project 'src\dashboard\ElevatedRequestSecurity.cs') -Raw -Encoding UTF8
 $harness = @'
 namespace ResticBackuper.Dashboard
 {
@@ -70,7 +71,7 @@ namespace ResticBackuper.Dashboard
     }
 }
 '@
-Add-Type -TypeDefinition ((Join-DashboardSources @($engineProfileSource, $scheduleSource, $launcherSource)) + [Environment]::NewLine + $harness) `
+Add-Type -TypeDefinition ((Join-DashboardSources @($engineProfileSource, $elevatedRequestSecuritySource, $scheduleSource, $launcherSource)) + [Environment]::NewLine + $harness) `
     -ReferencedAssemblies @(
         'System.dll',
         'System.Core.dll',
