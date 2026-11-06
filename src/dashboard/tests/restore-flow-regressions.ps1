@@ -490,7 +490,10 @@ try {
             $systemMessage = Get-RestoreDestinationMessage $config $systemTarget
             Assert-True (-not (Test-RestoreDestination $config $systemTarget) -and $systemMessage -match 'belongs to Windows or to installed programs') ("a destination inside $systemFolder was not refused in plain words: " + $systemMessage)
         }
-        Assert-True (-not (Test-RestoreDestination $config ([string](Join-Path $engineFixtureRoot 'programdata')))) 'a system folder in other letter case was accepted'
+        # Another letter case, in a new folder that no other guard refuses (the fixture's ProgramData also holds the state folders).
+        $caseTarget = [string](Join-Path $engineFixtureRoot 'PROGRAMDATA\New')
+        $caseMessage = Get-RestoreDestinationMessage $config $caseTarget
+        Assert-True (-not (Test-RestoreDestination $config $caseTarget) -and $caseMessage -match 'belongs to Windows or to installed programs') ('a system folder in other letter case was not refused in plain words: ' + $caseMessage)
     }
     else {
         $skipped.Add('SKIPPED: the temporary folder is not an ordinary local folder on this computer (overlap guards)')
