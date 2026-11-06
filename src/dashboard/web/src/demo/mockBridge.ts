@@ -9,6 +9,7 @@
 import type { CommandName, DashboardState, NativeCommand, NativeMessage, NativeWebView } from '../native-types';
 import { createSampleRunDetails, createSampleState, formatBytes, formatDuration } from './demoState';
 import { createRestoreDemo } from './restoreDemo';
+import { applyAlertsScenario, setSampleAlerts } from './alertsDemo';
 
 const READ_ONLY = 'Sample data is read-only.';
 // The desktop host re-sends state about once a second. The app treats 15 seconds of silence as a lost
@@ -28,6 +29,7 @@ const prefers = (query: string) => typeof window.matchMedia === 'function' && wi
 
 export function installSampleBridge(): void {
   let state: DashboardState = createSampleState();
+  applyAlertsScenario(state);
   const idleStatus = JSON.stringify(state.status);
   const listeners = new Set<Listener>();
   let previewStartedAt = 0;
@@ -101,6 +103,8 @@ export function installSampleBridge(): void {
         state.motion = motion as DashboardState['motion'];
         return null;
       }
+      case 'setAlerts':
+        return setSampleAlerts(state, payload);
       case 'selectRun': {
         const run = state.history.find(item => item.id === String(payload?.runId ?? ''));
         if (!run) return 'The requested backup run is unavailable.';

@@ -42,8 +42,34 @@ export function heroConcern(state: DashboardState): HeroConcern | null {
   if (state.actions.reviewChanges?.visible && freshness.state !== 'Healthy') {
     return { tone: 'warning', text: 'Your last backup also found far more changes than usual. Look them over, then choose Confirm these changes.' };
   }
-  return null;
+  return alertConcern(state);
 }
+
+// Missed-run explanations the page already says elsewhere: the hero's own overdue words ('unknown'), its failed run with its button
+// ('ranAndFailed'), the drive concern above ('driveMissing') and the repair banner ('repairPending').
+const SAID_ELSEWHERE: ReadonlySet<string> = new Set(['unknown', 'ranAndFailed', 'driveMissing', 'repairPending']);
+
+/**
+ * What the backup alerts add under the hero: how many backups in a row didn't finish while that count has turned the mark red, or
+ * why the overdue backup didn't happen, with its next step when that is not the hero's own Back up now (the host leaves it empty
+ * then). Paused and the clock are said by the host's own title. Times are 24-hour; the page puts them in the viewer's clock.
+ */
+export function alertConcern(state: DashboardState): HeroConcern | null {
+  const alerts = state.alerts;
+  if (!alerts) return null;
+  if (alerts.level === 'failing' && alerts.failedRuns > 0) {
+    const count = `The last ${alerts.failedRuns} backups didn’t finish.`;
+    return { tone: 'danger', text: heroOffersRunDetails(state)
+      ? `${count} Choose See what happened to find out why, then Back up now to try again.`
+      : `${count} Open Activity and choose the latest failed backup to see why, then choose Back up now to try again.` };
+  }
+  const missed = alerts.missedRun;
+  if (!missed || state.freshness.state !== 'Overdue' || SAID_ELSEWHERE.has(missed.kind)) return null;
+  return { tone: missed.tone === 'danger' ? 'danger' : 'warning', text: missed.nextStep ? `${missed.text} ${missed.nextStep}` : missed.text };
+}
+
+/** When Windows last started the backup, for a quiet line on the schedule card; null when that is unknown or it never ran. */
+export const lastStartedAt = (state: Pick<DashboardState, 'alerts'>): string | null => state.alerts?.lastRun?.at || null;
 
 /**
  * One tone for the whole hero. The host overrides the title for an overdue or paused schedule, a repair, a running move of the backup

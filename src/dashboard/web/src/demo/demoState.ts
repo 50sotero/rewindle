@@ -117,6 +117,8 @@ export function createSampleState(now = Date.now()): DashboardState {
       title: 'Healthy', detail: `Last verified ${formatWhen(new Date(latest.started))}. Next scheduled ${formatWhen(next)}.`,
       state: 'Healthy', verifiedAt: new Date(Date.parse(latest.started) + latest.durationSeconds * 1000).toISOString(),
     },
+    // The sample's backups are on time, so nothing is alerted; `?alerts=` (alertsDemo.ts) shows the other states.
+    alerts: { notify: true, level: 'none', reason: '', failedRuns: 0, failingAfter: 3, lastRun: { at: latest.started, ok: true, code: 'code 0' }, missedRun: null },
     offsite: {
       title: 'No off-site copy is set up', detail: 'That is optional. Your backup on this computer works without one.',
       evidence: '', kind: 'NotConfigured', checkedAt: '', providerConfirmed: false, restoreVerified: false,

@@ -78,6 +78,14 @@ class ShellTests(unittest.TestCase):
             self.assertIn(f"send('setZoom', {{ zoom: '{zoom}' }})", settings)
         self.assertIn("state.demo && <Action", settings)
         self.assertIn("Closing this window never stops a running backup.", settings)
+        # Backup alerts sit under Backup plan, in a component of their own that only an alerts-aware host gets.
+        self.assertIn("{state.alerts && <AlertsSetting alerts={state.alerts} send={send} />}", settings)
+        alerts = function_source(self.app, "AlertsSetting")
+        self.assertIn("Backup alerts", alerts)
+        self.assertIn("send('setAlerts', { notify: choice.value })", alerts)
+        self.assertIn("once for each problem", alerts)
+        self.assertIn("The mark stays when notifications are off.", alerts)
+        self.assertIn('aria-label="Backup alert notifications"', alerts)
 
     def test_about_lists_the_keyboard(self) -> None:
         about = function_source(self.app, "AboutSection")
