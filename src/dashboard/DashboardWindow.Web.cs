@@ -1603,6 +1603,7 @@ namespace ResticBackuper.Dashboard
                 { "filesDisplay", run.FilesDisplay },
                 { "processedDisplay", run.ProcessedBytesDisplay },
                 { "storedDisplay", run.StoredBytesDisplay },
+                { "changesDisplay", details.ChangesDisplay ?? string.Empty },
                 { "phase", details.Phase },
                 { "failureCode", details.FailureCode },
                 { "exitCode", details.ExitCode },
@@ -1810,6 +1811,7 @@ namespace ResticBackuper.Dashboard
             state["runDetails"] = BuildWebRunDetailsState();
             state["schedule"] = BuildWebScheduleState();
             state["repository"] = BuildWebRepositoryState();
+            state["backupRange"] = BuildWebBackupRangeState(snapshot);
             state["freshness"] = BuildWebFreshnessState(snapshot);
             state["alerts"] = BuildWebAlertsState();
             state["offsite"] = BuildWebOffsiteState(snapshot);
@@ -2122,6 +2124,11 @@ namespace ResticBackuper.Dashboard
                 item["storedBytes"] = run.StoredBytes;
                 item["storedDisplay"] = run.StoredBytesDisplay;
                 item["snapshot"] = run.SnapshotShort ?? string.Empty;
+                // "312 new, 41 changed, 12,040 unchanged": only when the run has all three counts, never a stand-in.
+                if (run.HasChangeCounts)
+                {
+                    item["changesDisplay"] = run.ChangesDisplay;
+                }
                 result.Add(item);
             }
             return result;
@@ -2195,6 +2202,33 @@ namespace ResticBackuper.Dashboard
             // How full the backup location is and when it fills (DashboardWindow.BackupSpace.cs).
             repository["space"] = BuildWebSpaceState();
             return repository;
+        }
+
+        // How far back the backups go ("412 backups, oldest 3 Mar 2025" on Protection and Restore), or null when that is not known
+        // for the plan and backup location in use. Display only. Only a data error hides it: the count comes from the last verified
+        // backup or the Restore list, not from status.json, so a status that cannot be read just now says nothing against it.
+        private Dictionary<string, object> BuildWebBackupRangeState(TelemetrySnapshot snapshot)
+        {
+            SourceConfiguration configuration = currentSourceConfiguration;
+            if (snapshot == null || !string.IsNullOrEmpty(webTelemetryError) || configuration == null)
+            {
+                return null;
+            }
+            BackupRangeView range = TelemetryReader.ChooseBackupRange(
+                snapshot.EngineBackupRange,
+                snapshot.ListedBackupRange,
+                configuration.PlanId,
+                configuration.RepositoryPath);
+            if (range == null)
+            {
+                return null;
+            }
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["count"] = range.Count;
+            result["oldestAt"] = range.OldestUtc.ToString("o", CultureInfo.InvariantCulture);
+            result["countedAt"] = range.CountedUtc.ToString("o", CultureInfo.InvariantCulture);
+            result["source"] = range.Source;
+            return result;
         }
 
         private Dictionary<string, object> BuildWebFreshnessState(TelemetrySnapshot snapshot)

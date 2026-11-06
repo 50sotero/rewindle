@@ -70,6 +70,18 @@ namespace ResticBackuper.Dashboard
         {
             return count < 0 ? "\u2014" : count.ToString("N0", CultureInfo.CurrentCulture);
         }
+
+        // What a backup found compared with the previous backup of the same folders ("312 new, 41 changed, 12,040 unchanged"):
+        // always all three, in that order, or nothing when any of them is not known.
+        public static string FormatChanges(long filesNew, long filesChanged, long filesUnmodified)
+        {
+            if (filesNew < 0 || filesChanged < 0 || filesUnmodified < 0)
+            {
+                return string.Empty;
+            }
+            return FormatCount(filesNew) + " new, " + FormatCount(filesChanged) + " changed, "
+                + FormatCount(filesUnmodified) + " unchanged";
+        }
     }
 
     public sealed class RunMetricView
@@ -92,6 +104,31 @@ namespace ResticBackuper.Dashboard
         // When the run finished (UTC), for the backup drive forecast (BackupSpace.cs), which reads only verified backups and needs
         // their finish times. Nothing new is kept in run-history.json for them.
         public DateTime FinishedUtc { get; set; }
+
+        // What the backup step found compared with the previous backup of the same folders: new, changed and unchanged
+        // files. All three are known, or all three are -1 (a check-only run, a run that stopped before it read the files, a
+        // run recorded before these were kept).
+        public long FilesNew { get; set; }
+        public long FilesChanged { get; set; }
+        public long FilesUnmodified { get; set; }
+
+        public RunMetricView()
+        {
+            FilesNew = -1;
+            FilesChanged = -1;
+            FilesUnmodified = -1;
+        }
+
+        public bool HasChangeCounts
+        {
+            get { return FilesNew >= 0 && FilesChanged >= 0 && FilesUnmodified >= 0; }
+        }
+
+        // "312 new, 41 changed, 12,040 unchanged", or empty when the counts are not known.
+        public string ChangesDisplay
+        {
+            get { return TelemetryFormat.FormatChanges(FilesNew, FilesChanged, FilesUnmodified); }
+        }
 
         // The year appears once a run is from an earlier year, so a history that spans years stays
         // unambiguous without lengthening every recent date.
@@ -205,6 +242,11 @@ namespace ResticBackuper.Dashboard
         // the dashboard can explain the visible window without implying that a
         // small history is incomplete.
         public bool HistoryTruncated { get; set; }
+        // How far back the backups go, as the backup service counted them during the last verified backup, and as this
+        // dashboard's Restore list last read them (each null when not known). TelemetryReader.ChooseBackupRange picks the one
+        // that belongs to the plan and backup location in use.
+        public BackupRangeView EngineBackupRange { get; set; }
+        public BackupRangeView ListedBackupRange { get; set; }
 
         public TelemetrySnapshot()
         {
@@ -224,6 +266,40 @@ namespace ResticBackuper.Dashboard
             History = new List<RunMetricView>();
             HistoryTruncated = false;
         }
+    }
+
+    // How many backups the backup location holds, and the oldest and newest, as one source counted them: "backup" (the backup
+    // service, during the last verified backup) or "restore" (this dashboard, when the Restore list was last read). Bound to the
+    // plan and backup location it was counted for. Display only: nothing is allowed, refused, kept or deleted because of it, and
+    // a per-user copy that someone edited can only change what that same person is told about their own backups.
+    public sealed class BackupRangeView
+    {
+        internal BackupRangeView(
+            string source,
+            string planId,
+            string repositoryPath,
+            long count,
+            DateTime oldestUtc,
+            DateTime newestUtc,
+            DateTime countedUtc)
+        {
+            Source = source;
+            PlanId = planId;
+            RepositoryPath = repositoryPath;
+            Count = count;
+            OldestUtc = DateTime.SpecifyKind(oldestUtc, DateTimeKind.Utc);
+            NewestUtc = DateTime.SpecifyKind(newestUtc, DateTimeKind.Utc);
+            CountedUtc = DateTime.SpecifyKind(countedUtc, DateTimeKind.Utc);
+        }
+
+        public string Source { get; private set; }
+        public string PlanId { get; private set; }
+        public string RepositoryPath { get; private set; }
+        public long Count { get; private set; }
+        // DateTime.MinValue when Count is 0.
+        public DateTime OldestUtc { get; private set; }
+        public DateTime NewestUtc { get; private set; }
+        public DateTime CountedUtc { get; private set; }
     }
 
     public enum OffsiteStatusKind
@@ -323,6 +399,10 @@ namespace ResticBackuper.Dashboard
         private const int MaximumHistoryLoadAttempts = 6;
         private const string LegacyEvidenceRetiredDetail =
             "An old off-site status record was found. It is retired and no longer counts as proof, so Rewindle needs a new check of the Google Drive copy.";
+        // How far back the backups go (BackupRangeView): the most backups a count may name, and the largest backup-range.json read.
+        private const long MaximumBackupRangeCount = 1000000;
+        private const int MaximumBackupRangeJsonLength = 64 * 1024;
+        private const string EngineBackupRangeRule = "restore_browse";
 
         private readonly string stateDirectory;
         private readonly string statusPath;
@@ -335,8 +415,15 @@ namespace ResticBackuper.Dashboard
         private readonly bool allowPersistence;
         private readonly string dashboardDirectory;
         private readonly string historyPath;
+        private readonly string backupRangePath;
         private readonly JavaScriptSerializer serializer;
         private readonly object syncRoot = new object();
+        // How far back the backups go, as this dashboard's Restore list last read them (RecordListedBackupRange), and whether that
+        // still has to be written to backup-range.json. The Restore list records it on the window's thread, which must never wait
+        // for a refresh, so it has its own lock and the file is written by the next Load (off the window's thread).
+        private readonly object listedBackupRangeGate = new object();
+        private BackupRangeView listedBackupRange;
+        private bool listedBackupRangeWriteDue;
 
         private bool persistenceReady;
         private bool localCacheLoaded;
@@ -407,6 +494,9 @@ namespace ResticBackuper.Dashboard
             this.historyPath = string.IsNullOrEmpty(this.dashboardDirectory)
                 ? string.Empty
                 : Path.Combine(this.dashboardDirectory, "run-history.json");
+            this.backupRangePath = string.IsNullOrEmpty(this.dashboardDirectory)
+                ? string.Empty
+                : Path.Combine(this.dashboardDirectory, "backup-range.json");
 
             this.serializer = new JavaScriptSerializer();
             this.serializer.MaxJsonLength = MaximumJsonLength;
@@ -468,12 +558,27 @@ namespace ResticBackuper.Dashboard
                 bool backupsBytesEstimated;
                 snapshot.BackupsBytes = ReadBackupsBytes(lastSuccessRead.Document, out backupsBytesEstimated);
                 snapshot.BackupsBytesEstimated = backupsBytesEstimated;
+                snapshot.EngineBackupRange = TryReadEngineBackupRange(lastSuccessRead.Document);
                 snapshot.History = BuildHistoryViews();
                 snapshot.HistoryTruncated = historyTruncated;
 
                 if (historyChanged || historyWriteDeferred)
                 {
                     TryPersistHistory();
+                }
+
+                BackupRangeView listed;
+                bool listedWriteDue;
+                lock (listedBackupRangeGate)
+                {
+                    listed = listedBackupRange;
+                    listedWriteDue = listedBackupRangeWriteDue;
+                    listedBackupRangeWriteDue = false;
+                }
+                snapshot.ListedBackupRange = listed;
+                if (listedWriteDue && listed != null)
+                {
+                    TryAtomicWriteJson(backupRangePath, SerializeListedBackupRange(listed));
                 }
 
                 return snapshot;
@@ -622,6 +727,19 @@ namespace ResticBackuper.Dashboard
                     return;
                 }
                 throw;
+            }
+
+            // How far back the backups went when the Restore list was last read. Read before the history, which can ask to be
+            // read again; a count the Restore list recorded since this process started is newer and is kept. A file that cannot
+            // be used is left alone: the next listing writes a new one.
+            BackupRangeView storedRange = ParseListedBackupRange(
+                ReadJsonObject(backupRangePath, MaximumBackupRangeJsonLength).Document);
+            lock (listedBackupRangeGate)
+            {
+                if (listedBackupRange == null)
+                {
+                    listedBackupRange = storedRange;
+                }
             }
 
             JsonReadResult historyRead = ReadJsonObject(historyPath);
@@ -2635,7 +2753,10 @@ namespace ResticBackuper.Dashboard
                 && left.ProcessedBytes == right.ProcessedBytes
                 && left.StoredBytes == right.StoredBytes
                 && left.SnapshotId == right.SnapshotId
-                && left.SourceFingerprint == right.SourceFingerprint;
+                && left.SourceFingerprint == right.SourceFingerprint
+                && left.FilesNew == right.FilesNew
+                && left.FilesChanged == right.FilesChanged
+                && left.FilesUnmodified == right.FilesUnmodified;
         }
 
         private RunMetricRecord CreateBackupMetric(IDictionary<string, object> document)
@@ -2705,6 +2826,20 @@ namespace ResticBackuper.Dashboard
                     GetString(document, "snapshot_id", string.Empty),
                     GetString(summary, "snapshot_id", string.Empty)),
                 128);
+            long filesNew;
+            long filesChanged;
+            long filesUnmodified;
+            // What the backup step found, compared with the previous backup of the same folders: all three, or none. Both
+            // engines keep Restic's whole summary; a check-only run's figures are what a backup would do, so they are not used.
+            if (string.Equals(typeKey, "backup", StringComparison.Ordinal)
+                && TryGetJsonInteger(summary, "files_new", 0, out filesNew)
+                && TryGetJsonInteger(summary, "files_changed", 0, out filesChanged)
+                && TryGetJsonInteger(summary, "files_unmodified", 0, out filesUnmodified))
+            {
+                metric.FilesNew = filesNew;
+                metric.FilesChanged = filesChanged;
+                metric.FilesUnmodified = filesUnmodified;
+            }
             return metric;
         }
 
@@ -2727,7 +2862,10 @@ namespace ResticBackuper.Dashboard
                     TypeKey = item.TypeKey,
                     StateKey = item.StateKey,
                     StartedUtc = DateTime.SpecifyKind(item.StartedUtc, DateTimeKind.Utc),
-                    FinishedUtc = item.FinishedUtc
+                    FinishedUtc = item.FinishedUtc,
+                    FilesNew = item.FilesNew,
+                    FilesChanged = item.FilesChanged,
+                    FilesUnmodified = item.FilesUnmodified
                 })
                 .ToList();
         }
@@ -2805,6 +2943,14 @@ namespace ResticBackuper.Dashboard
             value["stored_bytes"] = metric.StoredBytes;
             value["snapshot_id"] = metric.SnapshotId;
             value["source_fingerprint"] = metric.SourceFingerprint;
+            // Optional and additive (the schema stays 1): written only when known, so an older build reads the file as before
+            // and a run without them reads back as not known, never as zero.
+            if (metric.HasChangeCounts)
+            {
+                value["files_new"] = metric.FilesNew;
+                value["files_changed"] = metric.FilesChanged;
+                value["files_unmodified"] = metric.FilesUnmodified;
+            }
             return value;
         }
 
@@ -2868,6 +3014,18 @@ namespace ResticBackuper.Dashboard
                     GetString(value, "snapshot_id", string.Empty), 128);
                 metric.SourceFingerprint = CleanIdentifier(
                     GetString(value, "source_fingerprint", string.Empty), 128);
+                long filesNew;
+                long filesChanged;
+                long filesUnmodified;
+                if (type == "backup"
+                    && TryGetJsonInteger(value, "files_new", 0, out filesNew)
+                    && TryGetJsonInteger(value, "files_changed", 0, out filesChanged)
+                    && TryGetJsonInteger(value, "files_unmodified", 0, out filesUnmodified))
+                {
+                    metric.FilesNew = filesNew;
+                    metric.FilesChanged = filesChanged;
+                    metric.FilesUnmodified = filesUnmodified;
+                }
                 result.Add(metric);
             }
             preservedHistoryRecords = preserved;
@@ -3463,6 +3621,170 @@ namespace ResticBackuper.Dashboard
             return TryGetUtc(document, "finished_utc", out finishedUtc);
         }
 
+        // How far back the backups go, as the backup service counted them during the last verified backup (snapshot_inventory in
+        // last-success.json, written by backup.py; the earlier personal edition does not write it). Bound to the plan and backup
+        // location that verified backup names. Null for anything that is not exactly that record: it is only ever shown.
+        // No comparison with the current time, so a clock that is wrong cannot hide a true count.
+        private static BackupRangeView TryReadEngineBackupRange(IDictionary<string, object> lastSuccess)
+        {
+            DateTime verifiedUtc;
+            if (!TryReadLastVerifiedFinishedUtc(lastSuccess, out verifiedUtc))
+            {
+                return null;
+            }
+            IDictionary<string, object> inventory = GetDictionary(lastSuccess, "snapshot_inventory");
+            long schema;
+            long count;
+            DateTime oldestUtc;
+            DateTime newestUtc;
+            DateTime countedUtc;
+            if (inventory == null
+                || !TryGetJsonInteger(inventory, "schema_version", 1, out schema) || schema != 1
+                || !string.Equals(ExactText(inventory, "rule"), EngineBackupRangeRule, StringComparison.Ordinal)
+                || !TryGetJsonInteger(inventory, "count", 1, out count) || count > MaximumBackupRangeCount
+                || !TryGetUtc(inventory, "oldest_utc", out oldestUtc)
+                || !TryGetUtc(inventory, "newest_utc", out newestUtc)
+                || !TryGetUtc(inventory, "counted_utc", out countedUtc)
+                || oldestUtc > newestUtc)
+            {
+                return null;
+            }
+            string planId = CanonicalPlanId(ExactText(lastSuccess, "plan_id"));
+            string repositoryPath = CanonicalWindowsPath(ExactText(lastSuccess, "repository"));
+            if (string.IsNullOrEmpty(planId) || string.IsNullOrEmpty(repositoryPath))
+            {
+                return null;
+            }
+            return new BackupRangeView("backup", planId, repositoryPath, count, oldestUtc, newestUtc, countedUtc);
+        }
+
+        // backup-range.json, written by RecordListedBackupRange. It sits in the person's own folder, so it is read as defensively
+        // as anything else there and is only ever shown: a file that is not exactly this shape is null and is left alone.
+        private static BackupRangeView ParseListedBackupRange(IDictionary<string, object> document)
+        {
+            long schema;
+            long count;
+            DateTime countedUtc;
+            if (document == null
+                || !TryGetJsonInteger(document, "schema_version", 1, out schema) || schema != 1
+                || !string.Equals(ExactText(document, "source"), "restore", StringComparison.Ordinal)
+                || !TryGetJsonInteger(document, "count", 0, out count) || count > MaximumBackupRangeCount
+                || !TryGetUtc(document, "counted_utc", out countedUtc))
+            {
+                return null;
+            }
+            string repository = ExactText(document, "repository");
+            string planId = CanonicalPlanId(ExactText(document, "plan_id"));
+            string repositoryPath = repository == null || repository.Length > 1024
+                ? string.Empty
+                : CanonicalWindowsPath(repository);
+            if (string.IsNullOrEmpty(planId) || string.IsNullOrEmpty(repositoryPath))
+            {
+                return null;
+            }
+            DateTime oldestUtc = DateTime.MinValue;
+            DateTime newestUtc = DateTime.MinValue;
+            if (count > 0
+                && (!TryGetUtc(document, "oldest_utc", out oldestUtc)
+                    || !TryGetUtc(document, "newest_utc", out newestUtc)
+                    || oldestUtc > newestUtc))
+            {
+                return null;
+            }
+            return new BackupRangeView("restore", planId, repositoryPath, count, oldestUtc, newestUtc, countedUtc);
+        }
+
+        private static Dictionary<string, object> SerializeListedBackupRange(BackupRangeView range)
+        {
+            Dictionary<string, object> value = new Dictionary<string, object>();
+            value["schema_version"] = 1;
+            value["source"] = "restore";
+            value["plan_id"] = range.PlanId;
+            value["repository"] = range.RepositoryPath;
+            value["count"] = range.Count;
+            if (range.Count > 0)
+            {
+                value["oldest_utc"] = FormatUtc(range.OldestUtc);
+                value["newest_utc"] = FormatUtc(range.NewestUtc);
+            }
+            value["counted_utc"] = FormatUtc(range.CountedUtc);
+            return value;
+        }
+
+        // What the Restore list just read says about how far back the backups go, for the plan and backup location it was read
+        // for. Called on the window's thread, so it only keeps the count in memory: the next Load writes backup-range.json (when
+        // this reader may write at all). Anything out of range is not recorded. Display only.
+        internal void RecordListedBackupRange(
+            string planId,
+            string repositoryPath,
+            long count,
+            DateTime oldestUtc,
+            DateTime newestUtc)
+        {
+            string canonicalPlan = CanonicalPlanId(planId ?? string.Empty);
+            string canonicalPath = repositoryPath == null || repositoryPath.Length > 1024
+                ? string.Empty
+                : CanonicalWindowsPath(repositoryPath);
+            if (string.IsNullOrEmpty(canonicalPlan) || string.IsNullOrEmpty(canonicalPath)
+                || count < 0 || count > MaximumBackupRangeCount
+                || (count > 0 && oldestUtc.ToUniversalTime() > newestUtc.ToUniversalTime()))
+            {
+                return;
+            }
+            BackupRangeView range = new BackupRangeView(
+                "restore",
+                canonicalPlan,
+                canonicalPath,
+                count,
+                count > 0 ? oldestUtc.ToUniversalTime() : DateTime.MinValue,
+                count > 0 ? newestUtc.ToUniversalTime() : DateTime.MinValue,
+                DateTime.UtcNow);
+            lock (listedBackupRangeGate)
+            {
+                listedBackupRange = range;
+                listedBackupRangeWriteDue = true;
+            }
+        }
+
+        // Which count to show for the plan and backup location in use: the engine's and the Restore list's, whichever belongs to
+        // them and was counted later (the engine's on a tie). Null when neither belongs to them, or when the later one found no
+        // backups (a Restore list that found nothing hides an older count for the same location instead of contradicting it).
+        internal static BackupRangeView ChooseBackupRange(
+            BackupRangeView engine,
+            BackupRangeView listed,
+            string planId,
+            string repositoryPath)
+        {
+            string canonicalPlan = CanonicalPlanId(planId ?? string.Empty);
+            string canonicalPath = CanonicalWindowsPath(repositoryPath);
+            if (string.IsNullOrEmpty(canonicalPlan) || string.IsNullOrEmpty(canonicalPath))
+            {
+                return null;
+            }
+            BackupRangeView chosen = null;
+            foreach (BackupRangeView candidate in new[] { engine, listed })
+            {
+                if (candidate == null
+                    || !string.Equals(candidate.PlanId, canonicalPlan, StringComparison.Ordinal)
+                    || !string.Equals(candidate.RepositoryPath, canonicalPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                if (chosen == null || candidate.CountedUtc > chosen.CountedUtc)
+                {
+                    chosen = candidate;
+                }
+            }
+            return chosen == null || chosen.Count < 1 ? null : chosen;
+        }
+
+        // A value that is a JSON string, or null: never a number or a flag written as text.
+        private static string ExactText(IDictionary<string, object> source, string key)
+        {
+            object value;
+            return source != null && source.TryGetValue(key, out value) ? value as string : null;
+        }
+
         private static double DurationBetween(IDictionary<string, object> source)
         {
             DateTime start;
@@ -3786,5 +4108,21 @@ namespace ResticBackuper.Dashboard
         public long StoredBytes { get; set; }
         public string SnapshotId { get; set; }
         public string SourceFingerprint { get; set; }
+        // New, changed and unchanged files the backup step found: all three known, or all three -1.
+        public long FilesNew { get; set; }
+        public long FilesChanged { get; set; }
+        public long FilesUnmodified { get; set; }
+
+        public RunMetricRecord()
+        {
+            FilesNew = -1;
+            FilesChanged = -1;
+            FilesUnmodified = -1;
+        }
+
+        public bool HasChangeCounts
+        {
+            get { return FilesNew >= 0 && FilesChanged >= 0 && FilesUnmodified >= 0; }
+        }
     }
 }

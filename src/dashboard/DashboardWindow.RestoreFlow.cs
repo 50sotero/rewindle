@@ -408,6 +408,8 @@ namespace ResticBackuper.Dashboard
                 return;
             }
             restoreFlowSnapshots = result.Snapshots ?? new List<RestoreSnapshot>();
+            // The manager's whole list, as it was read (never a page of it that the dialog shows), for the count below.
+            IList<RestoreSnapshot> listedSnapshots = restoreFlowSnapshots;
             RestoreSnapshot selected = FindRestoreFlowSnapshot(restoreFlowSelectedSnapshotId);
             if (selected == null)
             {
@@ -428,6 +430,90 @@ namespace ResticBackuper.Dashboard
                         : restoreFlowSnapshots.Count.ToString(CultureInfo.CurrentCulture) +
                             " backups are available.");
             PublishWebPresentationState();
+            // Last, once the list is shown: how far back the backups go, kept for Protection and Restore. It is only ever shown,
+            // so nothing about it may change what Restore does.
+            try
+            {
+                RecordRestoreFlowBackupRange(freshAfterRead, listedSnapshots);
+            }
+            catch (Exception)
+            {
+                // A count that could not be recorded is simply not shown.
+            }
+        }
+
+        // What the list just read says about how far back the backups go, bound to the plan and backup location it was read for
+        // (the configuration read again after the listing). It only sets the reader's copy in memory; the next refresh writes it
+        // to the dashboard's own folder, off the window's thread. Display only.
+        private void RecordRestoreFlowBackupRange(SourceConfiguration configuration, IList<RestoreSnapshot> snapshots)
+        {
+            long count;
+            DateTime oldestUtc;
+            DateTime newestUtc;
+            if (reader == null || configuration == null
+                || !TryMeasureBackupRange(snapshots, out count, out oldestUtc, out newestUtc))
+            {
+                return;
+            }
+            reader.RecordListedBackupRange(
+                configuration.PlanId,
+                configuration.RepositoryPath,
+                count,
+                oldestUtc,
+                newestUtc);
+        }
+
+        // How many backups a list holds, and the oldest and newest of them. Zero backups is a count; a list in which no time can
+        // be read is not.
+        internal static bool TryMeasureBackupRange(
+            IList<RestoreSnapshot> snapshots,
+            out long count,
+            out DateTime oldestUtc,
+            out DateTime newestUtc)
+        {
+            count = 0;
+            oldestUtc = DateTime.MinValue;
+            newestUtc = DateTime.MinValue;
+            if (snapshots == null)
+            {
+                return false;
+            }
+            bool anyTime = false;
+            foreach (RestoreSnapshot snapshot in snapshots)
+            {
+                if (snapshot == null)
+                {
+                    continue;
+                }
+                count++;
+                DateTimeOffset parsed;
+                if (string.IsNullOrWhiteSpace(snapshot.Time)
+                    || snapshot.Time.Length > 64
+                    || !DateTimeOffset.TryParse(
+                        snapshot.Time,
+                        CultureInfo.InvariantCulture,
+                        DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                        out parsed))
+                {
+                    continue;
+                }
+                DateTime moment = parsed.UtcDateTime;
+                if (!anyTime || moment < oldestUtc)
+                {
+                    oldestUtc = moment;
+                }
+                if (!anyTime || moment > newestUtc)
+                {
+                    newestUtc = moment;
+                }
+                anyTime = true;
+            }
+            if (count > 0 && !anyTime)
+            {
+                count = 0;
+                return false;
+            }
+            return true;
         }
 
         private bool BeginRestoreFlowBrowseFiles(

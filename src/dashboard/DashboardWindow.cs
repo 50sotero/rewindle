@@ -6614,7 +6614,11 @@ namespace ResticBackuper.Dashboard
                     .Append(run.Files.ToString(CultureInfo.InvariantCulture)).Append('|')
                     .Append(run.ProcessedBytes.ToString(CultureInfo.InvariantCulture)).Append('|')
                     .Append(run.StoredBytes.ToString(CultureInfo.InvariantCulture)).Append('|')
-                    .Append(run.SnapshotShort).Append('\n');
+                    .Append(run.SnapshotShort).Append('|')
+                    // Run details take the run from this list, so counts that arrived later bind it again too.
+                    .Append(run.FilesNew.ToString(CultureInfo.InvariantCulture)).Append(',')
+                    .Append(run.FilesChanged.ToString(CultureInfo.InvariantCulture)).Append(',')
+                    .Append(run.FilesUnmodified.ToString(CultureInfo.InvariantCulture)).Append('\n');
             }
             return builder.ToString();
         }
