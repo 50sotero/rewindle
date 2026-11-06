@@ -1366,6 +1366,12 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
     # repository.json (updated_utc) wins over older backups.
     Reset-KeptState -Records @{ 'repository.json' = $setUp; 'last-success.json' = $afterMove; 'status.json' = $afterMove }
     Assert-Equal $keptMoved (Get-KeptPath) 'a backup after a move names the place the backups were moved to'
+    # Manage-Repository.ps1 rewrites repository.json when a move completes, keeping initialized_utc and adding relocated_utc.
+    # Until the next backup, the backups before the move still name the old place, so the time of the move counts.
+    $beforeMove = [ordered]@{ schema_version = 1; plan_id = $planId; config_generation = 2; started_utc = '2026-10-01T02:00:00Z'; finished_utc = '2026-10-01T02:20:00Z'; repository = $keptFirst; repository_storage_mode = 'local_ntfs' }
+    $relocated = [ordered]@{ schema_version = 1; initialized_utc = '2026-09-01T10:00:00.123456Z'; relocated_utc = '2026-10-01T09:30:00.1234567Z'; repository = $keptMoved; repository_storage_mode = 'local_ntfs' }
+    Reset-KeptState -Records @{ 'repository.json' = $relocated; 'last-success.json' = $beforeMove; 'status.json' = $beforeMove }
+    Assert-Equal $keptMoved (Get-KeptPath) 'a move completed after the last backup names the place the backups were moved to'
     $rewritten = [ordered]@{ schema_version = 1; initialized_utc = '2026-09-01T10:00:00Z'; updated_utc = '2026-10-03T08:00:00Z'; repository = $keptFirst }
     Reset-KeptState -Records @{ 'repository.json' = $rewritten; 'last-success.json' = $afterMove }
     Assert-Equal $keptFirst (Get-KeptPath) 'a later updated_utc in repository.json wins over an older backup'

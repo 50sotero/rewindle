@@ -316,6 +316,9 @@ class ContractMatchesTheScriptsTests(unittest.TestCase):
         # It reads the three records, needs the stored password, never throws and never raises a finding.
         for name in ("'repository.json'", "'last-success.json'", "'status.json'", "$secretFile"):
             self.assertIn(name, reader)
+        # A completed move of the backup location rewrites repository.json and stamps relocated_utc, which counts too.
+        self.assertIn("@('repository.json', @('initialized_utc', 'updated_utc', 'relocated_utc'))", reader)
+        self.assertIn("-Name 'relocated_utc'", read(PROJECT / "src" / "Manage-Repository.ps1"))
         self.assertTrue(reader.lstrip().startswith("try {"))
         for finding in ("Stop-InstallValidation", "New-InstallFinding", "Add-PlanFinding", "throw"):
             self.assertNotIn(finding, reader)

@@ -1978,13 +1978,14 @@ function ConvertTo-KeptRecordTime {
 }
 
 # Where the backups of an earlier installation are, from the records it left in the state folder that an uninstall keeps:
-# repository.json (written when its backup location was set up) and last-success.json and status.json (written by every backup,
-# so they follow a later move of the backup location). The newest record wins. Returns { repository, storage_mode }, or $null
-# when there is no such record, when this account can't read the records (only the account that installed is given access),
-# when they are malformed, or when the stored password those backups need is gone, so setup could not carry on with them. It
-# reads those small files only, never the backup folder (which may be on Google Drive), and never throws. As everywhere else
-# (Assert-StateFolderOwner), nothing is read from a state folder that is a link or that Administrators or SYSTEM don't own,
-# since any account can create that folder; here an owner that can't be read counts as one they don't own.
+# repository.json (written when its backup location was set up, and rewritten with relocated_utc when Manage-Repository.ps1
+# completes a move of it) and last-success.json and status.json (written by every backup, so they name the place each backup
+# used). The newest record wins. Returns { repository, storage_mode }, or $null when there is no such record, when this account
+# can't read the records (only the account that installed is given access), when they are malformed, or when the stored
+# password those backups need is gone, so setup could not carry on with them. It reads those small files only, never the
+# backup folder (which may be on Google Drive), and never throws. As everywhere else (Assert-StateFolderOwner), nothing is read
+# from a state folder that is a link or that Administrators or SYSTEM don't own, since any account can create that folder;
+# here an owner that can't be read counts as one they don't own.
 function Get-KeptRepository {
     try {
         if (-not (Test-Path -LiteralPath $stateRoot -PathType Container)) { return $null }
@@ -1994,7 +1995,7 @@ function Get-KeptRepository {
         $kept = $null
         $keptTime = $null
         foreach ($record in @(
-            @('repository.json', @('initialized_utc', 'updated_utc')),
+            @('repository.json', @('initialized_utc', 'updated_utc', 'relocated_utc')),
             @('last-success.json', @('started_utc', 'finished_utc')),
             @('status.json', @('started_utc', 'finished_utc'))
         )) {
