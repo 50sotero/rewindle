@@ -168,7 +168,15 @@ $sessionIdleEndUtc = [DateTime]::MaxValue
 $sessionNextConfigurationCheckUtc = [DateTime]::MinValue
 $sessionObservedClientSid = $null
 $sessionPipeNative = $null
-$sessionOperationCounts = [ordered]@{ list_snapshots = 0; list_tree = 0; restore = 0 }
+$sessionOperationCounts = [ordered]@{ list_snapshots = 0; list_tree = 0; restore = 0; find_files = 0 }
+
+# Find a file (find_files), served only by a session. This manager, never the dashboard, chooses how long one search may
+# take: restore.py stops itself after $findSeconds, and the manager ends it after $findKillSeconds if it has not.
+$fileSearchSchema = 'ResticBackuper.FileSearch.v1'
+$findSeconds = 20
+$findKillSeconds = 35
+$findText = ''
+$findFromSnapshotId = ''
 
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -628,7 +636,7 @@ function New-FinalResultDocument {
     # The bound result of one request. A single request writes it to its protected result file; a session sends it on its
     # channel. Both carry exactly these fields.
     param([bool]$Ok, [object]$Payload, [string]$ErrorMessage, [int]$BackendExitCode)
-    return [ordered]@{
+    $document = [ordered]@{
         schema_version = 1; request_nonce = $RequestNonce; request_digest = $RequestDigest;
         request_user_sid = $currentSid; action = $requestAction; expected_config_sha256 = $ExpectedConfigSha256;
         plan_id = $ExpectedPlanId; config_generation = $ExpectedConfigGeneration;
@@ -641,6 +649,12 @@ function New-FinalResultDocument {
         payload = $Payload; error = if ($Ok) { $null } else { Get-SanitizedError -Message $ErrorMessage };
         finished_utc = [DateTime]::UtcNow.ToString('o')
     }
+    if ($requestAction -ceq 'find_files') {
+        # A file search's result also says which search it answers. Every other result keeps exactly the fields above.
+        $document['find_text_sha256'] = Get-Sha256Hex -Bytes $utf8.GetBytes($findText)
+        $document['find_from_snapshot_id'] = $findFromSnapshotId
+    }
+    return $document
 }
 
 function Write-FinalResult {
@@ -970,7 +984,9 @@ function New-RestoreBackendEnvironment {
 }
 
 function Invoke-RestoreBackend {
-    param([string[]]$Arguments)
+    # -KillAfterSeconds (a file search): restore.py stops itself well before this; past it the manager ends it, and the
+    # Windows job restore.py put itself in ends every Restic it started. The result then has TimedOut and no output.
+    param([string[]]$Arguments, [int]$KillAfterSeconds = 0)
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $pythonPath
     $start.Arguments = (($Arguments | ForEach-Object { ConvertTo-WindowsArgument -Value ([string]$_) }) -join ' ')
@@ -990,13 +1006,18 @@ function Invoke-RestoreBackend {
         if (-not $process.Start()) { throw 'Windows did not start the protected restore backend.' }
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
+        if ($KillAfterSeconds -gt 0 -and -not $process.WaitForExit($KillAfterSeconds * 1000)) {
+            try { $process.Kill() } catch { }
+            $null = $process.WaitForExit(10000)
+            return [pscustomobject]@{ ExitCode = -1; Stdout = ''; Stderr = ''; TimedOut = $true }
+        }
         $process.WaitForExit()
         $stdout = $stdoutTask.Result
         $stderr = $stderrTask.Result
         if ($utf8.GetByteCount($stdout) -gt 7MB -or $utf8.GetByteCount($stderr) -gt 1MB) {
             throw 'The protected restore backend returned more output than the manager accepts.'
         }
-        return [pscustomobject]@{ ExitCode = $process.ExitCode; Stdout = $stdout; Stderr = $stderr }
+        return [pscustomobject]@{ ExitCode = $process.ExitCode; Stdout = $stdout; Stderr = $stderr; TimedOut = $false }
     }
     finally { $process.Dispose() }
 }
@@ -1108,6 +1129,119 @@ function Assert-TreePayload {
     if (@($Payload.entries).Count -gt 100000) { throw 'Snapshot-tree response exceeds the protected item limit.' }
 }
 
+function Get-FindTextProblem {
+    # The first of the shared file-search text rules the text breaks, or ''. The same rules, in the same order, are in
+    # restore.py, the dashboard and its page, and tests\fixtures\file-search-text-cases.json holds the cases all four pass.
+    # Only spaces are trimmed; an unpaired surrogate is refused before the length is counted.
+    param([string]$Value)
+    $text = $Value.Trim([char]0x20)
+    if ($text.Length -eq 0) { return 'EMPTY' }
+    for ($index = 0; $index -lt $text.Length; $index++) {
+        $character = $text[$index]
+        if ([int]$character -lt 0x20 -or [int]$character -eq 0x7F) { return 'CONTROL' }
+        if ([char]::IsHighSurrogate($character) -and $index + 1 -lt $text.Length -and [char]::IsLowSurrogate($text[$index + 1])) {
+            $index++
+            continue
+        }
+        if ([char]::IsSurrogate($character)) { return 'CONTROL' }
+    }
+    if ($text.IndexOfAny('\/:*?"<>|'.ToCharArray()) -ge 0) { return 'FORBIDDEN' }
+    if ($text.Length -lt 2) { return 'SHORT' }
+    if ($text.Length -gt 200) { return 'LONG' }
+    return ''
+}
+
+function Test-FindPayloadInteger {
+    param([object]$Value, [long]$Minimum, [long]$Maximum)
+    return ($Value -is [int] -or $Value -is [long]) -and [long]$Value -ge $Minimum -and [long]$Value -le $Maximum
+}
+
+function Test-FindPayloadTime {
+    param([object]$Value)
+    return $null -eq $Value -or ($Value -is [string] -and $Value.Length -le 64)
+}
+
+function Test-FindPayloadPath {
+    # The form a folder listing gives a path in a backup: from the top, with forward slashes and no empty, . or .. part.
+    param([object]$Value)
+    if ($Value -isnot [string] -or $Value.Length -gt 1024 -or -not $Value.StartsWith('/') -or $Value.Contains('\') -or
+        $Value.IndexOf([char]0) -ge 0) {
+        return $false
+    }
+    $parts = $Value.Split('/')
+    for ($index = 1; $index -lt $parts.Count; $index++) {
+        if ($parts[$index] -ceq '' -or $parts[$index] -ceq '.' -or $parts[$index] -ceq '..') { return $false }
+    }
+    return $true
+}
+
+function Get-FindPayloadArray {
+    param([object]$Object, [string]$Name)
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property -or $property.Value -isnot [array]) { return $null }
+    return ,$property.Value
+}
+
+function Assert-FindPayload {
+    # What restore.py --find-json returned must answer this search, for this backup location and plan, within the limits.
+    param([object]$Payload, [pscustomobject]$Configuration)
+    $failure = 'File search response is not bound to the requested search and plan.'
+    $binding = Get-OptionalProperty -Object $Payload -Name 'binding'
+    $query = Get-OptionalProperty -Object $Payload -Name 'query'
+    if ([string]$Payload.schema -cne $fileSearchSchema -or $Payload.schema_version -ne 1 -or
+        -not (Test-PathEqual -Left (Get-CanonicalLocalPath -Value ([string]$Payload.repository)) -Right $Configuration.Repository) -or
+        $null -eq $binding -or [string](Get-OptionalProperty -Object $binding -Name 'plan_id') -cne $ExpectedPlanId -or
+        [string](Get-OptionalProperty -Object $binding -Name 'legacy_match_policy') -cne 'exact-host-scheduled-tags-and-sources' -or
+        $null -eq $query -or (Get-OptionalProperty -Object $query -Name 'text') -isnot [string] -or
+        [string]$query.text -cne $findText -or (Get-OptionalProperty -Object $query -Name 'from_snapshot_id') -isnot [string] -or
+        [string]$query.from_snapshot_id -cne $findFromSnapshotId) {
+        throw $failure
+    }
+    $status = Get-OptionalProperty -Object $Payload -Name 'status'
+    $total = Get-OptionalProperty -Object $Payload -Name 'snapshots_total'
+    $next = Get-OptionalProperty -Object $Payload -Name 'next_from_snapshot_id'
+    if ($status -isnot [string] -or [string]$status -cnotin @('complete', 'more', 'too_many', 'too_broad', 'too_slow') -or
+        -not (Test-FindPayloadInteger -Value $total -Minimum 0 -Maximum 10000) -or
+        -not (Test-FindPayloadInteger -Value (Get-OptionalProperty -Object $Payload -Name 'snapshots_searched') -Minimum 0 -Maximum $total) -or
+        -not (Test-FindPayloadInteger -Value (Get-OptionalProperty -Object $Payload -Name 'matches_total') -Minimum 0 -Maximum 100000000) -or
+        -not (Test-FindPayloadInteger -Value (Get-OptionalProperty -Object $Payload -Name 'skipped') -Minimum 0 -Maximum ([long]::MaxValue)) -or
+        -not (Test-FindPayloadInteger -Value (Get-OptionalProperty -Object $Payload -Name 'elapsed_ms') -Minimum 0 -Maximum ([long]::MaxValue)) -or
+        -not (Test-FindPayloadTime -Value (Get-OptionalProperty -Object $Payload -Name 'searched_newest_time')) -or
+        -not (Test-FindPayloadTime -Value (Get-OptionalProperty -Object $Payload -Name 'searched_oldest_time'))) {
+        throw $failure
+    }
+    if ([string]$status -ceq 'complete') {
+        if ($null -ne $next) { throw $failure }
+    }
+    elseif ($next -isnot [string] -or [string]$next -cnotmatch '^[0-9a-f]{64}\z') { throw $failure }
+    $found = Get-FindPayloadArray -Object $Payload -Name 'matches'
+    if ($null -eq $found -or $found.Count -gt 100) { throw $failure }
+    foreach ($match in $found) {
+        $path = Get-OptionalProperty -Object $match -Name 'path'
+        $versions = Get-FindPayloadArray -Object $match -Name 'versions'
+        if (-not (Test-FindPayloadPath -Value $path) -or [string]$path -ceq '/' -or
+            (Get-OptionalProperty -Object $match -Name 'name') -isnot [string] -or
+            [string]$match.name -cne ([string]$path).Substring(([string]$path).LastIndexOf('/') + 1) -or
+            [string](Get-OptionalProperty -Object $match -Name 'type') -cnotin @('file', 'dir') -or
+            $null -eq $versions -or $versions.Count -lt 1 -or $versions.Count -gt 10 -or
+            -not (Test-FindPayloadInteger -Value (Get-OptionalProperty -Object $match -Name 'versions_total') -Minimum $versions.Count -Maximum 10000)) {
+            throw $failure
+        }
+        foreach ($version in $versions) {
+            if ([string](Get-OptionalProperty -Object $version -Name 'snapshot_id') -cnotmatch '^[0-9a-f]{64}\z' -or
+                [string](Get-OptionalProperty -Object $version -Name 'first_snapshot_id') -cnotmatch '^[0-9a-f]{64}\z' -or
+                [string](Get-OptionalProperty -Object $version -Name 'binding_state') -cnotin @('plan', 'legacy_unbound') -or
+                -not (Test-FindPayloadInteger -Value (Get-OptionalProperty -Object $version -Name 'size') -Minimum 0 -Maximum ([long]::MaxValue)) -or
+                -not (Test-FindPayloadInteger -Value (Get-OptionalProperty -Object $version -Name 'backups') -Minimum 1 -Maximum 10000) -or
+                -not (Test-FindPayloadTime -Value (Get-OptionalProperty -Object $version -Name 'mtime')) -or
+                -not (Test-FindPayloadTime -Value (Get-OptionalProperty -Object $version -Name 'snapshot_time')) -or
+                -not (Test-FindPayloadTime -Value (Get-OptionalProperty -Object $version -Name 'first_snapshot_time'))) {
+                throw $failure
+            }
+        }
+    }
+}
+
 function Assert-RestoreReport {
     param([object]$Payload)
     if ([string]$Payload.schema -cne 'ResticBackuper.RestoreReport.v1' -or $Payload.schema_version -ne 1 -or
@@ -1211,9 +1345,13 @@ function Initialize-RestoreRequest {
         [string]$RequestTreePath,
         [string]$RequestTarget,
         [string]$RequestIncludesBase64,
-        [string]$RequestAllowLegacyUnbound
+        [string]$RequestAllowLegacyUnbound,
+        [string]$RequestFindText = '',
+        [string]$RequestFindFromSnapshotId = ''
     )
     $script:requestAction = ''
+    $script:findText = ''
+    $script:findFromSnapshotId = ''
     $script:canonicalSnapshotId = ''
     $script:canonicalTreePath = ''
     $script:canonicalTarget = ''
@@ -1222,15 +1360,29 @@ function Initialize-RestoreRequest {
     $script:historyRecorded = $null
     $script:historyError = $null
     $script:reportPath = $null
-    if ($RequestAction -cnotin @('list_snapshots', 'list_tree', 'restore', 'restore_drill')) {
+    if ($RequestAction -cnotin @('list_snapshots', 'list_tree', 'restore', 'restore_drill', 'find_files')) {
         throw 'The protected restore action is invalid.'
     }
     if ($RequestAllowLegacyUnbound -cnotin @('0', '1')) { throw 'The legacy snapshot option is invalid.' }
     $script:requestAction = $RequestAction
     $script:allowLegacy = $RequestAllowLegacyUnbound -ceq '1'
-    if (($requestAction -eq 'list_snapshots' -or $requestAction -eq 'restore_drill') -and $allowLegacy) {
+    if (($requestAction -eq 'list_snapshots' -or $requestAction -eq 'restore_drill' -or $requestAction -eq 'find_files') -and
+        $allowLegacy) {
         throw 'Legacy snapshot access is not a snapshot-list request option.'
     }
+    if ($requestAction -eq 'find_files') {
+        # Only a session serves a search: a single request (the Request parameter set) can never ask for one.
+        if ($null -eq $sessionPipe) { throw 'A file search is only served by a restore session.' }
+        if ((Get-FindTextProblem -Value $RequestFindText) -or $RequestFindText.Trim([char]0x20) -cne $RequestFindText) {
+            throw 'The file search text is invalid.'
+        }
+        if ($RequestFindFromSnapshotId -cnotmatch '^[0-9a-f]{64}\z') {
+            throw 'A file search starts from one exact lowercase snapshot ID.'
+        }
+        $script:findText = $RequestFindText
+        $script:findFromSnapshotId = $RequestFindFromSnapshotId
+    }
+    elseif ($RequestFindText -or $RequestFindFromSnapshotId) { throw 'File search fields are only valid for a file search.' }
     if ($requestAction -in @('list_tree','restore')) {
         if ($RequestSnapshotId -cnotmatch '^[0-9a-f]{64}$') { throw 'Restore operations require one exact lowercase snapshot ID.' }
         $script:canonicalSnapshotId = $RequestSnapshotId
@@ -1315,6 +1467,13 @@ function Invoke-RestoreOperation {
             if ($canonicalTreePath) { $arguments += @('--tree-path',$canonicalTreePath) }
             Write-ProgressResult -Stage reading -Message 'Reading the selected snapshot folder.' -Percent 35
         }
+        elseif ($requestAction -eq 'find_files') {
+            # A search only reads, like a listing. Each value is one argument (--name=value), so a text that starts
+            # with "-" stays a value.
+            $arguments += @('--find-json','--no-restic-lock',"--find-text=$findText","--find-from-snapshot=$findFromSnapshotId",
+                ('--find-seconds=' + $findSeconds.ToString([Globalization.CultureInfo]::InvariantCulture)))
+            Write-ProgressResult -Stage searching -Message 'Searching the backups for the requested name.' -Percent 35
+        }
         else {
             $script:reportPath = Join-Path $resultRoot "$RequestNonce.restore-report.json"
             if (Test-Path -LiteralPath $reportPath) { throw 'Protected restore report target already exists.' }
@@ -1333,7 +1492,7 @@ function Invoke-RestoreOperation {
                 Write-ProgressResult -Stage restoring -Message 'Restoring to the new location and verifying every restored file.' -Percent 25
             }
         }
-        $backend = Invoke-RestoreBackend -Arguments $arguments
+        $backend = Invoke-RestoreBackend -Arguments $arguments -KillAfterSeconds $(if ($requestAction -eq 'find_files') { $findKillSeconds } else { 0 })
         $payload = $null
         if ($requestAction -eq 'list_snapshots') {
             if ($backend.ExitCode -ne 0) { throw "Snapshot history query failed with exit code $($backend.ExitCode)." }
@@ -1344,6 +1503,13 @@ function Invoke-RestoreOperation {
             if ($backend.ExitCode -ne 0) { throw "Snapshot tree query failed with exit code $($backend.ExitCode)." }
             $payload = ConvertFrom-BackendObject -Text $backend.Stdout -Description 'Snapshot tree query'
             Assert-TreePayload -Payload $payload -Configuration $configuration
+        }
+        elseif ($requestAction -eq 'find_files') {
+            if ($backend.TimedOut) { throw 'The search took too long and was stopped.' }
+            if ($backend.ExitCode -eq 4) { throw 'The backup to search from is no longer in the list.' }
+            if ($backend.ExitCode -ne 0) { throw "File search failed with exit code $($backend.ExitCode)." }
+            $payload = ConvertFrom-BackendObject -Text $backend.Stdout -Description 'File search'
+            Assert-FindPayload -Payload $payload -Configuration $configuration
         }
         else {
             if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
@@ -1388,6 +1554,8 @@ function Invoke-RestoreOperation {
             'Recovery-key restore drill completed, verified, and was recorded.'
         } elseif ($requestAction -eq 'restore') {
             'Restore completed and was verified.'
+        } elseif ($requestAction -eq 'find_files') {
+            'File search finished.'
         } else { 'Protected snapshot data loaded.' }) -Percent 100
         Set-OperationOutcome -Ok $true -Payload $payload -ErrorMessage $null -BackendExitCode $backend.ExitCode -ExitCode 0
     }
@@ -1406,7 +1574,7 @@ function Invoke-RestoreOperation {
 
 # ---------------------------------------------------------------------------------------------------------------------
 # Restore approval session (-Operation session). One elevation serves one guided restore: any number of snapshot and
-# folder listings and at most one restore. Each request goes through Initialize-RestoreRequest and
+# folder listings and file searches, and at most one restore. Each request goes through Initialize-RestoreRequest and
 # Invoke-RestoreOperation exactly as a single request does. The channel is a named pipe that only the requesting account
 # can open, that is served once (one instance, created first or not at all), and that is used only after Windows names
 # the client as the dashboard process that asked and the client proves the session token. Messages are a 4-byte
@@ -1560,8 +1728,12 @@ function ConvertTo-SessionRequest {
     # as a single request's parameters are. A recovery drill is never served by a session.
     param([object]$Message, [long]$ExpectedRequestId)
     $description = 'A restore-session request'
-    Assert-SessionMessageFields -Message $Message -Description $description -Names @(
-        'type', 'request_id', 'action', 'snapshot_id', 'tree_path', 'target', 'includes_base64', 'allow_legacy_unbound')
+    $requestedAction = Get-SessionString -Message $Message -Name 'action' -MaximumLength 32 -Description $description
+    $names = @('type', 'request_id', 'action', 'snapshot_id', 'tree_path', 'target', 'includes_base64', 'allow_legacy_unbound')
+    # A file search carries two more fields, and no other request carries them.
+    $isSearch = $requestedAction -ceq 'find_files'
+    if ($isSearch) { $names += @('find_text', 'find_from_snapshot_id') }
+    Assert-SessionMessageFields -Message $Message -Description $description -Names $names
     if ((Get-SessionMessageType -Message $Message) -cne 'request') {
         throw (New-SessionException -Reason 'schema_violation' -Message "$description has another type.")
     }
@@ -1569,8 +1741,7 @@ function ConvertTo-SessionRequest {
     if ($requestId -ne $ExpectedRequestId) {
         throw (New-SessionException -Reason 'schema_violation' -Message "$description is out of sequence.")
     }
-    $requestedAction = Get-SessionString -Message $Message -Name 'action' -MaximumLength 32 -Description $description
-    if ($requestedAction -cnotin @('list_snapshots', 'list_tree', 'restore')) {
+    if ($requestedAction -cnotin @('list_snapshots', 'list_tree', 'restore', 'find_files')) {
         throw (New-SessionException -Reason 'action_not_allowed' -Message "$description asks for an action a session does not serve.")
     }
     $legacy = Get-SessionString -Message $Message -Name 'allow_legacy_unbound' -MaximumLength 1 -Description $description
@@ -1585,6 +1756,10 @@ function ConvertTo-SessionRequest {
         Target = Get-SessionString -Message $Message -Name 'target' -MaximumLength 4096 -Description $description
         IncludesBase64 = Get-SessionString -Message $Message -Name 'includes_base64' -MaximumLength 131072 -Description $description
         AllowLegacyUnbound = $legacy
+        FindText = $(if ($isSearch) { Get-SessionString -Message $Message -Name 'find_text' -MaximumLength 256 -Description $description } else { '' })
+        FindFromSnapshotId = $(if ($isSearch) {
+            Get-SessionString -Message $Message -Name 'find_from_snapshot_id' -MaximumLength 64 -Description $description
+        } else { '' })
     }
 }
 
@@ -1805,7 +1980,8 @@ function Invoke-SessionRequest {
         try {
             Initialize-RestoreRequest -RequestAction $Request.Action -RequestSnapshotId $Request.SnapshotId `
                 -RequestTreePath $Request.TreePath -RequestTarget $Request.Target `
-                -RequestIncludesBase64 $Request.IncludesBase64 -RequestAllowLegacyUnbound $Request.AllowLegacyUnbound
+                -RequestIncludesBase64 $Request.IncludesBase64 -RequestAllowLegacyUnbound $Request.AllowLegacyUnbound `
+                -RequestFindText $Request.FindText -RequestFindFromSnapshotId $Request.FindFromSnapshotId
         }
         catch {
             throw (New-SessionException -Reason 'request_rejected' -Message 'A restore-session request failed the protected request validation.')
