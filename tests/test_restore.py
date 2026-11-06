@@ -1389,8 +1389,9 @@ class RestoreBackendTests(unittest.TestCase):
         self.assertFalse(os.stat(folders[0]).st_file_attributes & stat.FILE_ATTRIBUTE_HIDDEN)
 
     def test_folders_get_their_permissions_after_everything_inside_them(self) -> None:
-        # Until a restored folder's own permissions are written it keeps those of the restore folder, so nothing can be
-        # moved into it from outside while its contents are handed back.
+        # A restored folder's own permissions are written after everything inside it, so the hand-back itself never
+        # opens a folder up while its contents are still being handed back. (A folder Restic restored with the user as
+        # its owner is the user's to change before that anyway; see _hand_back_entry.)
         target = self.root / "deepest-first"
         self.write_control(restore_mode="tree")
         written: list[str] = []

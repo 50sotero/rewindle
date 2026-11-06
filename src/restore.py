@@ -2053,9 +2053,13 @@ def _hand_back_entry(
 ) -> tuple[int, ctypes.Array] | None:
     """Give one restored file the permissions it inherits in the target, or work them out for a folder.
 
-    A folder is returned open, with its new permissions, for the caller to enter. Its permissions are written only
-    after everything below it is handed back (deepest first): until then it keeps those of the restore folder, so
-    nothing can be moved into it from outside while its contents are being handed back.
+    A folder is returned open, with its new permissions worked out, for the caller to enter. They are written only
+    after everything below it is handed back (deepest first), so the hand-back itself never opens a folder up while
+    its contents are still being handed back. That does not close a restored folder to the user: Restic restores each
+    folder's owner from the backup, and an owner can always change a folder's permissions, so once Restic has finished
+    a folder the user owns, a program running as the user can move into it anything on the drive that it may delete.
+    Such an item is handed back like a restored one; links, protected permissions and files with a second name are
+    still left alone.
     """
 
     if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
