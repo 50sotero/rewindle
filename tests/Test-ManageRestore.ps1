@@ -1315,7 +1315,8 @@ namespace RestoreManagerTests {
 }
 '@
         }
-        $interopFixture = New-Fixture
+        # With a stored password, as every installed plan has: a file search never asks for one.
+        $interopFixture = New-Fixture -WithPasswordHelper
         [RestoreManagerTests.DisposableSessionLauncher]::TestRoot = $interopFixture.Root
         [RestoreManagerTests.DisposableSessionLauncher]::Launches = 0
         $env:FAKE_RESTIC_LOG = $interopFixture.Log
@@ -1337,12 +1338,17 @@ namespace RestoreManagerTests {
             Assert-True ($interopList.Succeeded -and $interopList.Snapshots.Count -eq 1 -and $interopList.Snapshots[0].Id -ceq $snapshotId) ('the dashboard could not list snapshots through a real session: ' + $interopList.ErrorMessage)
             $interopTree = $sessionMethods['ListTree'].Invoke($null, [object[]]@($interopConfiguration, $snapshotId, '/', $false, $interopHost, $null, $null, $null))
             Assert-True ($interopTree.Succeeded -and $interopTree.Entries.Count -eq 2) ('the dashboard could not list a folder through a real session: ' + $interopTree.ErrorMessage)
+            # Find a file through the same session: the dashboard's request, this broker's checks, restore.py's page and the dashboard's own.
+            $interopFind = $sessionMethods['FindFiles'].Invoke($null, [object[]]@($interopConfiguration, $interopHost, 'notes', $snapshotId, $null, $null, $null))
+            $interopFound = @(if ($interopFind.Succeeded) { $interopFind.FileSearch.Matches | ForEach-Object { [string]$_.Name } })
+            Assert-True ($interopFind.Succeeded -and [string]$interopFind.FileSearch.Status -ceq 'complete' -and ($interopFound -join '|') -ceq '-notes draft.txt|notes.txt' -and
+                [string]$interopFind.FileSearch.Matches[1].Versions[0].SnapshotId -ceq $snapshotId) ('the dashboard could not find a file through a real session: ' + $interopFind.ErrorMessage)
             $interopTarget = [string](Join-Path $interopFixture.Root 'Restored\Interop')
             $interopIncludes = [System.Collections.Generic.List[string]]::new()
             $interopIncludes.Add('/notes.txt')
             $interopRestore = $sessionMethods['Restore'].Invoke($null, [object[]]@($interopConfiguration, $snapshotId, $interopTarget, $interopIncludes, $false, $interopHost, $null, $null, $null))
             Assert-True ($interopRestore.Succeeded -and $interopRestore.Report.Verified) ('the dashboard could not restore through a real session: ' + $interopRestore.ErrorMessage)
-            Assert-True ([RestoreManagerTests.DisposableSessionLauncher]::Launches -eq 1) 'the dashboard asked for more than one session for two listings and a restore'
+            Assert-True ([RestoreManagerTests.DisposableSessionLauncher]::Launches -eq 1) 'the dashboard asked for more than one session for two listings, a search and a restore'
             Assert-True (-not [bool]$hostType.GetProperty('HasLiveSession', $memberFlags).GetValue($interopHost)) 'the dashboard kept a session after its one restore'
             $records = @(Get-ChildItem -LiteralPath (Join-Path $interopFixture.State 'RestoreManagerResults') -Filter '*.json' |
                 Where-Object { $_.Name -match '^[0-9a-f]{64}\.json$' } | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json })
@@ -1352,7 +1358,8 @@ namespace RestoreManagerTests {
                 $records = @(Get-ChildItem -LiteralPath (Join-Path $interopFixture.State 'RestoreManagerResults') -Filter '*.json' |
                     Where-Object { $_.Name -match '^[0-9a-f]{64}\.json$' } | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json })
             }
-            Assert-True ($records.Count -eq 1 -and [string]$records[0].close_reason -ceq 'restore_completed' -and [int]$records[0].operations.list_tree -eq 1) 'the real session did not end after the dashboard''s restore'
+            Assert-True ($records.Count -eq 1 -and [string]$records[0].close_reason -ceq 'restore_completed' -and [int]$records[0].operations.list_tree -eq 1 -and
+                [int]$records[0].operations.find_files -eq 1) 'the real session did not end after the dashboard''s restore'
             # A session the dashboard closes ends at once.
             $closingHost = [Activator]::CreateInstance($hostType, $memberFlags, $null, [object[]]@($interopLaunch), $null)
             $closingList = $sessionMethods['ListSnapshots'].Invoke($null, [object[]]@($interopConfiguration, $closingHost, $null, $null, $null))
