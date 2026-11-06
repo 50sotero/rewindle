@@ -18,7 +18,8 @@ and refuses to start with an administrator token. Its role is limited to:
 - reading the engine's protected configuration, status, run records, logs, and
   cloud proof (read-only; it never writes protected state and never reads the
   repository password);
-- reading the installed backup task from Task Scheduler;
+- reading the installed backup task from Task Scheduler, including the time
+  and result Windows recorded for its last run;
 - running the read-only recovery-readiness check as the user; and
 - requesting every change (folders, schedule, cancellation, repository
   location, restore, repairs, **Back up now**) from the engine's protected
@@ -598,6 +599,17 @@ section 9, and [`SECURITY.md`](../SECURITY.md).
   session's sign-in or a wake), with a task that runs missed starts and no run
   since the slot, is shown as catching up for 45 minutes after that moment,
   then as overdue.
+- Backup alerts: when backups are overdue, paused or have failed three times
+  in a row, the dashboard shows one Windows notification per problem and marks
+  its tray icon amber or red until the problem is put right. A missed slot is
+  explained from the run history and the task's `LastRunTime` and
+  `LastTaskResult`, read best effort with the user's rights; a value that
+  cannot be read leaves only "the backup didn't happen". A slot Windows is
+  catching up on, a status that cannot be read and a run in progress raise
+  nothing. The only file written is `alerts.json` (the notification switch and
+  the problems already told) in the dashboard's per-user folder. A second
+  dashboard (an isolated presentation store, or a `--state-dir` other than the
+  engine's own) shows the mark but never notifies or writes that file.
 - A direct off-site proof that is waiting for (or shows) a check is calm for
   48 hours after its last check; after that it is reported as overdue, since a
   check that fails writes no proof of its own.

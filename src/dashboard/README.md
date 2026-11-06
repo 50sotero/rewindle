@@ -73,6 +73,36 @@ refuses a second folder change while one is waiting for approval.
 `--native` starts an older WPF-only presentation instead of the web view, for
 diagnosis.
 
+### Backup alerts
+
+When backups are overdue, paused or have failed three times in a row, the
+dashboard shows one Windows notification for each problem (a balloon from its
+notification-area icon, which Windows 10 and 11 show as a notification) and
+marks that icon: an amber triangle while something needs attention, a red disc
+while backups keep failing, with a dark ring so it reads on a light or dark
+taskbar. Selecting an alert opens Protection, unless a restore, run details or
+the folder chooser is open. An amber problem waits 15 minutes before it is
+told, a red one is told at once, nothing is told while nobody is at the PC
+(the session is locked or there was no input for two minutes) or while
+Rewindle's window is in front, and a pause made in Edit schedule is never
+told. Catching up, a status that cannot be read and a run in progress raise
+nothing. `BackupAlerts.cs` holds the logic (missed-run explanation from the run
+history and the task's `LastRunTime` and `LastTaskResult`, the failing count,
+the store and the tray mark); `DashboardWindow.Alerts.cs` feeds it on each
+refresh.
+
+Settings > Backup plan > Backup alerts turns the notifications on or off; the
+mark stays either way. The choice and the problems already told are kept in
+`alerts.json` beside `settings.json`. The classic `--native` presentation has
+no switch and follows `alerts.json` (On by default). A dashboard started with
+`--isolated-presentation-store`, or with a `--state-dir` other than the engine's
+own, shows the mark but never notifies or writes `alerts.json`.
+
+Alerts come only from a running dashboard. The installer's logon task starts
+it at sign-in; the earlier personal edition's own deployment decides whether
+its dashboard starts at logon, and if it does not, nothing is told until
+Rewindle is opened.
+
 If WebView2 fails, the host recovers by itself where it can: a crashed renderer
 or browser process is reloaded automatically up to three times in five
 minutes, then the app offers **Reload**; a page that stops responding is given
@@ -245,7 +275,9 @@ restore flow (snapshot selection, scope, review invalidation, retries, path
 limits, destination restrictions), diagnostics redaction, run history and its
 limits, status-file read failures, backup freshness across clock changes,
 timers that setting the clock back does not hold, the tray and a cancelled
-sign-out, the crash log cap, the setup and engine-not-installed states, the
+sign-out, backup alerts on the tray (the mark, a failing streak told in place
+of the run's own balloon, the Settings switch), the crash log cap, the setup and
+engine-not-installed states, the
 dialogs' shared design tokens, and engine selection with the identities each
 profile owns.
 
@@ -257,6 +289,10 @@ The Python suite at the repository root (`py -3.14 -m unittest discover -s
 tests`) also checks the dashboard sources against the engine contract
 (`tests/test_dashboard_*.py`, `tests/test_neutral_release.py`), and several
 PowerShell suites in `tests/` compile dashboard classes into their harnesses.
+`tests\Test-BackupAlerts.ps1` covers the backup alerts: every missed-run
+explanation, the failing count, when a notification is shown, `alerts.json`
+(damaged, locked, newer and junction cases, all under the temporary folder)
+and the tray mark at each size, for both engine profiles.
 
 To inspect the telemetry reader on its own:
 
@@ -346,7 +382,7 @@ menu shortcut. There is no separate dashboard installer.
 
 The dashboard's own per-user data lives in `%LOCALAPPDATA%\ResticBackuperDashboard`
 (`ResticPersonalBackupDashboard` for the legacy profile): appearance and motion
-settings, `run-history.json` (at most 400 runs), `heartbeat.json`, `crash.log`
+settings, `alerts.json` (backup alerts), `run-history.json` (at most 400 runs), `heartbeat.json`, `crash.log`
 and the WebView2 profile. Uninstalling Rewindle removes the install root, the
 logon task and the shortcut, and leaves that folder in place. A launch with
 `--isolated-presentation-store` uses `ResticBackuperBeautifulUI` and
@@ -362,6 +398,7 @@ logon task and the shortcut, and leaves that folder in place. A launch with
 | `DashboardWindow.Web.cs` | WebView2 hosting and policy, the message bridge, command handling and published state. |
 | `DashboardWindow.SourcePicker.cs` / `DashboardWindow.RestoreFlow.cs` | Folder review and guided restore state. |
 | `Telemetry.cs` / `BackupFreshness.cs` | Status, run history, verification evidence and freshness. |
+| `BackupAlerts.cs` / `DashboardWindow.Alerts.cs` | Backup alerts: why a backup was missed, the failing count, notifications, `alerts.json` and the tray mark. |
 | `SourceConfiguration.cs` / `TaskSchedule.cs` | Reading the installed plan and the backup task. |
 | `*Manager.cs`, `*Controller.cs`, `ScheduleManagerLauncher.cs` | Adapters to the engine's protected managers and helpers. |
 | `ElevatedRequestSecurity.cs` | The one copy of the checks every elevated request relies on: command-line quoting, nonces, constant-time comparison and the protected-result ACL check. Compile it wherever one of those adapters is compiled. |
