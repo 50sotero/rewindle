@@ -85,6 +85,11 @@ function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw "Regression assertion failed: $Message" }
 }
 
+# A moment on the dashboard's own timer clock (the Stopwatch, which setting the wall clock does not move), Seconds from now.
+function Get-MonotonicAfter([double]$Seconds) {
+    return [Diagnostics.Stopwatch]::GetTimestamp() + [long]($Seconds * [Diagnostics.Stopwatch]::Frequency)
+}
+
 function New-GenericList([Type]$ItemType) {
     return ,([Activator]::CreateInstance([System.Collections.Generic.List``1].MakeGenericType($ItemType)))
 }
@@ -1557,10 +1562,10 @@ namespace RewindleRegression {
     Assert-True ($null -eq $unreadableState['notice']) 'a schedule notice showed although no change was made'
     Set-PrivateField $dashboard 'scheduleNoticeText' 'Schedule updated and independently verified.'
     Set-PrivateField $dashboard 'scheduleNoticeTone' 'success'
-    Set-PrivateField $dashboard 'scheduleNoticeExpiresUtc' ([DateTime]::UtcNow.AddMinutes(1))
+    Set-PrivateField $dashboard 'scheduleNoticeExpiresAt' (Get-MonotonicAfter 60)
     $noticeState = Invoke-Private $dashboard 'BuildWebScheduleState'
     Assert-True ($noticeState['notice']['text'] -eq 'Schedule updated and independently verified.' -and $noticeState['notice']['tone'] -eq 'success') 'the outcome of a schedule change did not reach the page'
-    Set-PrivateField $dashboard 'scheduleNoticeExpiresUtc' ([DateTime]::UtcNow.AddMinutes(-1))
+    Set-PrivateField $dashboard 'scheduleNoticeExpiresAt' (Get-MonotonicAfter (-60))
     Assert-True ($null -eq (Invoke-Private $dashboard 'BuildWebScheduleState')['notice']) 'the outcome of a schedule change did not lapse'
     Set-PrivateField $dashboard 'scheduleOperationInProgress' $true
     Assert-True ($null -ne (Invoke-Private $dashboard 'BuildWebScheduleState')['notice']) 'the progress of a schedule change lapsed while Windows approval was still pending'
@@ -1597,12 +1602,12 @@ namespace RewindleRegression {
 
     # A crashed web view is reloaded on its own at most three times in five minutes, then the notice with
     # its Reload button takes over, so a crash loop cannot spin. The allowance comes back with time.
-    $recoveryTimes = [System.Collections.Generic.List[DateTime]]::new()
-    Set-PrivateField $dashboard 'webPresentationRecoveryUtc' $recoveryTimes
+    $recoveryTimes = [System.Collections.Generic.List[long]]::new()
+    Set-PrivateField $dashboard 'webPresentationRecoveryStarts' $recoveryTimes
     $allowances = @(1..4 | ForEach-Object { [bool](Invoke-Private $dashboard 'TryBeginWebPresentationRecovery') })
     Assert-True (($allowances -join ',') -eq 'True,True,True,False') 'automatic web view reloads were not capped at three'
     $recoveryTimes.Clear()
-    foreach ($attempt in 1..3) { $recoveryTimes.Add([DateTime]::UtcNow.AddMinutes(-6)) }
+    foreach ($attempt in 1..3) { $recoveryTimes.Add((Get-MonotonicAfter (-360))) }
     Assert-True ([bool](Invoke-Private $dashboard 'TryBeginWebPresentationRecovery')) 'the automatic reload allowance did not return after five minutes'
     # A missing WebView2 Runtime is told apart from any other start-up failure, because only it offers the download.
     $webViewCore = [Reflection.Assembly]::LoadFrom((Join-Path (Split-Path -Parent $resolvedExecutable) 'Microsoft.Web.WebView2.Core.dll'))
@@ -1617,8 +1622,8 @@ namespace RewindleRegression {
     # A page that stops answering may only be busy, so it is not reloaded at the first report (that would throw away what it holds and
     # spend the automatic reloads on a slow page). The browser repeats its report every few seconds while the page is stuck: the notice
     # is raised once, when it has been stuck for fifteen seconds, and a quiet spell means it recovered and starts the count over.
-    $reportStart = [DateTime]::UtcNow
-    $reportOutcomes = foreach ($second in 0, 5, 10, 14, 16, 20, 40, 45, 50, 54, 56) { [bool](Invoke-Private $dashboard 'NoteWebPresentationUnresponsiveReport' @($reportStart.AddSeconds($second))) }
+    $reportStart = [Diagnostics.Stopwatch]::GetTimestamp()
+    $reportOutcomes = foreach ($second in 0, 5, 10, 14, 16, 20, 40, 45, 50, 54, 56) { [bool](Invoke-Private $dashboard 'NoteWebPresentationUnresponsiveReport' @([long]($reportStart + $second * [Diagnostics.Stopwatch]::Frequency))) }
     Assert-True (($reportOutcomes -join ',') -eq 'False,False,False,False,True,False,False,False,False,False,True') ('the not-responding notice was not raised once per stuck episode, after fifteen seconds: ' + ($reportOutcomes -join ','))
 
     # Backup freshness around a change of the clocks, in a fixed zone (US Eastern) so that the result does not depend on this computer's
@@ -2248,7 +2253,7 @@ namespace RewindleRegression {
         }
         function Wait-ForRequest([string]$BaselineRunId, [double]$SecondsLeft) {
             Set-PrivateField $requestDashboard 'backupRequestBaselineRunId' $BaselineRunId
-            Set-PrivateField $requestDashboard 'backupRequestPendingUntilUtc' ([DateTime]::UtcNow.AddSeconds($SecondsLeft))
+            Set-PrivateField $requestDashboard 'backupRequestPendingUntil' ([long](Get-MonotonicAfter $SecondsLeft))
         }
         function Update-RequestButton($Snapshot) {
             $requestIcon.BalloonTipTitle = '(none)'
@@ -2257,7 +2262,9 @@ namespace RewindleRegression {
         }
         Wait-ForRequest 'run-a' 30
         Assert-True ((Update-RequestButton (New-RunSnapshot 'run-a' $false)) -eq '(none)' -and [string]$requestButton.Content -like 'Request sent*') 'a request that is still within its wait was reported as not started'
+        Assert-True ([bool](Invoke-Private $requestDashboard 'BackupRequestPending')) 'a request within its wait did not hold the protected actions back'
         Wait-ForRequest 'run-a' (-1)
+        Assert-True (-not [bool](Invoke-Private $requestDashboard 'BackupRequestPending')) 'a request past its wait still held the protected actions back'
         Assert-True ((Update-RequestButton (New-RunSnapshot 'run-a' $false)) -eq 'Backup has not started') 'a request that ended its wait with no run was not reported'
         Assert-True ($requestButton.Content -eq 'Back up now' -and $requestButton.IsEnabled -and [string]$requestButton.ToolTip -like ($plainHelp + '*did not start*AC power*')) ('the Back up now help did not carry the note, or the button stayed off: ' + $requestButton.ToolTip)
         Assert-True ((Update-RequestButton (New-RunSnapshot 'run-a' $false)) -eq '(none)' -and [string]$requestButton.ToolTip -like '*did not start*') 'the not-started warning was raised more than once for one request, or the note was dropped while no run had appeared'
@@ -2278,6 +2285,21 @@ namespace RewindleRegression {
     finally {
         $requestIcon.Dispose()
     }
+
+    # The window's timers run on the Stopwatch clock, so setting the clock back cannot hold them in the future. The schedule is
+    # read again at once when asked, and otherwise once its deadline has passed and not before. Nothing here reads the real task.
+    $timerDashboard = [Runtime.Serialization.FormatterServices]::GetUninitializedObject($dashboardType)
+    Assert-True ([bool](Invoke-Private $timerDashboard 'ScheduleRefreshDue' @($false))) 'a schedule that was never read was not due'
+    Set-PrivateField $timerDashboard 'nextScheduleRefreshAt' ([long](Get-MonotonicAfter 30))
+    Assert-True (-not [bool](Invoke-Private $timerDashboard 'ScheduleRefreshDue' @($false))) 'the schedule was read again before its 30 seconds were up'
+    Assert-True ([bool](Invoke-Private $timerDashboard 'ScheduleRefreshDue' @($true))) 'a schedule read that was asked for waited for the timer'
+    Set-PrivateField $timerDashboard 'nextScheduleRefreshAt' ([long](Get-MonotonicAfter (-1)))
+    Assert-True ([bool](Invoke-Private $timerDashboard 'ScheduleRefreshDue' @($false))) 'the schedule was not read again once its time had come'
+
+    # A sign-out or shutdown that is called off leaves the window hiding to the tray again when it is closed.
+    Set-PrivateField $timerDashboard 'allowClose' $true
+    Invoke-Private $timerDashboard 'OnSessionEndCancelled' | Out-Null
+    Assert-True (-not [bool](Get-FieldValue $timerDashboard 'allowClose')) 'a cancelled sign-out left the window closing instead of hiding to the tray'
 
     # The recovery-readiness window explains its dimmed buttons: each button's accessible name is its visible label, its tooltip is its
     # help text, a line above the buttons says what is available, and the key button's label and the choice it makes come from the same
@@ -2493,4 +2515,4 @@ finally {
 }
 
 foreach ($note in $skipped) { Write-Output $note }
-Write-Output 'Regressions passed: snapshot scope reset, explicit whole-snapshot validation, observed-path enforcement, review invalidation, reload, retry routing, inline folder-read failures, launch guards, honest cancellation, UNC/reparse/no-overwrite/overlap destination guards and their plain-language refusals, diagnostics redaction of object keys, of whole paths (either slash, any root) and of account IDs, capped run history that is not rewritten for an evicted baseline, no live samples written and the old file removed, readable run-details timelines from long and odd logs, the restore approval wait, one Windows approval per restore session (every listing and one restore, a new session only after one ended, closed with the flow and a changed plan, a declined approval, a pipe served by another process, oversized and foreign frames), no folder read on choosing a backup or restoring all of it, folder listings kept per snapshot and bounded, the session-or-per-step choice from the installed engine, the published reason a restore cannot start, Open and Copy on a restore result acting only on the folder the restore reported once it has finished, an unreadable schedule and the outcome of a schedule change, schedule summaries for every day and lenient schedule times, capped automatic web view reloads, missing-runtime detection, a configuration check that could not complete ending the read it followed, cut-short folder listings and the published path limit, history lists bound again only when a run differs, one not-responding notice per stuck web view, backup freshness across a change of the clocks and of the run times, a missed backup Windows catches up on after a sign-in or a wake, an off-site check that is overdue, the tray balloon for a backup starting once per run, the not-started note for an accepted backup request that started nothing, the bounded crash log and its redacted copy in a diagnostic bundle, the installed plan read without keeping its writer out (and still refused when cut short, not an object or too large) with an install root that follows Program Files, the backup-location window''s done/current/failed steps and refused folders, the recovery-readiness window''s explained actions, the folder picker''s cloud-only walk (bounded by entries and time, skipping excluded folders and links), OneDrive paths and wording, the free-space warning for a whole snapshot that will not fit (a warning and never an error), the history limit the page is told, the schedule, location and readiness dialogs sharing the page tokens and the schedule wording, a status that cannot be read for a moment, a missing state folder, the retired legacy cloud file, a run history that is never written over while it is unreadable, the tray hover text and first-close hint, the setup state the page is told, and diagnostics that say what they left out and read a log cut inside a character.'
+Write-Output 'Regressions passed: snapshot scope reset, explicit whole-snapshot validation, observed-path enforcement, review invalidation, reload, retry routing, inline folder-read failures, launch guards, honest cancellation, UNC/reparse/no-overwrite/overlap destination guards and their plain-language refusals, diagnostics redaction of object keys, of whole paths (either slash, any root) and of account IDs, capped run history that is not rewritten for an evicted baseline, no live samples written and the old file removed, readable run-details timelines from long and odd logs, the restore approval wait, one Windows approval per restore session (every listing and one restore, a new session only after one ended, closed with the flow and a changed plan, a declined approval, a pipe served by another process, oversized and foreign frames), no folder read on choosing a backup or restoring all of it, folder listings kept per snapshot and bounded, the session-or-per-step choice from the installed engine, the published reason a restore cannot start, Open and Copy on a restore result acting only on the folder the restore reported once it has finished, an unreadable schedule and the outcome of a schedule change, schedule summaries for every day and lenient schedule times, capped automatic web view reloads, missing-runtime detection, a configuration check that could not complete ending the read it followed, cut-short folder listings and the published path limit, history lists bound again only when a run differs, one not-responding notice per stuck web view, backup freshness across a change of the clocks and of the run times, a missed backup Windows catches up on after a sign-in or a wake, an off-site check that is overdue, the tray balloon for a backup starting once per run, the not-started note for an accepted backup request that started nothing, timers on a clock that setting the time does not move, the window hiding to the tray again after a cancelled sign-out, the bounded crash log and its redacted copy in a diagnostic bundle, the installed plan read without keeping its writer out (and still refused when cut short, not an object or too large) with an install root that follows Program Files, the backup-location window''s done/current/failed steps and refused folders, the recovery-readiness window''s explained actions, the folder picker''s cloud-only walk (bounded by entries and time, skipping excluded folders and links), OneDrive paths and wording, the free-space warning for a whole snapshot that will not fit (a warning and never an error), the history limit the page is told, the schedule, location and readiness dialogs sharing the page tokens and the schedule wording, a status that cannot be read for a moment, a missing state folder, the retired legacy cloud file, a run history that is never written over while it is unreadable, the tray hover text and first-close hint, the setup state the page is told, and diagnostics that say what they left out and read a log cut inside a character.'

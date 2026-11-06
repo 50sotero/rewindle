@@ -116,6 +116,7 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
                 str(DASHBOARD / "AtomicFile.cs"),
                 str(DASHBOARD / "ElevatedRequestSecurity.cs"),
                 str(DASHBOARD / "SourceConfiguration.cs"),
+                str(DASHBOARD / "ProcessLiveness.cs"),
                 str(TELEMETRY_SOURCE),
                 str(harness),
             ],

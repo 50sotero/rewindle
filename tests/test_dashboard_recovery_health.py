@@ -51,6 +51,7 @@ class DashboardRecoveryHealthTests(unittest.TestCase):
                     str(DASHBOARD / "AtomicFile.cs"),
                     str(DASHBOARD / "ElevatedRequestSecurity.cs"),
                     str(DASHBOARD / "SourceConfiguration.cs"),
+                    str(DASHBOARD / "ProcessLiveness.cs"),
                     str(DASHBOARD / "Telemetry.cs"),
                     str(DASHBOARD / "TaskSchedule.cs"),
                     str(DASHBOARD / "RecoveryHealthManager.cs"),

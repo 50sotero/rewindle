@@ -231,8 +231,9 @@ and every engine folder moved under the temporary folder) and never run a real
 restore, start Restic, or change anything outside that folder. They cover the
 restore flow (snapshot selection, scope, review invalidation, retries, path
 limits, destination restrictions), diagnostics redaction, run history and its
-limits, status-file read failures, backup freshness across clock changes, the
-tray, the crash log cap, the setup and engine-not-installed states, the
+limits, status-file read failures, backup freshness across clock changes,
+timers that setting the clock back does not hold, the tray and a cancelled
+sign-out, the crash log cap, the setup and engine-not-installed states, the
 dialogs' shared design tokens, and engine selection with the identities each
 profile owns.
 
@@ -272,6 +273,11 @@ these user-facing rules when you change the dashboard:
 - **An accepted request is not a verified backup.** Only the engine's protected
   status can report a run as verified. If Windows accepts **Back up now** but no
   run appears, the app says so instead of claiming success.
+- **A backup is running only while its process is.** A status that says a run
+  is in progress is believed only while the very process that wrote it (its ID
+  and exact creation time) is still running, so a run cut short by a sign-out
+  or shutdown shows as interrupted rather than holding the protected actions
+  back.
 - **An unreadable status is not a failed backup.** The last good reading stands
   in briefly; a longer gap is a warning that names the reason, never a failure.
   A missing state folder means **Engine not installed**, not "no backups yet".

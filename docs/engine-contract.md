@@ -157,6 +157,13 @@ than overdue until the task has run since the slot, or for at most 45 minutes af
 | Retired per-user mirror status (section 2) | Presence only; never parsed | Written by the optional sync script | Written by that edition's sync script |
 | `<state>\recovery-health-latest.json` | Diagnostics only | Not written | Not written |
 
+An active `status.json` (a running state) is believed only while its writer is alive: the process
+`wrapper_pid`, opened as the user with `PROCESS_QUERY_LIMITED_INFORMATION`, must have exactly the creation time
+`wrapper_start_filetime` (a canonical decimal FILETIME string) and must not have exited, or the file must have been written
+in the last two minutes. Otherwise the run is shown as interrupted. A status without a valid `wrapper_start_filetime` (an
+older engine build) falls back to the process ID and a start time within five minutes of `started_utc`. Both engines write
+both fields, and must keep doing so.
+
 The read-only readiness check runs `<install>\Python\python.exe -E -S -B <install>\recovery_health.py --config …` as the
 user (60 s, 4 MiB stdout) and binds `schema` `<P>.RecoveryHealth.v1`, plan, generation, repository, and the check IDs
 `active_credential`, `recovery_key`, `rotation_rollback_key`, `pending_transaction`, `restore_drill`, `recovery_bundle`

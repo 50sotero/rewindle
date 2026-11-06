@@ -137,11 +137,17 @@ ones a home user reads without a glossary.
   you sign in: Windows starts such a backup by itself, so Protection says
   **Catching up** in a neutral color and asks for nothing. If the backup has
   not started 45 minutes after you sign in or wake the PC, it is **Backup
-  overdue** again, with **Back up now**. And an off-site copy whose nightly
+  overdue** again, with **Back up now**. An off-site copy whose nightly
   check has not worked for two days (or that has shown a check as running for
   that long) no longer says there is nothing to do: the card warns, says to
   leave the PC on and signed in overnight, and what to do if that does not
-  help.
+  help. A backup cut short by a sign-out or shutdown is shown as interrupted;
+  before, it could show as still running for up to a day, with **Back up
+  now**, folder changes and restores turned off. Setting the PC's clock back
+  no longer pauses the status checks, the notices or the wait after **Back up
+  now** for as long as the clock went back. And when a sign-out or shutdown is
+  cancelled, Rewindle is still running in the notification area; before, it
+  had already quit.
 
 ### Security
 

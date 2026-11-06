@@ -2475,6 +2475,19 @@ namespace ResticBackuper.Dashboard
                 return statusAgeSeconds > MissingProcessGraceSeconds;
             }
 
+            // The engine records the wrapper's exact creation time, so the run is alive only while that very process is. A
+            // process ID alone is not enough: the wrapper runs elevated, Process.HasExited is refused on it, and a refusal used
+            // to count as running, so an ID that a SYSTEM or elevated process took over after a sign-out showed the backup as
+            // running for up to a day.
+            long wrapperStartFileTime;
+            if (TryGetProcessFileTime(document, "wrapper_start_filetime", out wrapperStartFileTime))
+            {
+                return !ProcessLiveness.IsSameProcessAlive((int)processIdValue, wrapperStartFileTime)
+                    && statusAgeSeconds > MissingProcessGraceSeconds;
+            }
+
+            // A status without that time (an older engine build) keeps the check by ID and start time, which leans towards
+            // running when Windows refuses to answer.
             try
             {
                 using (Process process = Process.GetProcessById((int)processIdValue))
@@ -2516,6 +2529,43 @@ namespace ResticBackuper.Dashboard
             {
                 return false;
             }
+        }
+
+        // A process creation time as the engine writes it: a FILETIME as a canonical decimal string (or, leniently, a JSON
+        // integer), above zero and within a signed 64-bit value. Anything else is treated as absent.
+        private static bool TryGetProcessFileTime(IDictionary<string, object> document, string key, out long fileTime)
+        {
+            fileTime = 0;
+            object value;
+            if (document == null || !document.TryGetValue(key, out value) || value == null)
+            {
+                return false;
+            }
+            string text = value as string;
+            if (text != null)
+            {
+                if (text.Length == 0 || text.Length > 19 || text[0] == '0')
+                {
+                    return false;
+                }
+                foreach (char character in text)
+                {
+                    if (character < '0' || character > '9')
+                    {
+                        return false;
+                    }
+                }
+                return long.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out fileTime) && fileTime > 0;
+            }
+            if (value is int)
+            {
+                fileTime = (int)value;
+            }
+            else if (value is long)
+            {
+                fileTime = (long)value;
+            }
+            return fileTime > 0;
         }
 
         [DllImport("kernel32.dll")]

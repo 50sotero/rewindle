@@ -8,6 +8,7 @@ $engineProfileSource = Get-Content -LiteralPath (Join-Path $project 'src\dashboa
 $atomicFileSource = Get-Content -LiteralPath (Join-Path $project 'src\dashboard\AtomicFile.cs') -Raw -Encoding UTF8
 $sourceConfigurationSource = Get-Content -LiteralPath (Join-Path $project 'src\dashboard\SourceConfiguration.cs') -Raw -Encoding UTF8
 $elevatedRequestSecuritySource = Get-Content -LiteralPath (Join-Path $project 'src\dashboard\ElevatedRequestSecurity.cs') -Raw -Encoding UTF8
+$processLivenessSource = Get-Content -LiteralPath (Join-Path $project 'src\dashboard\ProcessLiveness.cs') -Raw -Encoding UTF8
 $harness = @'
 namespace ResticBackuper.Dashboard
 {
@@ -233,7 +234,7 @@ namespace ResticBackuper.Dashboard
 }
 '@
 
-$sourceParts = @($engineProfileSource, $atomicFileSource, $elevatedRequestSecuritySource, $sourceConfigurationSource, $telemetrySource, $scheduleSource, $freshnessSource)
+$sourceParts = @($engineProfileSource, $atomicFileSource, $elevatedRequestSecuritySource, $sourceConfigurationSource, $processLivenessSource, $telemetrySource, $scheduleSource, $freshnessSource)
 $usingPattern = '(?m)^using\s+[^;]+;\s*\r?\n'
 $allUsings = @($sourceParts | ForEach-Object {
     [regex]::Matches($_, $usingPattern) | ForEach-Object { $_.Value.Trim() }

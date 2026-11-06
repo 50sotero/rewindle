@@ -601,6 +601,19 @@ section 9, and [`SECURITY.md`](../SECURITY.md).
 - A direct off-site proof that is waiting for (or shows) a check is calm for
   48 hours after its last check; after that it is reported as overdue, since a
   check that fails writes no proof of its own.
+- A status that says a backup is running is believed only while the process
+  that wrote it still runs (the same process ID with exactly the creation time
+  the engine recorded), or for two minutes after its last write. A run cut
+  short by a sign-out or shutdown is shown as interrupted even when Windows has
+  given its process ID to another process, including one the dashboard may not
+  open.
+- The dashboard's timers (schedule re-reads, drive and folder checks, notices,
+  the wait after **Back up now**) run on a monotonic clock, so setting the
+  wall clock back does not hold them. Moments compared with backup times stay
+  on the wall clock, where a clock that disagrees is reported.
+- The dashboard never holds up a sign-out or shutdown, and one that is
+  cancelled leaves it running: it answers Windows' question itself and closes
+  only once the session really ends.
 - A large destructive change anomaly can complete as a verified local snapshot
   while remaining held for explicit review. Acknowledgement is bound to the
   exact plan, generation, snapshot, and evidence and never alters snapshots.

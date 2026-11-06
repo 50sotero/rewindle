@@ -196,7 +196,7 @@ namespace ResticBackuper.Dashboard
         private SourceConfiguration currentSourceConfiguration;
         private string sourceSignature;
         private bool sourceOperationInProgress;
-        private DateTime sourceNoticeExpiresUtc = DateTime.MinValue;
+        private long sourceNoticeExpiresAt;
         // What the web surface shows for the same notice: its own text and tone, independent of the
         // native status line, which other updates may overwrite while the notice is still live.
         private string sourceNoticeText = string.Empty;
@@ -207,13 +207,13 @@ namespace ResticBackuper.Dashboard
         private string sourceOperationError = string.Empty;
         private string lastSourceOperationAnnouncement = string.Empty;
         private int sourceOperationGeneration;
-        private DateTime sourceOperationExpiresUtc = DateTime.MinValue;
+        private long sourceOperationExpiresAt;
         private bool animateNextSourceOperationEntry;
         private bool animateNextResolvedSourceRow;
         private bool backupStartInProgress;
         private bool anomalyReviewInProgress;
         private bool diagnosticExportInProgress;
-        private DateTime backupRequestPendingUntilUtc = DateTime.MinValue;
+        private long backupRequestPendingUntil;
         private string backupRequestBaselineRunId = string.Empty;
         // Windows answers a backup request before it decides whether the task may start, so a task that one of its own
         // conditions holds back (it waits for AC power, say) leaves no run and nothing else to explain it. When the pending
@@ -229,7 +229,7 @@ namespace ResticBackuper.Dashboard
         private string cancellationRequestedRunId = string.Empty;
         private string cancellationNotice = string.Empty;
         private Brush cancellationNoticeColor;
-        private DateTime cancellationNoticeExpiresUtc = DateTime.MinValue;
+        private long cancellationNoticeExpiresAt;
         private string cancellationUnavailableRunId = string.Empty;
         private TaskSchedule currentTaskSchedule;
         private string scheduleReadError = string.Empty;
@@ -240,14 +240,14 @@ namespace ResticBackuper.Dashboard
         private const int ScheduleNoticeSeconds = 45;
         private string scheduleNoticeText = string.Empty;
         private string scheduleNoticeTone = "info";
-        private DateTime scheduleNoticeExpiresUtc = DateTime.MinValue;
+        private long scheduleNoticeExpiresAt;
         private bool repositoryOperationInProgress;
         private bool repositoryRecoveryInProgress;
         private RepositoryRecoveryStatus repositoryRecoveryStatus = RepositoryRecoveryStatus.None();
         private string repositoryRecoveryOperationMessage = string.Empty;
         private double? repositoryRecoveryOperationPercent;
         private string lastRepositoryRecoveryAnnouncement = string.Empty;
-        private DateTime nextScheduleRefreshUtc = DateTime.MinValue;
+        private long nextScheduleRefreshAt;
         // The 1 Hz tick loads telemetry (several JSON files, and a durable write of the run history when a run
         // changed) off the UI thread. An explicit refresh moves the generation, so a tick result that
         // was already in flight is dropped instead of overwriting the newer state.
@@ -269,11 +269,12 @@ namespace ResticBackuper.Dashboard
         // otherwise, and when the drive could not be asked at all (a network share has no drive to ask), so the page does
         // not warn about a volume nobody knows to be gone. Published as repository.volumeReady.
         private bool repositoryVolumeReady = true;
-        private DateTime repositoryVolumeCheckedUtc = DateTime.MinValue;
+        private long repositoryVolumeNextProbeAt;
         private bool repositoryVolumeProbeInFlight;
         private BackupFreshnessState? lastAnnouncedFreshnessState;
 
         private bool allowClose;
+        private SessionEndGuard sessionEndGuard;
         private bool previewEnabled;
         private DateTime previewStarted;
         private string lastStateKey;
@@ -372,7 +373,11 @@ namespace ResticBackuper.Dashboard
             SystemParameters.StaticPropertyChanged += OnSystemParametersChanged;
             sessionSignInUtc = ReadSessionSignInUtc();
             SystemEvents.PowerModeChanged += OnPowerModeChanged;
+            // WPF raises SessionEnding only when it is about to shut the application down for a sign-out or shutdown, which
+            // happens only if the session-end guard (see InstallSessionEndGuard) could not be put in place: the window must
+            // then close rather than hide.
             Application.Current.SessionEnding += delegate { allowClose = true; };
+            SourceInitialized += delegate { InstallSessionEndGuard(); };
 
             trayIcon = BuildTrayIcon();
             refreshTimer = new DispatcherTimer(DispatcherPriority.Background);
@@ -2691,13 +2696,13 @@ namespace ResticBackuper.Dashboard
         private void SetSourceOperationStage(
             SourceOperationStage stage,
             string error,
-            DateTime expiresUtc,
+            long expiresAt,
             bool rebuild,
             bool animate)
         {
             sourceOperationStage = stage;
             sourceOperationError = error ?? string.Empty;
-            sourceOperationExpiresUtc = expiresUtc;
+            sourceOperationExpiresAt = expiresAt;
             if (rebuild)
             {
                 sourceSignature = null;
@@ -2715,7 +2720,7 @@ namespace ResticBackuper.Dashboard
             sourceOperationAction = string.Empty;
             sourceOperationPath = string.Empty;
             sourceOperationError = string.Empty;
-            sourceOperationExpiresUtc = DateTime.MinValue;
+            sourceOperationExpiresAt = 0;
             lastSourceOperationAnnouncement = string.Empty;
             animateNextSourceOperationEntry = false;
             animateNextResolvedSourceRow = false;
@@ -2735,7 +2740,7 @@ namespace ResticBackuper.Dashboard
             if (configuration.ContainsUserSource(path))
             {
                 sourceOperationStage = SourceOperationStage.Succeeded;
-                sourceOperationExpiresUtc = DateTime.UtcNow.AddSeconds(4);
+                sourceOperationExpiresAt = MonotonicAfter(TimeSpan.FromSeconds(4));
                 animateNextResolvedSourceRow = true;
                 RefreshSources(true);
                 return;
@@ -2745,7 +2750,7 @@ namespace ResticBackuper.Dashboard
                 SetSourceOperationStage(
                     SourceOperationStage.Failed,
                     "A backup is starting or already running.",
-                    DateTime.MaxValue,
+                    MonotonicNever,
                     false,
                     true);
                 return;
@@ -3735,7 +3740,7 @@ namespace ResticBackuper.Dashboard
                 anomalyReviewInProgress ||
                 backupStartInProgress ||
                 CancellationBlocksMutations(lastSnapshot) ||
-                DateTime.UtcNow < backupRequestPendingUntilUtc ||
+                BackupRequestPending() ||
                 (lastSnapshot != null && lastSnapshot.IsActive);
         }
 
@@ -4045,7 +4050,7 @@ namespace ResticBackuper.Dashboard
             {
                 return;
             }
-            if (!force && DateTime.UtcNow < nextScheduleRefreshUtc)
+            if (!ScheduleRefreshDue(force))
             {
                 return;
             }
@@ -4055,8 +4060,8 @@ namespace ResticBackuper.Dashboard
                 // in the background would briefly report "Schedule unavailable" (and announce it) at startup.
                 scheduleReadSeeded = true;
                 scheduleReadGeneration++;
-                nextScheduleRefreshUtc = DateTime.UtcNow.AddSeconds(
-                    cancellationAwaitingTerminal ? 1 : 30);
+                nextScheduleRefreshAt = MonotonicAfter(TimeSpan.FromSeconds(
+                    cancellationAwaitingTerminal ? 1 : 30));
                 ApplyScheduleReadResult(TaskScheduleReader.ReadInstalled());
                 return;
             }
@@ -4064,9 +4069,49 @@ namespace ResticBackuper.Dashboard
             {
                 return;
             }
-            nextScheduleRefreshUtc = DateTime.UtcNow.AddSeconds(
-                cancellationAwaitingTerminal ? 1 : 30);
+            nextScheduleRefreshAt = MonotonicAfter(TimeSpan.FromSeconds(
+                cancellationAwaitingTerminal ? 1 : 30));
             BeginScheduleRead();
+        }
+
+        // The schedule is read again when asked to, and otherwise every 30 seconds (every second while a stop is awaited).
+        private bool ScheduleRefreshDue(bool force)
+        {
+            return force || MonotonicReached(nextScheduleRefreshAt);
+        }
+
+        // Timers and refresh intervals run on the Stopwatch clock, which only moves forward. One on the wall clock stays in the
+        // future when the clock is set back (a time-sync correction, a manual change, another system on the same PC that keeps
+        // it in UTC): the schedule read, the backup drive and folder checks, the notices and the wait after Back up now, which
+        // holds the protected actions back, would all stand still for as long as the clock went back. A deadline of 0 has
+        // passed (none is set) and MonotonicNever never passes by itself. Moments compared with backup times stay on the wall
+        // clock.
+        private const long MonotonicNever = long.MaxValue;
+
+        private static long MonotonicNow()
+        {
+            return Stopwatch.GetTimestamp();
+        }
+
+        private static long MonotonicSpan(TimeSpan span)
+        {
+            return (long)(span.TotalSeconds * Stopwatch.Frequency);
+        }
+
+        private static long MonotonicAfter(TimeSpan span)
+        {
+            return MonotonicNow() + MonotonicSpan(span);
+        }
+
+        private static bool MonotonicReached(long deadline)
+        {
+            return MonotonicNow() >= deadline;
+        }
+
+        // Windows accepted Back up now less than 45 seconds ago and the run has not shown up yet.
+        private bool BackupRequestPending()
+        {
+            return backupRequestPendingUntil != 0 && !MonotonicReached(backupRequestPendingUntil);
         }
 
         private async void BeginScheduleRead()
@@ -4236,10 +4281,10 @@ namespace ResticBackuper.Dashboard
                 repositoryVolumePath = path;
                 repositoryVolumeText = "Checking storage volume\u2026";
                 repositoryVolumeReady = true;
-                repositoryVolumeCheckedUtc = DateTime.MinValue;
+                repositoryVolumeNextProbeAt = 0;
             }
             if (!repositoryVolumeProbeInFlight &&
-                DateTime.UtcNow - repositoryVolumeCheckedUtc >= RepositoryVolumeRefreshInterval)
+                MonotonicReached(repositoryVolumeNextProbeAt))
             {
                 ProbeRepositoryVolumeAsync(path);
             }
@@ -4275,7 +4320,7 @@ namespace ResticBackuper.Dashboard
                 // The repository moved while this probed; the next header update probes the new path.
                 return;
             }
-            repositoryVolumeCheckedUtc = DateTime.UtcNow;
+            repositoryVolumeNextProbeAt = MonotonicAfter(RepositoryVolumeRefreshInterval);
             if (string.Equals(text, repositoryVolumeText, StringComparison.Ordinal) &&
                 ready == repositoryVolumeReady)
             {
@@ -4346,9 +4391,9 @@ namespace ResticBackuper.Dashboard
         {
             if (!sourceOperationInProgress &&
                 sourceOperationStage != SourceOperationStage.Idle &&
-                sourceOperationExpiresUtc != DateTime.MinValue &&
-                sourceOperationExpiresUtc != DateTime.MaxValue &&
-                DateTime.UtcNow >= sourceOperationExpiresUtc)
+                sourceOperationExpiresAt != 0 &&
+                sourceOperationExpiresAt != MonotonicNever &&
+                MonotonicReached(sourceOperationExpiresAt))
             {
                 ResetSourceOperationState();
                 force = true;
@@ -4388,7 +4433,7 @@ namespace ResticBackuper.Dashboard
                     sourceStatus.Text = "Folder changes are shown inline below. No backup has started.";
                     sourceStatus.Foreground = MutedText;
                 }
-                else if (DateTime.UtcNow >= sourceNoticeExpiresUtc)
+                else if (MonotonicReached(sourceNoticeExpiresAt))
                 {
                     if (!hasCanarySource)
                     {
@@ -4431,7 +4476,7 @@ namespace ResticBackuper.Dashboard
                 sourceSummary.Text = notInstalled
                     ? "Backup service not installed"
                     : "Backup settings unavailable";
-                if (DateTime.UtcNow >= sourceNoticeExpiresUtc)
+                if (MonotonicReached(sourceNoticeExpiresAt))
                 {
                     sourceStatus.Text = sourceConfigurationNote;
                     sourceStatus.Foreground = notInstalled ? MutedText : Rose;
@@ -4654,7 +4699,7 @@ namespace ResticBackuper.Dashboard
                 CancellationBlocksMutations(lastSnapshot) ||
                 anomalyReviewInProgress ||
                 backupStartInProgress ||
-                DateTime.UtcNow < backupRequestPendingUntilUtc ||
+                BackupRequestPending() ||
                 (lastSnapshot != null && lastSnapshot.IsActive);
             if (addSourceButton != null)
             {
@@ -4701,14 +4746,14 @@ namespace ResticBackuper.Dashboard
             bool enabled = false;
             bool hasCanary = currentSourceConfiguration != null &&
                 currentSourceConfiguration.Sources.Any(source => source.IsProtectedCanary);
-            bool pending = DateTime.UtcNow < backupRequestPendingUntilUtc;
+            bool pending = BackupRequestPending();
             if (pending && HasNewerBackupTelemetry(snapshot))
             {
-                backupRequestPendingUntilUtc = DateTime.MinValue;
+                backupRequestPendingUntil = 0;
                 backupRequestBaselineRunId = string.Empty;
                 pending = false;
             }
-            else if (!pending && backupRequestPendingUntilUtc != DateTime.MinValue)
+            else if (!pending && backupRequestPendingUntil != 0)
             {
                 // The wait is over. Say once that nothing started, but only when the status is readable and shows no
                 // run since the request: an unreadable status says nothing either way. It is worded as a possibility,
@@ -4723,7 +4768,7 @@ namespace ResticBackuper.Dashboard
                         BackupNotStartedNotice,
                         Forms.ToolTipIcon.Warning);
                 }
-                backupRequestPendingUntilUtc = DateTime.MinValue;
+                backupRequestPendingUntil = 0;
                 backupRequestBaselineRunId = string.Empty;
             }
             // A run that appeared since (this one, or a scheduled one) answers the note.
@@ -4761,7 +4806,7 @@ namespace ResticBackuper.Dashboard
             }
             else if (snapshot != null && snapshot.IsActive)
             {
-                backupRequestPendingUntilUtc = DateTime.MinValue;
+                backupRequestPendingUntil = 0;
                 label = "Backup running";
                 helpText = "A backup is already running.";
             }
@@ -4932,8 +4977,8 @@ namespace ResticBackuper.Dashboard
             if (cancelActionStatus != null)
             {
                 if (!string.IsNullOrWhiteSpace(cancellationNotice) &&
-                    (cancellationNoticeExpiresUtc == DateTime.MaxValue ||
-                        DateTime.UtcNow < cancellationNoticeExpiresUtc))
+                    (cancellationNoticeExpiresAt == MonotonicNever ||
+                        !MonotonicReached(cancellationNoticeExpiresAt)))
                 {
                     cancelActionStatus.Text = cancellationNotice;
                     cancelActionStatus.Foreground = cancellationNoticeColor ?? MutedText;
@@ -4942,7 +4987,7 @@ namespace ResticBackuper.Dashboard
                 else
                 {
                     cancellationNotice = string.Empty;
-                    cancellationNoticeExpiresUtc = DateTime.MinValue;
+                    cancellationNoticeExpiresAt = 0;
                     cancelActionStatus.Visibility = Visibility.Collapsed;
                 }
             }
@@ -5123,9 +5168,9 @@ namespace ResticBackuper.Dashboard
         {
             cancellationNotice = message ?? string.Empty;
             cancellationNoticeColor = foreground ?? MutedText;
-            cancellationNoticeExpiresUtc = visibleSeconds > 0
-                ? DateTime.UtcNow.AddSeconds(visibleSeconds)
-                : DateTime.MaxValue;
+            cancellationNoticeExpiresAt = visibleSeconds > 0
+                ? MonotonicAfter(TimeSpan.FromSeconds(visibleSeconds))
+                : MonotonicNever;
             if (cancelActionStatus == null)
             {
                 return;
@@ -5207,7 +5252,7 @@ namespace ResticBackuper.Dashboard
 
             if (snapshot.IsCancelled)
             {
-                nextScheduleRefreshUtc = DateTime.MinValue;
+                nextScheduleRefreshAt = 0;
                 if (currentTaskSchedule == null ||
                     currentTaskSchedule.State == BackupTaskState.Running ||
                     currentTaskSchedule.State == BackupTaskState.Unknown)
@@ -5293,7 +5338,7 @@ namespace ResticBackuper.Dashboard
                 UpdateCancelButton(snapshot);
                 return;
             }
-            nextScheduleRefreshUtc = DateTime.UtcNow.AddSeconds(30);
+            nextScheduleRefreshAt = MonotonicAfter(TimeSpan.FromSeconds(30));
             ApplyScheduleReadResult(scheduleCheck);
             if (currentTaskSchedule == null ||
                 currentTaskSchedule.State != BackupTaskState.Running)
@@ -5383,7 +5428,7 @@ namespace ResticBackuper.Dashboard
             else if (result.Requested)
             {
                 cancellationAwaitingTerminal = true;
-                nextScheduleRefreshUtc = DateTime.MinValue;
+                nextScheduleRefreshAt = 0;
                 SetCancellationStatus(
                     "Stopping the backup safely…",
                     Amber,
@@ -5416,7 +5461,7 @@ namespace ResticBackuper.Dashboard
             }
             bool backupConflict = backupStartInProgress || anomalyReviewInProgress ||
                 CancellationBlocksMutations(lastSnapshot) ||
-                DateTime.UtcNow < backupRequestPendingUntilUtc ||
+                BackupRequestPending() ||
                 (lastSnapshot != null && lastSnapshot.IsActive);
             string helpText;
             if (scheduleOperationInProgress)
@@ -5486,7 +5531,7 @@ namespace ResticBackuper.Dashboard
         {
             scheduleNoticeText = message ?? string.Empty;
             scheduleNoticeTone = tone ?? "info";
-            scheduleNoticeExpiresUtc = DateTime.UtcNow.AddSeconds(ScheduleNoticeSeconds);
+            scheduleNoticeExpiresAt = MonotonicAfter(TimeSpan.FromSeconds(ScheduleNoticeSeconds));
             if (scheduleActionStatus == null)
             {
                 PublishWebPresentationState();
@@ -5516,7 +5561,7 @@ namespace ResticBackuper.Dashboard
                     EngineProfile.Current.RepositoryManagerFileName));
             bool backupConflict = backupStartInProgress || anomalyReviewInProgress ||
                 CancellationBlocksMutations(lastSnapshot) ||
-                DateTime.UtcNow < backupRequestPendingUntilUtc ||
+                BackupRequestPending() ||
                 (lastSnapshot != null && lastSnapshot.IsActive);
             bool enabled = !repositoryOperationInProgress &&
                 !RepositoryRecoveryBlocksMutations() &&
@@ -5715,7 +5760,7 @@ namespace ResticBackuper.Dashboard
             }
 
             sourceSignature = null;
-            nextScheduleRefreshUtc = DateTime.MinValue;
+            nextScheduleRefreshAt = 0;
             RefreshDashboard();
 
             if (result.UserCancelled)
@@ -5761,7 +5806,7 @@ namespace ResticBackuper.Dashboard
                 RepositoryRecoveryBlocksMutations() ||
                 sourceOperationInProgress || scheduleOperationInProgress ||
                 backupStartInProgress || CancellationBlocksMutations(lastSnapshot) ||
-                DateTime.UtcNow < backupRequestPendingUntilUtc ||
+                BackupRequestPending() ||
                 currentSourceConfiguration == null ||
                 (lastSnapshot != null && lastSnapshot.IsActive))
             {
@@ -5810,7 +5855,7 @@ namespace ResticBackuper.Dashboard
                 repositoryOperationInProgress ||
                 RepositoryRecoveryBlocksMutations() ||
                 CancellationBlocksMutations(lastSnapshot) ||
-                backupStartInProgress || DateTime.UtcNow < backupRequestPendingUntilUtc ||
+                backupStartInProgress || BackupRequestPending() ||
                 (lastSnapshot != null && lastSnapshot.IsActive);
         }
 
@@ -5842,7 +5887,7 @@ namespace ResticBackuper.Dashboard
                 UpdateScheduleButton();
                 return;
             }
-            nextScheduleRefreshUtc = DateTime.UtcNow.AddSeconds(30);
+            nextScheduleRefreshAt = MonotonicAfter(TimeSpan.FromSeconds(30));
             ApplyScheduleReadResult(scheduleCheck);
             if (currentTaskSchedule == null)
             {
@@ -5875,7 +5920,7 @@ namespace ResticBackuper.Dashboard
                 repositoryOperationInProgress || RepositoryRecoveryBlocksMutations() ||
                 backupStartInProgress ||
                 CancellationBlocksMutations(lastSnapshot) ||
-                DateTime.UtcNow < backupRequestPendingUntilUtc ||
+                BackupRequestPending() ||
                 (lastSnapshot != null && lastSnapshot.IsActive))
             {
                 SetScheduleStatus("Schedule not changed because a protected operation started.", Amber, "warning");
@@ -5915,7 +5960,7 @@ namespace ResticBackuper.Dashboard
             {
                 scheduleOperationInProgress = false;
                 SetScheduleStatus("Schedule unchanged — Windows approval was cancelled.", MutedText, "info");
-                nextScheduleRefreshUtc = DateTime.MinValue;
+                nextScheduleRefreshAt = 0;
                 RefreshSchedule(true);
                 UpdateSourceButtons();
                 return;
@@ -5930,7 +5975,7 @@ namespace ResticBackuper.Dashboard
                 independentRead.Schedule != null &&
                 independentRead.Schedule.Matches(requested);
             scheduleOperationInProgress = false;
-            nextScheduleRefreshUtc = DateTime.UtcNow.AddSeconds(30);
+            nextScheduleRefreshAt = MonotonicAfter(TimeSpan.FromSeconds(30));
 
             if (independentlyVerified)
             {
@@ -6016,7 +6061,7 @@ namespace ResticBackuper.Dashboard
                 CancellationBlocksMutations(lastSnapshot) ||
                 anomalyReviewInProgress ||
                 backupStartInProgress ||
-                DateTime.UtcNow < backupRequestPendingUntilUtc ||
+                BackupRequestPending() ||
                 (lastSnapshot != null && lastSnapshot.IsActive);
         }
 
@@ -6027,7 +6072,7 @@ namespace ResticBackuper.Dashboard
                 RepositoryRecoveryBlocksMutations() ||
                 CancellationBlocksMutations(lastSnapshot) ||
                 scheduleOperationInProgress ||
-                DateTime.UtcNow < backupRequestPendingUntilUtc ||
+                BackupRequestPending() ||
                 currentSourceConfiguration == null ||
                 !currentSourceConfiguration.Sources.Any(source => source.IsProtectedCanary) ||
                 (lastSnapshot != null && lastSnapshot.IsActive))
@@ -6060,7 +6105,7 @@ namespace ResticBackuper.Dashboard
                 RepositoryRecoveryBlocksMutations() ||
                 CancellationBlocksMutations(lastSnapshot) ||
                 scheduleOperationInProgress ||
-                DateTime.UtcNow < backupRequestPendingUntilUtc ||
+                BackupRequestPending() ||
                 currentSourceConfiguration == null ||
                 !currentSourceConfiguration.Sources.Any(source => source.IsProtectedCanary) ||
                 (lastSnapshot != null && lastSnapshot.IsActive))
@@ -6110,7 +6155,7 @@ namespace ResticBackuper.Dashboard
             else
             {
                 backupRequestBaselineRunId = baselineRunId ?? string.Empty;
-                backupRequestPendingUntilUtc = DateTime.UtcNow.AddSeconds(45);
+                backupRequestPendingUntil = MonotonicAfter(TimeSpan.FromSeconds(45));
                 // This request replaces the answer to the last one.
                 backupNotStartedText = string.Empty;
                 backupNotStartedBaselineRunId = string.Empty;
@@ -6296,9 +6341,9 @@ namespace ResticBackuper.Dashboard
                 sourceOperationPath = sourcePath;
                 sourceOperationError = string.Empty;
                 sourceOperationStage = SourceOperationStage.AwaitingApproval;
-                sourceOperationExpiresUtc = DateTime.MaxValue;
+                sourceOperationExpiresAt = MonotonicNever;
                 animateNextSourceOperationEntry = true;
-                sourceNoticeExpiresUtc = DateTime.MinValue;
+                sourceNoticeExpiresAt = 0;
                 sourceSignature = null;
                 RefreshSources(true);
             }
@@ -6333,7 +6378,7 @@ namespace ResticBackuper.Dashboard
                                         SetSourceOperationStage(
                                             SourceOperationStage.Applying,
                                             string.Empty,
-                                            DateTime.MaxValue,
+                                            MonotonicNever,
                                             false,
                                             true);
                                     }
@@ -6361,7 +6406,7 @@ namespace ResticBackuper.Dashboard
                     SetSourceOperationStage(
                         SourceOperationStage.Cancelled,
                         string.Empty,
-                        DateTime.UtcNow.AddSeconds(3),
+                        MonotonicAfter(TimeSpan.FromSeconds(3)),
                         false,
                         true);
                 }
@@ -6388,7 +6433,7 @@ namespace ResticBackuper.Dashboard
                     SetSourceOperationStage(
                         SourceOperationStage.Failed,
                         detail,
-                        DateTime.MaxValue,
+                        MonotonicNever,
                         false,
                         true);
                 }
@@ -6412,7 +6457,7 @@ namespace ResticBackuper.Dashboard
                 SetSourceOperationStage(
                     SourceOperationStage.Verifying,
                     string.Empty,
-                    DateTime.MaxValue,
+                    MonotonicNever,
                     false,
                     true);
                 await Dispatcher.Yield(DispatcherPriority.Render);
@@ -6439,7 +6484,7 @@ namespace ResticBackuper.Dashboard
                     SetSourceOperationStage(
                         SourceOperationStage.Failed,
                         detail,
-                        DateTime.MaxValue,
+                        MonotonicNever,
                         true,
                         true);
                 }
@@ -6460,7 +6505,7 @@ namespace ResticBackuper.Dashboard
             if (isAdd && sourceOperationGeneration == operationGeneration)
             {
                 sourceOperationStage = SourceOperationStage.Succeeded;
-                sourceOperationExpiresUtc = DateTime.UtcNow.AddSeconds(4);
+                sourceOperationExpiresAt = MonotonicAfter(TimeSpan.FromSeconds(4));
                 animateNextResolvedSourceRow = true;
                 sourceSignature = null;
                 RefreshSources(true);
@@ -6481,7 +6526,7 @@ namespace ResticBackuper.Dashboard
         {
             sourceStatus.Text = message;
             sourceStatus.Foreground = color;
-            sourceNoticeExpiresUtc = DateTime.UtcNow.AddSeconds(seconds);
+            sourceNoticeExpiresAt = MonotonicAfter(TimeSpan.FromSeconds(seconds));
             sourceNoticeText = message ?? string.Empty;
             sourceNoticeTone = color == Rose ? "error"
                 : color == Amber ? "warning"
@@ -7557,6 +7602,45 @@ namespace ResticBackuper.Dashboard
             Application.Current.Shutdown();
         }
 
+        // Left to WPF, a sign-out or shutdown would end Rewindle as soon as Windows asked whether it may, so one that is then
+        // cancelled would leave nothing watching the backups until the next sign-in. The guard says yes for Rewindle (it never
+        // holds a sign-out up) and waits for Windows' decision: OnSessionEnded or OnSessionEndCancelled.
+        private void InstallSessionEndGuard()
+        {
+            if (sessionEndGuard == null)
+            {
+                sessionEndGuard = SessionEndGuard.TryInstall(
+                    Application.Current,
+                    OnSessionEnded,
+                    OnSessionEndCancelled);
+            }
+        }
+
+        // The session is ending. Windows may end this process as soon as this returns, so the window is closed now, which runs
+        // OnClosed's clean-up (the restore approval session, the heartbeat, the tray icon) and shuts the application down.
+        private void OnSessionEnded()
+        {
+            allowClose = true;
+            try
+            {
+                Close();
+            }
+            catch (InvalidOperationException)
+            {
+                // Already closing.
+            }
+            if (Application.Current != null)
+            {
+                Application.Current.Shutdown();
+            }
+        }
+
+        // The sign-out or shutdown was called off: Rewindle keeps running, and closing the window hides it to the tray again.
+        private void OnSessionEndCancelled()
+        {
+            allowClose = false;
+        }
+
         private void OnClosing(object sender, CancelEventArgs args)
         {
             if (!allowClose)
@@ -7607,10 +7691,11 @@ namespace ResticBackuper.Dashboard
                 trayApplicationIcon = null;
             }
             // The window is gone, and with it the tray icon, so nothing is left to bring it back: the process ends with it.
-            // ExitApplication asks for the same thing right after Close, which makes this a second, harmless request. It
-            // matters for a close that was let through without ExitApplication: a sign-out or shutdown that was then cancelled
-            // leaves allowClose set (see the SessionEnding handler), and the next close would otherwise leave the application
-            // running with no window, holding the single-instance mutex so that starting Rewindle again only signals it.
+            // ExitApplication and OnSessionEnded ask for the same thing right after Close, which makes this a second, harmless
+            // request. It matters for any other close that was let through: the application would otherwise keep running with
+            // no window, holding the single-instance mutex so that starting Rewindle again only signals it. A sign-out or
+            // shutdown that is cancelled no longer gets this far: the session-end guard leaves allowClose alone until Windows
+            // has decided, and clears it again when the session goes on.
             if (Application.Current != null)
             {
                 Application.Current.Shutdown();

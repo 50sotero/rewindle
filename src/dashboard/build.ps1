@@ -128,6 +128,7 @@ $sources = @(
     (Join-Path $project 'DashboardMotion.cs'),
     (Join-Path $project 'DashboardVisualStyle.cs'),
     (Join-Path $project 'RunChart.cs'),
+    (Join-Path $project 'SessionEndGuard.cs'),
     (Join-Path $project 'DashboardWindow.cs'),
     (Join-Path $project 'DashboardWindow.SourcePicker.cs'),
     (Join-Path $project 'DashboardWindow.RestoreFlow.cs'),

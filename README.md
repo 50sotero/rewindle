@@ -114,7 +114,8 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
   **About Rewindle**: version, backup service, MIT License, **Open licenses folder** and the keyboard shortcuts.
 
 Rewindle lives in the notification area. Closing the window never stops a
-running backup. `Ctrl+1` to `Ctrl+4` switch pages, `F5` refreshes, and
+running backup, and a sign-out or shutdown that is cancelled leaves Rewindle
+running there. `Ctrl+1` to `Ctrl+4` switch pages, `F5` refreshes, and
 `Ctrl+=` / `Ctrl+-` / `Ctrl+0` change the text size between 80% and 200% (Settings has buttons for it, and Rewindle remembers the size). Status is never shown
 by color alone, and a screen reader is told when a backup starts, finishes,
 fails or is cancelled.
