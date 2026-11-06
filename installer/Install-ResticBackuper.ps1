@@ -1185,6 +1185,8 @@ function Assert-Payload {
         'Manage-Backup.ps1',
         'Manage-Repository.ps1',
         'Manage-Restore.ps1',
+        'Manage-Retention.ps1',
+        'retention.py',
         # The dashboard's only evidence that this engine serves restore approval sessions. It is copied with the rest of the
         # payload, protected by the install-root ACL, listed in runtime-manifest.json and removed by the uninstaller.
         'engine-capabilities.json',

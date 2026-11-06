@@ -298,6 +298,7 @@ class RepositoryHygieneTests(unittest.TestCase):
             PROJECT / "src" / "install_google_drive_sync_task.ps1",
             PROJECT / "src" / "Manage-Repository.ps1",
             PROJECT / "src" / "Manage-Restore.ps1",
+            PROJECT / "src" / "Manage-Retention.ps1",
             PROJECT / "src" / "Manage-Sources.ps1",
         )
         for path in runtime_inventory_sources:
@@ -325,12 +326,14 @@ class RepositoryHygieneTests(unittest.TestCase):
             "anomaly_review.py",
             "restic_common.py",
             "restore.py",
+            "retention.py",
             "secret_store.py",
             "Manage-Sources.ps1",
             "Manage-Schedule.ps1",
             "Manage-Backup.ps1",
             "Manage-Repository.ps1",
             "Manage-Restore.ps1",
+            "Manage-Retention.ps1",
             "ResticBackuperTaskLauncher.exe",
             "ResticBackuperDashboard.exe",
             "Uninstall-ResticBackuper.ps1",
