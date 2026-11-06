@@ -84,6 +84,11 @@ namespace ResticBackuper.Dashboard
         public long ProcessedBytes { get; set; }
         public long StoredBytes { get; set; }
         public string SnapshotShort { get; set; }
+        // The run as the history file records it, for logic rather than display: "backup" or "dry_run", the state the run ended
+        // in ("failed", "success_unchanged"...), and its start in UTC.
+        public string TypeKey { get; set; }
+        public string StateKey { get; set; }
+        public DateTime StartedUtc { get; set; }
 
         // The year appears once a run is from an earlier year, so a history that spans years stays
         // unambiguous without lengthening every recent date.
@@ -2701,7 +2706,10 @@ namespace ResticBackuper.Dashboard
                     Files = item.Files,
                     ProcessedBytes = item.ProcessedBytes,
                     StoredBytes = item.StoredBytes,
-                    SnapshotShort = ShortSnapshot(item.SnapshotId)
+                    SnapshotShort = ShortSnapshot(item.SnapshotId),
+                    TypeKey = item.TypeKey,
+                    StateKey = item.StateKey,
+                    StartedUtc = DateTime.SpecifyKind(item.StartedUtc, DateTimeKind.Utc)
                 })
                 .ToList();
         }
