@@ -141,6 +141,16 @@ ones a home user reads without a glossary.
   `C:\ProgramData\ResticBackuper` folder that Administrators don't own, since
   any account can create one there: it says so and asks for the folder to be
   moved away, and it creates that folder already owned by Administrators.
+- **A program running without administrator rights can no longer stop your
+  backups.** Every backup and every protected change first takes a lock file
+  in the backup service's folder. That file could be read by your account, and
+  reading was enough to hold the lock, so any program you ran could keep every
+  backup from starting. Now only Administrators and Windows can open it. An
+  older lock file is repaired the next time a backup or a protected change
+  runs, and Setup protects it again after it sets the folder's permissions.
+  The GitHub workflows now run only actions pinned to an exact commit, and the
+  release workflow publishes a signed record of how each download was built,
+  which `gh attestation verify` checks. Releases are still not code-signed.
 
 ## [0.2.0-alpha.2] - 2026-10-08
 

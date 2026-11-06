@@ -47,6 +47,10 @@ or backup repository.
   after revalidating the current run, process creation identities, user SID,
   and exact task definition. The normal cancel path sends Restic a targeted
   Ctrl-Break and never calls Task Scheduler End or kills an arbitrary PID.
+- Every action in the GitHub workflows is pinned to a full commit SHA. The
+  release workflow records signed build provenance for the files it builds,
+  which `gh attestation verify <file> --repo 50sotero/rewindle` checks. The
+  releases are not code-signed.
 - The plaintext recovery key is intentionally separate. Anyone with that key
   and the repository can decrypt the backup.
 - `google_drivefs_stream` is an explicit storage-mode opt-in. Its synthetic

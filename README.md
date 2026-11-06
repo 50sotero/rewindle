@@ -235,8 +235,20 @@ Get-Content .\Rewindle-v0.2.0-alpha.2-windows-x64-setup.exe.sha256
 ```
 
 The two values must match. A checksum shows the file is the one published; it
-does not prove who published it. Do not turn off SmartScreen or antivirus
-protection globally to run the installer.
+does not prove who published it. For that, check the signed build record
+GitHub keeps for every file the release workflow builds, with the
+[GitHub CLI](https://cli.github.com/):
+
+```powershell
+gh attestation verify .\Rewindle-v0.2.0-alpha.2-windows-x64-setup.exe --repo 50sotero/rewindle
+```
+
+It succeeds only for a file that this project's own workflow on GitHub built
+from the project's source, and it shows which commit that was. Releases made
+before these records were added have none, so for them the checksum is the
+only check. The files are still not code-signed, so Windows may still warn.
+Do not turn off SmartScreen or antivirus protection globally to run the
+installer.
 
 ### The setup wizard
 
