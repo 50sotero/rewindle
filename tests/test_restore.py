@@ -1293,7 +1293,9 @@ class RestoreBackendTests(unittest.TestCase):
         self.assertEqual("verified", payload["result"])
         self.assert_restore_folder_security(elevated, check_owner=True)
         written = Path(self.fake_log.with_suffix(".target.txt").read_text(encoding="utf-8"))
-        self.assertEqual(target, written.parent)
+        # Restic is given the folder's final path, with long names, while a runner's temporary folder may be named by
+        # its short 8.3 alias (GitHub's is), so both are compared in their long form.
+        self.assertEqual(restore.canonical_path(target), restore.canonical_path(written.parent))
         self.assertTrue(written.name.startswith(restore.RESTORE_FOLDER_PREFIX))
         self.assertFalse(written.exists())
         self.assertEqual(["restored.txt"], sorted(item.name for item in target.iterdir()))
