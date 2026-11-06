@@ -345,6 +345,7 @@ logon task and the shortcut, and leaves that folder in place. A launch with
 | `SourceConfiguration.cs` / `TaskSchedule.cs` | Reading the installed plan and the backup task. |
 | `*Manager.cs`, `*Controller.cs`, `ScheduleManagerLauncher.cs` | Adapters to the engine's protected managers and helpers. |
 | `ElevatedRequestSecurity.cs` | The one copy of the checks every elevated request relies on: command-line quoting, nonces, constant-time comparison and the protected-result ACL check. Compile it wherever one of those adapters is compiled. |
+| `ProcessLiveness.cs` | Whether a process a protected record names (process ID and creation time) is still that same running process. |
 | `*Window.cs` | The schedule, location, recovery-readiness, restore and run-details windows. |
 | `DiagnosticExporter.cs` / `CrashLog.cs` | Redacted diagnostics and the local crash log. |
 | `DashboardTheme.cs` / `DashboardMotion.cs` / `DashboardVisualStyle.cs` | Appearance, motion and Windows accessibility preferences. |

@@ -3612,6 +3612,16 @@ namespace ResticBackuper.Dashboard
                 (repositoryRecoveryStatus != null && repositoryRecoveryStatus.Exists);
         }
 
+        // A move of the backup location that is still running (this dashboard's own, or one started before it opened).
+        // It blocks every protected change like any unfinished move (RepositoryRecoveryBlocksMutations), but nothing was
+        // interrupted: there is nothing to repair and nothing to alarm anyone about.
+        private bool RepositoryMoveRunning()
+        {
+            return !repositoryRecoveryInProgress &&
+                repositoryRecoveryStatus != null &&
+                repositoryRecoveryStatus.IsMoveRunning;
+        }
+
         private bool RepositoryRecoveryHasConflictingOperation()
         {
             return repositoryOperationInProgress ||
@@ -3665,12 +3675,15 @@ namespace ResticBackuper.Dashboard
         {
             RepositoryRecoveryStatus status = repositoryRecoveryStatus ??
                 RepositoryRecoveryStatus.None();
-            bool visible = repositoryRecoveryInProgress || status.Exists;
+            // A move that is still running is not an interruption: the repair card stays hidden (the overview says the
+            // move is running) and Repair stays off until the move has ended.
+            bool visible = repositoryRecoveryInProgress || (status.Exists && !status.IsMoveRunning);
             bool managerAvailable = RepositoryRecoveryManagerAvailable();
             bool conflict = RepositoryRecoveryHasConflictingOperation();
             bool canRepair = visible &&
                 !repositoryRecoveryInProgress &&
                 status.Exists &&
+                !status.IsMoveRunning &&
                 status.IsRecoverable &&
                 managerAvailable &&
                 !previewEnabled &&
@@ -3788,6 +3801,8 @@ namespace ResticBackuper.Dashboard
                 return;
             }
             card.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+            // A hidden card offers nothing: the page reads this button's state as the repair action's.
+            repairButton.IsEnabled = canRepair;
             if (!visible)
             {
                 return;
@@ -3800,7 +3815,6 @@ namespace ResticBackuper.Dashboard
                     ? Rose
                     : PrimaryText;
             repairButton.Content = label;
-            repairButton.IsEnabled = canRepair;
             repairButton.ToolTip = helpText;
             AutomationProperties.SetName(repairButton, label);
             AutomationProperties.SetHelpText(repairButton, helpText);
@@ -4397,6 +4411,13 @@ namespace ResticBackuper.Dashboard
                 restoreReadinessTitle.Foreground = Rose;
                 restoreReadinessNext = "setup";
             }
+            else if (RepositoryMoveRunning())
+            {
+                restoreReadinessTitle.Text = "Restore opens after the move";
+                restoreReadinessDetail.Text = "Your backups are being moved to a new backup location. Restore unlocks by itself when the move finishes.";
+                restoreReadinessTitle.Foreground = Amber;
+                restoreReadinessNext = "wait";
+            }
             else if (repositoryRecoveryStatus.Exists)
             {
                 restoreReadinessTitle.Text = "Finish moving your backup location first";
@@ -4647,10 +4668,14 @@ namespace ResticBackuper.Dashboard
             {
                 label = repositoryRecoveryInProgress
                     ? "Repairing…"
-                    : "Backup paused";
+                    : RepositoryMoveRunning()
+                        ? "Moving backups…"
+                        : "Backup paused";
                 helpText = repositoryRecoveryInProgress
                     ? "Wait for the repair of your backup location to finish."
-                    : "Repair the interrupted move of your backup location before starting another backup.";
+                    : RepositoryMoveRunning()
+                        ? "Wait for the move of your backup location to finish before starting a backup."
+                        : "Repair the interrupted move of your backup location before starting another backup.";
             }
             else if (scheduleOperationInProgress)
             {
@@ -5312,7 +5337,9 @@ namespace ResticBackuper.Dashboard
             {
                 helpText = repositoryRecoveryInProgress
                     ? "Wait for the backup location repair to finish before changing the schedule."
-                    : "Repair the interrupted move of your backup location before changing the schedule.";
+                    : RepositoryMoveRunning()
+                        ? "Wait for the move of your backup location to finish before changing the schedule."
+                        : "Repair the interrupted move of your backup location before changing the schedule.";
             }
             else if (repositoryOperationInProgress)
             {
@@ -5405,7 +5432,9 @@ namespace ResticBackuper.Dashboard
             {
                 helpText = repositoryRecoveryInProgress
                     ? "Wait for the repair to finish before changing the backup location."
-                    : "Repair the interrupted move before changing the backup location.";
+                    : RepositoryMoveRunning()
+                        ? "Wait for the current move of your backup location to finish."
+                        : "Repair the interrupted move before changing the backup location.";
             }
             else if (previewEnabled)
             {
@@ -6758,6 +6787,15 @@ namespace ResticBackuper.Dashboard
                 etaValue.Text = "Repairing";
                 etaHint.Text = "No backup can start until the repair finishes.";
                 SetBadge("REPAIR IN PROGRESS", Blue, BrushFrom("#172B45"));
+            }
+            else if (RepositoryMoveRunning())
+            {
+                heroTitle.Text = "Moving your backup location";
+                heroDetail.Text = detail;
+                etaTitle.Text = "Backups";
+                etaValue.Text = "Waiting";
+                etaHint.Text = "Backups run on schedule again once the move has finished.";
+                SetBadge("MOVE IN PROGRESS", Blue, BrushFrom("#172B45"));
             }
             else
             {

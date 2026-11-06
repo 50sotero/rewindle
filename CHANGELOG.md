@@ -92,7 +92,11 @@ ones a home user reads without a glossary.
   environment can change where it reads its password from. Once a move is
   complete, Rewindle's record of the backup location names the new folder too,
   so later backups can still compare their changes with earlier ones and the
-  Google Drive check can be set up there.
+  Google Drive check can be set up there. While a move runs, the dashboard now
+  says "Moving your backup location" instead of "Backups paused: moving the
+  backup location didn't finish", and it offers **Repair interrupted move**
+  only once the move has really stopped, also after the dashboard was closed
+  and opened again during the move.
 
 ### Security
 

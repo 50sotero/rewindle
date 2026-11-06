@@ -463,7 +463,12 @@ destination ownership, every publication phase, the original record and the
 hash of its rewrite, and the process ID and creation time of the manager running
 the move. If the process stops, the manager can return to the exact pre-change
 metadata, record included, while removing only a destination it proves through
-the journal, marker, and manifest.
+the journal, marker, and manifest. The journal exists for the whole move, so its
+presence alone keeps every other protected change blocked, but the dashboard
+calls the move interrupted, and offers Repair, only once the move has stopped:
+while it waits for the manager it started, or while the recorded process is
+still that same running process (checked with `OpenProcess` and
+`GetProcessTimes`, never through `run.lock`), it says the move is running.
 
 Restore requests are reviewed in the limited dashboard and executed through a
 separate elevated manager. Snapshot browsing returns bounded JSON. Plan-bound

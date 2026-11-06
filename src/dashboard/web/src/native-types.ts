@@ -229,8 +229,10 @@ export interface DashboardState {
    * `next` says what the Restore page offers when restoring is not available: 'refresh' (read the installation again), 'setup' (run
    * Rewindle Setup again; the detail says how), 'wait' (a backup or a change is running and it unlocks by itself), or empty when
    * there is nothing to do or the repair banner has the action. Additive: an older host does not send it.
+   * `moveRunning` is true while a move of the backup location is still running: backups and changes wait for it, but nothing was
+   * interrupted, so `repairNeeded` is false and nothing alarms. Additive: an older host does not send it.
    */
-  recovery: { title: string; detail: string; repairNeeded: boolean; repairMessage: string; repairState: string; repairBusy: boolean; repairPercent: number | null; next?: 'refresh' | 'setup' | 'wait' | '' };
+  recovery: { title: string; detail: string; repairNeeded: boolean; repairMessage: string; repairState: string; repairBusy: boolean; repairPercent: number | null; next?: 'refresh' | 'setup' | 'wait' | ''; moveRunning?: boolean };
   actions: Partial<Record<CommandName, ActionState>>;
   runDetails?: RunDetailsState | null;
   restoreFlow?: RestoreFlowState | null;
