@@ -351,7 +351,9 @@ function Invoke-Relocation {
         [string]$CurrentRepository = '',
         # Pauses the copy after this many files and runs -WhilePaused (given the request nonce) before it goes on.
         [int]$PauseDuringCopyAfterFiles = 0,
-        [scriptblock]$WhilePaused = $null
+        [scriptblock]$WhilePaused = $null,
+        # Makes the Google Drive hold check fail, as if a folder's file ID did not survive a rename there.
+        [switch]$FailFolderHoldProbe
     )
     $current = if ($CurrentRepository) { $CurrentRepository } else { $Fixture.OldRepository }
     $nonce = ([Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')).ToLowerInvariant()
@@ -376,6 +378,7 @@ function Invoke-Relocation {
         '-TestAvailableBytes', $AvailableBytes
     )
     if ($PauseDuringCopyAfterFiles -gt 0) { $arguments += @('-TestPauseDuringCopyAfterFiles', $PauseDuringCopyAfterFiles) }
+    if ($FailFolderHoldProbe) { $arguments += '-TestFailFolderHoldProbe' }
     $paused = $false
     $whilePausedResult = $null
     if ($PauseDuringCopyAfterFiles -le 0) {
@@ -551,6 +554,26 @@ try {
         Where-Object Name -like '.restic-repository-*.staging').Count -eq 0) 'DriveFS staging removed after verified promotion'
     Assert-True (@(Get-ChildItem -LiteralPath $driveFsParent -Force |
         Where-Object Name -like '.resticbackuper-provider-*').Count -eq 0) 'DriveFS provider probes cleaned'
+    Assert-True (@(Get-ChildItem -LiteralPath $driveFsParent -Force |
+        Where-Object Name -like '.resticbackuper-hold-*').Count -eq 0) 'Google Drive hold checks cleaned'
+
+    # Held folders, file IDs and renames through a handle have not been tried on Google Drive's own file system, and
+    # rollback and recovery need them as much as the move does. When they fail on a throwaway folder there, the move is
+    # refused in plain words before the journal is written: no copy starts, so nothing needs rolling back.
+    $holdFixture = New-Fixture
+    $holdRoot = Join-Path $holdFixture.Root 'DriveFs\My Drive'
+    $holdParent = Join-Path $holdRoot 'ResticBackups'
+    foreach ($directory in @($holdRoot, $holdParent, (Join-Path $holdFixture.Root 'LocalAppData\Google\DriveFS'))) {
+        [void][IO.Directory]::CreateDirectory($directory)
+    }
+    $holdConfigBefore = Get-Hash -Path $holdFixture.ConfigPath
+    $holdRun = Invoke-Relocation -Fixture $holdFixture -Destination (Join-Path $holdParent 'Personal') -FailFolderHoldProbe
+    Assert-True ($holdRun.ExitCode -ne 0 -and $null -ne $holdRun.Result -and
+        [string]$holdRun.Result.error -match 'Google Drive could not keep a folder in place') ('a failed Google Drive hold check refuses the move in plain words: ' + ($holdRun.Output -join ' | '))
+    Assert-True (-not (Test-Path -LiteralPath $holdFixture.Log)) 'a failed Google Drive hold check stops the move before its first Restic step'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $holdFixture.StateRoot 'repository-relocation.journal.json'))) 'a failed Google Drive hold check leaves no journal'
+    Assert-True ((Get-Hash -Path $holdFixture.ConfigPath) -eq $holdConfigBefore) 'a failed Google Drive hold check keeps the configuration'
+    Assert-True (@(Get-ChildItem -LiteralPath $holdParent -Force).Count -eq 0) 'a failed Google Drive hold check leaves nothing in Google Drive'
 
     # Only Restic's own files are copied, and anything else beside them stays where it is, from a local folder ...
     $extrasFixture = New-Fixture
@@ -823,6 +846,16 @@ try {
         ([Convert]::ToInt64($pinAccess.Groups[1].Value, 16) -band 0x1) -ne 0) 'the hold lists the folder and never asks for delete access'
     Assert-True ($pinShare.Success -and ([Convert]::ToInt64($pinShare.Groups[1].Value, 16) -band 0x4) -eq 0) 'the hold never shares delete'
     Assert-True ($managerText -match 'Get-TreeInventory -Root \$validated\.Repository -ResticLayout Skip') 'only Restic files are read from the current backup folder'
+    # Once a stage has its final name nothing that can fail runs before the caller marks it promoted, so a failure there
+    # can never leave a promoted copy that rollback does not know about.
+    $moveBody = [regex]::Match($managerText, '(?s)\nfunction Move-PinnedDirectory \{(.+?)\n\}').Groups[1].Value
+    $renameAt = $moveBody.IndexOf('SetFileInformationByHandle(')
+    $afterRename = if ($renameAt -lt 0) { '' } else {
+        @($moveBody.Substring($renameAt).Split("`n") | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+    }
+    Assert-True ($renameAt -ge 0 -and $afterRename -notmatch 'Get-DirectoryHandleIdentity|Assert-|Open-' -and
+        $afterRename -match 'return \$identity') 'a renamed stage is returned without another check that could fail'
+    Assert-True ($managerText -match '(?s)\nfunction Assert-ReadyDriveFsDestination \{(?:(?!\nfunction ).)+?\n    Assert-DriveFsFolderHold -Directory') 'Google Drive moves check held folders before they start'
     $builderText = Get-Content -LiteralPath (Join-Path $projectRoot 'build\Build-Release.ps1') -Raw
     $installerText = Get-Content -LiteralPath (Join-Path $projectRoot 'installer\Install-ResticBackuper.ps1') -Raw
     $commonText = Get-Content -LiteralPath (Join-Path $projectRoot 'src\restic_common.py') -Raw

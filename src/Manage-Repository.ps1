@@ -33,6 +33,7 @@ param(
     [int]$TestCrashAfterEmptyDestinationRemoval = 0,
     [ValidateRange(0, 1000000)]
     [int]$TestPauseDuringCopyAfterFiles = 0,
+    [switch]$TestFailFolderHoldProbe,
     [long]$TestAvailableBytes = -1
 )
 
@@ -703,6 +704,44 @@ function Assert-ReadyDriveFsDestination {
         throw 'Google DriveFS cache has less than 10 GiB free.'
     }
     Assert-DriveFsProviderTransaction -Directory (Split-Path -Parent $Destination)
+    Assert-DriveFsFolderHold -Directory (Split-Path -Parent $Destination)
+}
+
+function Assert-DriveFsFolderHold {
+    # The move holds its folders open, finds them again by file ID and renames them through a handle (see
+    # Open-PinnedDirectory), and rollback and recovery need the same. Google Drive's own file system has not been tried for
+    # that, so before the journal is written the same steps run on a throwaway folder there: hold it, check where it is,
+    # rename it through the handle and hold it again by its file ID under the new name. If any step fails, the move is
+    # refused before it starts instead of stopping half way with a folder it cannot remove.
+    param([string]$Directory)
+    $token = [Guid]::NewGuid().ToString('N')
+    $probe = Join-Path $Directory ".resticbackuper-hold-$token.tmp"
+    $renamed = Join-Path $Directory ".resticbackuper-hold-$token.commit"
+    $pin = $null
+    try {
+        [void][IO.Directory]::CreateDirectory($probe)
+        $pin = Open-PinnedDirectory -Path $probe
+        Assert-PinnedDirectory -Pin $pin
+        $identity = Move-PinnedDirectory -Pin $pin -Destination $renamed
+        if ($isTestMode -and $TestFailFolderHoldProbe) {
+            # As if the file ID did not survive the rename.
+            $identity = [pscustomobject]@{ VolumeSerial = $identity.VolumeSerial; FileId = '0000000000000000' }
+        }
+        $pin = Open-PinnedDirectory -Path $renamed -ExpectedIdentity $identity
+        Assert-PinnedDirectory -Pin $pin
+    }
+    catch {
+        throw ('Google Drive could not keep a folder in place while it was renamed, so the backup location was not ' +
+            'moved and nothing was changed. Choose a folder on this computer instead, or try again later. Details: ' +
+            $_.Exception.Message)
+    }
+    finally {
+        Close-PinnedDirectory -Pin $pin
+        foreach ($path in @($probe, $renamed)) {
+            # An empty folder, or a link in its place, is removed itself and never followed.
+            try { if ([IO.Directory]::Exists($path)) { [IO.Directory]::Delete($path, $false) } } catch { }
+        }
+    }
 }
 
 # Held folders. The stages are created in the folder the user chose, which the user can usually rename things in, and
@@ -875,12 +914,11 @@ function Move-PinnedDirectory {
             $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
             throw "Could not give the copied folder its final name (Windows error $errorCode): $Destination"
         }
-        # From here on the folder has its final name, so the caller must treat it as promoted even if a later check
-        # fails; its own Open-PinnedDirectory checks where it is.
-        $moved = Get-DirectoryHandleIdentity -Handle $mover -Path $Destination
+        # From here on the folder has its final name, so nothing that could fail runs before the caller has its identity
+        # (read above; a rename keeps the file ID) and marks it promoted; its own Open-PinnedDirectory checks where it is.
     }
     finally { $mover.Dispose() }
-    return $moved
+    return $identity
 }
 
 function Get-ResticLayoutVerdict {
@@ -2331,7 +2369,7 @@ try {
     if (-not $isTestMode -and ($TestFailAfterPublish -ne 0 -or $TestCrashAfterPublish -ne 0 -or
         $TestCrashDuringCopyAfterFiles -ne 0 -or $TestCrashAfterStageCreation -ne 0 -or
         $TestCrashAfterEmptyDestinationRemoval -ne 0 -or $TestPauseDuringCopyAfterFiles -ne 0 -or
-        $TestAvailableBytes -ne -1)) {
+        $TestFailFolderHoldProbe -or $TestAvailableBytes -ne -1)) {
         throw 'Failure and capacity injection are available only for disposable tests.'
     }
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
