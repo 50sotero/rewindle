@@ -58,6 +58,13 @@ the page and tells it the app is alive at least every five seconds, so the page
 can tell when it has lost the app. Commands that open a folder in File Explorer
 carry no path from the page; the host decides which folder to open.
 
+The host answers every command once it has run it, after any dialog of its own
+has closed. A button that asks for something once per press (Back up now, Stop
+backing up, Add folder, Restore now and the others in `ONE_SHOT_COMMANDS`, in
+`web/src/oneShot.ts`) stays off from the press until that answer, so a
+double-click is one request. The host still refuses a second folder change
+while one is waiting for approval.
+
 `--native` starts an older WPF-only presentation instead of the web view, for
 diagnosis.
 

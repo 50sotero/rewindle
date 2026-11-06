@@ -148,6 +148,17 @@ ones a home user reads without a glossary.
   now** for as long as the clock went back. And when a sign-out or shutdown is
   cancelled, Rewindle is still running in the notification area; before, it
   had already quit.
+- **Dashboard buttons work from the start, and once per press.** "See what
+  happened" under a failed backup stayed greyed out until a run was picked in
+  Activity; it now opens that run's details at once. A double-click on Back up
+  now, Stop backing up, Add folder, Restore now and the other buttons that ask
+  for something sent the request twice, so a second confirmation opened or a
+  red "wait" message stayed on screen. Each of them now stays off until its
+  first press has been answered, and Rewindle never starts a second folder
+  change while one is waiting for Windows approval. When the backup status
+  can't be read, Protection no longer adds "No verified backup yet" under it.
+  "Last 7 days" and the other ranges in Activity move on at midnight instead of
+  turning into fixed dates.
 
 ### Security
 

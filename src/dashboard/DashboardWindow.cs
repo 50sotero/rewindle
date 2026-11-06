@@ -6065,6 +6065,23 @@ namespace ResticBackuper.Dashboard
                 (lastSnapshot != null && lastSnapshot.IsActive);
         }
 
+        // Why a folder change cannot be asked for now, or an empty string when it can. A change that is already waiting for its
+        // Windows approval comes first: a second removal of the same folder (a second click that reached the dashboard after the
+        // first was confirmed) must not open a second confirmation or a second approval prompt. BackupBlocksSourceChanges leaves
+        // it out on purpose, because diagnostics export and Restore readiness also ask it, and they are not folder changes.
+        private string SourceChangeBlockedReason()
+        {
+            if (sourceOperationInProgress)
+            {
+                return "Wait for the current folder change to finish.";
+            }
+            if (BackupBlocksSourceChanges())
+            {
+                return "A backup is starting or already running.";
+            }
+            return string.Empty;
+        }
+
         private async void OnBackupNowClick(object sender, RoutedEventArgs args)
         {
             if (backupStartInProgress || anomalyReviewInProgress || previewEnabled || sourceOperationInProgress ||
@@ -6222,9 +6239,11 @@ namespace ResticBackuper.Dashboard
             {
                 return;
             }
-            if (BackupBlocksSourceChanges())
+            // The dialog was open for a while: check again, including a folder change that started meanwhile.
+            string blocked = SourceChangeBlockedReason();
+            if (blocked.Length > 0)
             {
-                SetSourceNotice("A backup is starting or already running. Try the folder change again afterward.", Amber, 10);
+                SetSourceNotice(blocked + " Try the folder change again afterward.", Amber, 10);
                 return;
             }
             await ApplySourceChange("Remove", selected.SourcePath);
@@ -6325,9 +6344,11 @@ namespace ResticBackuper.Dashboard
 
         private async Task ApplySourceChange(string action, string sourcePath)
         {
-            if (BackupBlocksSourceChanges())
+            // Every folder change starts here, so this is the last word on whether one may start: never while another is in progress.
+            string blocked = SourceChangeBlockedReason();
+            if (blocked.Length > 0)
             {
-                SetSourceNotice("A backup is starting or already running. No folder change was requested.", Amber, 10);
+                SetSourceNotice(blocked + " No folder change was requested.", Amber, 10);
                 return;
             }
             bool isAdd = string.Equals(action, "Add", StringComparison.Ordinal);

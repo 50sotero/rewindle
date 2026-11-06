@@ -26,9 +26,13 @@ import {
   typeLabel, unresolvedRuns, usualSeconds, type Verified,
 } from './runProblems';
 import { formatClock, formatWhen, formatWhenAgo, localClocks } from './when';
-import { driveOf, heroConcern, heroTone } from './protectionTone';
+import { canOpenRunDetails, driveOf, heroConcern, heroOffersRunDetails, heroTone, verifiedTimeKnown } from './protectionTone';
+import { createInFlight, sendOnceAtATime } from './oneShot';
+import { PendingCommands, usePendingCommand } from './pendingCommands';
+import { effectiveFrom, presetStart, rangeMenuValue, type ActivityDateFilter, type RangePreset } from './activityRange';
 
-type Send = (command: CommandName, payload?: Record<string, string | boolean>) => void;
+// `onResult` hears how the host answered a command: false when it refused it, or when the page could not send it.
+type Send = (command: CommandName, payload?: Record<string, string | boolean>, onResult?: (ok: boolean) => void) => void;
 
 // A component that throws while it renders would otherwise take the whole page with it and leave an empty window with nothing to
 // click, and the host would go on sending state to a page that is gone. The boundaries below keep the damage as small as where it
@@ -164,12 +168,11 @@ const duration = (n: number) => {
     : seconds >= 60 ? `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s` : `${seconds}s`;
 };
 type HistoryView = { query: string; sort: string; filter: FilterTableSelection };
-type ActivityDateFilter = { from: string; to: string };
 
 // How the history table and the trend charts group a run: finished and verified, stopped on request, or a problem (see runProblems).
 const runStatus = (run: RunState): FilterTableStatus => run.success ? 'done' : isCancelled(run) ? 'progress' : 'todo';
 
-const emptyHistoryView = (): HistoryView & ActivityDateFilter => ({ query: '', sort: 'newest', filter: 'all', from: '', to: '' });
+const emptyHistoryView = (): HistoryView & ActivityDateFilter => ({ query: '', sort: 'newest', filter: 'all', from: '', to: '', preset: '' });
 
 const localDateKey = (value: string) => {
   const date = new Date(value);
@@ -197,16 +200,18 @@ function withRunDates(state: DashboardState): DashboardState {
 // A disabled action explains itself in place. `quiet` is for a page that already says why once (see
 // busyNote): the reason stays linked for assistive technology and shows as a tooltip, but takes no
 // room, so the page does not shift when a backup starts or ends. A disabled button receives no
-// pointer events, so the tooltip sits on the wrapper.
+// pointer events, so the tooltip sits on the wrapper. A press that is waiting for the host's answer keeps the button off (see
+// oneShot.ts) without a reason of its own: it is a moment, and the host's own state takes over once it answers.
 function Action({ state, send, command, children, icon, primary = false, payload, size = 'sm', quiet = false }: {
   state: DashboardState; send: Send; command: CommandName; children?: React.ReactNode;
   icon?: React.ReactNode; primary?: boolean; payload?: Record<string, string | boolean>; size?: 'sm' | 'md' | 'xs'; quiet?: boolean;
 }) {
   const action = state.actions[command];
   const helpId = useId();
+  const pending = usePendingCommand();
   if (action?.visible === false) return null;
   const disabledReason = !action?.enabled ? action?.help || 'This action is currently unavailable.' : '';
-  return <span className="context-action" title={quiet && disabledReason ? disabledReason : undefined}><Button size={size} variant={primary ? 'primary' : 'secondary'} disabled={!action?.enabled}
+  return <span className="context-action" title={quiet && disabledReason ? disabledReason : undefined}><Button size={size} variant={primary ? 'primary' : 'secondary'} disabled={!action?.enabled || pending(command)}
     aria-describedby={disabledReason ? helpId : undefined} title={action?.help}
     onClick={() => send(command, payload)}>{icon}{children ?? action?.label ?? command}</Button>
     {disabledReason && <span className={quiet ? 'sr-only' : 'action-disabled-reason'} id={helpId}>{disabledReason}</span>}</span>;
@@ -315,6 +320,7 @@ function VolumeLine({ repository }: { repository: DashboardState['repository'] }
 // `stale` is a page that has lost the host (see App's `connected`): what it shows is the last thing the host said, so it stops moving and
 // is dimmed, and the banner above it says why.
 function Protection({ state, send, folders, setFolders, stale, openRunDetails }: { state: DashboardState; send: Send; folders: FolderView; setFolders: (value: FolderView) => void; stale: boolean; openRunDetails: (runId: string) => void }) {
+  const pending = usePendingCommand();
   // Without the backup service every widget below would say "unavailable" or "0"; the one explanation takes their place.
   if (serviceMissing(state)) return <><Heading title="Protection" description="Rewindle is waiting for a backup service to report on." /><SetupNotice state={state} send={send} /></>;
   const s = state.status;
@@ -322,7 +328,10 @@ function Protection({ state, send, folders, setFolders, stale, openRunDetails }:
   const locale = usableLocale(state.locale);
   // When the last verified backup finished, with its age in words ("yesterday at 2:03 AM"): how recent it is is the first thing to know.
   // Not drawn where the time cannot be trusted (the status could not be read, or the clocks disagree), the same rule the Local backup card follows.
-  const verifiedKnown = !state.dataError && state.freshness.state !== 'ClockAnomaly';
+  const verifiedKnown = verifiedTimeKnown(state);
+  // A failed run's details open from the hero as soon as the page is connected: the host selects the run it is sent. Nothing selects
+  // one in Activity's table at start-up, so going by the host's Open details would leave this button off until someone did.
+  const offersRun = heroOffersRunDetails(state), runOpen = offersRun && canOpenRunDetails(state, s.runId, !stale) && !pending('viewRunDetails');
   const verifiedAt = formatWhenAgo(state.freshness.verifiedAt, locale);
   // The host puts the same sentence in the hero and in the repair note above it; say it once.
   const repairDuplicate = state.recovery.repairNeeded && !!state.recovery.repairMessage && s.detail === state.recovery.repairMessage;
@@ -402,7 +411,7 @@ function Protection({ state, send, folders, setFolders, stale, openRunDetails }:
             {stale && state.updated && <span className="quiet-tag"><Clock3 size={11} aria-hidden="true" />{state.updated}</span>}
           </div>}
           <div className="info-action">
-            {s.failure && !s.active && s.runId && <Button size="sm" disabled={!state.actions.viewRunDetails?.enabled} title={state.actions.viewRunDetails?.help || undefined} onClick={() => openRunDetails(s.runId)}><ListChecks size={13} aria-hidden="true" />See what happened</Button>}
+            {offersRun && <Button size="sm" disabled={!runOpen} title={stale ? state.actions.viewRunDetails?.help || undefined : undefined} onClick={() => openRunDetails(s.runId)}><ListChecks size={13} aria-hidden="true" />See what happened</Button>}
             <Action state={state} send={send} command="reviewChanges" icon={<ListChecks size={13} />}>{reviewLabel}</Action>
           </div>
         </div>
@@ -643,10 +652,9 @@ const HISTORY_COLUMNS = { task: 'When', date: 'Time taken', status: 'Result', ow
 const verifiedBackup = (state: DashboardState): Verified | undefined =>
   lastVerified(state.freshness, formatWhen(state.freshness.verifiedAt, usableLocale(state.locale)));
 
-// "dayKey(6)" is the local date six days ago, as a date field writes it.
-const dayKey = (daysBack: number) => { const day = new Date(); day.setDate(day.getDate() - daysBack); return localDateKey(day.toISOString()); };
-// The ranges the date menu offers, as the number of days they reach back (today counts as the first).
-const DATE_RANGES: [days: string, label: string][] = [['7', 'Last 7 days'], ['30', 'Last 30 days'], ['365', 'Last year']];
+// The ranges the date menu offers, as the number of days they reach back (today counts as the first). The view keeps the choice
+// itself, so the range moves on at midnight (see activityRange.ts).
+const DATE_RANGES: [days: Exclude<RangePreset, ''>, label: string][] = [['7', 'Last 7 days'], ['30', 'Last 30 days'], ['365', 'Last year']];
 
 type ActivityProps = { state: DashboardState; send: Send; view: HistoryView & ActivityDateFilter; setView: (value: HistoryView & ActivityDateFilter) => void; openRunDetails: (runId: string) => void; openRestore: () => void; interactive: boolean };
 
@@ -657,7 +665,9 @@ function ActivityPage(props: ActivityProps) {
 }
 
 function ActivityHistory({ state, send, view, setView, openRunDetails, openRestore, interactive }: ActivityProps) {
-  const { query, sort, filter, from, to } = view;
+  const { query, sort, filter, to } = view;
+  // A preset ("Last 7 days") starts from today's date each time the page is drawn, which the host's state does at least every minute.
+  const from = effectiveFrom(view, new Date());
   const locale = usableLocale(state.locale);
   // The search field keeps focus when it is cleared (the clear button goes away with the text, and focus would fall to the page).
   const searchRef = useRef<HTMLInputElement>(null);
@@ -719,7 +729,7 @@ function ActivityHistory({ state, send, view, setView, openRunDetails, openResto
   const filtering = !!query.trim() || !!from || !!to || filter !== 'all';
   const shown = rows.filter(row => filter === 'all' || row.status === filter).length;
   const clearFilters = useCallback(() => {
-    setView({ ...view, query: '', from: '', to: '', filter: 'all' });
+    setView({ ...view, query: '', from: '', to: '', preset: '', filter: 'all' });
     setPickDates(false);
     searchRef.current?.focus();
   }, [setView, view]);
@@ -747,12 +757,14 @@ function ActivityHistory({ state, send, view, setView, openRunDetails, openResto
   const chart = useMemo<RunChartData>(() => ({ runs: backupRuns, selectedId: state.selectedRunId, onSelect: runId => send('selectRun', { runId }), locale, resolvedIds }), [backupRuns, state.selectedRunId, send, locale, resolvedIds]);
   // A trend needs two successful backups; failed and cancelled ones are only marked on it.
   const trend = success.length > 1;
-  // The date menu shows a range it knows, or "Pick dates…" with the two fields; dates left over from before show as picked.
-  const rangeValue = !from && !to ? 'any' : !to ? DATE_RANGES.find(([days]) => from === dayKey(Number(days) - 1))?.[0] ?? 'custom' : 'custom';
+  // The date menu shows the range that was chosen, or "Pick dates…" with the two fields; dates left over from before show as picked.
+  const rangeValue = rangeMenuValue(view);
   const showDates = pickDates || rangeValue === 'custom';
   const onRangeChange = (value: string) => {
     setPickDates(value === 'custom');
-    if (value !== 'custom') setView({ ...view, from: value === 'any' ? '' : dayKey(Number(value) - 1), to: '' });
+    // Picking dates after a range starts the fields from that range's first day, as typed dates that no longer move.
+    if (value === 'custom') { if (view.preset) setView({ ...view, from: presetStart(view.preset, new Date()), to: '', preset: '' }); return; }
+    setView({ ...view, from: '', to: '', preset: value === 'any' ? '' : value as RangePreset });
   };
   // What the first tile adds to its number, so "79" is not left to read as a score out of something: what, if anything, is still open.
   const successSub = unresolved.length ? `${unresolved.length} ${unresolved.length === 1 ? 'needs' : 'need'} a look`
@@ -782,8 +794,8 @@ function ActivityHistory({ state, send, view, setView, openRunDetails, openResto
           <select className="sort-field" aria-label="Show runs from" value={showDates ? 'custom' : rangeValue} onChange={event => onRangeChange(event.target.value)}>
             <option value="any">Any time</option>{DATE_RANGES.map(([days, label]) => <option key={days} value={days}>{label}</option>)}<option value="custom">Pick dates…</option></select>
           {showDates && <>
-            <label className="date-filter"><span>From</span><input type="date" aria-label="Show runs from date" value={from} max={to || undefined} onChange={event => setView({ ...view, from: event.target.value })} /></label>
-            <label className="date-filter"><span>To</span><input type="date" aria-label="Show runs through date" value={to} min={from || undefined} onChange={event => setView({ ...view, to: event.target.value })} /></label></>}
+            <label className="date-filter"><span>From</span><input type="date" aria-label="Show runs from date" value={from} max={to || undefined} onChange={event => setView({ ...view, from: event.target.value, preset: '' })} /></label>
+            <label className="date-filter"><span>To</span><input type="date" aria-label="Show runs through date" value={to} min={from || undefined} onChange={event => setView({ ...view, from, to: event.target.value, preset: '' })} /></label></>}
           <select className="sort-field" aria-label="Sort backup history" value={sort} onChange={event => setView({ ...view, sort: event.target.value })}><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="duration">Longest first</option><option value="size">Largest first</option></select>
           {/* Always in the toolbar, hidden (so out of the tab order too) while there is nothing to clear: it appearing and going shifted the other fields. */}
           <Button size="xs" variant="quiet" style={{ visibility: filtering ? 'visible' : 'hidden' }} onClick={clearFilters}>Clear filters</Button>
@@ -1023,7 +1035,19 @@ function OpeningLoader({ send }: { send: Send }) {
 }
 
 export default function App() {
-  const { state: rawState, connected, send, notice, dismissNotice, holdNotice } = useDashboard();
+  const { state: rawState, connected, send: post, notice, dismissNotice, holdNotice } = useDashboard();
+  // Every button sends through this: a command it sends once per press is not sent again while its first press waits for the host's
+  // answer, and its button stays off meanwhile (see oneShot.ts). An answer lost with the link would leave a button off, so whatever is
+  // waiting is forgotten when the link comes back.
+  const [inFlight] = useState(createInFlight);
+  const [inFlightVersion, setInFlightVersion] = useState(0);
+  const send = useMemo(() => sendOnceAtATime(post, inFlight, () => setInFlightVersion(version => version + 1)), [post, inFlight]);
+  const pending = useMemo(() => (command: CommandName) => inFlight.has(command), [inFlight, inFlightVersion]);
+  const wasConnected = useRef(connected);
+  useEffect(() => {
+    if (connected && !wasConnected.current) { inFlight.clear(); setInFlightVersion(version => version + 1); }
+    wasConnected.current = connected;
+  }, [connected, inFlight]);
   const state = useMemo(() => {
     if (!rawState) return null;
     const offline = !connected, unreadable = !!rawState.dataError;
@@ -1174,7 +1198,7 @@ export default function App() {
   const dialogOpen = !!state.sourcePicker?.open || !!state.restoreFlow?.open || (!!state.runDetails && dismissedRunDetailsId !== state.runDetails.id);
   // The later run that put the open run right, if one did, so its details do not ask for something nothing needs.
   const detailsResolvedBy = state.runDetails && !state.runDetails.success ? resolvedRuns(state.history, verifiedBackup(state)).get(state.runDetails.id) : undefined;
-  return <MotionConfig reducedMotion={state.reducedMotion ? 'always' : 'never'}><div className="app-shell">
+  return <PendingCommands.Provider value={pending}><MotionConfig reducedMotion={state.reducedMotion ? 'always' : 'never'}><div className="app-shell">
     <a className="skip-link" href="#main-content" onClick={event => { event.preventDefault(); pageRef.current?.focus(); }}>Skip to content</a>
     {/* Always present, empty until there is something to say: a live region speaks only what is put into it after it exists. */}
     <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{spoken.polite}</div>
@@ -1224,5 +1248,5 @@ export default function App() {
     <ErrorBoundary scope="dialog" label="run details window" resetKey={!!state.runDetails && dismissedRunDetailsId !== state.runDetails.id} onClose={closeRunDetails}>
       <RunDetailsModal details={state.runDetails ?? null} open={!!state.runDetails && dismissedRunDetailsId !== state.runDetails.id} resolvedBy={detailsResolvedBy} reducedMotion={state.reducedMotion} send={send} notice={notice} dismissNotice={dismissNotice} holdNotice={holdNotice} onRequestClose={closeRunDetails} />
     </ErrorBoundary>
-  </div></MotionConfig>;
+  </div></MotionConfig></PendingCommands.Provider>;
 }

@@ -383,6 +383,17 @@ try {
     Assert-True (-not [bool]$guardResult) 'active backup was accepted at restore launch guard'
     Set-PrivateField $dashboard 'backupStartInProgress' $false
 
+    # A folder change cannot start while another one is in progress: a second Stop backing up that reached the dashboard after the
+    # first was confirmed must not open a second confirmation or a second Windows approval prompt.
+    Set-PrivateField $dashboard 'sourceOperationInProgress' $false
+    Assert-True ([string]::IsNullOrEmpty([string](Invoke-Private $dashboard 'SourceChangeBlockedReason'))) 'an idle dashboard refused a folder change'
+    Set-PrivateField $dashboard 'sourceOperationInProgress' $true
+    Assert-True ([string](Invoke-Private $dashboard 'SourceChangeBlockedReason') -match 'current folder change') 'a folder change was allowed while another one was in progress'
+    Set-PrivateField $dashboard 'sourceOperationInProgress' $false
+    Set-PrivateField $dashboard 'backupStartInProgress' $true
+    Assert-True ([string](Invoke-Private $dashboard 'SourceChangeBlockedReason') -match 'backup is starting') 'a folder change was allowed while a backup was starting'
+    Set-PrivateField $dashboard 'backupStartInProgress' $false
+
     $cancelArgs = [object[]]@($null)
     Set-PrivateField $dashboard 'restoreFlowBusy' $true
     Set-PrivateField $dashboard 'restoreFlowStep' 'progress'

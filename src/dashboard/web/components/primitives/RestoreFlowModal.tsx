@@ -36,6 +36,7 @@ import type {
   SourceState,
 } from '@/src/native-types';
 import { noticeHoldProps, type NoticeHold } from '@/src/useDashboard';
+import { usePendingCommand } from '@/src/pendingCommands';
 import { formatClock, formatWhen } from '@/src/when';
 
 // `onResult` hears how the host answered a command: false when it refused it, or when the page could not send it.
@@ -198,6 +199,8 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
   sources?: SourceState[];
 }) {
   const connected = availability === 'ok';
+  // Review restore and Restore now stay off from the press until the host answers, so a double-click asks once (see oneShot.ts).
+  const pending = usePendingCommand();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   // The scrolling body, which a new step starts again from the top of; and the folder list, which is where focus goes back to after a read.
@@ -565,12 +568,12 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
   };
 
   const goReview = () => {
-    if (!selectedId || (!wholeSnapshot && paths.length === 0) || !selectionAccepted || !destinationValid || !connected || busy) return;
+    if (!selectedId || (!wholeSnapshot && paths.length === 0) || !selectionAccepted || !destinationValid || !connected || busy || pending('restoreFlowReview')) return;
     move('restoreFlowReview');
   };
 
   const startRestore = () => {
-    if (!selectedId || (!wholeSnapshot && paths.length === 0) || !selectionAccepted || !destinationValid || (selectedSnapshot?.isLegacyUnbound && !legacyConfirmed) || !connected || busy) return;
+    if (!selectedId || (!wholeSnapshot && paths.length === 0) || !selectionAccepted || !destinationValid || (selectedSnapshot?.isLegacyUnbound && !legacyConfirmed) || !connected || busy || pending('restoreFlowStart')) return;
     dismissNotice();
     send('restoreFlowStart', { legacyConfirmed });
   };
@@ -881,8 +884,8 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
           {!restoring && activeStep === 'files' && <Button size="md" variant="primary" aria-describedby={HINT_ID} disabled={!canContinueFiles || !connected || busy} onClick={goDestination}>Choose folder <ArrowRight size={14} /></Button>}
           {!restoring && activeStep === 'destination' && (needsCheck
             ? <Button size="md" variant="primary" aria-describedby={HINT_ID} disabled={!connected || busy} onClick={validateDestination}>{destinationChecking ? <LoaderCircle size={14} className="restore-spin" /> : <Check size={14} />}Check folder</Button>
-            : <Button size="md" variant="primary" aria-describedby={HINT_ID} data-review-restore disabled={!destinationValid || !canContinueFiles || !connected || busy} onClick={goReview}>Review restore <ArrowRight size={14} /></Button>)}
-          {!restoring && activeStep === 'review' && <Button size="md" variant="primary" aria-describedby={HINT_ID} disabled={!canStart || !connected || busy} onClick={startRestore}><ArchiveRestore size={15} />Restore now</Button>}
+            : <Button size="md" variant="primary" aria-describedby={HINT_ID} data-review-restore disabled={!destinationValid || !canContinueFiles || !connected || busy || pending('restoreFlowReview')} onClick={goReview}>Review restore <ArrowRight size={14} /></Button>)}
+          {!restoring && activeStep === 'review' && <Button size="md" variant="primary" aria-describedby={HINT_ID} disabled={!canStart || !connected || busy || pending('restoreFlowStart')} onClick={startRestore}><ArchiveRestore size={15} />Restore now</Button>}
           {/* On a restore that worked, opening the folder is the next thing anyone does, so it is the main button and Close steps back. After a
               partial one, Try again stays the main button and the folder is offered beside it. */}
           {!restoring && ['success', 'partial', 'error'].includes(activeStep) && <>
