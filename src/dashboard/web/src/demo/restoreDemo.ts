@@ -8,7 +8,11 @@
 //   "full" as a folder that already has files in it, and a path in Documents, Pictures, Desktop, Music or Projects as a folder that
 //   is itself backed up. The page's URL decides how Windows asks: `?session=once` is one prompt for the whole restore; without it,
 //   every folder opened is its own prompt, as on the earlier edition of the backup service.
-import type { BackupRangeState, DashboardState, RestoreEntry, RestoreFlowState, RestoreSnapshot } from '../native-types';
+// Find a file is offered only with `?session=once`, as the real host offers it only with a restore session. "Budget" finds a few
+// versions and a file that is gone from the newer backups; a text with "older" in it stops after the newest backups (Look further
+// back), "broad" and "slow" end as a name too common and a backup too large, and "fail" as a search that did not finish.
+import type { BackupRangeState, DashboardState, RestoreEntry, RestoreFileSearch, RestoreFlowState, RestoreSearchResult, RestoreSnapshot } from '../native-types';
+import { checkSearchText } from '../fileSearch';
 import { createSampleRuns, formatBytes } from './demoState';
 
 type Payload = Record<string, string | boolean> | undefined;
@@ -41,6 +45,14 @@ const TREE: Record<string, RestoreEntry[]> = {
 };
 
 const BACKED_UP = ['documents', 'pictures', 'desktop', 'music', 'projects'];
+// A file the older backups have and the newer ones do not (for "Not in your backups after …").
+const DELETED: RestoreEntry = file(`${USER}/Documents`, 'Budget 2025.xlsx', 44_900);
+const SEARCH_MS = 1800;
+const SEARCH_PAGE = 6;
+const emptySearch = (total: number): RestoreFileSearch => ({
+  text: '', status: 'idle', outcome: '', message: '', error: '', listChanged: false, nothingSearched: false, searched: 0, total,
+  searchedOldest: '', searchedOldestDisplay: '', canContinue: false, overflow: false, blocked: '', results: [], resultsTotal: 0,
+});
 const plural = (count: number, one: string, many: string) => `${count.toLocaleString()} ${count === 1 ? one : many}`;
 
 function sampleSnapshots(now: number): RestoreSnapshot[] {
@@ -208,14 +220,85 @@ export function createRestoreDemo(getState: () => DashboardState, notify: () => 
       progress: { stage: '', message: '', percent: 0, awaitingApproval: false },
       result: { status: null, target: '', verified: false, error: null, snapshotId: '' },
       approval: { waiting: false, session: !eachStep, notice: approvalNotice() },
+      search: eachStep ? undefined : emptySearch(0),
     };
     getState().restoreFlow = flow;
     protectedStep(READ_MS, () => {
       if (!flow) return;
       flow.snapshots = snapshots;
       flow.status = 'ready';
+      if (flow.search) flow.search = emptySearch(snapshots.length);
       say('Choose a backup', `${snapshots.length} backups are available.`);
     }, () => say('Loading your backups', 'Looking at your backups does not change them.'));
+  };
+
+  // Find a file: what the sample backups hold under a name, the newest first. `from` is how many backups earlier pages looked through.
+  const newestFirst = () => [...(flow?.snapshots ?? [])].sort((a, b) => Date.parse(b.when) - Date.parse(a.when));
+  const runSearch = (text: string, from: number) => {
+    if (!flow?.search) return;
+    const search = flow.search;
+    const all = newestFirst();
+    const needle = text.toLowerCase();
+    const looked = /older/i.test(text) && from === 0 ? all.slice(0, SEARCH_PAGE) : all.slice(from);
+    flow.busy = false;
+    flow.status = 'ready';
+    if (/fail/i.test(text)) {
+      Object.assign(search, { status: 'failed', outcome: '', message: '', error: 'Rewindle could not search your backups this time. Nothing was changed. Try again; if it keeps happening, choose Save problem report in Settings.' });
+      say('Search did not finish', search.error);
+      return;
+    }
+    if (/slow|broad/i.test(text)) {
+      Object.assign(search, {
+        status: 'done', outcome: /slow/i.test(text) ? 'tooSlow' : 'tooBroad', canContinue: false, nothingSearched: false,
+        message: /slow/i.test(text)
+          ? 'One of your backups is too large to search in the time allowed. Choose a backup by date, then open its folders to find your file.'
+          : `So many files are in folders whose names contain “${text}” that Rewindle stopped looking. Type more of the file’s name, for example Budget 2026.xlsx.`,
+      });
+      say('Search finished', search.message);
+      return;
+    }
+    const entries = [...Object.values(TREE).flat(), DELETED].filter(entry => entry.name.toLowerCase().includes(needle));
+    const searched = from + looked.length;
+    const newest = all[0], oldest = looked[looked.length - 1] ?? newest;
+    const found: RestoreSearchResult[] = entries.map(entry => {
+      const gone = entry === DELETED;
+      const holders = gone ? all.slice(Math.min(all.length - 1, 4)) : all.slice(0, searched);
+      const latest = holders[0] ?? newest;
+      const first = holders[holders.length - 1] ?? latest;
+      const versions = [{
+        snapshotId: latest.id, when: latest.when, whenDisplay: latest.whenDisplay, firstWhen: first.when, firstWhenDisplay: first.whenDisplay,
+        modified: entry.type === 'dir' ? '' : new Date(Date.parse(latest.when) - 86_400_000 * 3).toISOString(), modifiedDisplay: '',
+        size: entry.size, sizeDisplay: entry.type === 'dir' ? '' : entry.sizeDisplay, backups: holders.length, isLegacyUnbound: latest.isLegacyUnbound,
+      }];
+      // An older version of the budget, in the older backups.
+      if (entry.name === 'Budget 2026.xlsx' && holders.length > 3) {
+        const older = holders.slice(Math.ceil(holders.length / 2));
+        versions[0] = { ...versions[0], backups: holders.length - older.length, firstWhen: older[0].when, firstWhenDisplay: older[0].whenDisplay };
+        versions.push({ ...versions[0], snapshotId: older[0].id, when: older[0].when, whenDisplay: older[0].whenDisplay, firstWhen: older[older.length - 1].when,
+          firstWhenDisplay: older[older.length - 1].whenDisplay, modified: new Date(Date.parse(older[0].when) - 86_400_000 * 5).toISOString(), size: 41_300,
+          sizeDisplay: formatBytes(41_300), backups: older.length, isLegacyUnbound: older[0].isLegacyUnbound });
+      }
+      const where = entry.path.slice(0, entry.path.lastIndexOf('/')).replace(/^\/([A-Za-z])(?=\/|$)/, '$1:').replace(/\//g, '\\');
+      return { key: `${entry.type}|${entry.path}`, path: entry.path, name: entry.name, type: entry.type, folderDisplay: where, lastSeen: latest.when,
+        lastSeenDisplay: latest.whenDisplay, missingFromNewer: gone, hasMoreVersions: false, versions };
+    });
+    const more = searched < all.length;
+    Object.assign(search, {
+      status: 'done', outcome: more ? 'more' : 'complete', canContinue: more, nothingSearched: false, searched, total: all.length,
+      searchedOldest: oldest?.when ?? '', searchedOldestDisplay: oldest?.whenDisplay ?? '', results: found, resultsTotal: found.length,
+      message: more
+        ? `Looked through the ${searched} newest of your ${all.length} backups, back to ${oldest?.whenDisplay}. Choose Look further back to search older ones.`
+        : found.length ? `Looked through all ${all.length} backups.` : `No file or folder with “${text}” in its name is in any of your ${all.length} backups. Check the spelling, or type a shorter part of the name.`,
+    });
+    say('Search finished', search.message);
+  };
+  const startSearch = (text: string, from: number) => {
+    if (!flow?.search) return;
+    flow.busy = true;
+    flow.status = 'searching';
+    Object.assign(flow.search, { text, status: 'searching', error: '', listChanged: false });
+    say('Searching your backups', `Looking for “${text}”, newest backup first. This only reads your backups.`);
+    later(SEARCH_MS, () => runSearch(text, from));
   };
 
   const handle = (command: string, payload: Payload): string | null => {
@@ -338,6 +421,44 @@ export function createRestoreDemo(getState: () => DashboardState, notify: () => 
         flow = null;
         getState().restoreFlow = null;
         return null;
+      case 'restoreFlowFindFiles': {
+        if (busyReason) return busyReason;
+        if (!flow.search) return 'Searching all your backups at once is not available with the backup service on this PC. Choose a backup by date, then open its folders to find your file.';
+        if (!flow.snapshots.length) return 'There are no backups to search yet.';
+        const checked = checkSearchText(String(payload?.text ?? ''));
+        if (checked.error) return checked.message;
+        flow.search = { ...emptySearch(flow.snapshots.length), text: checked.normalized };
+        startSearch(checked.normalized, 0);
+        return null;
+      }
+      case 'restoreFlowFindMore':
+        if (busyReason) return busyReason;
+        if (!flow.search?.canContinue) return 'There are no older backups left to search.';
+        startSearch(flow.search.text, flow.search.searched);
+        return null;
+      case 'restoreFlowFindClear':
+        if (busyReason) return busyReason;
+        if (flow.search) flow.search = emptySearch(flow.snapshots.length);
+        say('Choose a backup', 'Choose a backup to continue.');
+        return null;
+      case 'restoreFlowPickFound': {
+        if (busyReason) return busyReason;
+        const id = String(payload?.snapshotId ?? ''), path = String(payload?.path ?? '');
+        const result = flow.search?.results.find(item => item.path === path && item.versions.some(version => version.snapshotId === id));
+        if (!result) return 'That version is no longer in the search results. Search again.';
+        const snapshot = flow.snapshots.find(item => item.id === id);
+        if (!snapshot) return 'That backup is no longer in your list. Choose Reload backups, then search again.';
+        if (id !== flow.selectedSnapshotId) {
+          flow.selectedSnapshotId = id;
+          flow.tree = { path: '/', entries: [], total: 0, truncated: false, loading: false, error: '', errorPath: '', loaded: false };
+        }
+        flow.selectedPaths = [path];
+        flow.wholeSnapshotSelected = false;
+        flow.step = 'destination'; flow.status = 'ready';
+        say('Choose a folder', `“${result.name}” from the backup of ${snapshot.whenDisplay} is selected. Nothing is restored until the last step.`);
+        validate();
+        return null;
+      }
       case 'restoreFlowOpenDestination':
       case 'restoreFlowCopyDestination':
         return 'This is sample data, so no real folder exists to open or copy.';
