@@ -130,7 +130,12 @@ same Windows values, a recovery-key password only when it checks one, and
 Restic writes its temporary pack files. `restore.py` carries its own copy of
 the list, because it must also run on its own from the recovery bundle; it
 keeps the user's local application-data folder for Restic's default cache and
-sets no temporary folder, since restores write no pack files.
+sets no temporary folder, since restores write no pack files. The elevated
+PowerShell launchers follow the same rule: `Manage-Restore.ps1` starts
+`restore.py`, and the installer starts `initialize_repository.py`, with the
+Windows values and the user's local application-data folder only, and the
+Google Drive verifier starts rclone, Restic and its inventory helper as
+described below.
 
 `backup.py` obtains a single-run lock, validates the configured repository
 volume and available space, and invokes Restic with the exact source and
@@ -256,6 +261,15 @@ normal-user ACL, and a no-reparse tree are checked before and after each run.
 The verifier never resolves those assets through `PATH` or a user-writable
 application-data directory. Native output is copied as bytes from redirected
 process streams so Windows PowerShell 5.1 cannot text-transform inventory JSON.
+No child inherits the task's environment: rclone and Restic get the Windows
+values from the Windows API, Windows' own PowerShell module folder (for the
+password helper), `TEMP`, `TMP` and `RCLONE_CACHE_DIR` in folders inside the
+protected run (removed when it ends), and only the rclone and Restic settings
+the verifier sets itself; the inventory helper gets the same list without the
+rclone and Restic settings.
+The read-only scope and the My Drive root are part of rclone's connection
+string (`<remote>,scope=drive.readonly,root_folder_id=root:<path>`), which
+outranks the configuration file and every `RCLONE_*` variable.
 Primary and verifier task exports use distinct generated evidence names, and
 are the only files exempt from the immutable runtime inventory. Task XML
 validation treats an omitted `Enabled` element as the schema default (`true`),

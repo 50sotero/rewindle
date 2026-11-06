@@ -548,6 +548,63 @@ function Quote-ProcessArgument {
     return '"' + $Value + $trailingBackslashes + '"'
 }
 
+function New-PythonChildEnvironment {
+    # The complete environment of the repository set-up's Python. Setup runs elevated, but Windows builds its environment
+    # from the user's profile (HKCU\Environment included), which any program the user runs can change without approval,
+    # and Python and the Restic it starts read settings from it. So nothing is inherited: the Windows values come from the
+    # Windows API, and LOCALAPPDATA is the user's local application-data folder as Windows reports it (the Google Drive
+    # cache check needs it).
+    $system = [Environment]::SystemDirectory
+    $windows = [IO.Directory]::GetParent($system).FullName
+    $environment = [ordered]@{
+        SystemRoot = $windows
+        windir = $windows
+        SystemDrive = [IO.Path]::GetPathRoot($windows).TrimEnd('\')
+        ComSpec = (Join-Path $system 'cmd.exe')
+        PATH = (@($system, $windows, (Join-Path $system 'Wbem'), (Join-Path $system 'WindowsPowerShell\v1.0')) -join ';')
+        PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC'
+        OS = 'Windows_NT'
+        NUMBER_OF_PROCESSORS = [string][Environment]::ProcessorCount
+    }
+    $architecture = [Environment]::GetEnvironmentVariable('PROCESSOR_ARCHITECTURE', 'Process')
+    if ($architecture -cin @('AMD64', 'x86', 'ARM64')) {
+        $environment['PROCESSOR_ARCHITECTURE'] = $architecture
+    }
+    $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+    if (-not [string]::IsNullOrEmpty($localAppData)) {
+        $environment['LOCALAPPDATA'] = $localAppData
+    }
+    return $environment
+}
+
+function Invoke-ProtectedPython {
+    # Runs the installed Python with an allow-listed environment (see New-PythonChildEnvironment), in this console, and
+    # returns its exit code.
+    param(
+        [Parameter(Mandatory = $true)] [string]$Python,
+        [Parameter(Mandatory = $true)] [string[]]$Arguments,
+        [Parameter(Mandatory = $true)] [string]$WorkingDirectory
+    )
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $Python
+    $start.Arguments = (@($Arguments | ForEach-Object { Quote-ProcessArgument ([string]$_) }) -join ' ')
+    $start.WorkingDirectory = $WorkingDirectory
+    $start.UseShellExecute = $false
+    $start.EnvironmentVariables.Clear()
+    $environment = New-PythonChildEnvironment
+    foreach ($name in @($environment.Keys)) {
+        $start.EnvironmentVariables[[string]$name] = [string]$environment[$name]
+    }
+    $process = [Diagnostics.Process]::Start($start)
+    try {
+        $process.WaitForExit()
+        return $process.ExitCode
+    }
+    finally {
+        $process.Dispose()
+    }
+}
+
 function Invoke-SelfElevation {
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $arguments = @(
@@ -2963,15 +3020,10 @@ try {
     Start-InstallPhase 'credential'
     $python = Join-Path $installRoot 'Python\python.exe'
     $initializer = Join-Path $installRoot 'initialize_repository.py'
-    Push-Location $installRoot
-    try {
-        & $python -I -S -B $initializer --config $configPath
-        if ($LASTEXITCODE -ne 0) {
-            throw "Repository initialization failed with exit code $LASTEXITCODE."
-        }
-    }
-    finally {
-        Pop-Location
+    $initializerExit = Invoke-ProtectedPython -Python $python -WorkingDirectory $installRoot `
+        -Arguments @('-I', '-S', '-B', $initializer, '--config', $configPath)
+    if ($initializerExit -ne 0) {
+        throw "Repository initialization failed with exit code $initializerExit."
     }
     Complete-InstallPhase 'credential'
     Start-InstallPhase 'repository'
@@ -3058,15 +3110,10 @@ try {
     Assert-InstallationVerified
     # A recovery key kept from an installation that used another backup location is made to name this one only now, when
     # nothing is left that rolls the installation back: a reinstall that fails leaves it naming the backups it was made for.
-    Push-Location $installRoot
-    try {
-        & $python -I -S -B $initializer --config $configPath --commit-recovery-key
-        if ($LASTEXITCODE -ne 0) {
-            throw "Updating the recovery key failed with exit code $LASTEXITCODE."
-        }
-    }
-    finally {
-        Pop-Location
+    $commitExit = Invoke-ProtectedPython -Python $python -WorkingDirectory $installRoot `
+        -Arguments @('-I', '-S', '-B', $initializer, '--config', $configPath, '--commit-recovery-key')
+    if ($commitExit -ne 0) {
+        throw "Updating the recovery key failed with exit code $commitExit."
     }
     $recoveryKeyReadable = Test-FileReadableByUser -Path $recoveryKey
     $verificationDetail = $null

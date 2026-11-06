@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import unittest
 
 
@@ -9,6 +10,26 @@ SCRIPT = (
 PASSWORD_HELPER = (
     PROJECT / "src" / "reveal-rclone-config-password.ps1"
 ).read_text(encoding="utf-8")
+
+
+def native_launches(text: str) -> list[str]:
+    """Return each Invoke-RequiredNative / Invoke-NativeToFiles call."""
+    lines = text.splitlines()
+    launches = []
+    for index, line in enumerate(lines):
+        if not re.match(
+            r"^\s*(?:\$\w+ = )?Invoke-(?:RequiredNative|NativeToFiles) `$", line
+        ):
+            continue
+        depth = 0
+        block = []
+        for current in lines[index:]:
+            block.append(current)
+            depth += current.count("(") - current.count(")")
+            if depth <= 0 and not current.rstrip().endswith("`"):
+                break
+        launches.append("\n".join(block))
+    return launches
 
 
 class MyDriveCloudVerifierScriptTests(unittest.TestCase):
@@ -57,12 +78,18 @@ class MyDriveCloudVerifierScriptTests(unittest.TestCase):
         )
 
     def test_api_calls_are_read_only_and_restore_bypasses_drivefs(self):
-        self.assertIn("'RCLONE_DRIVE_SCOPE'", SCRIPT)
-        self.assertIn("'drive.readonly'", SCRIPT)
+        # The scope and the My Drive root travel in rclone's connection string,
+        # which outranks the configuration file and every RCLONE_* variable.
+        self.assertIn("',scope=drive.readonly,root_folder_id='", SCRIPT)
+        self.assertIn("rclone_scope = 'drive.readonly'", SCRIPT)
+        self.assertNotIn("RCLONE_DRIVE_", SCRIPT)
         self.assertIn("'lsjson'", SCRIPT)
+        self.assertIn("($readOnlyRemote + ':' + $CloudRepositoryPath)", SCRIPT)
         self.assertIn("'--hash-type', 'MD5'", SCRIPT)
         self.assertIn("'--hash-type', 'SHA-256'", SCRIPT)
-        self.assertIn("$remoteRepository = 'rclone:'", SCRIPT)
+        self.assertIn(
+            "$remoteRepository = 'rclone:' + $readOnlyRemote + ':'", SCRIPT
+        )
         self.assertIn("'--no-lock'", SCRIPT)
         self.assertIn("'--no-cache'", SCRIPT)
         self.assertIn("@('snapshots', '--json')", SCRIPT)
@@ -70,6 +97,27 @@ class MyDriveCloudVerifierScriptTests(unittest.TestCase):
         self.assertIn("direct_cloud_latest_snapshot_verified = $true", SCRIPT)
         self.assertIn("'restore', $SnapshotId", SCRIPT)
         self.assertIn("'--verify'", SCRIPT)
+
+    def test_every_child_gets_an_allow_listed_environment(self):
+        # The task runs elevated with an environment built from the user's
+        # profile. No child may inherit it, and the verifier no longer sets
+        # rclone or Restic settings in its own process.
+        self.assertIn("$start.EnvironmentVariables.Clear()", SCRIPT)
+        self.assertNotIn("SetEnvironmentVariable", SCRIPT)
+        self.assertNotIn("$env:", SCRIPT.replace("$env:PSModulePath", ""))
+        launches = native_launches(SCRIPT)
+        self.assertEqual(7, len(launches))
+        for launch in launches:
+            self.assertRegex(launch, r"-Environment \$\w+")
+        self.assertIn("-Environment $helperEnvironment", SCRIPT)
+        for setting in (
+            "RCLONE_CONFIG",
+            "RCLONE_PASSWORD_COMMAND",
+            "RCLONE_ASK_PASSWORD",
+            "RCLONE_CACHE_DIR",
+            "RESTIC_PASSWORD_COMMAND",
+        ):
+            self.assertIn(f"            {setting} = ", SCRIPT)
 
     def test_schema_two_proof_binds_assets_backup_inventory_and_restore(self):
         self.assertIn("schema_version = 2", SCRIPT)

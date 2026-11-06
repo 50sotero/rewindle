@@ -304,5 +304,40 @@ class ChildEnvironmentTests(unittest.TestCase):
             self.assertEqual(str(state / "temp"), values["TEMP"])
 
 
+def _powershell_function(text: str, name: str) -> str:
+    start = text.index(f"function {name} {{")
+    return text[start:text.index("\n}\n", start)]
+
+
+class PowerShellLauncherTests(unittest.TestCase):
+    """The elevated PowerShell launchers clear their children's environment.
+
+    tests/Test-ChildEnvironment.ps1 and tests/Test-ManageRestore.ps1 run these
+    launchers against stand-ins; this keeps the rule in the Python suite too.
+    """
+
+    def test_manage_restore_starts_restore_py_with_its_allow_list(self) -> None:
+        text = (SOURCE / "Manage-Restore.ps1").read_text(encoding="utf-8")
+        backend = _powershell_function(text, "Invoke-RestoreBackend")
+        self.assertIn("$start.EnvironmentVariables.Clear()", backend)
+        self.assertIn("New-RestoreBackendEnvironment", backend)
+        allow_list = _powershell_function(text, "New-RestoreBackendEnvironment")
+        self.assertIn("$localAppDataRoot", allow_list)
+        self.assertNotIn("$env:", allow_list)
+
+    def test_installer_starts_python_only_through_its_allow_list(self) -> None:
+        text = (PROJECT / "installer" / "Install-ResticBackuper.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotRegex(text, r"&\s*\$python\b")
+        self.assertEqual(2, text.count("Invoke-ProtectedPython -Python $python "))
+        launcher = _powershell_function(text, "Invoke-ProtectedPython")
+        self.assertIn("$start.EnvironmentVariables.Clear()", launcher)
+        self.assertIn("New-PythonChildEnvironment", launcher)
+        allow_list = _powershell_function(text, "New-PythonChildEnvironment")
+        self.assertIn("SpecialFolder]::LocalApplicationData", allow_list)
+        self.assertNotIn("$env:", allow_list)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -861,12 +861,37 @@ function ConvertTo-WindowsArgument {
     return $builder.ToString()
 }
 
+function New-RestoreBackendEnvironment {
+    # The complete environment of restore.py. This manager runs elevated, but Windows builds its environment from the
+    # user's profile (HKCU\Environment included), which the user can change without approval, and Python and the Restic
+    # it starts read settings from it. So nothing is inherited: the Windows values come from the Windows API, and
+    # LOCALAPPDATA is the user's local application-data folder as Windows reports it (restore.py checks the Google Drive
+    # cache there, and Restic keeps its own cache there when the backup's cache is missing).
+    $system = [Environment]::SystemDirectory
+    $windows = [IO.Directory]::GetParent($system).FullName
+    $environment = [ordered]@{
+        SystemRoot = $windows; windir = $windows; SystemDrive = [IO.Path]::GetPathRoot($windows).TrimEnd('\')
+        ComSpec = (Join-Path $system 'cmd.exe')
+        PATH = (@($system, $windows, (Join-Path $system 'Wbem'), (Join-Path $system 'WindowsPowerShell\v1.0')) -join ';')
+        PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC'; OS = 'Windows_NT'
+        NUMBER_OF_PROCESSORS = [string][Environment]::ProcessorCount
+    }
+    $architecture = [Environment]::GetEnvironmentVariable('PROCESSOR_ARCHITECTURE', 'Process')
+    if ($architecture -cin @('AMD64', 'x86', 'ARM64')) { $environment['PROCESSOR_ARCHITECTURE'] = $architecture }
+    if (-not [string]::IsNullOrEmpty($localAppDataRoot)) { $environment['LOCALAPPDATA'] = $localAppDataRoot }
+    return $environment
+}
+
 function Invoke-RestoreBackend {
     param([string[]]$Arguments)
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $pythonPath
     $start.Arguments = (($Arguments | ForEach-Object { ConvertTo-WindowsArgument -Value ([string]$_) }) -join ' ')
     $start.WorkingDirectory = $installRoot
+    # Nothing is inherited from this process (see New-RestoreBackendEnvironment).
+    $start.EnvironmentVariables.Clear()
+    $environment = New-RestoreBackendEnvironment
+    foreach ($name in @($environment.Keys)) { $start.EnvironmentVariables[[string]$name] = [string]$environment[$name] }
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true

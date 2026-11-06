@@ -179,11 +179,22 @@ function Write-FakeResticControl {
 
 $pythonWrapper = Join-Path $compilerRoot 'python.exe'
 $escapedPython = $realPython.Replace('\', '\\').Replace('"', '\"')
+# Manage-Restore starts restore.py with an allow-listed environment. The stand-in refuses (exit 93) any other variable
+# and records what it got, for the exact check after the first listing.
+$pythonEnvironmentLog = Join-Path $compilerRoot 'python-environment.txt'
+$escapedPythonEnvironmentLog = $pythonEnvironmentLog.Replace('\', '\\').Replace('"', '\"')
 $pythonWrapperSource = @"
 using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Text;
 public static class PythonWrapper {
+  static readonly string[] Allowed = {
+    "SystemRoot", "windir", "SystemDrive", "ComSpec", "PATH", "PATHEXT", "OS", "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE", "LOCALAPPDATA"
+  };
   static string Quote(string value) {
     if (value.Length > 0 && value.IndexOfAny(new[] {' ', '\t', '"'}) < 0) return value;
     StringBuilder result = new StringBuilder("\""); int slashes = 0;
@@ -197,6 +208,14 @@ public static class PythonWrapper {
     return result.Append('"').ToString();
   }
   public static int Main(string[] args) {
+    List<string> received = new List<string>();
+    foreach (DictionaryEntry item in Environment.GetEnvironmentVariables()) {
+      string name = (string)item.Key;
+      if (Array.IndexOf(Allowed, name) < 0) { Console.Error.WriteLine("inherited " + name); return 93; }
+      received.Add(name + "=" + (string)item.Value);
+    }
+    received.Sort(StringComparer.Ordinal);
+    File.WriteAllLines("$escapedPythonEnvironmentLog", received.ToArray(), new UTF8Encoding(false));
     ProcessStartInfo start = new ProcessStartInfo(); start.FileName = "$escapedPython";
     start.Arguments = String.Join(" ", Array.ConvertAll(args, Quote)); start.UseShellExecute = false;
     using (Process process = Process.Start(start)) { process.WaitForExit(); return process.ExitCode; }
@@ -356,7 +375,8 @@ if (-not $SkipInstalledChecks) {
     $taskXmlBefore = try { (Export-ScheduledTask -TaskName 'ResticBackuper' -ErrorAction Stop).Replace("`r`n", "`n") } catch { $null }
 }
 
-# Settings a user could plant in their own environment. restore.py must not pass them to Restic: the fake exits 92 on one.
+# Settings a user could plant in their own environment. Manage-Restore must not pass them to restore.py (the Python
+# stand-in exits 93 on any variable outside its allow-list), and restore.py must not pass them to Restic (the fake exits 92).
 $plantedEnvironment = @{
     RESTIC_PASSWORD_COMMAND = 'C:\planted\evil.cmd'
     RESTIC_PASSWORD_FILE = 'C:\planted\password.txt'
@@ -376,6 +396,28 @@ try {
         if ($null -ne $list.Result) { Write-Output ("snapshot-list result: " + ($list.Result | ConvertTo-Json -Compress -Depth 20)) }
     }
     Assert-True ($list.ExitCode -eq 0 -and $list.Result.ok -eq $true) 'snapshot listing succeeds'
+    # restore.py got the Windows values from the Windows API and the user's local application-data folder, nothing else.
+    $systemFolder = [Environment]::SystemDirectory
+    $windowsFolder = [IO.Directory]::GetParent($systemFolder).FullName
+    $expectedPythonEnvironment = [ordered]@{
+        ComSpec = (Join-Path $systemFolder 'cmd.exe')
+        LOCALAPPDATA = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+        NUMBER_OF_PROCESSORS = [string][Environment]::ProcessorCount
+        OS = 'Windows_NT'
+        PATH = (@($systemFolder, $windowsFolder, (Join-Path $systemFolder 'Wbem'), (Join-Path $systemFolder 'WindowsPowerShell\v1.0')) -join ';')
+        PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC'
+        SystemDrive = [IO.Path]::GetPathRoot($windowsFolder).TrimEnd('\')
+        SystemRoot = $windowsFolder
+        windir = $windowsFolder
+    }
+    if ($env:PROCESSOR_ARCHITECTURE -cin @('AMD64', 'x86', 'ARM64')) {
+        $expectedPythonEnvironment['PROCESSOR_ARCHITECTURE'] = $env:PROCESSOR_ARCHITECTURE
+    }
+    $expectedPythonLines = [string[]]@($expectedPythonEnvironment.Keys | ForEach-Object { $_ + '=' + $expectedPythonEnvironment[$_] })
+    [Array]::Sort($expectedPythonLines, [StringComparer]::Ordinal)
+    $receivedPythonLines = [IO.File]::ReadAllLines($pythonEnvironmentLog, $encoding)
+    Assert-True (($receivedPythonLines -join "`n") -ceq ($expectedPythonLines -join "`n")) (
+        'restore.py gets only the allow-listed environment: ' + ($receivedPythonLines -join '; '))
     Assert-True ([string]$list.Result.request_digest -ceq $list.Digest -and [string]$list.Result.expected_config_sha256 -ceq $list.ConfigHash) 'snapshot result request/config binding'
     Assert-True ([string]$list.Result.plan_id -ceq $planId -and [long]$list.Result.config_generation -eq $generation) 'snapshot result plan binding'
     Assert-True ($list.Result.allow_legacy_unbound -eq $false) 'snapshot result binds legacy opt-in off'
