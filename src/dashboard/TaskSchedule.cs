@@ -285,6 +285,47 @@ namespace ResticBackuper.Dashboard
             BackupTaskState state,
             DateTime? nextRunTime,
             string semanticFingerprint)
+            : this(
+                cadence,
+                timeOfDay,
+                fixedUtcOffset,
+                days,
+                enabled,
+                startWhenAvailable,
+                wakeToRun,
+                allowStartOnBatteries,
+                stopIfGoingOnBatteries,
+                allowDemandStart,
+                taskName,
+                userSid,
+                command,
+                workingDirectory,
+                state,
+                nextRunTime,
+                null,
+                semanticFingerprint)
+        {
+        }
+
+        internal TaskSchedule(
+            BackupScheduleCadence cadence,
+            TimeSpan timeOfDay,
+            TimeSpan? fixedUtcOffset,
+            DayOfWeek[] days,
+            bool enabled,
+            bool startWhenAvailable,
+            bool wakeToRun,
+            bool allowStartOnBatteries,
+            bool stopIfGoingOnBatteries,
+            bool allowDemandStart,
+            string taskName,
+            string userSid,
+            string command,
+            string workingDirectory,
+            BackupTaskState state,
+            DateTime? nextRunTime,
+            DateTime? lastRunTime,
+            string semanticFingerprint)
         {
             Cadence = cadence;
             WrittenTimeOfDay = timeOfDay;
@@ -302,6 +343,7 @@ namespace ResticBackuper.Dashboard
             WorkingDirectory = workingDirectory;
             State = state;
             NextRunTime = nextRunTime;
+            LastRunTime = lastRunTime;
             SemanticFingerprint = semanticFingerprint;
         }
 
@@ -356,6 +398,10 @@ namespace ResticBackuper.Dashboard
         public string WorkingDirectory { get; private set; }
         public BackupTaskState State { get; private set; }
         public DateTime? NextRunTime { get; private set; }
+        // When Windows last started the task (on schedule, as a missed run it caught up on, or for Back up now), in local time
+        // as Task Scheduler reports it; null when it never ran or that could not be read. A task that is running has the start
+        // of that run here.
+        public DateTime? LastRunTime { get; private set; }
         public string SemanticFingerprint { get; private set; }
 
         public string Summary
@@ -453,13 +499,20 @@ namespace ResticBackuper.Dashboard
     internal sealed class TaskScheduleRuntimeInfo
     {
         public TaskScheduleRuntimeInfo(BackupTaskState state, DateTime? nextRunTime)
+            : this(state, nextRunTime, null)
+        {
+        }
+
+        public TaskScheduleRuntimeInfo(BackupTaskState state, DateTime? nextRunTime, DateTime? lastRunTime)
         {
             State = state;
             NextRunTime = nextRunTime;
+            LastRunTime = lastRunTime;
         }
 
         public BackupTaskState State { get; private set; }
         public DateTime? NextRunTime { get; private set; }
+        public DateTime? LastRunTime { get; private set; }
 
         public static TaskScheduleRuntimeInfo Unknown
         {
@@ -761,6 +814,10 @@ namespace ResticBackuper.Dashboard
                     NormalizePath(workingDirectory),
                     runtime.State,
                     runtime.NextRunTime,
+                    // Task Scheduler reports a task that never ran as 30 Dec 1899 (and some builds as 1999): not a run.
+                    runtime.LastRunTime.HasValue && runtime.LastRunTime.Value.Year >= 2000
+                        ? runtime.LastRunTime
+                        : null,
                     TaskScheduleCanonicalizer.ComputeTaskXmlFingerprint(document));
                 return true;
             }
@@ -1064,7 +1121,26 @@ namespace ResticBackuper.Dashboard
                 BackupTaskState state = Enum.IsDefined(typeof(BackupTaskState), stateValue)
                     ? (BackupTaskState)stateValue
                     : BackupTaskState.Unknown;
-                runtime = new TaskScheduleRuntimeInfo(state, nextRunTime);
+                // Only the freshness check uses the last run, to tell a missed backup Windows has yet to start from one it
+                // already tried. A failure to read it leaves it unknown and never fails the schedule read.
+                DateTime? lastRunTime = null;
+                try
+                {
+                    object lastValue = InvokeCom(task, "LastRunTime", BindingFlags.GetProperty, null);
+                    if (lastValue != null)
+                    {
+                        DateTime candidate = Convert.ToDateTime(lastValue, CultureInfo.InvariantCulture);
+                        if (candidate.Year >= 2000)
+                        {
+                            lastRunTime = candidate;
+                        }
+                    }
+                }
+                catch (Exception)
+                {
+                    lastRunTime = null;
+                }
+                runtime = new TaskScheduleRuntimeInfo(state, nextRunTime, lastRunTime);
                 return true;
             }
             catch (Exception exception)

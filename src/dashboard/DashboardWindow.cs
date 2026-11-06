@@ -307,6 +307,11 @@ namespace ResticBackuper.Dashboard
         // Set while the schedule's run times were just changed by someone, to the moment backups were last known to be current:
         // a slot the new schedule has before then never existed (see NoteScheduleReplaced). Null otherwise.
         private DateTime? scheduleCoveredThroughUtc;
+        // When this PC was last back from being off, signed out or asleep: the sign-in of this Windows session (read once, at
+        // start) and the last wake this app saw. A backup slot that passed before then is one Windows catches up on by itself
+        // (see BackupFreshnessEvaluator.IsCatchingUp). Null when unknown, which leaves a missed slot overdue.
+        private DateTime? sessionSignInUtc;
+        private DateTime? lastResumeUtc;
         private double currentProgress;
         private TelemetrySnapshot lastSnapshot;
         private DateTime lastHeartbeatUtc = DateTime.MinValue;
@@ -365,6 +370,8 @@ namespace ResticBackuper.Dashboard
             PreviewKeyDown += OnDashboardPreviewKeyDown;
             SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
             SystemParameters.StaticPropertyChanged += OnSystemParametersChanged;
+            sessionSignInUtc = ReadSessionSignInUtc();
+            SystemEvents.PowerModeChanged += OnPowerModeChanged;
             Application.Current.SessionEnding += delegate { allowClose = true; };
 
             trayIcon = BuildTrayIcon();
@@ -3540,6 +3547,104 @@ namespace ResticBackuper.Dashboard
             QueueEffectiveThemeRefresh();
         }
 
+        // A wake is a moment the PC came back: a backup slot that passed while it slept is one Windows now catches up on.
+        private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs args)
+        {
+            if (args.Mode != PowerModes.Resume ||
+                Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+            {
+                return;
+            }
+            DateTime resumedUtc = DateTime.UtcNow;
+            Dispatcher.BeginInvoke(
+                new Action(delegate { lastResumeUtc = resumedUtc; }),
+                DispatcherPriority.Background);
+        }
+
+        // The later of the sign-in and the last wake (see sessionSignInUtc), or null when neither is known.
+        private DateTime? AvailableSinceUtc()
+        {
+            if (!lastResumeUtc.HasValue)
+            {
+                return sessionSignInUtc;
+            }
+            if (!sessionSignInUtc.HasValue)
+            {
+                return lastResumeUtc;
+            }
+            return lastResumeUtc.Value > sessionSignInUtc.Value ? lastResumeUtc : sessionSignInUtc;
+        }
+
+        private const int WtsCurrentSession = -1;
+        private const int WtsSessionInfoClass = 24;
+        // WTSINFOW: eight DWORDs, the station, domain and user names (32, 17 and 21 UTF-16 units), then five FILETIMEs
+        // (connect, disconnect, last input, logon, current) on an 8-byte boundary.
+        private const int WtsInfoSize = 216;
+        private const int WtsInfoLogonTimeOffset = 200;
+        private const int WtsInfoCurrentTimeOffset = 208;
+
+        [System.Runtime.InteropServices.DllImport("wtsapi32.dll", EntryPoint = "WTSQuerySessionInformationW", SetLastError = true)]
+        private static extern bool WTSQuerySessionInformation(
+            IntPtr server,
+            int sessionId,
+            int infoClass,
+            out IntPtr buffer,
+            out int bytesReturned);
+
+        [System.Runtime.InteropServices.DllImport("wtsapi32.dll")]
+        private static extern void WTSFreeMemory(IntPtr memory);
+
+        // When the person signed in to this Windows session, which needs no rights to read. The dashboard starts at sign-in, but
+        // may be started again later, so its own start time is only the fallback: it is never earlier than the sign-in, so a
+        // wrong guess shows "Catching up" for at most the catch-up window rather than hiding an overdue backup for longer.
+        // The layout is checked by the current time it carries, which must be this moment.
+        private static DateTime? ReadSessionSignInUtc()
+        {
+            IntPtr buffer = IntPtr.Zero;
+            try
+            {
+                int bytes;
+                if (WTSQuerySessionInformation(IntPtr.Zero, WtsCurrentSession, WtsSessionInfoClass, out buffer, out bytes) &&
+                    buffer != IntPtr.Zero && bytes >= WtsInfoSize)
+                {
+                    long logon = System.Runtime.InteropServices.Marshal.ReadInt64(buffer, WtsInfoLogonTimeOffset);
+                    long current = System.Runtime.InteropServices.Marshal.ReadInt64(buffer, WtsInfoCurrentTimeOffset);
+                    DateTime nowUtc = DateTime.UtcNow;
+                    if (logon > 0 && current >= logon && current < DateTime.MaxValue.ToFileTimeUtc())
+                    {
+                        DateTime currentUtc = DateTime.FromFileTimeUtc(current);
+                        DateTime logonUtc = DateTime.FromFileTimeUtc(logon);
+                        if ((currentUtc - nowUtc).Duration() <= TimeSpan.FromMinutes(5) && logonUtc <= nowUtc)
+                        {
+                            return logonUtc;
+                        }
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // Read as unknown: the process start below stands in.
+            }
+            finally
+            {
+                if (buffer != IntPtr.Zero)
+                {
+                    WTSFreeMemory(buffer);
+                }
+            }
+            try
+            {
+                using (Process current = Process.GetCurrentProcess())
+                {
+                    return current.StartTime.ToUniversalTime();
+                }
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
         private void OnSystemParametersChanged(
             object sender,
             PropertyChangedEventArgs args)
@@ -4063,7 +4168,8 @@ namespace ResticBackuper.Dashboard
             BackupFreshnessResult before = BackupFreshnessEvaluator.EvaluateNow(
                 previous,
                 snapshot.LastVerifiedFinishedUtc,
-                scheduleCoveredThroughUtc);
+                scheduleCoveredThroughUtc,
+                AvailableSinceUtc());
             if (before.State == BackupFreshnessState.Healthy)
             {
                 scheduleCoveredThroughUtc = DateTime.UtcNow;
@@ -6701,7 +6807,12 @@ namespace ResticBackuper.Dashboard
 
             settingsOffsiteStatus.Text = status.StatusLabel;
             settingsOffsiteDetail.Text = status.StatusDetail;
-            if (status.Kind == OffsiteStatusKind.Failed)
+            if (status.CheckOverdue)
+            {
+                // A check that is waiting or running is calm, until none has worked for two days.
+                settingsOffsiteStatus.Foreground = Amber;
+            }
+            else if (status.Kind == OffsiteStatusKind.Failed)
             {
                 settingsOffsiteStatus.Foreground = Rose;
             }
@@ -6817,7 +6928,8 @@ namespace ResticBackuper.Dashboard
             BackupFreshnessResult freshness = BackupFreshnessEvaluator.EvaluateNow(
                 currentTaskSchedule,
                 snapshot.LastVerifiedFinishedUtc,
-                scheduleCoveredThroughUtc);
+                scheduleCoveredThroughUtc,
+                AvailableSinceUtc());
             Brush tone = freshness.State == BackupFreshnessState.Healthy
                 ? Green
                 : freshness.State == BackupFreshnessState.Paused
@@ -6913,6 +7025,19 @@ namespace ResticBackuper.Dashboard
                         ? freshness.Detail
                         : "Next automatic run: " + currentTaskSchedule.NextRunDisplay;
                 }
+            }
+            else if (freshness.State == BackupFreshnessState.CatchingUp && !snapshot.IsFailure)
+            {
+                // A slot missed while the PC was off or asleep, which Windows starts by itself in a moment: said calmly, with no
+                // button to press, until the run starts (it then has the hero) or the catch-up window passes (overdue, above).
+                heroTitle.Text = "Catching up on a missed backup";
+                heroDetail.Text = freshness.Detail;
+                etaTitle.Text = "Automatic schedule";
+                etaValue.Text = "Catching up";
+                etaHint.Text = "Windows starts the missed backup by itself.";
+                SetBadge("CATCHING UP", Blue, BrushFrom("#172B45"));
+                statusBadge.Visibility = Visibility.Visible;
+                StopStatusPulse();
             }
             else if (freshness.State == BackupFreshnessState.Paused && !snapshot.IsFailure)
             {
@@ -7254,7 +7379,8 @@ namespace ResticBackuper.Dashboard
             BackupFreshnessResult freshness = BackupFreshnessEvaluator.EvaluateNow(
                 currentTaskSchedule,
                 snapshot.LastVerifiedFinishedUtc,
-                scheduleCoveredThroughUtc);
+                scheduleCoveredThroughUtc,
+                AvailableSinceUtc());
             string verified = snapshot.LastVerifiedFinishedUtc.HasValue
                 ? "verified " + FormatTrayAge(DateTime.UtcNow - snapshot.LastVerifiedFinishedUtc.Value)
                 : "no verified backup yet";
@@ -7262,6 +7388,8 @@ namespace ResticBackuper.Dashboard
             {
                 case BackupFreshnessState.Overdue:
                     return prefix + "backup overdue, " + verified;
+                case BackupFreshnessState.CatchingUp:
+                    return prefix + "catching up on a missed backup";
                 case BackupFreshnessState.Paused:
                     return prefix + "backups paused, " + verified;
                 case BackupFreshnessState.ClockAnomaly:
@@ -7469,6 +7597,7 @@ namespace ResticBackuper.Dashboard
             StopStatusPulse();
             StopSourceOperationAnimation();
             SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+            SystemEvents.PowerModeChanged -= OnPowerModeChanged;
             SystemParameters.StaticPropertyChanged -= OnSystemParametersChanged;
             trayIcon.Visible = false;
             trayIcon.Dispose();

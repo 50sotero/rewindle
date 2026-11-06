@@ -3,6 +3,7 @@ import { motion } from 'motion/react';
 import { ArchiveRestore, ArrowUpRight, Check, ChevronDown, Clock3, Cloud, HardDrive, LoaderCircle, OctagonAlert, Play, RefreshCw, TriangleAlert } from 'lucide-react';
 import { Button } from '@/components/atoms/Button';
 import { usableLocale, type CommandName, type DashboardState } from '@/src/native-types';
+import { offsiteOverdueWords, offsiteTone } from '@/src/protectionTone';
 import { formatClock, formatWhen, formatWhenAgo } from '@/src/when';
 import './protection-health.css';
 
@@ -67,10 +68,11 @@ const FRESHNESS_CAUSE: Partial<Record<DashboardState['freshness']['state'], stri
   NoVerifiedBackup: 'Your files are not protected until the first backup finishes.',
   ClockAnomaly: 'Rewindle can’t tell how old your last backup is.',
   Unavailable: 'Your backups may still be running on time. Rewindle just can’t confirm it.',
+  CatchingUp: 'Windows will start the missed backup shortly. You don’t need to do anything.',
 };
 
 // What the card calls the schedule's state. The host's "Healthy" and "Overdue" are one word each; beside "Local backup" these read as sentences.
-const FRESHNESS_TITLE: Partial<Record<DashboardState['freshness']['state'], string>> = { Healthy: 'On schedule', Overdue: 'Backup overdue' };
+const FRESHNESS_TITLE: Partial<Record<DashboardState['freshness']['state'], string>> = { Healthy: 'On schedule', Overdue: 'Backup overdue', CatchingUp: 'Catching up' };
 
 export function protectionHealthItems(state: DashboardState, context: HealthContext = 'protection'): HealthItem[] {
   const freshness = state.freshness;
@@ -95,13 +97,14 @@ export function protectionHealthItems(state: DashboardState, context: HealthCont
   const restoreTone: Tone = restoreFailed ? 'danger' : restoreRunning ? 'active'
     : hasTest ? (freshness.state === 'Healthy' ? 'success' : 'neutral')
     : unavailable || freshness.state === 'ClockAnomaly' ? 'warning' : 'neutral';
+  // A backup missed while the PC was off or asleep, which Windows is about to start, asks for nothing (see heroTone).
   const localTone: Tone = unavailable ? 'warning' : s.active ? 'active'
-    : s.failure || behind ? 'danger' : calmStop ? 'neutral' : s.cancelled ? 'warning' : freshness.state === 'Healthy' ? 'success' : 'warning';
-  // An off-site copy waiting for its next check is neutral: Rewindle does the check by itself, so nothing is asked of the person.
-  const cloudWaiting = cloud.kind === 'Stale';
-  const cloudTone: Tone = unavailable ? 'warning' : cloud.kind === 'RestoreVerified' || cloud.kind === 'ProviderConfirmed' ? 'success'
-    : cloud.kind === 'Failed' ? 'danger' : cloud.kind === 'InProgress' ? 'active'
-    : cloud.kind === 'NotConfigured' || cloudWaiting ? 'neutral' : 'warning';
+    : s.failure || behind ? 'danger' : calmStop ? 'neutral' : s.cancelled ? 'warning' : freshness.state === 'Healthy' ? 'success'
+    : freshness.state === 'CatchingUp' ? 'neutral' : 'warning';
+  // An off-site copy waiting for its next check is neutral: Rewindle does the check by itself, so nothing is asked of the person. Once no
+  // check has worked for two days it is a warning with its own words and a next step (see offsiteTone and offsiteOverdueWords).
+  const cloudTone: Tone = unavailable ? 'warning' : offsiteTone(cloud);
+  const cloudOverdue = unavailable ? null : offsiteOverdueWords(cloud);
   const cloudTitles: Record<DashboardState['offsite']['kind'], string> = {
     NotConfigured: 'Not set up (optional)', StatusUnavailable: 'Can’t be confirmed yet', Stale: 'Waiting for the next check', Failed: 'The last check failed',
     InProgress: 'Being checked', LocalVerifiedProviderPending: provider ? `Waiting for ${provider} to confirm` : 'Waiting for confirmation',
@@ -168,16 +171,18 @@ export function protectionHealthItems(state: DashboardState, context: HealthCont
     },
     {
       key: 'cloud', label: 'Off-site copy', tone: cloudTone,
-      title: unavailable ? 'Status unavailable' : cloudTitles[cloud.kind] || 'Can’t be confirmed yet',
-      detail: unavailable ? 'Rewindle could not read the off-site status just now.' : cloudDetails[cloud.kind] || 'There is no current check result.',
+      title: unavailable ? 'Status unavailable' : cloudOverdue?.title || cloudTitles[cloud.kind] || 'Can’t be confirmed yet',
+      detail: unavailable ? 'Rewindle could not read the off-site status just now.' : cloudOverdue?.detail || cloudDetails[cloud.kind] || 'There is no current check result.',
       timestamp: unavailable || cloudOptional ? '' : cloud.checkedAt,
       timestampLabel: cloudTone === 'success' ? 'Last verified' : 'Last checked',
       // Rewindle checks the off-site copy by itself (nothing on this page starts that check), so there is no button and nothing to wait for.
-      nextStep: cloud.kind === 'Failed' ? `Make sure ${provider || 'the off-site location'} is available. Rewindle checks again automatically.`
+      nextStep: cloudOverdue ? cloudOverdue.nextStep
+        : cloud.kind === 'Failed' ? `Make sure ${provider || 'the off-site location'} is available. Rewindle checks again automatically.`
         : cloud.kind === 'StatusUnavailable' ? 'Rewindle checks again automatically. The details below say what it found.' : '',
       reason: cloudProblem ? briefReason(cloud.detail) : '',
       evidence: cloudOptional ? undefined : [cloud.title, cloud.detail, cloud.evidence].filter(Boolean).join('\n\n'),
-      openEvidence: cloudProblem,
+      // An overdue check already says why and what to do above; its details stay folded.
+      openEvidence: cloudProblem && !cloudOverdue,
       compact: cloudOptional,
     },
     {

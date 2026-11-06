@@ -79,6 +79,35 @@ class DashboardFreshnessSourceTests(unittest.TestCase):
             ),
         )
 
+    def test_a_missed_backup_windows_catches_up_on_is_calm(self) -> None:
+        freshness = self.method("ApplyFreshnessStatus", "ApplyPreview")
+        gate = freshness.index("if (activeRunOwnsPrimaryStatus)")
+        catching_up = freshness.index("freshness.State == BackupFreshnessState.CatchingUp && !snapshot.IsFailure")
+        self.assertLess(gate, catching_up)
+        branch = freshness[catching_up:freshness.index("else if", catching_up)]
+        self.assertIn('SetBadge("CATCHING UP", Blue,', branch)
+        self.assertIn('heroTitle.Text = "Catching up on a missed backup";', branch)
+        self.assertNotIn("Rose", branch)
+        self.assertNotIn("Back up now", branch)
+        # Not a state that needs attention, so its live region stays polite.
+        attention = self.freshness[self.freshness.index("public bool NeedsAttention"):]
+        attention = attention[:attention.index("}")]
+        self.assertNotIn("CatchingUp", attention)
+        tray = self.window[self.window.index("private string DescribeTrayStatus"):self.window.index("private static string FormatTrayAge")]
+        self.assertIn('case BackupFreshnessState.CatchingUp:', tray)
+
+    def test_every_freshness_read_knows_when_the_pc_came_back(self) -> None:
+        web = (DASHBOARD / "DashboardWindow.Web.cs").read_text(encoding="utf-8")
+        calls = re.findall(r"BackupFreshnessEvaluator\.EvaluateNow\((.*?)\);", self.window + web, re.DOTALL)
+        self.assertEqual(4, len(calls))
+        for call in calls:
+            self.assertIn("AvailableSinceUtc()", call)
+        # Sign-in is read once; a wake is noticed while the app runs, and the handler is removed when it closes.
+        self.assertIn("sessionSignInUtc = ReadSessionSignInUtc();", self.window)
+        self.assertIn("SystemEvents.PowerModeChanged += OnPowerModeChanged;", self.window)
+        self.assertIn("SystemEvents.PowerModeChanged -= OnPowerModeChanged;", self.window)
+        self.assertIn("WTSQuerySessionInformationW", self.window)
+
     def test_build_includes_the_freshness_evaluator(self) -> None:
         self.assertIn("(Join-Path $project 'BackupFreshness.cs')", self.build)
 

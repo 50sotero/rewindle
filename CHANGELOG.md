@@ -132,6 +132,16 @@ ones a home user reads without a glossary.
   that doesn't answer now each get their own explanation and next step. Before,
   the first two said to reconnect the backup drive and the third blamed the
   backup drive.
+- **Protection is neither too calm nor too loud.** A backup missed while the
+  PC was off, asleep or signed out no longer turns the page red the moment
+  you sign in: Windows starts such a backup by itself, so Protection says
+  **Catching up** in a neutral color and asks for nothing. If the backup has
+  not started 45 minutes after you sign in or wake the PC, it is **Backup
+  overdue** again, with **Back up now**. And an off-site copy whose nightly
+  check has not worked for two days (or that has shown a check as running for
+  that long) no longer says there is nothing to do: the card warns, says to
+  leave the PC on and signed in overnight, and what to do if that does not
+  help.
 
 ### Security
 

@@ -130,12 +130,14 @@ the backup: <relative path>`) and ignored in a DriveFS folder. The result docume
 ## 4. Task Scheduler contract
 
 Read with `schtasks.exe /Query /TN "<backup task>" /XML` (as the user, 15 s, 256 K characters) and the
-`Schedule.Service` COM object for state and next run. The XML must have exactly one `Exec` action whose command is the
-launcher, no arguments, working directory `<install>`; exactly one principal that resolves to the current user, with
-`InteractiveToken` and `HighestAvailable`; `URI` = `\<backup task>`; `IgnoreNew`, `ExecutionTimeLimit` `PT0S`, priority 7,
-no idle or network conditions, hard terminate and on-demand start allowed; exactly one daily or weekly calendar trigger.
-The fingerprint is SHA-256 of `<TaskXml domain>` + LF + the canonical document element. The Rewindle installer registers
-exactly this shape.
+`Schedule.Service` COM object for state, next run and last run (a last run that cannot be read is left unknown). The XML
+must have exactly one `Exec` action whose command is the launcher, no arguments, working directory `<install>`; exactly
+one principal that resolves to the current user, with `InteractiveToken` and `HighestAvailable`; `URI` = `\<backup task>`;
+`IgnoreNew`, `ExecutionTimeLimit` `PT0S`, priority 7, no idle or network conditions, hard terminate and on-demand start
+allowed; exactly one daily or weekly calendar trigger. The fingerprint is SHA-256 of `<TaskXml domain>` + LF + the
+canonical document element. The Rewindle installer registers exactly this shape. Both engines' tasks set
+`StartWhenAvailable`; with it, a slot that passed while the PC was off, asleep or signed out is shown as catching up rather
+than overdue until the task has run since the slot, or for at most 45 minutes after the sign-in or wake.
 
 ## 5. State the dashboard reads (read-only, never written)
 

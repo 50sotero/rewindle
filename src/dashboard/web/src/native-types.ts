@@ -219,11 +219,14 @@ export interface DashboardState {
   schedule: { summary: string; nextRun: string; /** The next run as an ISO 8601 timestamp, or empty/absent when there is none; the page formats it like every other time. */ nextRunAt?: string; detail: string; /** Set while Windows keeps the run at a fixed UTC time, so it moves an hour when the clocks change; says how to keep it fixed. Additive. */ clockChange?: string; error?: string; notice?: { text: string; tone: 'info' | 'success' | 'warning' | 'error' } | null };
   /** `volumeReady` is false only when the drive itself answered that it is not ready (unplugged, disconnected); true or absent means no such answer. */
   repository: { path: string; volume: string; volumeReady?: boolean };
-  freshness: { title: string; detail: string; state: 'Unavailable' | 'Healthy' | 'NoVerifiedBackup' | 'Overdue' | 'Paused' | 'ClockAnomaly'; verifiedAt: string };
+  /** `CatchingUp`: a backup was missed while the PC was off, asleep or signed out, and Windows starts it by itself shortly (not a problem; an older host never sends it). */
+  freshness: { title: string; detail: string; state: 'Unavailable' | 'Healthy' | 'NoVerifiedBackup' | 'Overdue' | 'Paused' | 'ClockAnomaly' | 'CatchingUp'; verifiedAt: string };
   offsite: {
     title: string; detail: string; evidence: string; kind: 'NotConfigured' | 'StatusUnavailable' | 'Stale' | 'Failed' | 'InProgress' | 'LocalVerifiedProviderPending' | 'ProviderConfirmed' | 'RestoreVerified'; checkedAt: string; providerConfirmed: boolean; restoreVerified: boolean;
     /** The provider the off-site evidence comes from ("Google Drive"), only when the host's evidence names one. Absent or empty otherwise. */
     provider?: string;
+    /** True when a check that is waiting (`Stale`) or running (`InProgress`) is overdue: none has worked for about two days. Additive. */
+    checkOverdue?: boolean;
   };
   /**
    * `next` says what the Restore page offers when restoring is not available: 'refresh' (read the installation again), 'setup' (run

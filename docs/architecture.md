@@ -594,7 +594,13 @@ section 9, and [`SECURITY.md`](../SECURITY.md).
   credentials or command lines to explain a run.
 - Schedule-aware freshness is computed from the last verified run and installed
   task policy, so an overdue backup is visible even when no process is active or
-  a heartbeat was lost.
+  a heartbeat was lost. A slot that passed before the PC came back (the
+  session's sign-in or a wake), with a task that runs missed starts and no run
+  since the slot, is shown as catching up for 45 minutes after that moment,
+  then as overdue.
+- A direct off-site proof that is waiting for (or shows) a check is calm for
+  48 hours after its last check; after that it is reported as overdue, since a
+  check that fails writes no proof of its own.
 - A large destructive change anomaly can complete as a verified local snapshot
   while remaining held for explicit review. Acknowledgement is bound to the
   exact plan, generation, snapshot, and evidence and never alters snapshots.

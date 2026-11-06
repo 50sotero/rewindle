@@ -2189,7 +2189,8 @@ namespace ResticBackuper.Dashboard
             BackupFreshnessResult result = BackupFreshnessEvaluator.EvaluateNow(
                 readable ? currentTaskSchedule : null,
                 readable ? snapshot.LastVerifiedFinishedUtc : null,
-                scheduleCoveredThroughUtc);
+                scheduleCoveredThroughUtc,
+                AvailableSinceUtc());
             Dictionary<string, object> freshness = new Dictionary<string, object>();
             freshness["title"] = result.StatusLabel;
             freshness["detail"] = result.Detail;
@@ -2218,6 +2219,8 @@ namespace ResticBackuper.Dashboard
             offsite["checkedAt"] = status != null && status.LastUpdatedLocal.HasValue
                 ? status.LastUpdatedLocal.Value.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture)
                 : string.Empty;
+            // A check that is waiting or running, but none has worked for about two days (see OffsiteStatusView.CheckOverdue).
+            offsite["checkOverdue"] = status != null && status.CheckOverdue;
             offsite["providerConfirmed"] = status != null && status.ProviderUploadConfirmed;
             offsite["restoreVerified"] = status != null && status.RestoreVerified;
             // The provider is named only when the evidence names one (a direct My Drive proof is Google Drive's); the page
