@@ -426,7 +426,10 @@ once held. Promotion closes the hold, reopens the stage with delete access,
 proves by its file ID that it is the same folder, renames it through that
 handle without replacing anything, and holds the promoted folder again until
 the move is committed. Anything outside Restic's layout is refused in a local
-stage or destination and left alone in a DriveFS folder.
+stage or destination and left alone in a DriveFS folder. Before the journal of
+a move to DriveFS is written, the same hold, rename by handle and file-ID check
+run on a throwaway folder there, and the move is refused if any of them fails,
+because rollback and recovery would need them too.
 DriveFS repository stages instead use an exact nonce path, ownership marker,
 and commit-manifest digest because its synthetic FAT32 ACL cannot carry that
 policy; the recovery stage still uses protected NTFS. The manager copies
@@ -458,8 +461,11 @@ and holds it open, without delete sharing, for the whole restore, so neither it
 nor any folder above it can be renamed or swapped for a junction. Restic writes
 into a new hidden folder inside it that only Administrators and SYSTEM can
 change, so nothing can be planted below it meanwhile. Afterwards each restored
-item gets the permissions it would inherit in the destination and is moved
-into it by handle, never replacing a name that appeared there in the meantime.
+item gets the permissions it would inherit in the destination (a folder's own
+last, once everything inside it has them) and is moved into it by handle,
+never replacing a name that appeared there in the meantime. Windows, both
+Program Files folders and ProgramData are never taken from environment
+variables, which the requesting user can set for the elevated process.
 
 Recovery Readiness authenticates the active DPAPI credential and separately
 parses and authenticates the configured recovery key. It also checks the

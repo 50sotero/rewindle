@@ -84,20 +84,27 @@ re-inspects readiness afterwards instead of reading a result file:
 | `anomaly_review.py` | `--expected-run-id`, `--expected-snapshot-id`, `--expected-evidence-sha256` (SHA-256 of `last-success.json`) | 0, 2 | Yes, scope `anomaly_review_acknowledgement` | Yes, scope `offsite_promotion` |
 
 **Restore target (Rewindle `restore.py`).** A target inside Windows, either Program Files folder or ProgramData is refused
-with `restore target must not be inside a Windows or program folder`; those folders come from the known-folder API, never
-from environment variables, and are compared after short names are expanded. The recovery drill's own folder under
-ProgramData is the one exception. The target is opened one folder at a time from the drive root, each relative to the
-handle of the folder above it and without following links, and is held open without delete sharing until the restore
-ends, so neither it nor any folder above it can be renamed. Restic's `--target` is a new hidden folder
-`<target>\.rewindle-restore-<16 hex>` created with a protected DACL for SYSTEM and Administrators only (the user is added
-only when `restore.py` runs unelevated). Afterwards every restored item gets, through its own handle, the DACL it would
-inherit in the target (links are never followed, permissions Restic restored as protected are kept, a file with a second
-name is left as it is) and is moved into the target by handle without replacing anything. A name that appeared in the
-target meanwhile stays in that folder, which is then left visible and open, and the report is `partial` with an `error`
-that names it. The report's `target` is still the chosen folder. Other new refusals: `restore target changed while it
-was being prepared` and `restore target must be on a drive that keeps folder permissions` (a drive without permissions
-that can hold links). The dashboard words all three plainly and refuses the same system folders at the destination step
-for both profiles; the legacy engine's own `restore.py` does neither.
+with `restore target must not be inside a Windows or program folder`, compared after short names are expanded. No
+environment variable is consulted, because the requesting user can set them for the elevated process: Windows and the
+Program Files folders come from the known-folder API, and ProgramData from the machine's `ProfileList\ProgramData`
+record with `%SystemDrive%` taken from the Windows folder's drive (the known-folder API would expand it from the caller's
+environment). The recovery drill's own folder under ProgramData is the one exception. The target is opened one folder at
+a time from the drive root, each relative to the handle of the folder above it and without following links, and is held
+open without delete sharing until the restore ends, so neither it nor any folder above it can be renamed. Restic's
+`--target` is a new hidden folder `<target>\.rewindle-restore-<16 hex>` created with a protected DACL for SYSTEM and
+Administrators only (the user is added only when `restore.py` runs unelevated). Afterwards every restored item gets,
+through its own handle, the DACL it would inherit in the target, deepest first (a folder's own DACL is written after
+everything inside it), and is moved into the target by handle without replacing anything. Links are never followed,
+permissions Restic restored as protected are kept, and a file with a second name (a hard link) is left as it is, so after
+an elevated restore it keeps the restore folder's administrator-only entries. A move that fails with access denied or a
+sharing violation is tried again for a few seconds. An item that still cannot move stays in that folder, which is then
+left visible and open, and the report is `partial` with an `error` that names the folder and says whether a name appeared
+in the target meanwhile or another program was using the item. The report's `target` is still the chosen folder. If
+`restore.py` is stopped during the restore (a power cut, for example), the hidden folder stays in the target with its
+administrator-only DACL; nothing removes it automatically yet (`src/RECOVERY.md` says how to delete it). Other new
+refusals: `restore target changed while it was being prepared` and `restore target must be on a drive that keeps folder
+permissions` (a drive without permissions that can hold links). The dashboard words all three plainly and refuses the
+same system folders at the destination step for both profiles; the legacy engine's own `restore.py` does neither.
 
 **Moving the repository (Rewindle `Manage-Repository.ps1`).** The stages `.restic-repository-<nonce>.staging` and
 `.restic-recovery-<nonce>.staging` are held open (list access, read and write sharing, no delete access, no delete
@@ -106,7 +113,11 @@ renamed or swapped for a junction during the copy, the ACL reset or the checks. 
 its volume serial and, when Windows gives one, its drive-letter path must equal the checked path. Promotion reopens the
 stage with delete access, requires the same file ID and renames it through that handle without replacing anything; the
 promoted folders stay held until the move is committed. Rollback and recovery hold a folder and prove its file ID before
-emptying it. Only Restic's own files are copied: `config`, 64-hex files in `keys`, `index` and `snapshots`, and 64-hex
+emptying it. Before the journal of a move to DriveFS is written, the same steps run on a throwaway folder
+`.resticbackuper-hold-<32 hex>` in the destination's parent (hold, final-path check, rename through the handle, hold
+again by file ID under the new name); if any fails, the move is refused with `Google Drive could not keep a folder in
+place while it was renamed, so the backup location was not moved and nothing was changed. ...` before anything is
+copied. Only Restic's own files are copied: `config`, 64-hex files in `keys`, `index` and `snapshots`, and 64-hex
 files in `data\<two hex>` that start with those two digits; `locks` is skipped as before. Anything else is left in the
 current repository, refused in a local stage or destination (`The copy of the backup holds something that is not part of
 the backup: <relative path>`) and ignored in a DriveFS folder. The result documents are unchanged. The legacy engine's
