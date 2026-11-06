@@ -917,6 +917,17 @@ try {
         Assert-True ($loaderFacts.status -eq 'Valid' -and -not $loaderFacts.os_binary -and $loaderFacts.chain_valid) "the WebView2 SDK's loader has a valid signature of its own and a chain ($($loader.FullName))"
         Assert-True (@($root2010, $root2011) -contains @($loaderFacts.chain)[-1]) "the WebView2 SDK's loader leads to one of Microsoft's roots (got $(@($loaderFacts.chain) -join ' > '))"
         Assert-Equal 'no-finding' (Get-FindingCode { Assert-MicrosoftSignedExecutable -Path $loader.FullName }) "the WebView2 SDK's loader passes"
+        # Invoke-HeldExecutable runs this check while it holds the downloaded file open with only reading shared, and the
+        # check opens the file again to read the certificates it carries. It still passes under that hold.
+        $loaderHold = [IO.File]::Open($loader.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+            $heldLoaderFacts = Get-AuthenticodeSignerFacts -Path $loader.FullName
+            Assert-True ($heldLoaderFacts.status -eq 'Valid' -and $heldLoaderFacts.chain_valid -and (@($root2010, $root2011) -contains @($heldLoaderFacts.chain)[-1])) "while held as a download is held, the loader's signature and chain read the same (got $(@($heldLoaderFacts.chain) -join ' > '))"
+            Assert-Equal 'no-finding' (Get-FindingCode { Assert-MicrosoftSignedExecutable -Path $loader.FullName }) "the WebView2 SDK's loader passes while it is held as a download is held"
+        }
+        finally {
+            $loaderHold.Dispose()
+        }
     }
 
     # ====================================================================================================================
