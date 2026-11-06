@@ -201,6 +201,7 @@ class DashboardStaleWrapperTests(unittest.TestCase):
                 f"/reference:{framework / 'System.Web.Extensions.dll'}",
                 str(DASHBOARD / "EngineProfile.cs"),
                 str(DASHBOARD / "AtomicFile.cs"),
+                str(DASHBOARD / "ElevatedRequestSecurity.cs"),
                 str(DASHBOARD / "SourceConfiguration.cs"),
                 str(DASHBOARD / "ProcessLiveness.cs"),
                 str(DASHBOARD / "Telemetry.cs"),
@@ -283,7 +284,10 @@ class DashboardStaleWrapperTests(unittest.TestCase):
         )
         self.assertIn("0x1000", self.liveness)
         self.assertIn("GetProcessTimes(", self.liveness)
-        self.assertIn("WaitForSingleObject(process, 0)", self.liveness)
+        # A process that has ended keeps its ID and creation time while a handle to it is open, so it must also still be
+        # running (STILL_ACTIVE).
+        self.assertIn("StillActive = 259;", self.liveness)
+        self.assertIn("GetExitCodeProcess(handle, out exitCode) && exitCode == StillActive", self.liveness)
         self.assertNotIn("0x0400", self.liveness)
         self.assertIn("ProcessLiveness.IsSameProcessAlive(", self.telemetry)
         self.assertIn('"wrapper_start_filetime"', self.telemetry)
