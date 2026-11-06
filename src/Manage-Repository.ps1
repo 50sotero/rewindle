@@ -548,26 +548,38 @@ function Exit-RunLock {
 
 $script:repositoryNative = $null
 
-# GetVolumeInformationW gives the volume serial and the raw file-system flags (a Google Drive mount reports remote storage),
-# which WMI does not. The P/Invoke stub is emitted in memory (Reflection.Emit, run only), never compiled: csc.exe would work
-# through files in %TEMP%, a folder the requesting account's unelevated programs can change while this manager runs elevated
-# and loads what was compiled there. SetLastError is set, as DllImport would set it.
+# The manager's Windows calls. GetVolumeInformationW gives the volume serial and the raw file-system flags (a Google Drive
+# mount reports remote storage), which WMI does not; the handle calls hold, identify, locate and rename the folders a move
+# copies into (see Open-PinnedDirectory). The P/Invoke stubs are emitted in memory (Reflection.Emit, run only), never
+# compiled: csc.exe would work through files in %TEMP%, a folder the requesting account's unelevated programs can change
+# while this manager runs elevated and loads what was compiled there. SetLastError is set on each, as DllImport would set it.
 function Get-RepositoryNativeMethods {
     if ($null -ne $script:repositoryNative) { return $script:repositoryNative }
     $assemblyName = [Reflection.AssemblyName]::new('ResticBackuper.RepositoryManager.Native.' + [Guid]::NewGuid().ToString('N'))
     $assembly = [Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly($assemblyName, [Reflection.Emit.AssemblyBuilderAccess]::Run)
     $module = $assembly.DefineDynamicModule($assemblyName.Name)
     $type = $module.DefineType('ResticBackuper.RepositoryManager.NativeMethods', [Reflection.TypeAttributes]'Public, Class, Sealed, Abstract')
-    $outUInt32 = [uint32].MakeByRefType()
-    $method = $type.DefineMethod('GetVolumeInformationW', [Reflection.MethodAttributes]'Public, Static, PinvokeImpl, HideBySig', [bool],
-        [Type[]]@([string], [Text.StringBuilder], [int], $outUInt32, $outUInt32, $outUInt32, [Text.StringBuilder], [int]))
     $dllImport = [Runtime.InteropServices.DllImportAttribute]
     $fields = [Reflection.FieldInfo[]]@(
         $dllImport.GetField('SetLastError'), $dllImport.GetField('CallingConvention'), $dllImport.GetField('CharSet'),
         $dllImport.GetField('EntryPoint'), $dllImport.GetField('ExactSpelling'))
-    $method.SetCustomAttribute([Reflection.Emit.CustomAttributeBuilder]::new($dllImport.GetConstructor([Type[]]@([string])),
-        [object[]]@('kernel32.dll'), $fields,
-        [object[]]@($true, [Runtime.InteropServices.CallingConvention]::Winapi, [Runtime.InteropServices.CharSet]::Unicode, 'GetVolumeInformationW', $true)))
+    $outUInt32 = [uint32].MakeByRefType()
+    $handleType = [Microsoft.Win32.SafeHandles.SafeFileHandle]
+    foreach ($signature in @(
+        @('GetVolumeInformationW', [bool],
+            [Type[]]@([string], [Text.StringBuilder], [int], $outUInt32, $outUInt32, $outUInt32, [Text.StringBuilder], [int])),
+        @('CreateFileW', $handleType, [Type[]]@([string], [uint32], [uint32], [IntPtr], [uint32], [uint32], [IntPtr])),
+        @('GetFileInformationByHandle', [bool], [Type[]]@($handleType, [byte[]])),
+        @('GetFinalPathNameByHandleW', [uint32], [Type[]]@($handleType, [byte[]], [uint32], [uint32])),
+        @('SetFileInformationByHandle', [bool], [Type[]]@($handleType, [int], [byte[]], [uint32]))
+    )) {
+        $method = $type.DefineMethod($signature[0], [Reflection.MethodAttributes]'Public, Static, PinvokeImpl, HideBySig',
+            $signature[1], $signature[2])
+        $method.SetCustomAttribute([Reflection.Emit.CustomAttributeBuilder]::new(
+            $dllImport.GetConstructor([Type[]]@([string])), [object[]]@('kernel32.dll'), $fields,
+            [object[]]@($true, [Runtime.InteropServices.CallingConvention]::Winapi,
+                [Runtime.InteropServices.CharSet]::Unicode, $signature[0], $true)))
+    }
     $script:repositoryNative = $type.CreateType()
     return $script:repositoryNative
 }
@@ -750,46 +762,16 @@ function Assert-DriveFsFolderHold {
 # sharing, so neither it nor any folder above it can be renamed or swapped for a junction meanwhile. The hold never
 # includes delete access itself, because Restic (a Go program) could then no longer open the folder. Renaming a held
 # folder therefore closes the hold, opens it again with delete access and proves by its file ID that it is still the same
-# folder. The P/Invoke stubs are emitted in memory (Reflection.Emit, run only), never compiled from a temporary folder.
+# folder. The Windows calls come from Get-RepositoryNativeMethods, emitted in memory and never compiled.
 $stagePinAccess = 0x00100081    # SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY, never DELETE
 $stagePinShare = 0x3            # FILE_SHARE_READ | FILE_SHARE_WRITE, never FILE_SHARE_DELETE
 $stageMoveAccess = 0x00110080   # SYNCHRONIZE | DELETE | FILE_READ_ATTRIBUTES, only for the rename itself
 $stageProbeAccess = 0x00100080  # SYNCHRONIZE | FILE_READ_ATTRIBUTES: no data access, so a hold does not stop it
 $stageOpenFlags = 0x02200000    # FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT: a link is opened, not followed
-$script:stagePinNative = $null
-
-function Get-StagePinNativeMethods {
-    if ($null -ne $script:stagePinNative) { return $script:stagePinNative }
-    $assemblyName = [Reflection.AssemblyName]::new('ResticBackuper.RepositoryManager.StagePin.' + [Guid]::NewGuid().ToString('N'))
-    $assembly = [Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly($assemblyName, [Reflection.Emit.AssemblyBuilderAccess]::Run)
-    $module = $assembly.DefineDynamicModule($assemblyName.Name)
-    $type = $module.DefineType('ResticBackuper.RepositoryManager.StagePinNativeMethods',
-        [Reflection.TypeAttributes]'Public, Class, Sealed, Abstract')
-    $dllImport = [Runtime.InteropServices.DllImportAttribute]
-    $fields = [Reflection.FieldInfo[]]@(
-        $dllImport.GetField('SetLastError'), $dllImport.GetField('CallingConvention'), $dllImport.GetField('CharSet'),
-        $dllImport.GetField('EntryPoint'), $dllImport.GetField('ExactSpelling'))
-    $handleType = [Microsoft.Win32.SafeHandles.SafeFileHandle]
-    foreach ($signature in @(
-        @('CreateFileW', $handleType, [Type[]]@([string], [uint32], [uint32], [IntPtr], [uint32], [uint32], [IntPtr])),
-        @('GetFileInformationByHandle', [bool], [Type[]]@($handleType, [byte[]])),
-        @('GetFinalPathNameByHandleW', [uint32], [Type[]]@($handleType, [byte[]], [uint32], [uint32])),
-        @('SetFileInformationByHandle', [bool], [Type[]]@($handleType, [int], [byte[]], [uint32]))
-    )) {
-        $method = $type.DefineMethod($signature[0], [Reflection.MethodAttributes]'Public, Static, PinvokeImpl, HideBySig',
-            $signature[1], $signature[2])
-        $method.SetCustomAttribute([Reflection.Emit.CustomAttributeBuilder]::new(
-            $dllImport.GetConstructor([Type[]]@([string])), [object[]]@('kernel32.dll'), $fields,
-            [object[]]@($true, [Runtime.InteropServices.CallingConvention]::Winapi,
-                [Runtime.InteropServices.CharSet]::Unicode, $signature[0], $true)))
-    }
-    $script:stagePinNative = $type.CreateType()
-    return $script:stagePinNative
-}
 
 function Open-DirectoryHandle {
     param([string]$Path, [uint32]$Access, [uint32]$Share)
-    $native = Get-StagePinNativeMethods
+    $native = Get-RepositoryNativeMethods
     $handle = $native::CreateFileW($Path, $Access, $Share, [IntPtr]::Zero, 3, $stageOpenFlags, [IntPtr]::Zero)
     $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
     if ($handle.IsInvalid) {
@@ -801,7 +783,7 @@ function Open-DirectoryHandle {
 
 function Get-DirectoryHandleIdentity {
     param([Microsoft.Win32.SafeHandles.SafeFileHandle]$Handle, [string]$Path)
-    $native = Get-StagePinNativeMethods
+    $native = Get-RepositoryNativeMethods
     # BY_HANDLE_FILE_INFORMATION: attributes at 0, volume serial at 28, file index (high, low) at 44 and 48.
     $buffer = [byte[]]::new(52)
     if (-not $native::GetFileInformationByHandle($Handle, $buffer)) {
@@ -820,7 +802,7 @@ function Get-DirectoryHandleIdentity {
 
 function Get-DirectoryHandlePath {
     param([Microsoft.Win32.SafeHandles.SafeFileHandle]$Handle, [uint32]$Flags)
-    $native = Get-StagePinNativeMethods
+    $native = Get-RepositoryNativeMethods
     $buffer = [byte[]]::new(65536)
     $length = $native::GetFinalPathNameByHandleW($Handle, $buffer, 32767, $Flags)
     if ($length -eq 0 -or $length -ge 32767) { return $null }
@@ -896,7 +878,7 @@ function Move-PinnedDirectory {
         throw "A held folder can only be renamed within its own parent: $($Pin.Path)"
     }
     Close-PinnedDirectory -Pin $Pin
-    $native = Get-StagePinNativeMethods
+    $native = Get-RepositoryNativeMethods
     $mover = Open-DirectoryHandle -Path $Pin.Path -Access $stageMoveAccess -Share $stagePinShare
     try {
         $identity = Get-DirectoryHandleIdentity -Handle $mover -Path $Pin.Path
