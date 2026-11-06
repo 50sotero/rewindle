@@ -85,6 +85,9 @@ CLOUD_ONLY_ATTRIBUTE_MASK = (
 )
 SOURCE_PREFLIGHT_SAMPLE_LIMIT = 20
 MAX_CONFIG_GENERATION = 2**63 - 1
+CHILD_TEMP_DIRECTORY_NAME = "temp"
+CHILD_PATHEXT = ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC"
+CHILD_PROCESSOR_ARCHITECTURES = frozenset({"AMD64", "x86", "ARM64"})
 
 
 @dataclass(frozen=True)
@@ -2095,12 +2098,103 @@ def cancellation_checkpoint(
     raise BackupCancelled(requested_utc)
 
 
-def _child_environment_without_cancellation_identity() -> dict[str, str]:
-    """Do not disclose the launcher's privileged control channel to Restic."""
-    environment = dict(os.environ)
-    for name in CANCEL_ENVIRONMENT_NAMES:
-        environment.pop(name, None)
+def windows_directory() -> Path:
+    """Return the shared Windows folder as Windows reports it.
+
+    Elevated helpers never take it from SystemRoot or windir: their own
+    environment is built from the user's profile, which the user can change
+    without approval.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetSystemWindowsDirectoryW.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+    kernel32.GetSystemWindowsDirectoryW.restype = wintypes.UINT
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = kernel32.GetSystemWindowsDirectoryW(buffer, len(buffer))
+    if length == 0 or length >= len(buffer):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return Path(buffer.value)
+
+
+def _prepare_restic_temp_directory(command: list[str] | None) -> Path | None:
+    """Create and return the protected folder for Restic's temporary packs.
+
+    Engine commands come from restic_base(), whose --cache-dir is
+    <state_directory>\\cache, so the sibling <state_directory>\\temp keeps the
+    protected state permissions instead of the user's own temp folder.
+    """
+    if not command or "--cache-dir" not in command:
+        return None
+    index = command.index("--cache-dir")
+    if index + 1 >= len(command):
+        return None
+    directory = Path(command[index + 1]).parent / CHILD_TEMP_DIRECTORY_NAME
+    directory.mkdir(parents=True, exist_ok=True)
+    metadata = os.lstat(directory)
+    if not stat.S_ISDIR(metadata.st_mode) or (
+        getattr(metadata, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT
+    ):
+        raise RuntimeError(
+            f"Restic's temporary folder is not a normal local folder: {directory}"
+        )
+    return directory
+
+
+def restic_child_environment(
+    command: list[str] | None = None,
+    *,
+    password: str | None = None,
+) -> dict[str, str]:
+    """Build the complete environment of a Restic child from an allow-list.
+
+    Nothing is inherited. An elevated helper's environment comes from the
+    user's profile, and Restic and rclone read their settings from it:
+    RESTIC_PASSWORD_COMMAND or an rclone remote type would run a command with
+    the helper's rights, and RESTIC_PASSWORD_FILE, RESTIC_REPOSITORY_FILE or
+    RESTIC_PACK_SIZE would make every backup fail. The Windows values come
+    from the Windows API, TEMP and TMP point at the protected folder next to
+    the command's --cache-dir, and RESTIC_PASSWORD is set only when the caller
+    passes one. The launcher's cancellation channel is never included.
+    """
+    windows = windows_directory()
+    system = windows / "System32"
+    environment = {
+        "SystemRoot": str(windows),
+        "windir": str(windows),
+        "SystemDrive": windows.drive,
+        "ComSpec": str(system / "cmd.exe"),
+        "PATH": ";".join(
+            str(path)
+            for path in (
+                system,
+                windows,
+                system / "Wbem",
+                system / "WindowsPowerShell" / "v1.0",
+            )
+        ),
+        "PATHEXT": CHILD_PATHEXT,
+        "OS": "Windows_NT",
+        "NUMBER_OF_PROCESSORS": str(os.cpu_count() or 1),
+    }
+    architecture = os.environ.get("PROCESSOR_ARCHITECTURE")
+    if architecture in CHILD_PROCESSOR_ARCHITECTURES:
+        environment["PROCESSOR_ARCHITECTURE"] = architecture
+    temp_directory = _prepare_restic_temp_directory(command)
+    if temp_directory is not None:
+        environment["TEMP"] = str(temp_directory)
+        environment["TMP"] = str(temp_directory)
+    if password is not None:
+        environment["RESTIC_PASSWORD"] = password
     return environment
+
+
+def _child_environment_without_cancellation_identity(
+    command: list[str] | None = None,
+) -> dict[str, str]:
+    """Do not disclose the launcher's privileged control channel to Restic."""
+    return restic_child_environment(command)
 
 
 def _wait_for_cancellable_process(
@@ -2259,7 +2353,7 @@ def run_capture(
                 errors="replace",
                 shell=False,
                 creationflags=console.creationflags,
-                env=_child_environment_without_cancellation_identity(),
+                env=restic_child_environment(command),
             )
             assigned = False
             try:
@@ -2316,7 +2410,7 @@ def stream_command(
                 bufsize=1,
                 shell=False,
                 creationflags=console.creationflags,
-                env=_child_environment_without_cancellation_identity(),
+                env=restic_child_environment(command),
             )
             assigned = False
             try:

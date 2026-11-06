@@ -116,6 +116,22 @@ in isolated mode and assigns it to a Windows job object. Closing the supervisor
 also terminates descendants, reducing the chance that an abandoned Restic
 process continues writing to the repository.
 
+Protected children never inherit an environment. The task and the elevated
+helpers get theirs from the user's profile (including `HKCU\Environment`),
+which the user can change without approval, and Restic, rclone and Python all
+take settings from it: an inherited `RESTIC_PASSWORD_COMMAND` or rclone remote
+type would run a program with the helper's rights. The supervisor therefore
+starts Python with a fixed list: the Windows folders and processor values as
+Windows reports them, the user's local application-data folder (for the Google
+Drive cache check) and the run's cancellation channel. The engine
+(`restic_common.restic_child_environment`) starts every Restic process with the
+same Windows values, a recovery-key password only when it checks one, and
+`TEMP`/`TMP` set to the `temp` folder in the protected state directory, where
+Restic writes its temporary pack files. `restore.py` carries its own copy of
+the list, because it must also run on its own from the recovery bundle; it
+keeps the user's local application-data folder for Restic's default cache and
+sets no temporary folder, since restores write no pack files.
+
 `backup.py` obtains a single-run lock, validates the configured repository
 volume and available space, and invokes Restic with the exact source and
 exclusion set. When configured, Restic asks Windows VSS for filesystem
@@ -177,7 +193,8 @@ ordinary users must not be able to replace files in this tree.
 
 Contains the CurrentUser DPAPI password envelope, protected restore canary, run
 lock, status records, structured failure detail, JSONL logs, last-successful
-record, and local metrics history. During protected changes it may also contain
+record, local metrics history, Restic's cache, and the `temp` folder for
+Restic's temporary pack files. During protected changes it may also contain
 source-update, repository-relocation, or credential-rotation journals plus
 bounded result/evidence records. Writers run from the protected scheduled task
 or narrowly scoped elevated managers; the dashboard receives read access.

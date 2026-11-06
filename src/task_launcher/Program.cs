@@ -1,5 +1,4 @@
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
@@ -302,11 +301,44 @@ namespace ResticBackuper.TaskLauncher
             uint launcherPid,
             string launcherStartFileTime)
         {
+            // Nothing is copied from this process's environment. The task runs
+            // with the highest rights, but its environment is built from the
+            // user's profile, which the user can change without approval, and
+            // Python, Restic and rclone all read settings from it. Every value
+            // below comes from the Windows API or from this run.
             SortedDictionary<string, string> variables =
                 new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (DictionaryEntry item in Environment.GetEnvironmentVariables())
+            string system = Environment.SystemDirectory;
+            string windows = Path.GetDirectoryName(system);
+            variables["SystemRoot"] = windows;
+            variables["windir"] = windows;
+            variables["SystemDrive"] = Path.GetPathRoot(windows).TrimEnd(
+                Path.DirectorySeparatorChar);
+            variables["ComSpec"] = Path.Combine(system, "cmd.exe");
+            variables["PATH"] = string.Join(
+                ";",
+                new string[]
+                {
+                    system,
+                    windows,
+                    Path.Combine(system, "Wbem"),
+                    Path.Combine(system, "WindowsPowerShell\\v1.0")
+                });
+            variables["PATHEXT"] = ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC";
+            variables["OS"] = "Windows_NT";
+            variables["NUMBER_OF_PROCESSORS"] = Environment.ProcessorCount.ToString(
+                System.Globalization.CultureInfo.InvariantCulture);
+            string architecture = Environment.GetEnvironmentVariable("PROCESSOR_ARCHITECTURE");
+            if (architecture == "AMD64" || architecture == "x86" || architecture == "ARM64")
             {
-                variables[Convert.ToString(item.Key)] = Convert.ToString(item.Value);
+                variables["PROCESSOR_ARCHITECTURE"] = architecture;
+            }
+            // The engine binds a Google Drive backup to this user's DriveFS cache.
+            string localAppData = Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData);
+            if (!string.IsNullOrEmpty(localAppData))
+            {
+                variables["LOCALAPPDATA"] = localAppData;
             }
             variables["RESTICBACKUPER_CANCEL_EVENT_NAME"] = channel.EventName;
             variables["RESTICBACKUPER_CANCEL_CHANNEL_ID"] = channel.ChannelId;

@@ -12,7 +12,6 @@ import argparse
 from datetime import datetime, timezone
 import json
 import ntpath
-import os
 from pathlib import Path
 import re
 import shutil
@@ -28,6 +27,7 @@ from refresh_recovery_tools import (
 from restic_common import (
     DRIVE_FIXED,
     canonical_windows_path,
+    restic_child_environment,
     validate_repository_volume,
     windows_volume_metadata,
 )
@@ -99,6 +99,10 @@ def command_result(
     environment: dict[str, str] | None = None,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> subprocess.CompletedProcess[str]:
+    # Restic gets the allow-listed environment plus, for a recovery-key check,
+    # the one password the caller set. Nothing else in ``environment`` or in
+    # this process's own environment reaches it.
+    password = None if environment is None else environment.get("RESTIC_PASSWORD")
     result = runner(
         command,
         check=False,
@@ -108,7 +112,7 @@ def command_result(
         text=True,
         encoding="utf-8",
         errors="replace",
-        env=environment,
+        env=restic_child_environment(command, password=password),
         shell=False,
         creationflags=CREATE_NO_WINDOW,
     )
@@ -377,7 +381,7 @@ def inspect(
     try:
         acl_verifier(recovery_key)
         password = parse_recovery_key(recovery_key, repository)
-        environment = os.environ.copy()
+        environment = restic_child_environment()
         environment["RESTIC_PASSWORD"] = password
         try:
             recovery_id, recovery_format = authenticate(
@@ -493,7 +497,7 @@ def inspect(
                 raise RuntimeError("The previous recovery-key path is outside the configured key directory.")
             acl_verifier(previous)
             previous_password = parse_recovery_key(previous, repository)
-            environment = os.environ.copy()
+            environment = restic_child_environment()
             environment["RESTIC_PASSWORD"] = previous_password
             try:
                 previous_id, previous_format = authenticate(

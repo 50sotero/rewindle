@@ -19,7 +19,7 @@ import subprocess
 from typing import Any, Callable
 
 from recovery_health import authenticate, parse_recovery_key, password_command, utc_now
-from restic_common import load_config_under_lock
+from restic_common import load_config_under_lock, restic_child_environment
 from secret_store import (
     _current_user_sid,
     load_secret,
@@ -170,7 +170,7 @@ def repair(
         secret = Path(config["secret_file"])
         acl_verifier(recovery_key)
         recovery_password = parse_recovery_key(recovery_key, repository)
-        environment = os.environ.copy()
+        environment = restic_child_environment()
         environment["RESTIC_PASSWORD"] = recovery_password
         try:
             repository_id, repository_format = authenticate(

@@ -98,12 +98,28 @@ public static class FakeRestic {
   static string Escape(string value) {
     return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
   }
+  // restore.py gives Restic an allow-listed environment, so the fixture settings come from a control file.
+  static string Control(string name) {
+    string path = @"__FAKE_RESTIC_CONTROL__";
+    if (!File.Exists(path)) return null;
+    foreach (string line in File.ReadAllLines(path)) {
+      int separator = line.IndexOf('=');
+      if (separator > 0 && line.Substring(0, separator) == name) return line.Substring(separator + 1);
+    }
+    return null;
+  }
   public static int Main(string[] args) {
-    string log = Environment.GetEnvironmentVariable("FAKE_RESTIC_LOG");
+    foreach (System.Collections.DictionaryEntry item in Environment.GetEnvironmentVariables()) {
+      string name = ((string)item.Key).ToUpperInvariant();
+      if (name.StartsWith("RCLONE_") || name == "RESTIC_PASSWORD_COMMAND" || name == "RESTIC_PASSWORD_FILE" || name == "RESTIC_REPOSITORY_FILE") {
+        Console.Error.WriteLine("inherited " + name); return 92;
+      }
+    }
+    string log = Control("FAKE_RESTIC_LOG");
     if (!String.IsNullOrEmpty(log)) File.AppendAllText(log, String.Join("\t", args) + Environment.NewLine);
-    string plan = Environment.GetEnvironmentVariable("FAKE_PLAN_ID");
-    string source = Environment.GetEnvironmentVariable("FAKE_SOURCE");
-    bool legacy = Environment.GetEnvironmentVariable("FAKE_LEGACY_SNAPSHOT") == "1";
+    string plan = Control("FAKE_PLAN_ID");
+    string source = Control("FAKE_SOURCE");
+    bool legacy = Control("FAKE_LEGACY_SNAPSHOT") == "1";
     string snapshot = new String(legacy ? 'f' : 'b', 64);
     if (args.Contains("cat") && args.Contains("config")) {
       Console.WriteLine("{\"id\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"version\":2}"); return 0;
@@ -129,7 +145,7 @@ public static class FakeRestic {
     }
     if (args.Contains("restore")) {
       string target = After(args, "--target"); Directory.CreateDirectory(target);
-      if (Environment.GetEnvironmentVariable("FAKE_RESTORE_PARTIAL") == "1") {
+      if (Control("FAKE_RESTORE_PARTIAL") == "1") {
         File.WriteAllText(Path.Combine(target, "partial.txt"), "retained partial data"); return 23;
       }
       int includeCount = args.Count(value => value == "--include");
@@ -148,7 +164,18 @@ public static class FakeRestic {
   }
 }
 '@
+$fakeResticControl = Join-Path $compilerRoot 'fake-restic-control.txt'
+$fakeResticSource = $fakeResticSource.Replace('__FAKE_RESTIC_CONTROL__', $fakeResticControl)
 Add-Type -TypeDefinition $fakeResticSource -OutputAssembly $fakeRestic -OutputType ConsoleApplication
+
+function Write-FakeResticControl {
+    # Restic gets an allow-listed environment, so this process's FAKE_* settings reach the fake through a file.
+    $lines = @(foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_LEGACY_SNAPSHOT')) {
+        $value = [Environment]::GetEnvironmentVariable($name, 'Process')
+        if ($null -ne $value) { $name + '=' + $value }
+    })
+    [IO.File]::WriteAllLines($fakeResticControl, [string[]]$lines, $encoding)
+}
 
 $pythonWrapper = Join-Path $compilerRoot 'python.exe'
 $escapedPython = $realPython.Replace('\', '\\').Replace('"', '\"')
@@ -303,6 +330,7 @@ function Invoke-Manager {
     $env:FAKE_SOURCE = $Fixture.Source
     if ($LegacyFixture) { $env:FAKE_LEGACY_SNAPSHOT = '1' }
     else { Remove-Item Env:FAKE_LEGACY_SNAPSHOT -ErrorAction SilentlyContinue }
+    Write-FakeResticControl
     $priorPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
@@ -327,6 +355,15 @@ if (-not $SkipInstalledChecks) {
     $productionHashBefore = if (Test-Path -LiteralPath $productionConfig) { Get-Hash -Path $productionConfig } else { $null }
     $taskXmlBefore = try { (Export-ScheduledTask -TaskName 'ResticBackuper' -ErrorAction Stop).Replace("`r`n", "`n") } catch { $null }
 }
+
+# Settings a user could plant in their own environment. restore.py must not pass them to Restic: the fake exits 92 on one.
+$plantedEnvironment = @{
+    RESTIC_PASSWORD_COMMAND = 'C:\planted\evil.cmd'
+    RESTIC_PASSWORD_FILE = 'C:\planted\password.txt'
+    RESTIC_REPOSITORY_FILE = 'C:\planted\repository.txt'
+    RCLONE_CONFIG_PLANTED_TYPE = 'sftp'
+}
+foreach ($name in $plantedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $plantedEnvironment[$name], 'Process') }
 
 try {
     $fixture = New-Fixture
@@ -654,6 +691,7 @@ try {
         $env:FAKE_PLAN_ID = $planId
         $env:FAKE_SOURCE = $Fixture.Source
         if ($LegacyFixture) { $env:FAKE_LEGACY_SNAPSHOT = '1' } else { Remove-Item Env:FAKE_LEGACY_SNAPSHOT -ErrorAction SilentlyContinue }
+        Write-FakeResticControl
         $start = [Diagnostics.ProcessStartInfo]::new()
         $start.FileName = $powershellPath
         $start.Arguments = (($arguments | ForEach-Object { ConvertTo-CommandLineArgument ([string]$_) }) -join ' ')
@@ -984,6 +1022,7 @@ namespace RestoreManagerTests {
         $env:FAKE_PLAN_ID = $planId
         $env:FAKE_SOURCE = $interopFixture.Source
         Remove-Item Env:FAKE_LEGACY_SNAPSHOT -ErrorAction SilentlyContinue
+        Write-FakeResticControl
         $profileType.GetMethod('UseFolderRootsForTesting', $memberFlags).Invoke($null, [object[]]@([string]$interopFixture.Root)) | Out-Null
         $profileType.GetMethod('Activate', $memberFlags).Invoke($null, [object[]]@($profileType.GetProperty('Rewindle', $memberFlags).GetValue($null))) | Out-Null
         try {
@@ -1058,6 +1097,7 @@ finally {
     foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_LEGACY_SNAPSHOT')) {
         Remove-Item "Env:$name" -ErrorAction SilentlyContinue
     }
+    foreach ($name in $plantedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $null, 'Process') }
     foreach ($root in $roots) {
         $full = [IO.Path]::GetFullPath($root).TrimEnd('\')
         $temp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')

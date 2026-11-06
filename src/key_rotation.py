@@ -22,7 +22,11 @@ from typing import Any, Callable
 
 from credential_repair import sha256_file, validate_runtime_manifest
 from recovery_health import authenticate, parse_recovery_key, password_command, utc_now
-from restic_common import atomic_write_json, load_config_under_lock
+from restic_common import (
+    atomic_write_json,
+    load_config_under_lock,
+    restic_child_environment,
+)
 from secret_store import (
     _current_user_sid,
     load_secret,
@@ -81,6 +85,9 @@ def _restic_result(
     environment: dict[str, str] | None = None,
     timeout: int = 180,
 ) -> subprocess.CompletedProcess[str]:
+    # Only the allow-listed environment and the caller's RESTIC_PASSWORD reach
+    # Restic, as in recovery_health.command_result.
+    password = None if environment is None else environment.get("RESTIC_PASSWORD")
     return runner(
         command,
         stdout=subprocess.PIPE,
@@ -88,7 +95,7 @@ def _restic_result(
         text=True,
         encoding="utf-8",
         errors="replace",
-        env=environment,
+        env=restic_child_environment(command, password=password),
         timeout=timeout,
     )
 
@@ -225,7 +232,7 @@ def _authenticate_plaintext(
     *,
     runner: Callable[..., subprocess.CompletedProcess[str]],
 ) -> tuple[str, int, list[dict[str, Any]], str]:
-    environment = os.environ.copy()
+    environment = restic_child_environment()
     environment["RESTIC_PASSWORD"] = value
     try:
         repository_id, repository_format = authenticate(
