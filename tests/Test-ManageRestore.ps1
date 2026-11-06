@@ -485,6 +485,17 @@ try {
     $nothingHistory = Get-Content -LiteralPath (Join-Path $nothingFixture.State 'restore-history.json') -Raw | ConvertFrom-Json
     Assert-True (@($nothingHistory.entries).Count -eq 1 -and $nothingHistory.entries[0].verified -eq $false) 'a restore missing a chosen item was recorded as verified'
 
+    # An item that is not one path as the backup lists it is refused before anything is restored, once the report is bound to the
+    # snapshot, so the manager accepts the report and the refusal reaches the dashboard in restore.py's words, which it puts plainly.
+    $refusedFixture = New-Fixture
+    $refusedTarget = Join-Path $refusedFixture.Root 'Restored\Refused'
+    $refused = Invoke-Manager -Fixture $refusedFixture -Action restore -Snapshot $snapshotId -Target $refusedTarget -Includes @('C:\notes.txt')
+    Assert-True ($refused.ExitCode -ne 0 -and $refused.Result.ok -eq $false -and
+        [string]$refused.Result.error -match "^an include must be one item's path as Restic lists it") ('a refused item did not reach the dashboard in restore.py''s words: ' + [string]$refused.Result.error)
+    Assert-True ([string]$refused.Result.payload.result -ceq 'error' -and $refused.Result.payload.verified -eq $false) 'a refused item was not reported as a restore that did not run'
+    Assert-True (-not (Test-Path -LiteralPath $refusedTarget) -or @(Get-ChildItem -LiteralPath $refusedTarget -Force).Count -eq 0) 'a refused item still restored something'
+    Assert-True (-not (@(Get-Content -LiteralPath $refusedFixture.Log) | Where-Object { ($_ -split "`t") -contains 'restore' })) 'Restic was asked to restore a refused item'
+
     $drillFixture = New-Fixture
     $drill = Invoke-Manager -Fixture $drillFixture -Action restore_drill
     if ($drill.ExitCode -ne 0) {

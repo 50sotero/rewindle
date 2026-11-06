@@ -1732,6 +1732,66 @@ class RestoreBackendTests(unittest.TestCase):
         self.assertIn(folders[0].name, payload["error"])
         self.assertEqual(["C/Users/plain.txt"], self.restored_files(folders[0]))
 
+    def test_a_skipped_item_is_still_named_when_the_hand_over_left_others_behind(self) -> None:
+        # The items the hand-over left are looked for in the restore folder, where they are; a chosen item that Restic
+        # skipped is in neither place, and the hand-over's message, which says where the others are, also names it.
+        busy, _ = self.busy_rename(-1, 32)
+        with mock.patch.object(restore, "_rename_into", side_effect=busy), mock.patch.object(
+            restore, "_MOVE_RETRY_DELAYS", (0.0, 0.0)
+        ):
+            result, stderr, payload, target = self.restore_selection(
+                "left-and-skipped", ["/C/Users/plain.txt", "/C/Users/gone [old].txt"]
+            )
+        self.assertEqual(1, result)
+        self.assertEqual(("partial", False, 0), (payload["result"], payload["verified"], payload["restic_exit_code"]))
+        folders = [item for item in target.iterdir() if item.is_dir()]
+        self.assertEqual(1, len(folders))
+        self.assertTrue(payload["error"].startswith("Some restored files could not be moved into the folder you chose"))
+        self.assertIn(folders[0].name, payload["error"])
+        self.assertTrue(
+            payload["error"].endswith(
+                " Besides those, 1 of the 2 items you chose was not restored at all. To try again, choose the folder "
+                "that holds it and a new empty folder to restore into."
+            ),
+            payload["error"],
+        )
+        self.assertNotIn("Restic", payload["error"])
+        self.assertIn("could not be moved into", stderr)
+        self.assertIn("Not restored at all:\n  /C/Users/gone [old].txt\n", stderr)
+        self.assertNotIn("  /C/Users/plain.txt", stderr)
+        self.assertEqual(["C/Users/plain.txt"], self.restored_files(folders[0]))
+
+    def test_items_the_hand_over_left_are_looked_for_in_the_restore_folder_only(self) -> None:
+        target = self.root / "looked-for"
+        restore_folder = target / ".rewindle-restore-0123456789abcdef"
+        (restore_folder / "C" / "Users").mkdir(parents=True)
+        (restore_folder / "C" / "Users" / "kept.txt").write_text("restored", encoding="utf-8")
+        # A "C" that appeared in the target while the restore ran is someone else's, so what is in it does not count.
+        (target / "C" / "Users").mkdir(parents=True)
+        (target / "C" / "Users" / "theirs.txt").write_text("not restored", encoding="utf-8")
+        (target / "D").mkdir()
+        (target / "D" / "moved.txt").write_text("restored", encoding="utf-8")
+        chosen = ["/C/Users/kept.txt", "/C/Users/theirs.txt", "/D/moved.txt", "/D/skipped.txt"]
+        self.assertEqual(
+            ["/C/Users/theirs.txt", "/D/skipped.txt"],
+            restore.missing_chosen_items(target, chosen, str(restore_folder), ["c"]),
+        )
+        # Without anything left behind, everything is looked for in the target.
+        self.assertEqual(["/C/Users/kept.txt", "/D/skipped.txt"], restore.missing_chosen_items(target, chosen))
+
+    def test_what_is_added_to_the_hand_over_message_counts_the_skipped_items(self) -> None:
+        cases = (
+            (1, 1, "the item you chose was not restored at all", "holds it"),
+            (2, 2, "none of the 2 items you chose was restored at all", "holds them"),
+            (1, 3, "1 of the 3 items you chose was not restored at all", "holds it"),
+            (2, 3, "2 of the 3 items you chose were not restored at all", "holds them"),
+        )
+        for missing, chosen, counted, holds in cases:
+            with self.subTest(missing=missing, chosen=chosen):
+                message = restore.also_not_restored_message(missing, chosen)
+                self.assertTrue(message.startswith(f"Besides those, {counted}. To try again, "), message)
+                self.assertIn(f"choose the folder that {holds} and a new empty folder", message)
+
     def test_a_restored_item_beyond_the_windows_path_limit_counts_as_restored(self) -> None:
         deep = "/C/Users/" + "/".join(f"a-rather-long-folder-name-{index:02d}" for index in range(9))
         chosen = deep + "/report [final].txt"
@@ -1776,11 +1836,70 @@ class RestoreBackendTests(unittest.TestCase):
             "/C/./Users",
             "/C/../Users",
         ):
-            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "one item's snapshot path"):
-                restore.validate_includes([value])
-        with self.assertRaisesRegex(ValueError, "one item's snapshot path"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    ValueError, "one item's path as Restic lists it, starting with / and the drive letter"
+                ):
+                    restore.validate_includes([value])
+                # With --source the same rules hold, and the refusal says what the path is then relative to.
+                with self.assertRaisesRegex(ValueError, "one item's path inside the --source folder, starting with /,"):
+                    restore.validate_includes([value], inside_source=True)
+        with self.assertRaisesRegex(ValueError, r"as Restic lists it, .*for example /C/Users/you/Documents/report\.docx"):
             self.invoke(["--target", str(self.root / "refused"), "--include", "/C/Users/*.docx"])
+        with self.assertRaisesRegex(ValueError, r"inside the --source folder, .*for example /Taxes/return\.pdf"):
+            self.invoke(
+                ["--target", str(self.root / "refused"), "--source", str(self.source), "--include", "C:\\x.txt"]
+            )
         self.assertFalse(any("restore" in args for args in self.read_log()))
+
+    def test_the_include_help_gives_the_path_with_and_without_a_source(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit):
+            restore.parse_args(["--help"])
+        # argparse wraps the help where it likes, so the words are compared without their spacing.
+        squeezed = "".join(output.getvalue().split())
+        for expected in (
+            "one item to restore, taken literally: its path as Restic lists it",
+            "(for example /C/Users/you/Documents/report.docx)",
+            "or with --source its path inside that source (for example /report.docx)",
+        ):
+            self.assertIn("".join(expected.split()), squeezed)
+
+
+class ExtendedLengthPathTests(unittest.TestCase):
+    """Chosen items are looked for through the \\\\?\\ prefix, which lifts the Windows path length limit.
+
+    A restore test cannot pin this on a computer where long paths are switched on, so the helper is tested itself.
+    """
+
+    @unittest.skipUnless(os.name == "nt", "Windows paths")
+    def test_a_drive_path_gets_the_prefix_and_a_prefixed_path_keeps_its_own(self) -> None:
+        self.assertEqual("\\\\?\\C:\\Restored\\a [1].txt", restore._extended_length_path("C:\\Restored\\a [1].txt"))
+        self.assertEqual("\\\\?\\C:\\Restored", restore._extended_length_path("\\\\?\\C:\\Restored"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows paths")
+    def test_each_chosen_item_is_looked_for_through_the_prefix(self) -> None:
+        looked_for: list[str] = []
+
+        def lexists(path: str) -> bool:
+            looked_for.append(path)
+            return True
+
+        with mock.patch.object(restore.os.path, "lexists", side_effect=lexists):
+            missing = restore.missing_chosen_items(
+                Path("C:\\Restored"),
+                ["/C/Users/a [1].txt", "/kept/b.txt"],
+                "C:\\Restored\\.rewindle-restore-0123456789abcdef",
+                ["kept"],
+            )
+        self.assertEqual([], missing)
+        self.assertEqual(
+            [
+                "\\\\?\\C:\\Restored\\C\\Users\\a [1].txt",
+                "\\\\?\\C:\\Restored\\.rewindle-restore-0123456789abcdef\\kept\\b.txt",
+            ],
+            looked_for,
+        )
 
 
 class ResticLiteralPatternTests(unittest.TestCase):

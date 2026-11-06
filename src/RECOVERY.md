@@ -27,6 +27,16 @@ must not overlap a source or repository, and must not be inside Windows,
 Program Files or ProgramData. While the restore runs, the files go into a
 hidden folder inside the target and move into the target when it finishes.
 
+To restore only some items, add `--include` for each one. With `--source`,
+give its path inside that source, starting with `/`:
+`--include '/Taxes [2024]/return.pdf'` restores
+`C:\Users\you\Documents\Taxes [2024]\return.pdf`. Without `--source`, give its
+whole path in the backup, starting with the drive letter:
+`/C/Users/you/Documents/Taxes [2024]/return.pdf`. `restore.py` takes each name
+exactly as written (a `[` needs no escaping here, unlike with Restic below),
+refuses `*`, `?` and Windows-style paths, and reports the restore as incomplete
+if an item you named is not in the target afterwards.
+
 If a restore is interrupted (for example by a power cut), that hidden folder,
 named `.rewindle-restore-` followed by 16 letters and digits, can stay behind
 in the target, and only administrators can open it. To delete it, open a
