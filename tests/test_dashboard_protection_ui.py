@@ -25,7 +25,7 @@ const { states, moments, offsite } = JSON.parse(readFileSync(0, 'utf8'));
 const local = parts => new Date(parts[0], parts[1], parts[2], parts[3], parts[4]);
 const report = { states: {}, moments: {} };
 for (const [name, state] of Object.entries(states)) {
-  report.states[name] = { tone: tone.heroTone(state), concern: tone.heroConcern(state), lastStartedAt: tone.lastStartedAt(state) };
+  report.states[name] = { tone: tone.heroTone(state), concern: tone.heroConcern(state), lastStartedAt: tone.lastStartedAt ? tone.lastStartedAt(state) : null };
 }
 report.offsite = {};
 for (const [name, copy] of Object.entries(offsite)) {
@@ -323,7 +323,7 @@ class ProtectionUiTests(unittest.TestCase):
         self.assertEqual(self.tone("catching_up_unplugged"), "danger")
         self.assertEqual(self.tone("catching_up_after_a_stop"), "neutral")
 
-    def test_an_overdue_backup_says_why_it_was_missed_and_what_to_do(self) -> None:
+    def test_an_overdue_backup_says_why_it_was_missed_once_and_what_to_do(self) -> None:
         # The hero stays red for an overdue backup; the concern is the reason, and a next step only when it isn't Back up now.
         self.assertEqual(self.tone("alert_pc_off"), "danger")
         self.assertEqual(self.concern("alert_pc_off"), {"tone": "warning", "text": PC_OFF})
@@ -331,10 +331,8 @@ class ProtectionUiTests(unittest.TestCase):
         self.assertEqual(self.concern("alert_could_not_start"), {"tone": "warning", "text": f"{COULD_NOT_START} {REPORT_STEP}"})
         self.assertEqual(self.concern("alert_program_problem"), {"tone": "danger", "text": f"{PROGRAM_PROBLEM} {REINSTALL_STEP}"})
         self.assertNotIn("Back up now", self.concern("alert_pc_off")["text"])
-
-    def test_a_missed_run_the_page_already_explains_adds_nothing(self) -> None:
-        # The failed run has the hero's See what happened, the plain "didn't happen" is the hero's own overdue text, and the repair
-        # banner says the rest.
+        # What the page already says is not said again: the failed run has the hero's See what happened, the plain "didn't happen"
+        # is the hero's own overdue text, and the repair banner says the rest.
         self.assertIsNone(self.concern("alert_ran_and_failed"))
         self.assertIsNone(self.concern("alert_unknown"))
         self.assertIsNone(self.concern("alert_repair_pending"))
@@ -344,6 +342,11 @@ class ProtectionUiTests(unittest.TestCase):
         self.assertNotIn("due today", drive)
         # The change review comes first, and the missed run is not said on top of it.
         self.assertIn("Confirm these changes", self.concern("alert_review_and_missed")["text"])
+        # A backup Windows is catching up on, and a pause (the host's own title says it), add no alert sentence.
+        self.assertIsNone(self.concern("alert_catching_up"))
+        self.assertEqual(self.tone("alert_catching_up"), "neutral")
+        self.assertIsNone(self.concern("alert_paused"))
+        self.assertEqual(self.tone("alert_paused"), "warning")
 
     def test_backups_that_keep_failing_are_red_and_point_to_the_details(self) -> None:
         details = self.concern("alert_failing_details")
@@ -355,22 +358,15 @@ class ProtectionUiTests(unittest.TestCase):
             "The last 3 backups didn’t finish. Open Activity and choose the latest failed backup to see why, then choose Back up now to try again.",
         )
         self.assertEqual(self.tone("alert_failing_details"), "danger")
-        # Two failures in a row are not yet the red alert.
+        # Two failures in a row are not yet the red alert, and the change review still comes first.
         self.assertIsNone(self.concern("alert_two_failures"))
         self.assertIn("Confirm these changes", self.concern("alert_failing_review")["text"])
-
-    def test_catching_up_and_paused_add_no_alert_sentence(self) -> None:
-        self.assertIsNone(self.concern("alert_catching_up"))
-        self.assertEqual(self.tone("alert_catching_up"), "neutral")
-        self.assertIsNone(self.concern("alert_paused"))
-        self.assertEqual(self.tone("alert_paused"), "warning")
 
     def test_the_schedule_card_says_when_windows_last_started_the_backup(self) -> None:
         self.assertEqual(self.report["states"]["alert_healthy_last_run"]["lastStartedAt"], "2026-07-21T02:00:05Z")
         self.assertIsNone(self.concern("alert_healthy_last_run"))
         self.assertIsNone(self.report["states"]["alert_never_ran"]["lastStartedAt"])
-
-    def test_a_state_from_an_older_host_is_unchanged_by_the_alerts(self) -> None:
+        # A state from an older host carries no alerts: nothing about them is shown, and its concerns are as before.
         for name, entry in self.report["states"].items():
             if name.startswith("alert_"):
                 continue
