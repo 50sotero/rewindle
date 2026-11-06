@@ -1,10 +1,13 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Text.RegularExpressions;
 using System.Threading;
 using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
@@ -305,8 +308,20 @@ namespace Rewindle.Setup
             return true;
         }
 
-        // True when the file has a valid Authenticode signature whose signer is Microsoft: the check Install-ResticBackuper.ps1
-        // makes with Get-AuthenticodeSignature (status Valid, signer subject naming Microsoft).
+        // Microsoft's own root certificates, at the end of the chain of every Microsoft code-signing certificate. Microsoft
+        // Identity Verification Root Certificate Authority 2020 (F40042E2E5F7E8EF8189FED15519AECE42C3BFA2) is left out on purpose:
+        // it anchors certificates that Microsoft issues to other publishers.
+        private static readonly string[] MicrosoftRootThumbprints =
+        {
+            "3B1EFD3A66EA28B16697394703A72CA340A05BD5", // Microsoft Root Certificate Authority 2010
+            "8F43288AD272F3103B6FB1428485EA3014C0BCFE", // Microsoft Root Certificate Authority 2011
+        };
+
+        private static readonly Regex AttributeStart =
+            new Regex(@"^(?:[A-Za-z][A-Za-z0-9.-]*|[0-9]+(?:\.[0-9]+)+)=", RegexOptions.CultureInvariant);
+
+        // True when the file has a valid Authenticode signature whose signer is Microsoft itself (MicrosoftSignerProblem): the
+        // rule Install-ResticBackuper.ps1 applies with Get-MicrosoftSignerProblem.
         public static bool IsSignedByMicrosoft(string path, out string problem)
         {
             return IsSignedByMicrosoft(path, null, out problem);
@@ -326,20 +341,100 @@ namespace Rewindle.Setup
             }
             try
             {
-                X509Certificate signer = X509Certificate.CreateFromSignedFile(path);
-                string subject = signer.Subject ?? string.Empty;
-                if (subject.IndexOf("Microsoft Corporation", StringComparison.OrdinalIgnoreCase) < 0)
+                // The file is held while it is checked, so reading it again by its path reads the same bytes.
+                X509Certificate2 signer = new X509Certificate2(X509Certificate.CreateFromSignedFile(path));
+                X509Certificate2Collection carried = new X509Certificate2Collection();
+                try
                 {
-                    problem = "It was not signed by Microsoft.";
-                    return false;
+                    carried.Import(path);
                 }
+                catch (CryptographicException)
+                {
+                    // The chain is then built from Windows' own certificate stores alone.
+                }
+                problem = SignerProblem(signer, carried);
             }
             catch (Exception)
             {
                 problem = "Its signer could not be read.";
-                return false;
             }
-            return true;
+            return problem == null;
+        }
+
+        // The signer's certificate chain, built with the certificates the file carries, without revocation checks (WinVerifyTrust
+        // made them) and ignoring expired certificates (a time stamp keeps a signature valid after its certificate expires), then
+        // judged by MicrosoftSignerProblem. Null when the signer is Microsoft.
+        internal static string SignerProblem(X509Certificate2 signer, X509Certificate2Collection carried)
+        {
+            using (X509Chain chain = new X509Chain())
+            {
+                chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+                chain.ChainPolicy.VerificationFlags = X509VerificationFlags.IgnoreNotTimeValid;
+                chain.ChainPolicy.UrlRetrievalTimeout = TimeSpan.FromSeconds(15);
+                if (carried != null)
+                {
+                    chain.ChainPolicy.ExtraStore.AddRange(carried);
+                }
+                bool valid;
+                try
+                {
+                    valid = chain.Build(signer);
+                }
+                catch (CryptographicException)
+                {
+                    valid = false;
+                }
+                string[] thumbprints = new string[chain.ChainElements.Count];
+                for (int index = 0; index < thumbprints.Length; index++)
+                {
+                    thumbprints[index] = chain.ChainElements[index].Certificate.Thumbprint;
+                }
+                return MicrosoftSignerProblem(signer.SubjectName.Decode(X500DistinguishedNameFlags.UseNewLines), thumbprints, valid);
+            }
+        }
+
+        // Whether a signer is Microsoft itself. A name that merely contains "Microsoft" is not enough: the subject (as
+        // X500DistinguishedName.Decode writes it with UseNewLines) must hold exactly one organization (O), "Microsoft Corporation"
+        // exactly, and the chain (leaf first) must be valid and end at one of Microsoft's own root certificates. Returns null when
+        // it is, or a plain sentence for the person.
+        internal static string MicrosoftSignerProblem(string subject, string[] chainThumbprints, bool chainValid)
+        {
+            List<string> organizations = new List<string>();
+            foreach (string line in (subject ?? string.Empty).Split(new string[] { "\r\n", "\n" }, StringSplitOptions.None))
+            {
+                if (line.Length == 0)
+                {
+                    continue;
+                }
+                // " + " joins the attributes of a multi-valued part. A value holding a line break or " + " is quoted and would be
+                // split, so every piece must be a whole TYPE=value with balanced quotes.
+                foreach (string attribute in line.Split(new string[] { " + " }, StringSplitOptions.None))
+                {
+                    int quotes = attribute.Length - attribute.Replace("\"", string.Empty).Length;
+                    if (!AttributeStart.IsMatch(attribute) || quotes % 2 != 0)
+                    {
+                        return "Its signer’s name could not be read.";
+                    }
+                    if (attribute.StartsWith("O=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        organizations.Add(attribute);
+                    }
+                }
+            }
+            if (organizations.Count != 1 || !string.Equals(organizations[0], "O=Microsoft Corporation", StringComparison.Ordinal))
+            {
+                return "It was not signed by Microsoft.";
+            }
+            if (!chainValid || chainThumbprints == null || chainThumbprints.Length < 2)
+            {
+                return "Its certificate chain could not be verified.";
+            }
+            string root = (chainThumbprints[chainThumbprints.Length - 1] ?? string.Empty).Replace(" ", string.Empty).ToUpperInvariant();
+            if (Array.IndexOf(MicrosoftRootThumbprints, root) < 0)
+            {
+                return "Its certificate chain doesn’t lead to Microsoft’s own root certificate.";
+            }
+            return null;
         }
 
         // WinVerifyTrust with the generic Authenticode policy and no user interface. Zero means the signature is valid and trusted.

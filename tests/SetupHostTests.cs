@@ -28,6 +28,11 @@ namespace Rewindle.Setup.Tests
         [STAThread]
         private static int Main(string[] args)
         {
+            if (args.Length >= 2 && args[0] == DllSearchProbeArgument)
+            {
+                // A child started by DllSearchOrder: it only loads one DLL by name and prints where it came from.
+                return DllSearchProbe(args[1], args.Length >= 3 && args[2] == "--restricted");
+            }
             root = Path.Combine(Path.GetTempPath(), "rewindle-setup-host-tests-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
             try
@@ -66,6 +71,8 @@ namespace Rewindle.Setup.Tests
                 Run("Elevated bootstrap", ElevatedBootstrapBehaviour);
                 Run("Web policy", WebPolicyBehaviour);
                 Run("Microsoft signature check", SignatureCheck);
+                Run("Microsoft signer rule", SignerRule);
+                Run("DLL search order", DllSearchOrder);
                 Run("Native screen palette", PaletteBehaviour);
                 if (builtProgram != null)
                 {
@@ -1768,6 +1775,153 @@ switch ($mode) {
             string version = WebViewRuntime.InstalledVersion();
             Check(version == null || version.Contains("."), "the installed runtime version is null or a version number (" + (version ?? "none") + ")");
         }
+
+        // The rule for who signed the WebView2 bootstrapper, on made-up facts: the one organization (O) must be exactly "Microsoft
+        // Corporation", and the chain must be valid and end at Microsoft Root Certificate Authority 2010 or 2011. A name that merely
+        // contains "Microsoft" in some other place does not pass, and neither does Microsoft's root for other publishers.
+        private static void SignerRule()
+        {
+            const string Root2010 = "3B1EFD3A66EA28B16697394703A72CA340A05BD5";
+            const string Root2011 = "8F43288AD272F3103B6FB1428485EA3014C0BCFE";
+            const string IdentityRoot2020 = "F40042E2E5F7E8EF8189FED15519AECE42C3BFA2";
+            const string PublicRoot = "DF3C24F9BFD666761B268073FE06D1CC8D4F82A4";
+            const string Leaf = "1111111111111111111111111111111111111111";
+            const string Intermediate = "2222222222222222222222222222222222222222";
+            string microsoft = "C=US\r\nS=Washington\r\nL=Redmond\r\nO=Microsoft Corporation\r\nCN=Microsoft Corporation";
+            string windows = "C=US\r\nS=Washington\r\nL=Redmond\r\nO=Microsoft Corporation\r\nCN=Microsoft Windows";
+            string[] to2011 = { Leaf, Intermediate, Root2011 };
+            string[] to2010 = { Leaf, Intermediate, Root2010 };
+
+            Check(WebViewRuntime.MicrosoftSignerProblem(microsoft, to2011, true) == null, "Microsoft Corporation through root 2011 passes");
+            Check(WebViewRuntime.MicrosoftSignerProblem(windows, to2010, true) == null, "Microsoft Windows (O=Microsoft Corporation) through root 2010 passes");
+            Check(WebViewRuntime.MicrosoftSignerProblem("O=Microsoft Corporation\nCN=Microsoft Corporation", new string[] { Leaf, Intermediate, "8f43 288a d272 f310 3b6f b142 8485 ea30 14c0 bcfe" }, true) == null,
+                "line feeds alone, and a thumbprint written with spaces and in lower case, are read the same way");
+
+            string[][] refusedSubjects =
+            {
+                new string[] { "C=US\r\nO=Contoso Microsoftware Ltd\r\nCN=Contoso Microsoftware Ltd", "an organization that merely contains Microsoft" },
+                new string[] { "C=US\r\nO=Contoso Ltd\r\nCN=Microsoft Corporation", "Microsoft Corporation in the common name only" },
+                new string[] { "C=US\r\nO=Microsoft Corporation Fan Club\r\nCN=x", "an organization that starts with Microsoft Corporation" },
+                new string[] { "O=\"Microsoft Corporation, Evil\"\r\nCN=x", "a quoted organization with Microsoft Corporation in it" },
+                new string[] { "O=Microsoft Corporation\r\nO=Contoso Ltd\r\nCN=x", "two organizations" },
+                new string[] { "O=Contoso Ltd\r\nCN=x + O=Microsoft Corporation", "a second organization in a multi-valued part" },
+                new string[] { "o=microsoft corporation\r\nCN=x", "the name in another case" },
+                new string[] { "CN=\"x\r\nO=Microsoft Corporation\r\ny\"", "a value with line breaks that would look like an organization" },
+                new string[] { "C=US\r\nCN=Microsoft Corporation", "no organization at all" },
+                new string[] { string.Empty, "an empty subject" },
+                new string[] { null, "no subject" },
+            };
+            foreach (string[] item in refusedSubjects)
+            {
+                string problem = WebViewRuntime.MicrosoftSignerProblem(item[0], to2011, true);
+                Check(!string.IsNullOrEmpty(problem), "refused: " + item[1] + " (" + (problem ?? "accepted") + ")");
+            }
+
+            object[][] refusedChains =
+            {
+                new object[] { new string[] { Leaf, Intermediate, IdentityRoot2020 }, true, "Microsoft's root for other publishers" },
+                new object[] { new string[] { Leaf, Intermediate, PublicRoot }, true, "a public certificate authority's root" },
+                new object[] { new string[] { Root2011 }, true, "a one-certificate chain" },
+                new object[] { new string[0], true, "no chain" },
+                new object[] { null, true, "a missing chain" },
+                new object[] { to2011, false, "a chain that did not validate" },
+                new object[] { new string[] { Leaf, Root2011, Intermediate }, true, "a Microsoft root that is not the last element" },
+            };
+            foreach (object[] item in refusedChains)
+            {
+                string problem = WebViewRuntime.MicrosoftSignerProblem(microsoft, (string[])item[0], (bool)item[1]);
+                Check(!string.IsNullOrEmpty(problem), "refused: " + item[2] + " (" + (problem ?? "accepted") + ")");
+            }
+
+            // A real certificate made here, never stored: its subject names Microsoft twice and its chain is itself.
+            using (System.Security.Cryptography.RSA key = new System.Security.Cryptography.RSACng(2048))
+            {
+                foreach (string subject in new string[] { "CN=Microsoft Corporation, O=Contoso Microsoft Fans Ltd, C=US", "CN=Microsoft Corporation, O=Microsoft Corporation, C=US" })
+                {
+                    System.Security.Cryptography.X509Certificates.CertificateRequest request = new System.Security.Cryptography.X509Certificates.CertificateRequest(
+                        subject, key, System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.RSASignaturePadding.Pkcs1);
+                    using (System.Security.Cryptography.X509Certificates.X509Certificate2 made = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(30)))
+                    {
+                        string problem = WebViewRuntime.SignerProblem(made, null);
+                        Check(!string.IsNullOrEmpty(problem), "refused: a self-made certificate named " + subject + " (" + (problem ?? "accepted") + ")");
+                    }
+                }
+            }
+        }
+
+        private const string DllSearchProbeArgument = "--dll-search-probe";
+
+        // Setup's DLL search order, in two child processes of this program: one asks for a DLL by name as any process does, the
+        // other first calls DllSearch.RestrictToSystem32 as Setup's Main does. A copy of the same Windows DLL is placed next to this
+        // program, as a planted one would be next to Setup in Downloads; only the first child may load it.
+        private static void DllSearchOrder()
+        {
+            const string name = "msimg32.dll";
+            string system = Path.Combine(Environment.SystemDirectory, name);
+            string program = System.Reflection.Assembly.GetExecutingAssembly().Location;
+            string planted = Path.Combine(Path.GetDirectoryName(program), name);
+            File.Copy(system, planted, false);
+            try
+            {
+                string open = RunDllSearchProbe(program, name, false);
+                Check(string.Equals(open, planted, StringComparison.OrdinalIgnoreCase),
+                    "without the restriction the copy next to the program is loaded, so this test can see the problem (" + open + ")");
+                string restricted = RunDllSearchProbe(program, name, true);
+                Check(string.Equals(restricted, system, StringComparison.OrdinalIgnoreCase),
+                    "with DllSearch.RestrictToSystem32 the same name loads Windows' own copy (" + restricted + ")");
+            }
+            finally
+            {
+                File.Delete(planted);
+            }
+        }
+
+        private static string RunDllSearchProbe(string program, string name, bool restricted)
+        {
+            System.Diagnostics.ProcessStartInfo start = new System.Diagnostics.ProcessStartInfo(program, DllSearchProbeArgument + " " + name + (restricted ? " --restricted" : string.Empty));
+            start.UseShellExecute = false;
+            start.CreateNoWindow = true;
+            start.RedirectStandardOutput = true;
+            using (System.Diagnostics.Process probe = System.Diagnostics.Process.Start(start))
+            {
+                string output = probe.StandardOutput.ReadToEnd().Trim();
+                probe.WaitForExit();
+                return probe.ExitCode == 0 ? output : "exit " + probe.ExitCode + ": " + output;
+            }
+        }
+
+        private static int DllSearchProbe(string name, bool restricted)
+        {
+            if (restricted && !DllSearch.RestrictToSystem32())
+            {
+                Console.WriteLine("the restriction was refused");
+                return 2;
+            }
+            if (GetModuleHandle(name) != IntPtr.Zero)
+            {
+                Console.WriteLine(name + " was already loaded");
+                return 3;
+            }
+            IntPtr module = LoadLibrary(name);
+            if (module == IntPtr.Zero)
+            {
+                Console.WriteLine(name + " did not load (error " + Marshal.GetLastWin32Error() + ")");
+                return 4;
+            }
+            StringBuilder path = new StringBuilder(1024);
+            GetModuleFileName(module, path, path.Capacity);
+            Console.WriteLine(path.ToString());
+            return 0;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr LoadLibrary(string name);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr GetModuleHandle(string name);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetModuleFileName(IntPtr module, StringBuilder path, int size);
 
         // ---- the program the build made ---------------------------------------------------------------------------------
 

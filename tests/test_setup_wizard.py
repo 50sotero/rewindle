@@ -308,6 +308,46 @@ class HostHardeningTests(unittest.TestCase):
         self.assertIn("SetDllDirectory(string.Empty);", libraries)
         self.assertNotIn("SetDllDirectory(libraryFolder)", libraries)
 
+    def test_the_bootstrapper_must_be_signed_by_microsoft_itself(self) -> None:
+        runtime = read(SETUP / "WebViewRuntime.cs")
+        # Not a name that merely contains "Microsoft": exactly one organization, exactly "Microsoft Corporation", and a valid
+        # chain that ends at one of Microsoft's own roots (never Microsoft's root for other publishers).
+        self.assertNotIn('IndexOf("Microsoft Corporation"', runtime)
+        self.assertIn('string.Equals(organizations[0], "O=Microsoft Corporation", StringComparison.Ordinal)', runtime)
+        roots = re.search(r"MicrosoftRootThumbprints =\s*\{(.*?)\};", runtime, re.S)
+        self.assertIsNotNone(roots)
+        self.assertEqual(
+            {"3B1EFD3A66EA28B16697394703A72CA340A05BD5", "8F43288AD272F3103B6FB1428485EA3014C0BCFE"},
+            set(re.findall(r'"([0-9A-F]{40})"', roots.group(1))),
+        )
+        check = runtime[runtime.index("internal static bool IsSignedByMicrosoft(string path, SafeFileHandle file"):]
+        self.assertLess(check.index("VerifyTrust(path, file)"), check.index("problem = SignerProblem(signer, carried);"))
+
+    def test_setup_limits_the_dll_search_order_before_anything_else(self) -> None:
+        program = read(SETUP / "Program.cs")
+        # Main restricts the order and hands over to Start, which is compiled only afterwards, so nothing Setup uses (WPF, the
+        # message box, the log, the WebView2 libraries) can be loaded from the folder the program was started from.
+        main = re.search(r"private static int Main\(string\[\] args\)\n        \{\n(.*?)\n        \}\n", program, re.S)
+        self.assertIsNotNone(main)
+        statements = [line.strip() for line in main.group(1).splitlines() if line.strip() and not line.strip().startswith("//")]
+        self.assertEqual(
+            ["bool dllSearchRestricted = DllSearch.RestrictToSystem32();", "return Start(args, dllSearchRestricted);"], statements
+        )
+        self.assertIn("[MethodImpl(MethodImplOptions.NoInlining)]\n        private static int Start(string[] args, bool dllSearchRestricted)", program)
+        start = program[program.index("private static int Start(") :]
+        for later in ("foreach (string argument in args)", "MessageBox.Show", "new Mutex", "SetupLog.Initialize", "WebViewLibraries.Install"):
+            with self.subTest(later=later):
+                self.assertIn(later, start)
+        search = read(SETUP / "DllSearch.cs")
+        self.assertIn("LoadLibrarySearchSystem32 = 0x00000800;", search)
+        self.assertIn("SetDefaultDllDirectories(LoadLibrarySearchSystem32)", search)
+        # Nothing that would put the program's own folder, or a folder of the person's, back into the order.
+        for widening in ("0x00001000", "0x00000200", "0x00000400", "AddDllDirectory", "SetDllDirectory"):
+            with self.subTest(widening=widening):
+                self.assertNotIn(widening, search)
+        smoke = read(PROJECT / "tests" / "SetupWindowSmoke.cs")
+        self.assertLess(smoke.index("DllSearch.RestrictToSystem32();"), smoke.index("WebViewLibraries.Install("))
+
     def test_project_links_are_the_projects_own(self) -> None:
         links = read(SETUP / "ProjectLinks.cs")
         self.assertIn("https://github.com/50sotero/rewindle", links)

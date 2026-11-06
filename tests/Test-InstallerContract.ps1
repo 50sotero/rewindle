@@ -549,6 +549,15 @@ try {
     [IO.Compression.ZipFile]::ExtractToDirectory((Resolve-Path -LiteralPath $Artifact).Path, $bundle)
     $installerScript = Join-Path $bundle 'Install-ResticBackuper.ps1'
     Assert-True (Test-Path -LiteralPath $installerScript -PathType Leaf) 'the release bundle holds the installer'
+    # The installer's own rule for who signed a file, taken from the bundle's script without running it, for the WebView2
+    # bootstrapper this test downloads: so this run also shows that Microsoft's real bootstrapper passes it.
+    $installerAst = [Management.Automation.Language.Parser]::ParseFile($installerScript, [ref]$null, [ref]$null)
+    $signerFunctions = @($installerAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in @('Get-MicrosoftSignerProblem', 'Get-AuthenticodeSignerFacts')
+    }, $true))
+    Assert-True ($signerFunctions.Count -eq 2) 'the installer defines its Microsoft signer check'
+    foreach ($signerFunction in $signerFunctions) { . ([scriptblock]::Create($signerFunction.Extent.Text)) }
     Assert-True (Test-Path -LiteralPath (Join-Path $bundle 'payload\Uninstall-ResticBackuper.ps1') -PathType Leaf) 'the release payload holds the uninstaller'
     Start-Service -Name seclogon
     $standardUser = New-TestUser -Name 'rwd-contract-std'
@@ -626,8 +635,9 @@ try {
             $bootstrapper = Join-Path $root 'MicrosoftEdgeWebview2Setup.exe'
             try {
                 Invoke-WebRequest -UseBasicParsing -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $bootstrapper
-                $signature = Get-AuthenticodeSignature -LiteralPath $bootstrapper
-                if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notlike '*Microsoft*') { throw 'The WebView2 bootstrapper is not signed by Microsoft.' }
+                $signerFacts = Get-AuthenticodeSignerFacts -Path $bootstrapper
+                $signerProblem = Get-MicrosoftSignerProblem -Status $signerFacts.status -Subject $signerFacts.subject -ChainThumbprints $signerFacts.chain -ChainValid $signerFacts.chain_valid -IsOSBinary $signerFacts.os_binary
+                if ($null -ne $signerProblem) { throw "The WebView2 bootstrapper did not pass the installer's Microsoft signer check: $signerProblem" }
                 Start-Process -FilePath $bootstrapper -ArgumentList '/silent', '/install' -Wait
             }
             catch { Write-Host "WebView2 pre-installation attempt $attempt failed: $($_.Exception.Message)"; Start-Sleep -Seconds 5 }

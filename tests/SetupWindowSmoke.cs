@@ -292,6 +292,8 @@ namespace Rewindle.Setup.Smoke
         [STAThread]
         private static int Main(string[] args)
         {
+            // As Rewindle Setup does first, so the real web view is shown to start with DLLs found in System32 only.
+            DllSearch.RestrictToSystem32();
             string web = null;
             string libs = null;
             string icon = null;

@@ -9,9 +9,10 @@ namespace Rewindle.Setup
     // resolved path, where SetupWorkspace holds them). The managed libraries are found by an AssemblyResolve handler (nothing next
     // to the program's own file is trusted or needed), and WebView2Loader.dll, which the managed library asks for by name, is
     // loaded by its full path first so that name resolves to it. The folder is not added to the DLL search order: it is in the
-    // person's temporary folder, where another program could add a DLL that Windows would then find before its own. It must run
+    // person's temporary folder, where another program could add a DLL that Windows would then find before its own. Program.Main
+    // has already limited that order to System32 (DllSearch), so the loader's own dependencies come from there. It must run
     // before the first method that mentions a WebView2 type is compiled, which is why it has no WebView2 types of its own and why
-    // Program.Main calls it before anything else.
+    // Program.Start calls it before anything else that needs them.
     internal static class WebViewLibraries
     {
         private static string folder;
@@ -25,7 +26,8 @@ namespace Rewindle.Setup
                 AppDomain.CurrentDomain.AssemblyResolve += Resolve;
                 installed = true;
             }
-            // An empty string also takes the current folder out of the DLL search order.
+            // An empty string also takes the current folder out of the DLL search order (it matters only if DllSearch could not
+            // restrict that order to System32).
             SetDllDirectory(string.Empty);
             string loader = Path.Combine(libraryFolder, "WebView2Loader.dll");
             if (LoadLibrary(loader) == IntPtr.Zero)

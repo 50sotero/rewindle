@@ -763,6 +763,106 @@ function Assert-NoReparsePath {
     }
 }
 
+# Whether a file's signer is Microsoft itself, from facts Get-AuthenticodeSignerFacts reads. Returns $null when it is, or a
+# short reason. A name that merely contains "Microsoft" is not enough: the signature must be valid, the signer's subject must
+# hold exactly one organization (O), "Microsoft Corporation" exactly, and its certificate chain must end at one of Microsoft's
+# own root certificates. Windows' own files, which Windows signs through its catalogs and reports as such (IsOSBinary), pass
+# without the chain, so an offline PC that can't fetch a missing intermediate certificate still passes them.
+# Microsoft Identity Verification Root Certificate Authority 2020 (F40042E2E5F7E8EF8189FED15519AECE42C3BFA2) is left out on
+# purpose: it anchors certificates that Microsoft issues to other publishers.
+function Get-MicrosoftSignerProblem {
+    param(
+        [string]$Status,
+        [string]$Subject,
+        [string[]]$ChainThumbprints = @(),
+        [bool]$ChainValid,
+        [bool]$IsOSBinary
+    )
+    $microsoftRoots = @(
+        '3B1EFD3A66EA28B16697394703A72CA340A05BD5', # Microsoft Root Certificate Authority 2010
+        '8F43288AD272F3103B6FB1428485EA3014C0BCFE'  # Microsoft Root Certificate Authority 2011
+    )
+    if ($Status -cne 'Valid') {
+        return "the signature is not valid ($Status)"
+    }
+    # The subject as X500DistinguishedName.Decode('UseNewLines') writes it: one attribute per line, and ' + ' between the
+    # attributes of a multi-valued part. A value holding a line break or ' + ' is quoted and would be split, so every piece must
+    # be a whole TYPE=value with balanced quotes.
+    $organizations = @()
+    foreach ($line in @([string]$Subject -split "`r?`n")) {
+        if ($line.Length -eq 0) { continue }
+        foreach ($attribute in @($line -split ' \+ ')) {
+            $quotes = $attribute.Length - $attribute.Replace('"', '').Length
+            if ($attribute -cnotmatch '^(?:[A-Za-z][A-Za-z0-9.-]*|[0-9]+(?:\.[0-9]+)+)=' -or ($quotes % 2) -ne 0) {
+                return "the signer's name could not be read"
+            }
+            if ($attribute -match '^O=') { $organizations += $attribute }
+        }
+    }
+    if ($organizations.Count -ne 1 -or $organizations[0] -cne 'O=Microsoft Corporation') {
+        return 'the signer is not Microsoft Corporation'
+    }
+    if ($IsOSBinary) {
+        return $null
+    }
+    $chain = @($ChainThumbprints | ForEach-Object { ([string]$_ -replace '\s', '').ToUpperInvariant() })
+    if (-not $ChainValid -or $chain.Count -lt 2) {
+        return 'its certificate chain could not be verified'
+    }
+    if ($microsoftRoots -cnotcontains $chain[-1]) {
+        return "its certificate chain ends at a root that is not Microsoft's ($($chain[-1]))"
+    }
+    return $null
+}
+
+# What Get-MicrosoftSignerProblem decides on, read from the file: the signature's status, the signer's subject, whether Windows
+# reports the file as its own, and the signer's certificate chain, leaf first. The chain is built with the certificates the
+# file carries (Windows keeps those of its catalogs), without revocation checks (the signature check made them) and ignoring
+# expired certificates, since a time stamp keeps a signature valid after its certificate expires.
+function Get-AuthenticodeSignerFacts {
+    param([string]$Path)
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    $facts = [pscustomobject][ordered]@{
+        status = [string]$signature.Status
+        subject = $null
+        chain = @()
+        chain_valid = $false
+        os_binary = [bool]$signature.IsOSBinary
+    }
+    $signer = $signature.SignerCertificate
+    if ($null -eq $signer) {
+        return $facts
+    }
+    $facts.subject = $signer.SubjectName.Decode([Security.Cryptography.X509Certificates.X500DistinguishedNameFlags]::UseNewLines)
+    $chain = [Security.Cryptography.X509Certificates.X509Chain]::new()
+    try {
+        $chain.ChainPolicy.RevocationMode = [Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+        $chain.ChainPolicy.VerificationFlags = [Security.Cryptography.X509Certificates.X509VerificationFlags]::IgnoreNotTimeValid
+        $chain.ChainPolicy.UrlRetrievalTimeout = [TimeSpan]::FromSeconds(15)
+        if ([string]$signature.SignatureType -eq 'Authenticode') {
+            try {
+                $carried = [Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
+                $carried.Import($Path)
+                $chain.ChainPolicy.ExtraStore.AddRange($carried)
+            }
+            catch {
+                # The chain is then built from Windows' own certificate stores alone.
+            }
+        }
+        try {
+            $facts.chain_valid = [bool]$chain.Build($signer)
+        }
+        catch {
+            $facts.chain_valid = $false
+        }
+        $facts.chain = @($chain.ChainElements | ForEach-Object { [string]$_.Certificate.Thumbprint })
+    }
+    finally {
+        $chain.Reset()
+    }
+    return $facts
+}
+
 function Assert-MicrosoftSignedExecutable {
     param(
         [string]$Path,
@@ -773,15 +873,17 @@ function Assert-MicrosoftSignedExecutable {
             -Message 'A Windows component that setup needs is missing, so this copy of Windows cannot be used for setup.' `
             -Console "Required Windows executable is missing: $Path" -Path $Path
     }
-    $signature = Get-AuthenticodeSignature -LiteralPath $Path
-    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notlike '*Microsoft*') {
+    $facts = Get-AuthenticodeSignerFacts -Path $Path
+    $problem = Get-MicrosoftSignerProblem -Status $facts.status -Subject $facts.subject -ChainThumbprints $facts.chain `
+        -ChainValid $facts.chain_valid -IsOSBinary $facts.os_binary
+    if ($null -ne $problem) {
         $message = if ($Code -eq 'webview2_installer_untrusted') {
             "The Microsoft Edge WebView2 installer that was downloaded did not pass Microsoft's signature check, so setup stopped."
         } else {
             "A Windows component that setup needs did not pass Microsoft's signature check, so setup stopped."
         }
         Stop-InstallValidation -Code $Code -Field 'environment' -Message $message `
-            -Console "Required Windows executable did not pass Microsoft signature validation: $Path" -Path $Path
+            -Console "Required Windows executable did not pass Microsoft signature validation ($problem): $Path" -Path $Path
     }
 }
 
@@ -1155,12 +1257,9 @@ function Assert-RecoveryToolsCompatible {
     }
 }
 
-function Set-ProtectedDirectory {
-    param(
-        [string]$Path,
-        [string]$UserSid
-    )
-    Assert-NormalDirectory -Path $Path
+# Owned by Administrators; only Administrators and SYSTEM may change it; the user (and the owner as such) may read it.
+function New-ProtectedDirectorySecurity {
+    param([string]$UserSid)
     $administrators = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
     $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
     $ownerRights = [Security.Principal.SecurityIdentifier]::new('S-1-3-4')
@@ -1175,6 +1274,16 @@ function Set-ProtectedDirectory {
     $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($administrators, [Security.AccessControl.FileSystemRights]::FullControl, $inheritance, $propagation, $allow))
     $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($user, [Security.AccessControl.FileSystemRights]::ReadAndExecute, $inheritance, $propagation, $allow))
     $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($ownerRights, [Security.AccessControl.FileSystemRights]::ReadAndExecute, $inheritance, $propagation, $allow))
+    return $acl
+}
+
+function Set-ProtectedDirectory {
+    param(
+        [string]$Path,
+        [string]$UserSid
+    )
+    Assert-NormalDirectory -Path $Path
+    $acl = New-ProtectedDirectorySecurity -UserSid $UserSid
     Set-Acl -LiteralPath $Path -AclObject $acl
     if (@(Get-ChildItem -LiteralPath $Path -Force).Count -gt 0) {
         & $icacls (Join-Path $Path '*') /reset /T /C /L | Out-Null
@@ -2180,12 +2289,51 @@ function Resolve-SourceSelection {
     $script:sources = @($accepted)
 }
 
+# Administrators and SYSTEM are the only owners a Rewindle state folder has: the permissions phase gives the folder and
+# everything in it to Administrators, and the canary phase creates it that way.
+function Test-TrustedStateOwner {
+    param([string]$OwnerSid)
+    return ($OwnerSid -ceq 'S-1-5-32-544' -or $OwnerSid -ceq 'S-1-5-18')
+}
+
+# Any account can create a folder in ProgramData, so an existing state folder that Administrators or SYSTEM don't own may hold
+# whatever another account put there: a plan identity a reinstall would adopt, or journals the elevated managers would act
+# on, all of which the permissions phase would then make Administrators' own. Nothing in such a folder is read or used. A
+# link is left to protected_path_reparse_point. In plan mode an account that can't read the owner leaves the check to the
+# elevated install, which treats an unreadable owner as an untrusted one.
+function Assert-StateFolderOwner {
+    if (-not (Test-Path -LiteralPath $stateRoot -PathType Container)) {
+        return
+    }
+    if ((Get-Item -LiteralPath $stateRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        return
+    }
+    $owner = $null
+    try {
+        $owner = Get-FeedOwnerSid -Path $stateRoot
+    }
+    catch [UnauthorizedAccessException] {
+        if ($PlanOnly) { return }
+    }
+    catch [IO.IOException] {
+        if ($PlanOnly) { return }
+    }
+    if (-not (Test-TrustedStateOwner -OwnerSid $owner)) {
+        $ownerText = if ($owner) { $owner } else { 'an owner that could not be read' }
+        Stop-InstallValidation -Code 'state_folder_untrusted' -Field 'environment' `
+            -Message "Setup won't use the folder $stateRoot, where Rewindle keeps its records, because it doesn't belong to this PC's administrators: another program or account may have made it. Move that folder somewhere else or delete it (Windows will ask an administrator to approve), then run setup again." `
+            -Console "The ProgramData state folder is owned by $ownerText, not by Administrators or SYSTEM, so nothing in it is trusted: $stateRoot" -Path $stateRoot
+    }
+}
+
 # The backup plan an earlier installation recorded in the state folder that an uninstall keeps: plan-state.json, and the plan
 # named by last-success.json and status.json. A reinstall continues that plan, because the engine refuses every backup whose
 # configured plan_id differs from it, or whose config_generation is lower than the highest one recorded
 # (validate_and_record_plan_state in restic_common.py, whose checks this mirrors). Returns $null when there is no such state,
 # or in plan mode when this account can't read the state folder (the elevated install reads it and checks again).
 function Get-PreservedPlanIdentity {
+    # Nothing is read from a state folder that Administrators or SYSTEM don't own.
+    Assert-StateFolderOwner
     $planIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $highest = [long]0
     $unreadable = 'Rewindle''s saved backup state from an earlier installation can''t be used, so setup can''t continue that backup plan. Move the folder ' + $stateRoot + ' somewhere else to start a new one, then run setup again.'
@@ -2548,6 +2696,8 @@ function Invoke-PlanMode {
     [void](Invoke-PlanStage { Assert-MicrosoftSignedExecutable -Path $icacls })
     [void](Invoke-PlanStage { Assert-DotNetFramework48 })
     [void](Invoke-PlanStage { Import-TrustedScheduledTasksModule })
+    # Reported whatever backup location is chosen (Get-PreservedPlanIdentity checks it again; the plan lists it once).
+    [void](Invoke-PlanStage { Assert-StateFolderOwner })
     if (Invoke-PlanStage { $script:payloadManifest = Assert-Payload }) {
         [void](Invoke-PlanStage { Read-PayloadVersion })
     }
@@ -2842,6 +2992,7 @@ function Invoke-InstallPreflight {
             -Console 'Approve elevation with the same Windows account. CurrentUser DPAPI cannot be installed through a different administrator account.'
     }
     Import-TrustedScheduledTasksModule
+    Assert-StateFolderOwner
     $script:payloadManifest = Assert-Payload
     Read-PayloadVersion
     Resolve-StorageSettings
@@ -3004,11 +3155,13 @@ try {
 
     Start-InstallPhase 'canary'
     if (-not (Test-Path -LiteralPath $stateRoot)) {
-        New-Item -ItemType Directory -Path $stateRoot | Out-Null
+        # Created owned by Administrators with the protected access list already in place, so no other account can add
+        # anything to it before the permissions phase. If another account made the folder since the preflight,
+        # CreateDirectory leaves that one as it is, and the owner check below refuses it.
+        [void][IO.Directory]::CreateDirectory($stateRoot, (New-ProtectedDirectorySecurity -UserSid $currentSid))
     }
-    else {
-        Assert-NormalDirectory -Path $stateRoot
-    }
+    Assert-NormalDirectory -Path $stateRoot
+    Assert-StateFolderOwner
     if (-not (Test-Path -LiteralPath $canarySource)) {
         New-Item -ItemType Directory -Path $canarySource | Out-Null
     }

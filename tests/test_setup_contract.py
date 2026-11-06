@@ -303,6 +303,90 @@ class ContractMatchesTheScriptsTests(unittest.TestCase):
             self.assertIn(text, section)
 
 
+class MicrosoftSignerTests(unittest.TestCase):
+    """Windows' own tools and the WebView2 installer must be signed by Microsoft itself, not by a name that contains it."""
+
+    ROOTS = {"3B1EFD3A66EA28B16697394703A72CA340A05BD5", "8F43288AD272F3103B6FB1428485EA3014C0BCFE"}
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.installer = functions(read(INSTALLER))
+        cls.uninstaller = functions(read(UNINSTALLER))
+
+    def test_no_script_accepts_a_signer_name_that_merely_contains_microsoft(self) -> None:
+        for path, defined in ((INSTALLER, self.installer), (UNINSTALLER, self.uninstaller)):
+            with self.subTest(script=path.name):
+                self.assertNotRegex(read(path), r"(?i)-(?:not)?like\s+'\*Microsoft\*'")
+                check = defined["Assert-MicrosoftSignedExecutable"]
+                self.assertLess(check.index("Get-AuthenticodeSignerFacts -Path $Path"), check.index("Get-MicrosoftSignerProblem"))
+                self.assertNotIn("Get-AuthenticodeSignature", check)
+
+    def test_the_installer_and_the_uninstaller_apply_the_same_rule(self) -> None:
+        for name in ("Get-MicrosoftSignerProblem", "Get-AuthenticodeSignerFacts"):
+            with self.subTest(function=name):
+                self.assertEqual(self.installer[name], self.uninstaller[name])
+
+    def test_only_microsofts_own_roots_and_its_exact_name_are_trusted(self) -> None:
+        rule = self.installer["Get-MicrosoftSignerProblem"]
+        roots = re.search(r"\$microsoftRoots = @\((.*?)\n    \)", rule, re.S)
+        self.assertIsNotNone(roots)
+        self.assertEqual(self.ROOTS, set(re.findall(r"'([0-9A-F]{40})'", roots.group(1))))
+        self.assertIn("$organizations[0] -cne 'O=Microsoft Corporation'", rule)
+        self.assertIn("$Status -cne 'Valid'", rule)
+        # Rewindle Setup checks the WebView2 installer it downloads against the same roots.
+        runtime = read(PROJECT / "installer" / "setup" / "WebViewRuntime.cs")
+        block = re.search(r"MicrosoftRootThumbprints =\s*\{(.*?)\};", runtime, re.S)
+        self.assertIsNotNone(block)
+        self.assertEqual(self.ROOTS, set(re.findall(r'"([0-9A-F]{40})"', block.group(1))))
+
+    def test_the_signer_check_adds_no_compiled_code(self) -> None:
+        for name in ("Get-MicrosoftSignerProblem", "Get-AuthenticodeSignerFacts", "Assert-MicrosoftSignedExecutable"):
+            with self.subTest(function=name):
+                self.assertNotIn("Add-Type", self.installer[name])
+
+
+class StateFolderOwnerTests(unittest.TestCase):
+    """Any account can create C:\\ProgramData\\ResticBackuper; one that Administrators or SYSTEM don't own is never used."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.text = read(INSTALLER)
+        cls.defined = functions(cls.text)
+
+    def test_only_administrators_and_system_may_own_it(self) -> None:
+        check = self.defined["Test-TrustedStateOwner"]
+        self.assertEqual(["S-1-5-18", "S-1-5-32-544"], sorted(re.findall(r"'(S-1-[0-9-]+)'", check)))
+
+    def test_nothing_is_read_from_the_folder_before_its_owner_is_checked(self) -> None:
+        body = self.defined["Get-PreservedPlanIdentity"]
+        statements = [line.strip() for line in body.splitlines() if line.strip() and not line.strip().startswith("#")]
+        self.assertEqual("Assert-StateFolderOwner", statements[0])
+
+    def test_plan_mode_reports_it_whatever_backup_location_is_chosen(self) -> None:
+        plan = self.defined["Invoke-PlanMode"]
+        stage = plan.index("[void](Invoke-PlanStage { Assert-StateFolderOwner })")
+        self.assertLess(stage, plan.index("Resolve-RepositorySelection"))
+
+    def test_the_install_checks_it_before_it_resolves_anything(self) -> None:
+        preflight = self.defined["Invoke-InstallPreflight"]
+        check = preflight.index("Assert-StateFolderOwner")
+        self.assertGreater(check, preflight.index("expected_user_mismatch"))
+        for later in ("Assert-Payload", "Resolve-RepositorySelection", "Resolve-ProtectedBindings"):
+            with self.subTest(later=later):
+                self.assertLess(check, preflight.index(later))
+
+    def test_the_install_creates_the_folder_owned_by_administrators_and_checks_one_it_finds(self) -> None:
+        canary = self.text.split("Start-InstallPhase 'canary'", 1)[1].split("Complete-InstallPhase 'canary'", 1)[0]
+        creation = canary.index("[IO.Directory]::CreateDirectory($stateRoot, (New-ProtectedDirectorySecurity -UserSid $currentSid))")
+        self.assertNotIn("New-Item -ItemType Directory -Path $stateRoot", canary)
+        self.assertLess(creation, canary.index("Assert-StateFolderOwner"))
+        self.assertLess(canary.index("Assert-StateFolderOwner"), canary.index("$canarySource"))
+        security = self.defined["New-ProtectedDirectorySecurity"]
+        self.assertIn("$acl.SetOwner($administrators)", security)
+        self.assertIn("$acl.SetAccessRuleProtection($true, $false)", security)
+        self.assertIn("New-ProtectedDirectorySecurity -UserSid $UserSid", self.defined["Set-ProtectedDirectory"])
+
+
 class ContinuousIntegrationTests(unittest.TestCase):
     def test_ci_runs_the_hermetic_plan_suite_and_the_real_install_test(self) -> None:
         ci = read(CI)

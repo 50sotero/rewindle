@@ -131,6 +131,16 @@ ones a home user reads without a glossary.
   they get their final names, and only the backup's own files are copied, so
   nothing else in the old folder (a Google Drive folder, for example) comes
   along with administrator rights.
+- **Setup and the installer are stricter about what they trust.** A Windows
+  tool, or Microsoft's WebView2 installer, must now be signed by Microsoft
+  itself: the signer is exactly Microsoft Corporation, through Microsoft's own
+  root certificates. Before, any valid signature with "Microsoft" anywhere in
+  the signer's name passed. Setup looks for the DLLs it loads by name only in
+  Windows' System32 folder, so a file left next to it in Downloads is never
+  loaded in their place. And the installer no longer uses a
+  `C:\ProgramData\ResticBackuper` folder that Administrators don't own, since
+  any account can create one there: it says so and asks for the folder to be
+  moved away, and it creates that folder already owned by Administrators.
 
 ## [0.2.0-alpha.2] - 2026-10-08
 

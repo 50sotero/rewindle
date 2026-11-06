@@ -437,14 +437,116 @@ function Assert-NormalDirectory {
     }
 }
 
+# Whether a file's signer is Microsoft itself, from facts Get-AuthenticodeSignerFacts reads. Returns $null when it is, or a
+# short reason. A name that merely contains "Microsoft" is not enough: the signature must be valid, the signer's subject must
+# hold exactly one organization (O), "Microsoft Corporation" exactly, and its certificate chain must end at one of Microsoft's
+# own root certificates. Windows' own files, which Windows signs through its catalogs and reports as such (IsOSBinary), pass
+# without the chain, so an offline PC that can't fetch a missing intermediate certificate still passes them.
+# Microsoft Identity Verification Root Certificate Authority 2020 (F40042E2E5F7E8EF8189FED15519AECE42C3BFA2) is left out on
+# purpose: it anchors certificates that Microsoft issues to other publishers.
+function Get-MicrosoftSignerProblem {
+    param(
+        [string]$Status,
+        [string]$Subject,
+        [string[]]$ChainThumbprints = @(),
+        [bool]$ChainValid,
+        [bool]$IsOSBinary
+    )
+    $microsoftRoots = @(
+        '3B1EFD3A66EA28B16697394703A72CA340A05BD5', # Microsoft Root Certificate Authority 2010
+        '8F43288AD272F3103B6FB1428485EA3014C0BCFE'  # Microsoft Root Certificate Authority 2011
+    )
+    if ($Status -cne 'Valid') {
+        return "the signature is not valid ($Status)"
+    }
+    # The subject as X500DistinguishedName.Decode('UseNewLines') writes it: one attribute per line, and ' + ' between the
+    # attributes of a multi-valued part. A value holding a line break or ' + ' is quoted and would be split, so every piece must
+    # be a whole TYPE=value with balanced quotes.
+    $organizations = @()
+    foreach ($line in @([string]$Subject -split "`r?`n")) {
+        if ($line.Length -eq 0) { continue }
+        foreach ($attribute in @($line -split ' \+ ')) {
+            $quotes = $attribute.Length - $attribute.Replace('"', '').Length
+            if ($attribute -cnotmatch '^(?:[A-Za-z][A-Za-z0-9.-]*|[0-9]+(?:\.[0-9]+)+)=' -or ($quotes % 2) -ne 0) {
+                return "the signer's name could not be read"
+            }
+            if ($attribute -match '^O=') { $organizations += $attribute }
+        }
+    }
+    if ($organizations.Count -ne 1 -or $organizations[0] -cne 'O=Microsoft Corporation') {
+        return 'the signer is not Microsoft Corporation'
+    }
+    if ($IsOSBinary) {
+        return $null
+    }
+    $chain = @($ChainThumbprints | ForEach-Object { ([string]$_ -replace '\s', '').ToUpperInvariant() })
+    if (-not $ChainValid -or $chain.Count -lt 2) {
+        return 'its certificate chain could not be verified'
+    }
+    if ($microsoftRoots -cnotcontains $chain[-1]) {
+        return "its certificate chain ends at a root that is not Microsoft's ($($chain[-1]))"
+    }
+    return $null
+}
+
+# What Get-MicrosoftSignerProblem decides on, read from the file: the signature's status, the signer's subject, whether Windows
+# reports the file as its own, and the signer's certificate chain, leaf first. The chain is built with the certificates the
+# file carries (Windows keeps those of its catalogs), without revocation checks (the signature check made them) and ignoring
+# expired certificates, since a time stamp keeps a signature valid after its certificate expires.
+function Get-AuthenticodeSignerFacts {
+    param([string]$Path)
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    $facts = [pscustomobject][ordered]@{
+        status = [string]$signature.Status
+        subject = $null
+        chain = @()
+        chain_valid = $false
+        os_binary = [bool]$signature.IsOSBinary
+    }
+    $signer = $signature.SignerCertificate
+    if ($null -eq $signer) {
+        return $facts
+    }
+    $facts.subject = $signer.SubjectName.Decode([Security.Cryptography.X509Certificates.X500DistinguishedNameFlags]::UseNewLines)
+    $chain = [Security.Cryptography.X509Certificates.X509Chain]::new()
+    try {
+        $chain.ChainPolicy.RevocationMode = [Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+        $chain.ChainPolicy.VerificationFlags = [Security.Cryptography.X509Certificates.X509VerificationFlags]::IgnoreNotTimeValid
+        $chain.ChainPolicy.UrlRetrievalTimeout = [TimeSpan]::FromSeconds(15)
+        if ([string]$signature.SignatureType -eq 'Authenticode') {
+            try {
+                $carried = [Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
+                $carried.Import($Path)
+                $chain.ChainPolicy.ExtraStore.AddRange($carried)
+            }
+            catch {
+                # The chain is then built from Windows' own certificate stores alone.
+            }
+        }
+        try {
+            $facts.chain_valid = [bool]$chain.Build($signer)
+        }
+        catch {
+            $facts.chain_valid = $false
+        }
+        $facts.chain = @($chain.ChainElements | ForEach-Object { [string]$_.Certificate.Thumbprint })
+    }
+    finally {
+        $chain.Reset()
+    }
+    return $facts
+}
+
 function Assert-MicrosoftSignedExecutable {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "Required Windows executable is missing: $Path"
     }
-    $signature = Get-AuthenticodeSignature -LiteralPath $Path
-    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notlike '*Microsoft*') {
-        throw "Required Windows executable did not pass Microsoft signature validation: $Path"
+    $facts = Get-AuthenticodeSignerFacts -Path $Path
+    $problem = Get-MicrosoftSignerProblem -Status $facts.status -Subject $facts.subject -ChainThumbprints $facts.chain `
+        -ChainValid $facts.chain_valid -IsOSBinary $facts.os_binary
+    if ($null -ne $problem) {
+        throw "Required Windows executable did not pass Microsoft signature validation ($problem): $Path"
     }
 }
 
