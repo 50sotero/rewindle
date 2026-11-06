@@ -21,7 +21,9 @@ from restic_common import (
     BackupCancelled,
     CancellationToken,
     DEFAULT_CONFIG,
+    EngineFailure,
     RunLockUnavailable,
+    SourcePreflightFailed,
     SourceUpdateJournalPresent,
     atomic_write_json,
     backup_plan_tags,
@@ -295,7 +297,13 @@ def classify_failure(
     error: BaseException,
     exit_code: int | None,
 ) -> tuple[str, str]:
-    """Publish stable support semantics without depending on exception wording."""
+    """Publish stable support semantics without depending on exception wording.
+
+    A problem the engine recognises where it happens (a full backup drive, a
+    different drive at the backup location's letter, a protected folder that
+    is missing or on another drive) raises an ``EngineFailure`` that carries
+    its own code. Everything else is classified by the phase it stopped in.
+    """
     phase = {
         "starting": "initialization",
         "checking_repository_storage": "repository_storage",
@@ -308,13 +316,10 @@ def classify_failure(
         "restoring_canary": "restore_canary",
         "checking_data_subset": "repository_data_check",
     }.get(phase_state, "wrapper")
-    message = str(error).casefold()
     if phase_state == "partial" or exit_code == 3:
         code = "source_data_unreadable"
-    elif "free space" in message or "free-space" in message:
-        code = "repository_low_space"
-    elif "volume serial" in message or "volume identity" in message:
-        code = "volume_identity_mismatch"
+    elif isinstance(error, EngineFailure):
+        code = error.failure_code
     elif phase == "repository_storage":
         code = "repository_storage_unavailable"
     elif phase == "source_preflight":
@@ -601,7 +606,7 @@ def _run_locked(
             status["affected_paths"] = collect_affected_paths(status)
             atomic_write_json(status_path, status)
             if source_preflight["status"] != "ready":
-                raise RuntimeError(
+                raise SourcePreflightFailed(
                     "source preflight failed: "
                     + "; ".join(source_preflight["failures"])
                 )

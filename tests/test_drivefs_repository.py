@@ -322,8 +322,16 @@ class DriveFsRepositoryTests(unittest.TestCase):
                         return_value=metadata,
                     ),
                 ):
-                    with self.assertRaisesRegex(RuntimeError, message):
+                    with self.assertRaisesRegex(RuntimeError, message) as raised:
                         restic_common.validate_repository_volume(config)
+                    # Only another drive at the letter is an identity mismatch.
+                    self.assertEqual(
+                        message == "volume mismatch",
+                        isinstance(
+                            raised.exception,
+                            restic_common.RepositoryVolumeMismatch,
+                        ),
+                    )
 
     def test_drivefs_readiness_proves_atomic_write_and_cleans_probe(self) -> None:
         with tempfile.TemporaryDirectory(prefix="drivefs-ready-") as root_text:
@@ -432,7 +440,10 @@ class DriveFsRepositoryTests(unittest.TestCase):
                 ),
                 mock.patch.dict(os.environ, {"LOCALAPPDATA": str(root)}),
             ):
-                with self.assertRaisesRegex(RuntimeError, "cache free space"):
+                # A full Google Drive cache is reported as low space, by type.
+                with self.assertRaisesRegex(
+                    restic_common.RepositoryLowSpace, "cache free space"
+                ):
                     restic_common.validate_repository_storage_readiness(config)
 
             with (
