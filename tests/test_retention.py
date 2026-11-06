@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
 import hashlib
+import io
 import json
 from pathlib import Path
 import re
@@ -689,6 +691,25 @@ class ApplyTests(RetentionTestCase):
         self.assertEqual(result["removed_count"], 50)
         self.assertEqual(len(self.forgotten()), 2)
 
+    def test_a_list_that_cannot_be_read_back_is_partial_and_reports_the_finished_batches(self) -> None:
+        h = self.h
+        original_run = h.fake.run
+
+        def no_relist(command, **kwargs):
+            if "snapshots" in command and self.forgotten():
+                return subprocess.CompletedProcess(command, 1, "", "the location went away")
+            return original_run(command, **kwargs)
+
+        h.ctx.runner = no_relist
+        result = h.apply()
+        self.assertEqual(result["state"], "partial")
+        self.assertTrue(result["removal_unverified"])
+        self.assertEqual(result["removed_count"], 2)
+        self.assertEqual(
+            result["removed_set_sha256"],
+            retention.set_digest(retention.REMOVE_SET_DOMAIN, [snapshot_id(1), snapshot_id(2)]),
+        )
+
     def test_a_kept_backup_that_disappears_stops_everything(self) -> None:
         self.h.fake.lose_on_forget = snapshot_id(4)
         result = self.h.apply()
@@ -759,6 +780,30 @@ class CommandLineTests(RetentionTestCase):
             retention._validate_test_root(self.h.root, config)
             with self.assertRaises(retention.RetentionError):
                 retention._validate_test_root(PROJECT, config)
+
+    def test_turning_it_off_does_not_need_the_backup_location(self) -> None:
+        seen: list[bool] = []
+
+        def load(_path, *, require_repository=True):
+            seen.append(require_repository)
+            raise retention.RetentionError("stopped", "stopped after loading")
+
+        config = self.h.root / "config.json"
+        config.write_text("{}", encoding="utf-8")
+        digest = hashlib.sha256(config.read_bytes()).hexdigest()
+        outputs = []
+        with mock.patch.object(retention, "load_config", load), mock.patch.object(retention, "is_administrator", lambda: False):
+            for enabled in ("0", "1"):
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    code = retention.main([
+                        "--config", str(config), "--expected-config-sha256", digest, "--request-nonce", "a" * 64,
+                        "--step", "configure", "--enabled", enabled, "--keep-daily", "14", "--keep-weekly", "8",
+                        "--keep-monthly", "24", "--test-root", str(self.h.root),
+                    ])
+                outputs.append((code, json.loads(buffer.getvalue())["state"]))
+        self.assertEqual(seen, [False, True])
+        self.assertEqual(outputs, [(1, "failed"), (1, "failed")])
 
     def test_errors_never_carry_credential_details(self) -> None:
         self.assertNotIn("secret", retention.sanitize("RESTIC_PASSWORD=secret was refused"))

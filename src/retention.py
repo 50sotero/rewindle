@@ -1185,21 +1185,37 @@ def apply_forget(
 
     result["free_bytes_before"] = ctx.free_bytes(Path(config["repository"]))
     failed = False
-    attempted: list[str] = []
+    succeeded: list[str] = []
     for start in range(0, len(confirmed), FORGET_BATCH):
         batch = sorted(confirmed)[start : start + FORGET_BATCH]
         # Explicit backup IDs only: no keep rules, no --prune. This and apply_prune are the only places that remove.
         command = restic_base(config) + ["forget", *batch]
         _log(ctx, {"event": "forget_batch", "count": len(batch), "command": sanitized_command(command)[:-len(batch)]})
-        attempted.extend(batch)
         with _open_log(ctx) as log_handle:
             exit_code = ctx.stream(command, log_handle)
         if exit_code != 0:
             failed = True
             _log(ctx, {"event": "forget_batch_failed", "exit_code": exit_code})
             break
+        succeeded.extend(batch)
 
-    listed = _relist(ctx)
+    try:
+        listed = _relist(ctx)
+    except RetentionError:
+        # Some backups were removed but the list could not be read back. What the finished batches removed is reported,
+        # nothing more runs, and the next clean-up lists again and frees the space.
+        _log(ctx, {"event": "removal_unverified", "count": len(succeeded)})
+        result.update(
+            {
+                "state": "partial",
+                "removal_unverified": True,
+                "removed_count": len(succeeded),
+                "removed_set_sha256": set_digest(REMOVE_SET_DOMAIN, succeeded),
+                "exit_code": EXIT_PARTIAL,
+            }
+        )
+        return result
+    result["removal_unverified"] = False
     removed = sorted(set(confirmed) - listed)
     missing_kept = sorted(keep_ids - listed)
     result.update(
@@ -1462,7 +1478,9 @@ def main(argv: list[str] | None = None) -> int:
             acl_check = _test_mode_acl_check
         if sha256_file(config_path) != args.expected_config_sha256:
             raise RetentionError("configuration_changed", "the backup configuration changed after the request")
-        config = load_config(config_path)
+        # Turning clean-up off never reads the backup location, so an unplugged drive cannot keep it on.
+        disabling = args.step == "configure" and args.enabled == "0"
+        config = load_config(config_path, require_repository=not disabling)
         state = Path(config["state_directory"])
         ctx = Context(
             config=config,
