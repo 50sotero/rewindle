@@ -148,10 +148,17 @@ public static class FakeRestic {
       if (Control("FAKE_RESTORE_PARTIAL") == "1") {
         File.WriteAllText(Path.Combine(target, "partial.txt"), "retained partial data"); return 23;
       }
+      // Restic finishing with exit code 0 although it restored nothing, as it does when no pattern matches.
+      if (Environment.GetEnvironmentVariable("FAKE_RESTORE_NOTHING") == "1") return 0;
       int includeCount = args.Count(value => value == "--include");
-      if (includeCount > 0 && !String.IsNullOrEmpty(Environment.GetEnvironmentVariable("RESTIC_PASSWORD"))) {
+      if (includeCount > 0) {
         for (int i = 0; i < args.Length - 1; i++) if (args[i] == "--include") {
-          string include = args[i + 1]; string[] parts = include.Split(new[] {'/'}, StringSplitOptions.RemoveEmptyEntries);
+          // Like Restic, "[" opens a character class: a pattern with one matches no name that is written
+          // literally, so only "[[]" (a class that holds "[") brings such a name back.
+          string marked = args[i + 1].Replace("[[]", "\u0001");
+          if (marked.Contains("[")) continue;
+          string include = marked.Replace("\u0001", "[");
+          string[] parts = include.Split(new[] {'/'}, StringSplitOptions.RemoveEmptyEntries);
           string restored = target; foreach (string part in parts) restored = Path.Combine(restored, part);
           Directory.CreateDirectory(Path.GetDirectoryName(restored));
           string content = include.EndsWith("/canary.txt") ? "canary\n" : include.EndsWith("/live.txt") ? "live source sentinel\n" : "fixture notes\n";
@@ -452,9 +459,31 @@ try {
     $restore = Invoke-Manager -Fixture $fixture -Action restore -Snapshot $snapshotId -Target $target -Includes @('/notes.txt')
     Assert-True ($restore.ExitCode -eq 0 -and $restore.Result.ok -eq $true) 'verified restore succeeds'
     Assert-True ([string]$restore.Result.payload.result -ceq 'verified' -and $restore.Result.payload.verified -eq $true) 'verified restore report accepted'
-    Assert-True (Test-Path -LiteralPath (Join-Path $target 'restored.txt') -PathType Leaf) 'verified restore target created'
+    Assert-True (Test-Path -LiteralPath (Join-Path $target 'notes.txt') -PathType Leaf) 'verified restore target created'
     $verifiedHistory = Get-Content -LiteralPath (Join-Path $fixture.State 'restore-history.json') -Raw | ConvertFrom-Json
     Assert-True ($restore.Result.history_recorded -eq $true -and @($verifiedHistory.entries).Count -eq 1 -and $verifiedHistory.entries[0].verified -eq $true) 'verified restore is recorded in bounded protected history'
+
+    # Names with square brackets come back as themselves: the fake, like Restic, reads "[" as the start of a character class.
+    $bracketFixture = New-Fixture
+    $bracketTarget = Join-Path $bracketFixture.Root 'Restored\Brackets'
+    $bracketRestore = Invoke-Manager -Fixture $bracketFixture -Action restore -Snapshot $snapshotId -Target $bracketTarget -Includes @('/Photos [2020]/a.txt', '/Notes[1].txt')
+    Assert-True ($bracketRestore.ExitCode -eq 0 -and $bracketRestore.Result.ok -eq $true -and [string]$bracketRestore.Result.payload.result -ceq 'verified') 'a restore of names with square brackets was not verified'
+    Assert-True ((Test-Path -LiteralPath (Join-Path $bracketTarget 'Photos [2020]\a.txt') -PathType Leaf) -and
+        (Test-Path -LiteralPath (Join-Path $bracketTarget 'Notes[1].txt') -PathType Leaf)) 'names with square brackets were not restored'
+    Assert-True ((Get-Content -LiteralPath $bracketFixture.Log -Raw).Contains("--include`t/Photos [[]2020]/a.txt")) 'a chosen name with "[" reached Restic as a pattern instead of literally'
+
+    # Restic can finish with exit code 0 having restored nothing; a chosen item that is not there ends as an incomplete restore.
+    $nothingFixture = New-Fixture
+    $nothingTarget = Join-Path $nothingFixture.Root 'Restored\Nothing'
+    $env:FAKE_RESTORE_NOTHING = '1'
+    try { $nothing = Invoke-Manager -Fixture $nothingFixture -Action restore -Snapshot $snapshotId -Target $nothingTarget -Includes @('/notes.txt') }
+    finally { Remove-Item Env:FAKE_RESTORE_NOTHING -ErrorAction SilentlyContinue }
+    Assert-True ($nothing.ExitCode -ne 0 -and $nothing.Result.ok -eq $false -and [int]$nothing.Result.backend_exit_code -eq 1) 'a restore that brought back no chosen item was reported as done'
+    Assert-True ([string]$nothing.Result.payload.result -ceq 'partial' -and $nothing.Result.payload.verified -eq $false -and
+        [int]$nothing.Result.payload.restic_exit_code -eq 0 -and
+        [string]$nothing.Result.error -match 'without restoring every chosen item') 'a missing chosen item was not reported in its own words'
+    $nothingHistory = Get-Content -LiteralPath (Join-Path $nothingFixture.State 'restore-history.json') -Raw | ConvertFrom-Json
+    Assert-True (@($nothingHistory.entries).Count -eq 1 -and $nothingHistory.entries[0].verified -eq $false) 'a restore missing a chosen item was recorded as verified'
 
     $drillFixture = New-Fixture
     $drill = Invoke-Manager -Fixture $drillFixture -Action restore_drill
@@ -1136,7 +1165,7 @@ namespace RestoreManagerTests {
     } | ConvertTo-Json -Depth 3
 }
 finally {
-    foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_LEGACY_SNAPSHOT')) {
+    foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_RESTORE_NOTHING','FAKE_LEGACY_SNAPSHOT')) {
         Remove-Item "Env:$name" -ErrorAction SilentlyContinue
     }
     foreach ($name in $plantedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $null, 'Process') }

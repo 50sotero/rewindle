@@ -95,7 +95,8 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
 
 - **Open Restore Center** walks through four steps: choose a backup, choose
   files, choose an empty destination, then review and **Restore now**. Restic
-  verifies what it restores and never overwrites a file.
+  verifies what it restores and never overwrites a file, and Rewindle then
+  checks that every item you chose is in the destination.
 - **Check recovery readiness** inspects the repository, the active credential,
   the recovery key, the recovery-tools folder, locks, free space and when a
   sample of the backup data was last read back, without a prompt. From there

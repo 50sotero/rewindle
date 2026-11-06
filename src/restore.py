@@ -263,7 +263,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--include",
         action="append",
         default=[],
-        help="snapshot path/pattern to restore; repeatable",
+        help=(
+            "snapshot path of one item to restore, as Restic lists it (for example "
+            "/C/Users/you/Documents/report.docx), taken literally; repeatable"
+        ),
     )
     parser.add_argument(
         "--report",
@@ -2349,6 +2352,11 @@ class RestoreFolder:
 
 
 def validate_includes(includes: list[str]) -> list[str]:
+    """The chosen items: each one snapshot path, as Restic lists it, taken literally.
+
+    A path names one item, so the restore can check afterwards that every chosen item came back.
+    "*" and "?" cannot occur in a Windows name, so they could only be wildcards and are refused.
+    """
     if len(includes) > MAX_REPORT_INCLUDES:
         raise ValueError(f"at most {MAX_REPORT_INCLUDES} include patterns are allowed")
     result: list[str] = []
@@ -2357,8 +2365,63 @@ def validate_includes(includes: list[str]) -> list[str]:
             raise ValueError("include patterns must not be empty")
         if "\x00" in pattern or len(pattern) > MAX_REPORT_STRING:
             raise ValueError("an include pattern is invalid or too long")
+        if (
+            not pattern.startswith("/")
+            or "\\" in pattern
+            or "*" in pattern
+            or "?" in pattern
+            or any(part in {"", ".", ".."} for part in pattern.split("/")[1:])
+        ):
+            raise ValueError(
+                "an include must be one item's snapshot path as Restic lists it, "
+                "for example /C/Users/you/Documents/report.docx"
+            )
         result.append(pattern)
     return result
+
+
+def restic_literal_pattern(snapshot_path: str) -> str:
+    """The Restic include pattern that matches this one snapshot path, and nothing else.
+
+    Restic matches include patterns with Go's filepath.Match rules, where "[" opens a character
+    class: "Photos [2020]" would match a folder named "Photos 2" and never itself. "[[]" is a class
+    that holds only "[". A "]" outside a class is already literal, validate_includes refuses "*"
+    and "?", and on Windows a backslash is a path separator rather than an escape.
+    """
+    return snapshot_path.replace("[", "[[]")
+
+
+def _extended_length_path(path: str) -> str:
+    # Restic writes restored paths of any length; look for them the same way. Each chosen item's
+    # parts are already free of "." and "..", so nothing needs the normalization the prefix skips.
+    if os.name != "nt" or path.startswith("\\\\"):
+        return path
+    return "\\\\?\\" + path
+
+
+def missing_chosen_items(target: Path, chosen: list[str]) -> list[str]:
+    """The chosen snapshot paths that are not under the target after Restic finished.
+
+    Restic restores a chosen item at the target plus its snapshot path (relative to the snapshot
+    folder when the selector names one), and leaves the name as it was in the backup. A link counts
+    as restored even when what it points to is not there.
+    """
+    base = os.path.abspath(str(target)).rstrip("\\/")
+    missing: list[str] = []
+    for item in chosen:
+        parts = [part for part in item.split("/") if part]
+        restored = _extended_length_path(os.sep.join([base, *parts]))
+        if not os.path.lexists(restored):
+            missing.append(item)
+    return missing
+
+
+def missing_chosen_items_message(missing: int, chosen: int) -> str:
+    # The dashboard looks for "without restoring every chosen item" to put this in plain words.
+    return (
+        f"Restic finished without restoring every chosen item ({missing} of {chosen} missing); "
+        "the alternate target was retained for inspection"
+    )
 
 
 def validate_report_path(
@@ -2793,8 +2856,8 @@ def main(argv: list[str] | None = None) -> int:
                 "never",
                 "--verify",
             ]
-            for pattern in includes:
-                restore_command.extend(["--include", pattern])
+            for chosen in includes:
+                restore_command.extend(["--include", restic_literal_pattern(chosen)])
             restore_started = True
             try:
                 returncode = subprocess.call(
@@ -2808,7 +2871,16 @@ def main(argv: list[str] | None = None) -> int:
             finally:
                 # Also after a failed restore, so a partial restore is still found in the chosen folder.
                 left_in_restore_folder = restore_folder.hand_over()
-        restore_succeeded = returncode == 0 and not left_in_restore_folder
+        # Restic ends a restore that matched nothing with exit code 0 and verifies the nothing it
+        # restored, so every chosen item is looked for in the chosen folder, once the restored items
+        # have been handed over to it, before the restore counts as done. A hand-over that left items
+        # in the restore folder already ends the restore as incomplete and says where they are.
+        missing_items = (
+            missing_chosen_items(target, includes)
+            if returncode == 0 and includes and not args.recovery_drill and not left_in_restore_folder
+            else []
+        )
+        restore_succeeded = returncode == 0 and not left_in_restore_folder and not missing_items
         if report is not None:
             report["restic_exit_code"] = int(returncode)
             report["finished_utc"] = utc_now()
@@ -2855,13 +2927,17 @@ def main(argv: list[str] | None = None) -> int:
                 report["sample_paths_sha256"] = hashlib.sha256(path_manifest).hexdigest()
                 report["result"] = "verified"
                 report["verified"] = True
-            elif returncode == 0 and not left_in_restore_folder:
+            elif returncode == 0 and not left_in_restore_folder and not missing_items:
                 report["result"] = "verified"
                 report["verified"] = True
             elif returncode == 0:
                 report["result"] = "partial"
                 report["partial_target_retained"] = True
-                report["error"] = restore_folder.left_message()
+                report["error"] = (
+                    restore_folder.left_message()
+                    if left_in_restore_folder
+                    else missing_chosen_items_message(len(missing_items), len(includes))
+                )
             else:
                 report["result"] = "partial"
                 report["partial_target_retained"] = True
@@ -2883,9 +2959,17 @@ def main(argv: list[str] | None = None) -> int:
                 f"{target}; they are in {restore_folder.path}",
                 file=sys.stderr,
             )
+        elif missing_items:
+            print(
+                "RESTORE INCOMPLETE: Restic finished without restoring every chosen item; "
+                f"the alternate target was retained at {target}. Not restored:",
+                file=sys.stderr,
+            )
+            for item in missing_items:
+                print(f"  {item}", file=sys.stderr)
         if report is not None:
             atomic_write_report(report_path, report)
-        if returncode == 0 and left_in_restore_folder:
+        if returncode == 0 and (left_in_restore_folder or missing_items):
             return 1
         return int(returncode)
     except Exception as error:

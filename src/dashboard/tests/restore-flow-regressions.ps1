@@ -1157,6 +1157,10 @@ try {
     }
     $handOverFailure = [string](Invoke-Static $restoreLauncherType 'SanitizeAnswer' @('the restore folder changed during the restore', 'restore'))
     Assert-True ($handOverFailure -match 'could not finish putting the restored files in place' -and $handOverFailure -match 'may already be in the folder you chose' -and $handOverFailure -notmatch 'restore folder changed') ('a restore folder that moved during the restore was not put plainly: ' + $handOverFailure)
+    # A restore that Restic finished without an error but that left a chosen item out (restore.py's own check) is put in plain
+    # words with a next step, as the incomplete restore it reaches the dashboard as.
+    $missingItems = [string](Invoke-Static $restoreLauncherType 'Sanitize' @('Restic finished without restoring every chosen item (2 of 3 missing); the alternate target was retained for inspection'))
+    Assert-True ($missingItems -match 'items you chose were not restored' -and $missingItems -match 'To try again' -and $missingItems -notmatch 'Restic|alternate target') ('a chosen item missing after the restore was not put in plain words: ' + $missingItems)
     # Only a plan with the "strict" cloud placeholder policy (or none) refuses a folder for online-only files, as the backup does.
     Assert-True ([bool](Invoke-Static $dashboardType 'RefusesOnlineOnlyFiles' @('strict')) -and -not [bool](Invoke-Static $dashboardType 'RefusesOnlineOnlyFiles' @('allow'))) 'the folder check did not follow the plan''s cloud placeholder policy'
     $rewindleEngine = $engineProfileType.GetProperty('Rewindle', $flags).GetValue($null)

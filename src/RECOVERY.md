@@ -60,6 +60,12 @@ shown above. Restic prompts for the password. Copy only the value on the `Passwo
 from the offline recovery-key file. Do not place it in command-line arguments,
 scripts, logs, or screenshots.
 
+To restore only part of that folder, add `--include` for each item with its
+path inside the folder: `--include '/Taxes [[]2024]/return.pdf'` restores
+`Taxes [2024]\return.pdf`. Restic reads `[` as the start of a pattern, so write
+every `[` in a name as `[[]`. An include that matches nothing restores nothing
+and still ends without an error, so check the target afterwards.
+
 Restores never need to modify or delete the repository. Prefer a new empty
 target on a different path, inspect the restored files, and only then decide
 how to put individual files back into service.

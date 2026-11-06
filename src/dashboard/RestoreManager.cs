@@ -1451,6 +1451,11 @@ namespace ResticBackuper.Dashboard
             {
                 return "Rewindle could not finish putting the restored files in place." + outcome;
             }
+            // Restic finished without an error, but restore.py did not find every chosen item in the folder afterwards.
+            if (text.Contains("without restoring every chosen item"))
+            {
+                return "Some of the items you chose were not restored, even though the restore finished without an error. To try again, choose the folder that holds them and a new empty folder to restore into.";
+            }
             if (text.Contains("restore target must not overlap"))
             {
                 return "That folder is part of what Rewindle backs up or where its backups are kept. Choose a different folder, for example a new folder on another drive.";
