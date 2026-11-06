@@ -65,6 +65,19 @@ ones a home user reads without a glossary.
   While it works, the dialog says what each stage means instead of showing the
   service's log line.
 
+### Fixed
+
+- **The automatic backup no longer moves by an hour when the clocks change.**
+  Setup wrote the backup time in UTC, which Windows keeps at one UTC moment all
+  year, so a backup set for 02:00 ran at 01:00 all winter. The dashboard took
+  it as due at 02:00 and called a backup that had run on time **Overdue**.
+  Setup and Edit schedule now write a local clock time (the Google Drive check
+  too), and saving the schedule repairs one an earlier version wrote. Until it
+  is saved, the dashboard works out the times that schedule really runs at,
+  shows them, and says how to keep it at the same time all year.
+- With the backups overdue or paused, a pending change review now says why the
+  **Confirm these changes** button is there.
+
 ## [0.2.0-alpha.2] - 2026-10-08
 
 ### Added

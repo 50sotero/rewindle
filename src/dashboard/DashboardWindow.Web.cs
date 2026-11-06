@@ -2141,6 +2141,8 @@ namespace ResticBackuper.Dashboard
             // The same moment as an ISO 8601 timestamp, so the page formats it like every other time (empty when there is none).
             schedule["nextRunAt"] = NextRunIso(currentTaskSchedule);
             schedule["detail"] = unreadable ? string.Empty : currentTaskSchedule.SettingsSummary;
+            // Why the backup runs an hour off the chosen time after the clocks change, and the way back (empty otherwise).
+            schedule["clockChange"] = unreadable ? string.Empty : currentTaskSchedule.ClockChangeNote;
             schedule["error"] = unreadable
                 ? (string.IsNullOrWhiteSpace(scheduleReadError) ? "The installed schedule could not be verified." : scheduleReadError)
                 : string.Empty;

@@ -246,9 +246,49 @@ namespace ResticBackuper.Dashboard
             BackupTaskState state,
             DateTime? nextRunTime,
             string semanticFingerprint)
+            : this(
+                cadence,
+                timeOfDay,
+                null,
+                days,
+                enabled,
+                startWhenAvailable,
+                wakeToRun,
+                allowStartOnBatteries,
+                stopIfGoingOnBatteries,
+                allowDemandStart,
+                taskName,
+                userSid,
+                command,
+                workingDirectory,
+                state,
+                nextRunTime,
+                semanticFingerprint)
+        {
+        }
+
+        internal TaskSchedule(
+            BackupScheduleCadence cadence,
+            TimeSpan timeOfDay,
+            TimeSpan? fixedUtcOffset,
+            DayOfWeek[] days,
+            bool enabled,
+            bool startWhenAvailable,
+            bool wakeToRun,
+            bool allowStartOnBatteries,
+            bool stopIfGoingOnBatteries,
+            bool allowDemandStart,
+            string taskName,
+            string userSid,
+            string command,
+            string workingDirectory,
+            BackupTaskState state,
+            DateTime? nextRunTime,
+            string semanticFingerprint)
         {
             Cadence = cadence;
-            TimeOfDay = timeOfDay;
+            WrittenTimeOfDay = timeOfDay;
+            FixedUtcOffset = fixedUtcOffset;
             Days = (DayOfWeek[])days.Clone();
             Enabled = enabled;
             StartWhenAvailable = startWhenAvailable;
@@ -266,8 +306,44 @@ namespace ResticBackuper.Dashboard
         }
 
         public BackupScheduleCadence Cadence { get; private set; }
-        public TimeSpan TimeOfDay { get; private set; }
+        // The start time as the task has it. With FixedUtcOffset it is a clock time in that offset, not a local one.
+        public TimeSpan WrittenTimeOfDay { get; private set; }
+        // The offset a start was written with, when it has one: Windows then runs the task at the same UTC moment every day,
+        // so its local time moves by an hour when the clocks change. Null for a start in local time, which keeps its clock time.
+        public TimeSpan? FixedUtcOffset { get; private set; }
         public DayOfWeek[] Days { get; private set; }
+
+        // The local time of day the backup runs at. For a start in UTC it is the local time that moment has today, so the
+        // schedule reads as the runs happen (01:00 in winter for a start written as 02:00 summer time).
+        public TimeSpan TimeOfDay
+        {
+            get
+            {
+                return FixedUtcOffset.HasValue
+                    ? LocalTimeOfDayOn(DateTime.UtcNow, TimeZoneInfo.Local)
+                    : WrittenTimeOfDay;
+            }
+        }
+
+        // The UTC moment of the run that a start in UTC makes on a date of the offset it was written in.
+        internal DateTime FixedOccurrenceUtc(DateTime dateInWrittenOffset)
+        {
+            return DateTime.SpecifyKind(
+                dateInWrittenOffset.Date + WrittenTimeOfDay - FixedUtcOffset.GetValueOrDefault(),
+                DateTimeKind.Utc);
+        }
+
+        internal TimeSpan LocalTimeOfDayOn(DateTime utcNow, TimeZoneInfo localTimeZone)
+        {
+            if (!FixedUtcOffset.HasValue)
+            {
+                return WrittenTimeOfDay;
+            }
+            DateTime writtenDate = (DateTime.SpecifyKind(utcNow, DateTimeKind.Utc) + FixedUtcOffset.Value).Date;
+            DateTime local = TimeZoneInfo.ConvertTimeFromUtc(FixedOccurrenceUtc(writtenDate), localTimeZone);
+            return new TimeSpan(local.Hour, local.Minute, 0);
+        }
+
         public bool Enabled { get; private set; }
         public bool StartWhenAvailable { get; private set; }
         public bool WakeToRun { get; private set; }
@@ -285,6 +361,19 @@ namespace ResticBackuper.Dashboard
         public string Summary
         {
             get { return TaskScheduleCanonicalizer.CreateSummary(Cadence, TimeOfDay, Days, Enabled); }
+        }
+
+        // Said beside the schedule while its start is in UTC, so a backup an hour off the chosen time is explained, with the
+        // way back to one local time all year: saving the schedule writes the start without an offset.
+        public string ClockChangeNote
+        {
+            get
+            {
+                return FixedUtcOffset.HasValue
+                    ? "Windows keeps this backup at a fixed UTC time, so it moves by an hour when the clocks change. " +
+                        "To keep it at the same time all year, choose Edit schedule and save."
+                    : string.Empty;
+            }
         }
 
         public string NextRunDisplay
@@ -327,9 +416,12 @@ namespace ResticBackuper.Dashboard
             }
         }
 
+        // A start in UTC never matches: a request is a local time, so saving it is a change (it stops the runs moving with
+        // the clocks), and that save is what ClockChangeNote asks for.
         public bool Matches(ScheduleChangeRequest desired)
         {
             return desired != null &&
+                !FixedUtcOffset.HasValue &&
                 Cadence == desired.Cadence &&
                 TimeOfDay == desired.TimeOfDay &&
                 TaskScheduleCanonicalizer.SameDays(Days, desired.Days) &&
@@ -642,17 +734,20 @@ namespace ResticBackuper.Dashboard
 
                 BackupScheduleCadence cadence;
                 TimeSpan timeOfDay;
+                TimeSpan? fixedUtcOffset;
                 DayOfWeek[] days;
                 ParseSingleCalendarTrigger(
                     document,
                     namespaces,
                     out cadence,
                     out timeOfDay,
+                    out fixedUtcOffset,
                     out days);
 
                 schedule = new TaskSchedule(
                     cadence,
                     timeOfDay,
+                    fixedUtcOffset,
                     days,
                     enabled,
                     startWhenAvailable,
@@ -682,6 +777,7 @@ namespace ResticBackuper.Dashboard
             XmlNamespaceManager namespaces,
             out BackupScheduleCadence cadence,
             out TimeSpan timeOfDay,
+            out TimeSpan? fixedUtcOffset,
             out DayOfWeek[] days)
         {
             XmlNodeList triggers = document.SelectNodes("/t:Task/t:Triggers/*", namespaces);
@@ -718,9 +814,10 @@ namespace ResticBackuper.Dashboard
             }
 
             XmlNode startNode = ReadSingleNode(trigger, namespaces, "t:StartBoundary");
+            string startText = startNode.InnerText.Trim();
             DateTime startBoundary;
             if (!DateTime.TryParse(
-                startNode.InnerText.Trim(),
+                startText,
                 CultureInfo.InvariantCulture,
                 DateTimeStyles.AllowWhiteSpaces | DateTimeStyles.RoundtripKind,
                 out startBoundary) ||
@@ -729,6 +826,26 @@ namespace ResticBackuper.Dashboard
                 throw new InvalidDataException("The calendar start time is invalid.");
             }
             timeOfDay = new TimeSpan(startBoundary.Hour, startBoundary.Minute, 0);
+            // A start written with a UTC offset ("Z" or "+01:00"; New-ScheduledTaskTrigger writes one) is what Task Scheduler
+            // calls "Synchronize across time zones": the task runs at that same UTC moment every day. Its clock time is kept as
+            // written, in that offset, rather than converted to local time on the start date (which named the summer time all
+            // winter, an hour off the real runs).
+            fixedUtcOffset = null;
+            if (startText.EndsWith("Z", StringComparison.OrdinalIgnoreCase) ||
+                System.Text.RegularExpressions.Regex.IsMatch(startText, @"[+-]\d{2}:\d{2}$"))
+            {
+                DateTimeOffset written;
+                if (!DateTimeOffset.TryParse(
+                    startText,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AllowWhiteSpaces,
+                    out written))
+                {
+                    throw new InvalidDataException("The calendar start time is invalid.");
+                }
+                fixedUtcOffset = written.Offset;
+                timeOfDay = new TimeSpan(written.Hour, written.Minute, 0);
+            }
 
             XmlNodeList dailyNodes = trigger.SelectNodes("t:ScheduleByDay", namespaces);
             XmlNodeList weeklyNodes = trigger.SelectNodes("t:ScheduleByWeek", namespaces);

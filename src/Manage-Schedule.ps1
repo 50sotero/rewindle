@@ -839,7 +839,6 @@ function Get-ValidatedTaskDefinition {
         NamespaceManager = $namespaceManager
         StartBoundary = $startBoundary
         BoundaryDate = $boundaryMatch.Groups['date'].Value
-        BoundaryZone = $boundaryMatch.Groups['zone'].Value
         ScheduleNode = $scheduleNode
         SettingsNode = $settings
         Cadence = $scheduleCadence
@@ -887,7 +886,10 @@ function New-DesiredTaskDocument {
     )
     $document = [Xml.XmlDocument]$Baseline.CloneNode($true)
     $validated = Get-ValidatedTaskDefinition -Document $document -ExpectedSid $ExpectedSid
-    $validated.StartBoundary.InnerText = $validated.BoundaryDate + 'T' + $RequestedTime + ':00' + $validated.BoundaryZone
+    # The time asked for is a local clock time, so it is written without a UTC offset. With one (New-ScheduledTaskTrigger
+    # writes the start in UTC), Windows runs the task at the same UTC moment every day, and the backup moves by an hour
+    # whenever the clocks change. Saving the schedule also repairs a start that an earlier install wrote that way.
+    $validated.StartBoundary.InnerText = $validated.BoundaryDate + 'T' + $RequestedTime + ':00'
 
     Set-RequiredNodeText -Context $validated.SettingsNode -XPath 't:Enabled' `
         -NamespaceManager $validated.NamespaceManager -Description 'Settings/Enabled' `

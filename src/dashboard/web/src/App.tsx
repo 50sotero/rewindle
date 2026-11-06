@@ -426,6 +426,7 @@ function Protection({ state, send, folders, setFolders, stale, openRunDetails }:
           <details className="inline-details"><summary>Technical details</summary><p className="muted-copy">{state.schedule.error}</p></details>
         </div> : <>
           <div className="info-main">{state.schedule.nextRunAt ? formatWhen(state.schedule.nextRunAt, locale, state.schedule.nextRun) : state.schedule.nextRun || 'No upcoming run'}</div><div className="muted-copy">{localClocks(state.schedule.summary, locale)}</div>
+          {state.schedule.clockChange && <p className="muted-copy schedule-clock-change">{state.schedule.clockChange}</p>}
         </>}
         <ScheduleNotice notice={state.schedule.notice} className="schedule-notice-slot" />
         <div className="info-action"><Action state={state} send={send} command="editSchedule" icon={<ArrowUpRight size={12} />} quiet={quiet} /></div></section>
@@ -882,7 +883,7 @@ function SettingsPage({ state, send, stale = false }: { state: DashboardState; s
           <p>Rewindle could not read the Windows backup schedule just now. Nothing was changed. Try again, or open Details to see why.</p>
           <details className="inline-details"><summary>Details</summary><p className="muted-copy">{state.schedule.error}</p></details>
           <Button size="sm" onClick={() => send('refresh')}><RefreshCw size={13} />Try again</Button>
-        </div> : <><p className="muted-copy">Next: {formatWhen(state.schedule.nextRunAt, usableLocale(state.locale), state.schedule.nextRun)}</p><details className="inline-details"><summary>Run conditions</summary><p className="muted-copy">{state.schedule.detail}</p></details></>}
+        </div> : <><p className="muted-copy">Next: {formatWhen(state.schedule.nextRunAt, usableLocale(state.locale), state.schedule.nextRun)}</p>{state.schedule.clockChange && <p className="muted-copy schedule-clock-change">{state.schedule.clockChange}</p>}<details className="inline-details"><summary>Run conditions</summary><p className="muted-copy">{state.schedule.detail}</p></details></>}
         <ScheduleNotice notice={state.schedule.notice} className="schedule-notice-slot" /></div><div className="setting-controls"><Action state={state} send={send} command="editSchedule" quiet={quiet} /></div></section>
     </div><div className="settings-notes">
       <p className="muted-copy settings-note"><LockKeyhole size={12} aria-hidden="true" />Windows asks for your permission before the location or schedule changes.</p>

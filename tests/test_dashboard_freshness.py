@@ -34,7 +34,9 @@ class DashboardFreshnessSourceTests(unittest.TestCase):
 
     def test_evaluator_is_calendar_based_and_side_effect_free(self) -> None:
         self.assertIn("FindLatestDueOccurrence", self.freshness)
-        self.assertIn("date.Add(schedule.TimeOfDay)", self.freshness)
+        self.assertIn("date.Add(schedule.WrittenTimeOfDay)", self.freshness)
+        # A start written in UTC is one UTC moment every day, not a local clock time.
+        self.assertIn("schedule.FixedOccurrenceUtc(date)", self.freshness)
         self.assertIn("IsInvalidTime", self.freshness)
         self.assertIn("GetAmbiguousTimeOffsets", self.freshness)
         self.assertNotIn("TimeSpan.FromHours(24)", self.freshness)

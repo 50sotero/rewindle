@@ -2920,6 +2920,9 @@ try {
     $scheduleTime = [DateTime]::Today.Add([TimeSpan]::ParseExact($Schedule, 'hh\:mm', [Globalization.CultureInfo]::InvariantCulture))
     $backupAction = New-ScheduledTaskAction -Execute (Join-Path $installRoot 'ResticBackuperTaskLauncher.exe') -WorkingDirectory $installRoot
     $backupTrigger = New-ScheduledTaskTrigger -Daily -At $scheduleTime
+    # New-ScheduledTaskTrigger writes the start in UTC, and Windows then runs the task at that same UTC moment every day,
+    # an hour off the chosen time whenever the clocks change. A start with no offset is a local clock time.
+    $backupTrigger.StartBoundary = $scheduleTime.ToString('yyyy-MM-dd''T''HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
     $backupSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Priority 7
     $backupPrincipal = New-ScheduledTaskPrincipal -UserId $identity.Name -LogonType Interactive -RunLevel Highest
     Register-ScheduledTask -TaskName $backupTaskName -Action $backupAction -Trigger $backupTrigger -Settings $backupSettings -Principal $backupPrincipal -Description 'Verified encrypted incremental Restic backup supervised by ResticBackuper.' | Out-Null

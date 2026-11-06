@@ -36,6 +36,11 @@ export function heroConcern(state: DashboardState): HeroConcern | null {
   if (freshness.state === 'Unavailable' && !state.dataError && !state.status.unavailable) {
     return { tone: 'warning', text: 'Rewindle can’t read the Windows backup schedule, so it can’t tell whether backups are on time.' };
   }
+  // While the schedule has the hero's words (an overdue or paused backup), the change review would be a button with nothing
+  // above it to say why. With the backups on time the host's own title and detail are about the review.
+  if (state.actions.reviewChanges?.visible && freshness.state !== 'Healthy') {
+    return { tone: 'warning', text: 'Your last backup also found far more changes than usual. Look them over, then choose Confirm these changes.' };
+  }
   return null;
 }
 
