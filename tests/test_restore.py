@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -59,10 +60,37 @@ expected_password = control.get("expected_password")
 if expected_password is not None and os.environ.get("RESTIC_PASSWORD") != expected_password:
     raise SystemExit(91)
 
+if "find" in args:
+    # Like Restic 0.19.1's `find --json`: one array with an object for each backup that has matches.
+    import time
+    if control.get("pid_file"):
+        Path(control["pid_file"]).write_text(str(os.getpid()), encoding="utf-8")
+    ids = [args[index + 1] for index, value in enumerate(args[:-1]) if value == "--snapshot"]
+    for snapshot_id in ids:
+        time.sleep(float(control.get("find_sleep", {}).get(snapshot_id, 0)))
+    if "find_raw" in control:
+        sys.stdout.write(control["find_raw"])
+        raise SystemExit(int(control.get("find_exit", 0)))
+    flood = int(control.get("find_flood", 0))
+    found = []
+    for snapshot_id in ids:
+        nodes = control.get("find_nodes", {}).get(snapshot_id, [])
+        if flood:
+            nodes = [
+                {"name": f"budget-{index}.txt", "type": "file", "path": f"/C/Budget/budget-{index}.txt", "size": 1}
+                for index in range(flood)
+            ]
+        if nodes:
+            found.append({"matches": nodes, "hits": len(nodes), "snapshot": snapshot_id})
+    sys.stdout.write(json.dumps(found) + "\n")
+    raise SystemExit(int(control.get("find_exit", 0)))
 if "cat" in args:
     print(json.dumps({"id": control["repository_id"], "version": 2}))
     raise SystemExit(0)
 if "snapshots" in args:
+    if control.get("snapshots_sleep"):
+        import time
+        time.sleep(float(control["snapshots_sleep"]))
     print(json.dumps(control.get("snapshots", []), separators=(",", ":")))
     raise SystemExit(int(control.get("snapshot_exit", 0)))
 if "ls" in args:
@@ -1975,6 +2003,550 @@ class ExtendedLengthPathTests(unittest.TestCase):
         )
 
 
+FIND_TEXT_CASES = json.loads(
+    (PROJECT_ROOT / "tests" / "fixtures" / "file-search-text-cases.json").read_text(encoding="utf-8")
+)
+
+
+def backup_id(index: int) -> str:
+    return hashlib.sha256(f"backup-{index}".encode("ascii")).hexdigest()
+
+
+def found(path: str, kind: str = "file", size: int = 7, mtime: str = "2026-07-01T10:00:00.1234567+02:00") -> dict:
+    """One item as `restic find --json` prints it."""
+    node: dict[str, object] = {"name": path.rsplit("/", 1)[-1], "type": kind, "path": path, "mtime": mtime}
+    if kind == "file":
+        node["size"] = size
+    return node
+
+
+class FileSearchTextTests(unittest.TestCase):
+    def test_the_shared_text_cases(self) -> None:
+        self.assertGreater(len(FIND_TEXT_CASES), 30)
+        for case in FIND_TEXT_CASES:
+            with self.subTest(text=case["text"]):
+                if case["valid"]:
+                    self.assertEqual("", restore.find_text_problem(case["text"]))
+                    self.assertEqual(case["normalized"], restore.normalize_find_text(case["text"]))
+                else:
+                    self.assertEqual(case["error"], restore.find_text_problem(case["text"]))
+                    with self.assertRaisesRegex(ValueError, "file search text is invalid"):
+                        restore.normalize_find_text(case["text"])
+
+    def test_the_pattern_starts_with_a_star_and_lets_brackets_match_themselves(self) -> None:
+        for text, pattern in (
+            ("Budget", "*Budget*"),
+            ("-notes", "*-notes*"),
+            ("--x", "*--x*"),
+            ("[old]", "*?old?*"),
+            ("Photos [2020]", "*Photos ?2020?*"),
+            ("a]b[c", "*a?b?c*"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(pattern, restore.find_restic_pattern(text))
+                # fnmatch reads "[" as Restic does: the name itself is matched only once the brackets are widened.
+                self.assertTrue(fnmatch.fnmatchcase(f"x {text} y", pattern))
+
+    def test_names_are_folded_one_character_at_a_time_as_restic_does(self) -> None:
+        self.assertEqual("budget.xlsx", restore.find_fold("BUDGET.XLSX"))
+        self.assertEqual("istanbul", restore.find_fold("\u0130stanbul"))
+        self.assertEqual("\u03c3\u03c3", restore.find_fold("\u03a3\u03a3"))
+
+    def test_times_are_kept_in_utc_to_a_ten_millionth_of_a_second(self) -> None:
+        for value, expected in (
+            ("2026-07-01T10:00:00.1234567+02:00", "2026-07-01T08:00:00.1234567Z"),
+            ("2026-07-01T08:00:00.123456789Z", "2026-07-01T08:00:00.1234567Z"),
+            ("2026-07-01T08:00:00Z", "2026-07-01T08:00:00.0000000Z"),
+            ("2026-07-01T03:30:00.5-04:30", "2026-07-01T08:00:00.5000000Z"),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(expected, restore.normalize_restic_time(value))
+        for value in ("", "yesterday", "2026-07-01 08:00:00Z", "2026-07-01T08:00:00", "2026-13-01T08:00:00Z", None, 5):
+            with self.subTest(value=value):
+                self.assertIsNone(restore.normalize_restic_time(value))
+
+
+class FileSearchTests(unittest.TestCase):
+    """--find-json through restore.py and the fake Restic, in the same disposable folders as the restore tests."""
+
+    tearDown = RestoreBackendTests.tearDown
+    write_control = RestoreBackendTests.write_control
+    base_arguments = RestoreBackendTests.base_arguments
+    enable_plan = RestoreBackendTests.enable_plan
+    invoke = RestoreBackendTests.invoke
+    read_log = RestoreBackendTests.read_log
+    bracket_tree = RestoreBackendTests.bracket_tree
+    restore_selection = RestoreBackendTests.restore_selection
+    restored_files = staticmethod(RestoreBackendTests.restored_files)
+
+    def setUp(self) -> None:
+        RestoreBackendTests.setUp(self)
+        self.cache = self.state / "cache"
+        self.cache.mkdir()
+        self.snapshots: list[dict] = []
+
+    def backups(self, count: int) -> list[str]:
+        """Make `count` backups of the configured folder and return their IDs, newest first."""
+        self.snapshots = [
+            snapshot(backup_id(index), f"2026-07-{1 + index // 24:02d}T{index % 24:02d}:00:00Z", str(self.source))
+            for index in range(count)
+        ]
+        self.write_control(snapshots=self.snapshots)
+        return [backup_id(index) for index in reversed(range(count))]
+
+    def time_of(self, snapshot_id: str) -> str:
+        for item in self.snapshots:
+            if item["id"] == snapshot_id:
+                return restore.normalize_restic_time(item["time"])
+        raise KeyError(snapshot_id)
+
+    def write_found(self, **control: object) -> None:
+        self.write_control(snapshots=self.snapshots, **control)
+
+    def search(self, text: str = "Budget", *extra: str) -> tuple[int, dict | None, str]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(restore, "tie_children_to_this_process") as tie, redirect_stdout(
+            stdout
+        ), redirect_stderr(stderr):
+            result = restore.main(
+                [
+                    *self.base_arguments(),
+                    "--cache-dir",
+                    str(self.cache),
+                    "--no-restic-lock",
+                    "--find-json",
+                    f"--find-text={text}",
+                    *extra,
+                ]
+            )
+        self.assertTrue(tie.called)
+        return result, json.loads(stdout.getvalue()) if result == 0 else None, stderr.getvalue()
+
+    def find_calls(self) -> list[list[str]]:
+        return [args for args in self.read_log() if "find" in args]
+
+    @staticmethod
+    def batch(args: list[str]) -> list[str]:
+        return [args[index + 1] for index, value in enumerate(args) if value == "--snapshot"]
+
+    def test_backups_are_searched_newest_first_in_batches_that_grow(self) -> None:
+        ids = self.backups(14)
+        self.write_found(find_nodes={ids[5]: [found("/C/Docs/Budget.xlsx")]})
+        result, payload, stderr = self.search()
+        self.assertEqual((0, ""), (result, stderr))
+        calls = self.find_calls()
+        self.assertEqual([ids[0:1], ids[1:3], ids[3:7], ids[7:14]], [self.batch(call) for call in calls])
+        for call in calls:
+            start = call.index("find")
+            self.assertEqual(["find", "--json", "--ignore-case", "--snapshot"], call[start : start + 4])
+            self.assertEqual(["--", "*Budget*"], call[-2:])
+        for call in self.read_log():
+            # Only reads, through the backup's cache, without Restic's lock: the manager holds the run lock.
+            self.assertIn("--no-lock", call)
+            self.assertEqual(str(self.cache), call[call.index("--cache-dir") + 1])
+        self.assertEqual(1, sum("snapshots" in call for call in self.read_log()))
+        self.assertEqual(restore.FIND_SCHEMA, payload["schema"])
+        self.assertEqual(1, payload["schema_version"])
+        self.assertEqual(str(self.repository.resolve()), payload["repository"])
+        self.assertNotIn("repository_id", payload)
+        self.assertEqual({"text": "Budget", "from_snapshot_id": None}, payload["query"])
+        self.assertEqual(
+            {"plan_id": None, "legacy_match_policy": "exact-host-scheduled-tags-and-sources"}, payload["binding"]
+        )
+        self.assertEqual(
+            ("complete", 14, 14, None, 1, 0),
+            (
+                payload["status"],
+                payload["snapshots_total"],
+                payload["snapshots_searched"],
+                payload["next_from_snapshot_id"],
+                payload["matches_total"],
+                payload["skipped"],
+            ),
+        )
+        self.assertEqual(self.time_of(ids[0]), payload["searched_newest_time"])
+        self.assertEqual(self.time_of(ids[13]), payload["searched_oldest_time"])
+        self.assertIsInstance(payload["elapsed_ms"], int)
+        self.assertEqual(ids[5], payload["matches"][0]["versions"][0]["snapshot_id"])
+
+    def test_only_names_that_hold_the_text_are_kept_and_each_version_once(self) -> None:
+        ids = self.backups(4)
+        self.write_found(
+            find_nodes={
+                ids[0]: [
+                    found("/C/Docs/Budget.xlsx", size=10, mtime="2026-07-03T10:00:00.1234567+02:00"),
+                    found("/C/Docs/Budgets", "dir"),
+                    # Inside a folder whose name holds the text; Restic prints these too.
+                    found("/C/Docs/Budgets/notes.txt"),
+                    {"name": "budget.lnk", "type": "symlink", "path": "/C/Docs/budget.lnk"},
+                    found("C:\\Docs\\budget.txt"),
+                    found("/C/Docs/../budget.txt"),
+                    found("/C/Docs//budget.txt"),
+                ],
+                # The same file at the same moment, written with another offset: the same version.
+                ids[1]: [
+                    found("/C/Docs/Budget.xlsx", size=10, mtime="2026-07-03T08:00:00.1234567Z"),
+                    found("/C/Docs/Budgets", "dir"),
+                ],
+                ids[2]: [found("/C/Docs/Budget.xlsx", size=9, mtime="2026-07-02T08:00:00Z")],
+            }
+        )
+        result, payload, _ = self.search("budget")
+        self.assertEqual(0, result)
+        self.assertEqual(("complete", 2, 5), (payload["status"], payload["matches_total"], payload["skipped"]))
+        file_match, folder_match = payload["matches"]
+        self.assertEqual(
+            ("/C/Docs/Budget.xlsx", "Budget.xlsx", "file", 2),
+            (file_match["path"], file_match["name"], file_match["type"], file_match["versions_total"]),
+        )
+        newer, older = file_match["versions"]
+        self.assertEqual(
+            {
+                "size": 10,
+                "mtime": "2026-07-03T08:00:00.1234567Z",
+                "snapshot_id": ids[0],
+                "snapshot_time": self.time_of(ids[0]),
+                "first_snapshot_id": ids[1],
+                "first_snapshot_time": self.time_of(ids[1]),
+                "backups": 2,
+                "binding_state": "configuration",
+            },
+            newer,
+        )
+        self.assertEqual((9, ids[2], ids[2], 1), (older["size"], older["snapshot_id"], older["first_snapshot_id"], older["backups"]))
+        self.assertEqual(("/C/Docs/Budgets", "dir", 1), (folder_match["path"], folder_match["type"], folder_match["versions_total"]))
+        self.assertEqual(
+            (0, None, ids[0], ids[1], 2),
+            tuple(folder_match["versions"][0][key] for key in ("size", "mtime", "snapshot_id", "first_snapshot_id", "backups")),
+        )
+
+    def test_a_path_keeps_its_ten_newest_versions_and_says_how_many_there_are(self) -> None:
+        ids = self.backups(12)
+        self.write_found(
+            find_nodes={snapshot_id: [found("/C/Docs/Budget.xlsx", size=index)] for index, snapshot_id in enumerate(ids)}
+        )
+        result, payload, _ = self.search()
+        self.assertEqual(0, result)
+        match = payload["matches"][0]
+        self.assertEqual(12, match["versions_total"])
+        self.assertEqual(ids[:10], [version["snapshot_id"] for version in match["versions"]])
+
+    def test_text_that_starts_with_a_dash_reaches_restic_as_a_pattern(self) -> None:
+        ids = self.backups(1)
+        for text in ("-notes", "--x", "-rf"):
+            with self.subTest(text=text):
+                self.fake_log.unlink(missing_ok=True)
+                result, payload, _ = self.search(text)
+                self.assertEqual((0, text), (result, payload["query"]["text"]))
+                call = self.find_calls()[0]
+                self.assertEqual(["--snapshot", ids[0], "--", f"*{text}*"], call[-4:])
+
+    def test_the_time_running_out_stops_a_batch_and_says_where_to_go_on(self) -> None:
+        ids = self.backups(6)
+        self.write_found(
+            find_nodes={ids[0]: [found("/C/Docs/Budget.xlsx")], ids[4]: [found("/C/Old/Budget.xlsx")]},
+            find_sleep={ids[1]: 30},
+        )
+        started = time.monotonic()
+        with mock.patch.object(restore, "FIND_SECONDS_MIN", 1):
+            result, payload, _ = self.search("Budget", "--find-seconds=3")
+        self.assertLess(time.monotonic() - started, 6)
+        self.assertEqual(0, result)
+        # The batch the deadline cut is not counted: Restic prints nothing for a backup without matches.
+        self.assertEqual(
+            ("more", 6, 1, ids[1], ["/C/Docs/Budget.xlsx"]),
+            (
+                payload["status"],
+                payload["snapshots_total"],
+                payload["snapshots_searched"],
+                payload["next_from_snapshot_id"],
+                [match["path"] for match in payload["matches"]],
+            ),
+        )
+        self.assertEqual(self.time_of(ids[0]), payload["searched_oldest_time"])
+        self.fake_log.unlink()
+        self.write_found(find_nodes={ids[4]: [found("/C/Old/Budget.xlsx")]})
+        result, payload, _ = self.search("Budget", f"--find-from-snapshot={ids[1]}")
+        self.assertEqual(0, result)
+        self.assertEqual({"text": "Budget", "from_snapshot_id": ids[1]}, payload["query"])
+        self.assertEqual([ids[1:2], ids[2:4], ids[4:6]], [self.batch(call) for call in self.find_calls()])
+        self.assertEqual(
+            ("complete", 5, None, self.time_of(ids[1]), self.time_of(ids[5])),
+            (
+                payload["status"],
+                payload["snapshots_searched"],
+                payload["next_from_snapshot_id"],
+                payload["searched_newest_time"],
+                payload["searched_oldest_time"],
+            ),
+        )
+        self.assertEqual(["/C/Old/Budget.xlsx"], [match["path"] for match in payload["matches"]])
+
+    def test_one_backup_that_cannot_be_searched_in_time_is_too_slow(self) -> None:
+        ids = self.backups(3)
+        self.write_found(find_sleep={ids[0]: 30})
+        with mock.patch.object(restore, "FIND_SECONDS_MIN", 1):
+            result, payload, _ = self.search("Budget", "--find-seconds=2")
+        self.assertEqual(0, result)
+        self.assertEqual(
+            ("too_slow", 0, ids[0]),
+            (payload["status"], payload["snapshots_searched"], payload["next_from_snapshot_id"]),
+        )
+
+    def test_the_first_backup_waits_for_half_of_the_time(self) -> None:
+        ids = self.backups(3)
+        self.write_found(snapshots_sleep=1.8)
+        with mock.patch.object(restore, "FIND_SECONDS_MIN", 1):
+            result, payload, _ = self.search("Budget", "--find-seconds=3")
+        self.assertEqual(0, result)
+        self.assertEqual(
+            ("more", 3, 0, ids[0]),
+            (
+                payload["status"],
+                payload["snapshots_total"],
+                payload["snapshots_searched"],
+                payload["next_from_snapshot_id"],
+            ),
+        )
+        self.assertEqual([], self.find_calls())
+
+    def test_a_list_of_backups_cut_by_the_time_searches_nothing(self) -> None:
+        ids = self.backups(3)
+        self.write_found(snapshots_sleep=30)
+        with mock.patch.object(restore, "FIND_SECONDS_MIN", 1):
+            result, payload, _ = self.search("Budget", "--find-seconds=1", f"--find-from-snapshot={ids[1]}")
+            self.assertEqual(0, result)
+            self.assertEqual(
+                ("more", 0, 0, ids[1]),
+                (
+                    payload["status"],
+                    payload["snapshots_total"],
+                    payload["snapshots_searched"],
+                    payload["next_from_snapshot_id"],
+                ),
+            )
+            with self.assertRaisesRegex(RuntimeError, "list of backups could not be read in the time"):
+                self.search("Budget", "--find-seconds=1")
+        self.assertEqual([], self.find_calls())
+
+    def test_a_name_that_matches_too_much_asks_for_more_of_it(self) -> None:
+        ids = self.backups(3)
+        self.write_found(find_flood=60)
+        with mock.patch.object(restore, "FIND_MAX_BATCH_NODES", 50):
+            result, payload, _ = self.search()
+        self.assertEqual(
+            (0, "too_broad", 0, ids[0], []),
+            (result, payload["status"], payload["snapshots_searched"], payload["next_from_snapshot_id"], payload["matches"]),
+        )
+        with mock.patch.object(restore, "FIND_MAX_BATCH_BYTES", 4096):
+            result, payload, _ = self.search()
+        self.assertEqual((0, "too_broad", 0), (result, payload["status"], payload["snapshots_searched"]))
+
+    def test_more_than_a_hundred_paths_stops_with_the_first_hundred(self) -> None:
+        ids = self.backups(3)
+        self.write_found(find_flood=101)
+        result, payload, _ = self.search()
+        self.assertEqual(0, result)
+        self.assertEqual(
+            ("too_many", 1, ids[1], 101, 100),
+            (
+                payload["status"],
+                payload["snapshots_searched"],
+                payload["next_from_snapshot_id"],
+                payload["matches_total"],
+                len(payload["matches"]),
+            ),
+        )
+
+    def test_a_start_that_is_no_longer_listed_exits_with_its_own_code(self) -> None:
+        self.backups(3)
+        result, payload, stderr = self.search("Budget", f"--find-from-snapshot={backup_id(99)}")
+        self.assertEqual((restore.FIND_EXIT_START_MISSING, None), (result, payload))
+        self.assertIn("the backup to search from is no longer in the list", stderr)
+        self.assertEqual([], self.find_calls())
+
+    def test_restic_failing_or_printing_anything_unexpected_is_not_used(self) -> None:
+        ids = self.backups(2)
+        self.write_found(find_exit=1)
+        with self.assertRaisesRegex(restore.ResticReadError, "file search failed with exit code 1"):
+            self.search()
+        one = {"matches": [found("/C/Docs/Budget.xlsx")], "hits": 1, "snapshot": ids[0]}
+        for raw in (
+            "not json",
+            json.dumps(one),
+            json.dumps([{**one, "hits": 2}]),
+            json.dumps([{**one, "hits": True}]),
+            json.dumps([{**one, "extra": 1}]),
+            json.dumps([{**one, "snapshot": backup_id(99)}]),
+            json.dumps([{**one, "snapshot": ids[0].upper()}]),
+            json.dumps([one, one]),
+            json.dumps([{"matches": "x", "hits": 1, "snapshot": ids[0]}]),
+            "null",
+        ):
+            with self.subTest(raw=raw):
+                self.write_found(find_raw=raw)
+                with self.assertRaisesRegex(ValueError, restore.FIND_INVALID_OUTPUT):
+                    self.search()
+
+    def test_the_options_of_a_search_are_checked_before_restic_runs(self) -> None:
+        self.backups(2)
+        refused = (
+            (["--find-json"], "needs --find-text"),
+            (["--find-text=Budget"], "require --find-json"),
+            (["--find-seconds=20"], "require --find-json"),
+            (["--find-json", "--find-text= Budget"], "needs --find-text"),
+            (["--find-json", "--find-text=a"], "file search text is invalid"),
+            (["--find-json", "--find-text=Docs/Budget"], "file search text is invalid"),
+            (["--find-json", "--find-text=Budget", "--find-from-snapshot=" + "A" * 64], "full backup ID"),
+            (["--find-json", "--find-text=Budget", "--find-from-snapshot=abc"], "full backup ID"),
+            (["--find-json", "--find-text=Budget", "--find-seconds=4"], "from 5 to 60"),
+            (["--find-json", "--find-text=Budget", "--find-seconds=61"], "from 5 to 60"),
+            (["--find-json", "--find-text=Budget", "--list-snapshots-json"], "choose only one"),
+            (["--find-json", "--find-text=Budget", "--list-tree-json"], "choose only one"),
+            (["--find-json", "--find-text=Budget", "--target", str(self.root / "t")], "choose only one"),
+            (["--find-json", "--find-text=Budget", "--include", "/C/Docs"], "takes only its text"),
+            (["--find-json", "--find-text=Budget", "--tree-path", "/C"], "takes only its text"),
+            (["--find-json", "--find-text=Budget", "--snapshot", backup_id(0)], "takes only its text"),
+            (["--find-json", "--find-text=Budget", "--allow-legacy-unbound"], "takes only its text"),
+        )
+        for arguments, message in refused:
+            with self.subTest(arguments=arguments), self.assertRaisesRegex(ValueError, message):
+                self.invoke(arguments)
+        with self.assertRaisesRegex(ValueError, "needs the protected password helper or a recovery key"):
+            restore.main([*self.base_arguments(recovery_key=False), "--find-json", "--find-text=Budget"])
+        self.assertEqual([], self.read_log())
+
+    def test_versions_say_which_backups_belong_to_the_plan(self) -> None:
+        self.enable_plan(generation=2)
+        current = snapshot(
+            NEW_ID,
+            "2026-07-21T01:00:00Z",
+            str(self.source),
+            tags=["scheduled", restore.plan_tag(PLAN_ID), restore.generation_tag(2)],
+        )
+        legacy = snapshot(LEGACY_ID, "2026-07-20T01:00:00Z", str(self.source))
+        other_host = snapshot(WRONG_HOST_ID, "2026-07-22T01:00:00Z", str(self.source), hostname="OTHER-HOST")
+        self.snapshots = [legacy, current, other_host]
+        self.write_found(
+            find_nodes={
+                NEW_ID: [found("/C/Docs/Budget.xlsx")],
+                LEGACY_ID: [found("/C/Docs/Budget.xlsx"), found("/C/Docs/Budget-old.xlsx")],
+                WRONG_HOST_ID: [found("/C/Docs/Budget-other.xlsx")],
+            }
+        )
+        result, payload, _ = self.search()
+        self.assertEqual(0, result)
+        self.assertEqual(PLAN_ID, payload["binding"]["plan_id"])
+        self.assertEqual(2, payload["snapshots_total"])
+        self.assertEqual([[NEW_ID], [LEGACY_ID]], [self.batch(call) for call in self.find_calls()])
+        versions = {match["path"]: match["versions"] for match in payload["matches"]}
+        self.assertEqual({"/C/Docs/Budget.xlsx", "/C/Docs/Budget-old.xlsx"}, set(versions))
+        self.assertEqual(
+            [("plan", NEW_ID, LEGACY_ID, 2)],
+            [(v["binding_state"], v["snapshot_id"], v["first_snapshot_id"], v["backups"]) for v in versions["/C/Docs/Budget.xlsx"]],
+        )
+        self.assertEqual("legacy_unbound", versions["/C/Docs/Budget-old.xlsx"][0]["binding_state"])
+
+    def test_restic_sees_only_an_allow_listed_environment_while_searching(self) -> None:
+        self.backups(2)
+        planted = {
+            "RESTIC_PASSWORD_COMMAND": r"C:\planted\evil.cmd",
+            "RESTIC_REPOSITORY_FILE": r"C:\planted\repository.txt",
+            "RCLONE_CONFIG_PLANTED_TYPE": "sftp",
+            "PYTHONPATH": r"C:\planted",
+        }
+        with mock.patch.dict(os.environ, planted):
+            result, _, stderr = self.search()
+        self.assertEqual(0, result, stderr)
+        calls = [json.loads(line) for line in self.fake_log.read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(any("find" in call["args"] for call in calls))
+        for call in calls:
+            names = set(call["environment"])
+            self.assertFalse(names & set(planted), call["args"])
+            self.assertIn("RESTIC_PASSWORD", names)
+
+    def test_a_found_name_with_square_brackets_restores_as_itself(self) -> None:
+        self.write_control(
+            tree=self.bracket_tree(),
+            find_nodes={
+                NEW_ID: [
+                    found("/C/Users/Photos [2020]", "dir"),
+                    found("/C/Users/Photos [2020]/a.txt"),
+                    # What the widened pattern also matches.
+                    found("/C/Users/Photos x2020y", "dir"),
+                ]
+            },
+        )
+        result, payload, _ = self.search("[2020]")
+        self.assertEqual(0, result)
+        self.assertEqual(["--", "*?2020?*"], self.find_calls()[0][-2:])
+        self.assertEqual(["/C/Users/Photos [2020]"], [match["path"] for match in payload["matches"]])
+        result, stderr, report, target = self.restore_selection("found", [payload["matches"][0]["path"]])
+        self.assertEqual((0, ""), (result, stderr))
+        self.assertEqual("verified", report["result"])
+        self.assertEqual(["C/Users/Photos [2020]/a.txt"], self.restored_files(target))
+
+    def run_search_process(self, *extra: str) -> subprocess.Popen:
+        return subprocess.Popen(
+            [
+                sys.executable,
+                "-I",
+                str(SOURCE_ROOT / "restore.py"),
+                *self.base_arguments(),
+                "--find-json",
+                "--find-text=Budget",
+                *extra,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
+    def test_the_time_budget_holds_for_the_whole_process(self) -> None:
+        ids = self.backups(6)
+        self.write_found(find_sleep={ids[1]: 60})
+        started = time.monotonic()
+        process = self.run_search_process("--find-seconds=5")
+        stdout, stderr = process.communicate(timeout=30)
+        self.assertLess(time.monotonic() - started, 7.5)
+        self.assertEqual(0, process.returncode, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(("more", 1, ids[1]), (payload["status"], payload["snapshots_searched"], payload["next_from_snapshot_id"]))
+        self.assertLess(payload["elapsed_ms"], 6000)
+
+    @unittest.skipUnless(os.name == "nt", "Windows job objects")
+    def test_stopping_the_search_also_stops_restic(self) -> None:
+        ids = self.backups(2)
+        pid_file = self.root / "find.pid"
+        self.write_found(find_sleep={ids[0]: 120}, pid_file=str(pid_file))
+        process = self.run_search_process("--find-seconds=60")
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        try:
+            deadline = time.monotonic() + 20
+            while not (pid_file.is_file() and pid_file.read_text(encoding="utf-8")):
+                self.assertIsNone(process.poll(), process.stderr.read() if process.poll() is not None else "")
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.05)
+            handle = kernel32.OpenProcess(0x00100000, False, int(pid_file.read_text(encoding="utf-8")))  # SYNCHRONIZE
+            self.assertTrue(handle)
+            try:
+                # As the manager does when a search outlasts its own limit.
+                process.kill()
+                process.wait(timeout=10)
+                self.assertEqual(0, kernel32.WaitForSingleObject(handle, 10_000))
+            finally:
+                kernel32.CloseHandle(handle)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=10)
+
+
 class ResticLiteralPatternTests(unittest.TestCase):
     """The include pattern for a chosen path, checked with fnmatch, which reads "[" as Restic does."""
 
@@ -2121,6 +2693,100 @@ class PinnedResticRestoreTests(unittest.TestCase):
             self.assertEqual((1, 0), (result, payload["restic_exit_code"]))
             self.assertEqual(("partial", False), (payload["result"], payload["verified"]))
             self.assertIn("without restoring every chosen item (1 of 1 missing)", payload["error"])
+
+    def test_find_looks_through_every_backup_by_name(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rewindle-find-") as root_text:
+            root = Path(root_text)
+            source = root / "source"
+            for relative in ("Budget 2026.xlsx", "Budgets/notes.txt", "Photos [2020]/a.txt", "Photos x2020y/b.txt"):
+                path = source / Path(relative)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"fixture\n")
+            password = "pinned-restic-find-test-only-" + "x" * 40
+            key = root / "recovery-key.txt"
+            key.write_text(f"Password: {password}\n", encoding="ascii")
+            repository = root / "repository"
+            environment = {
+                name: os.environ[name] for name in ("SYSTEMROOT", "TEMP", "TMP") if name in os.environ
+            }
+            environment["RESTIC_PASSWORD"] = password
+            common = [str(RESTIC), "--repo", str(repository), "--no-cache"]
+            backup = ["backup", str(source), "--host", "TESTHOST", "--tag", "scheduled"]
+            for arguments in (["init"], backup, None, backup):
+                if arguments is None:
+                    # A new version of the file between the two backups.
+                    (source / "Budget 2026.xlsx").write_bytes(b"fixture, changed\n")
+                    continue
+                finished = subprocess.run(
+                    [*common, *arguments],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=120,
+                    env=environment,
+                )
+                self.assertEqual(0, finished.returncode, finished.stderr)
+            cache = root / "cache"
+            cache.mkdir()
+            config_path = root / "backup-config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "repository": str(repository),
+                        "repository_volume_serial": "00000000",
+                        "restic_executable": str(RESTIC),
+                        "state_directory": str(root / "state"),
+                        "recovery_key_file": str(key),
+                        "hostname": "TESTHOST",
+                        "scheduled_tag": "scheduled",
+                        "sources": [str(source)],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def search(text: str) -> dict:
+                stdout = io.StringIO()
+                inherited = {
+                    name: value for name, value in os.environ.items() if not name.upper().startswith("RESTIC_")
+                }
+                with mock.patch.dict(os.environ, inherited, clear=True), mock.patch.object(
+                    restore, "tie_children_to_this_process"
+                ), redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                    result = restore.main(
+                        [
+                            "--config", str(config_path),
+                            "--repository", str(repository),
+                            "--restic", str(RESTIC),
+                            "--recovery-key-file", str(key),
+                            "--cache-dir", str(cache),
+                            "--no-restic-lock",
+                            "--find-json",
+                            f"--find-text={text}",
+                            "--find-seconds=60",
+                        ]
+                    )
+                self.assertEqual(0, result)
+                return json.loads(stdout.getvalue())
+
+            payload = search("budget")
+            self.assertEqual(("complete", 2, 2), (payload["status"], payload["snapshots_total"], payload["snapshots_searched"]))
+            matches = {match["name"]: match for match in payload["matches"]}
+            self.assertEqual({"Budget 2026.xlsx", "Budgets"}, set(matches))
+            self.assertEqual("dir", matches["Budgets"]["type"])
+            self.assertEqual(2, matches["Budgets"]["versions"][0]["backups"])
+            versions = matches["Budget 2026.xlsx"]["versions"]
+            self.assertEqual([17, 8], [version["size"] for version in versions])
+            for version in versions:
+                self.assertRegex(version["mtime"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$")
+            # "notes.txt" in the matching folder, in each backup.
+            self.assertEqual(2, payload["skipped"])
+
+            payload = search("[2020]")
+            self.assertEqual(["Photos [2020]"], [match["name"] for match in payload["matches"]])
+            self.assertTrue(payload["matches"][0]["path"].endswith("/source/Photos [2020]"))
 
 
 if __name__ == "__main__":
