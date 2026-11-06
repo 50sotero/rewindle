@@ -191,21 +191,22 @@ class AnomalyReviewTests(unittest.TestCase):
             fixture = ReviewFixture(Path(root_text))
             fixture.evidence_path.unlink()
             atomic_write_json(fixture.evidence_path, fixture.evidence)
+            # approve() resolves the configuration path, so a temporary folder with a short (8.3) name arrives in its long form.
             descriptors = {
-                fixture.evidence_path: INSTALLED_EVIDENCE_SDDL,
-                fixture.state: INSTALLED_STATE_FOLDER_SDDL,
+                fixture.evidence_path.resolve(): INSTALLED_EVIDENCE_SDDL,
+                fixture.state.resolve(): INSTALLED_STATE_FOLDER_SDDL,
             }
             seen: list[Path] = []
 
             def installed_descriptor(path: Path, *, include_owner: bool = False) -> str:
                 self.assertTrue(include_owner)
-                seen.append(Path(path))
-                return descriptors[Path(path)]
+                seen.append(Path(path).resolve())
+                return descriptors[Path(path).resolve()]
 
             with mock.patch.object(anomaly_review, "_security_sddl", installed_descriptor):
                 result = fixture.approve()
             self.assertEqual("approved", result["state"])
-            self.assertEqual([fixture.evidence_path, fixture.state], seen)
+            self.assertEqual([fixture.evidence_path.resolve(), fixture.state.resolve()], seen)
 
     def test_evidence_a_user_could_change_is_refused(self) -> None:
         with tempfile.TemporaryDirectory(prefix="anomaly-review-unprotected-") as root_text:
@@ -217,13 +218,13 @@ class AnomalyReviewTests(unittest.TestCase):
                 fixture.approve()
             user_writable_folder = INSTALLED_STATE_FOLDER_SDDL.replace(f"0x1200a9;;;{SID}", f"0x1301bf;;;{SID}")
             descriptors = {
-                fixture.evidence_path: INSTALLED_EVIDENCE_SDDL,
-                fixture.state: user_writable_folder,
+                fixture.evidence_path.resolve(): INSTALLED_EVIDENCE_SDDL,
+                fixture.state.resolve(): user_writable_folder,
             }
             with mock.patch.object(
                 anomaly_review,
                 "_security_sddl",
-                lambda path, include_owner=False: descriptors[Path(path)],
+                lambda path, include_owner=False: descriptors[Path(path).resolve()],
             ):
                 with self.assertRaisesRegex(RuntimeError, "evidence folder is not protected"):
                     fixture.approve()
