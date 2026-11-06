@@ -588,7 +588,8 @@ namespace ResticBackuper.Dashboard
             }
         }
 
-        private static bool TryResolveLocalToUtc(
+        // Also used by the backup alerts, to place Task Scheduler's last run (a local time) against a slot.
+        internal static bool TryResolveLocalToUtc(
             DateTime local,
             TimeZoneInfo localTimeZone,
             bool preferLaterAmbiguousOccurrence,
