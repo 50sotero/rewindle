@@ -711,10 +711,12 @@ class BackupSpaceWiringTests(unittest.TestCase):
             self.assertNotIn(forbidden, self.space)
 
     def test_harnesses_with_fixed_source_lists_keep_compiling(self) -> None:
-        # Several tests compile these files without BackupSpace.cs, so they never name its types.
-        for name in ("Telemetry.cs", "SourceConfiguration.cs", "DiagnosticExporter.cs", "EngineProfile.cs"):
-            with self.subTest(file=name):
-                self.assertIsNone(re.search(r"(?<![A-Za-z])BackupSpace[A-Z]", (DASHBOARD / name).read_text(encoding="utf-8")))
+        # Several tests compile these files without BackupSpace.cs, so they never name its types. (Only read
+        # here, never compiled, so the names are stems.)
+        for stem in ("Telemetry", "SourceConfiguration", "DiagnosticExporter", "EngineProfile"):
+            with self.subTest(file=stem):
+                text = (DASHBOARD / f"{stem}.cs").read_text(encoding="utf-8")
+                self.assertIsNone(re.search(r"(?<![A-Za-z])BackupSpace[A-Z]", text))
 
     def test_the_build_compiles_the_new_sources(self) -> None:
         for name in ("BackupSpace.cs", "SpaceWarningStore.cs", "DashboardWindow.BackupSpace.cs"):
