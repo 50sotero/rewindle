@@ -448,6 +448,14 @@ namespace ResticBackuper.Dashboard
             value["wake_to_run"] = schedule.WakeToRun;
             value["allow_start_on_batteries"] = schedule.AllowStartOnBatteries;
             value["stop_if_going_on_batteries"] = schedule.StopIfGoingOnBatteries;
+            // What Task Scheduler recorded for the last run: whether it could be read, when (local time) and the result.
+            value["last_run_known"] = schedule.LastRunKnown;
+            value["last_run_time"] = schedule.LastRunTime.HasValue
+                ? schedule.LastRunTime.Value.ToString("yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture)
+                : null;
+            value["last_task_result"] = schedule.LastTaskResult.HasValue
+                ? TaskSchedule.DescribeTaskResult(schedule.LastTaskResult.Value)
+                : null;
             value["state"] = schedule.State.ToString();
             value["next_run_local"] = schedule.NextRunTime.HasValue
                 ? schedule.NextRunTime.Value.ToString("o", CultureInfo.InvariantCulture)
