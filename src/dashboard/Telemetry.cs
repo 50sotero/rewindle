@@ -89,6 +89,9 @@ namespace ResticBackuper.Dashboard
         public string TypeKey { get; set; }
         public string StateKey { get; set; }
         public DateTime StartedUtc { get; set; }
+        // When the run finished (UTC), for the backup drive forecast (BackupSpace.cs), which reads only verified backups and needs
+        // their finish times. Nothing new is kept in run-history.json for them.
+        public DateTime FinishedUtc { get; set; }
 
         // The year appears once a run is from an earlier year, so a history that spans years stays
         // unambiguous without lengthening every recent date.
@@ -187,6 +190,12 @@ namespace ResticBackuper.Dashboard
         public string PhaseLabel { get; set; }
         public DateTime LastUpdatedLocal { get; set; }
         public DateTime? LastVerifiedFinishedUtc { get; set; }
+        // What the backups take on the backup location after the latest verified backup, or -1 when nothing recorded it (see
+        // TelemetryReader.ReadBackupsBytes). Estimated: worked out from Google Drive's count before that backup plus what it saved.
+        public long BackupsBytes { get; set; }
+        public bool BackupsBytesEstimated { get; set; }
+        // The failure_code of the run shown, when it failed (for example "repository_low_space"), or empty.
+        public string FailureCode { get; set; }
         public string RunId { get; set; }
         public string SnapshotId { get; set; }
         public OffsiteStatusView OffsiteStatus { get; set; }
@@ -209,6 +218,8 @@ namespace ResticBackuper.Dashboard
             SnapshotId = string.Empty;
             CancelOutcome = string.Empty;
             MaintenanceHoldDetail = string.Empty;
+            BackupsBytes = -1;
+            FailureCode = string.Empty;
             OffsiteStatus = new OffsiteStatusView();
             History = new List<RunMetricView>();
             HistoryTruncated = false;
@@ -454,6 +465,9 @@ namespace ResticBackuper.Dashboard
                     out lastVerifiedFinishedUtc)
                     ? lastVerifiedFinishedUtc
                     : (DateTime?)null;
+                bool backupsBytesEstimated;
+                snapshot.BackupsBytes = ReadBackupsBytes(lastSuccessRead.Document, out backupsBytesEstimated);
+                snapshot.BackupsBytesEstimated = backupsBytesEstimated;
                 snapshot.History = BuildHistoryViews();
                 snapshot.HistoryTruncated = historyTruncated;
 
@@ -1838,6 +1852,9 @@ namespace ResticBackuper.Dashboard
                     : phase.StatusLabel;
             snapshot.IsActive = active;
             snapshot.IsFailure = terminalFailure;
+            snapshot.FailureCode = terminalFailure
+                ? CleanIdentifier(GetString(document, "failure_code", string.Empty), 100).Trim().ToLowerInvariant()
+                : string.Empty;
             snapshot.IsSuccess = terminalSuccess;
             snapshot.IsCancelled = terminalCancelled;
             snapshot.HasMaintenanceHold = terminalSuccess
@@ -2013,7 +2030,7 @@ namespace ResticBackuper.Dashboard
                 case "source_data_unreadable":
                     return "Some files couldn\u2019t be read (a program may have had them open), so this backup is incomplete. The next backup tries again.";
                 case "repository_low_space":
-                    return "The backup drive doesn\u2019t have enough free space. Free up some space on it, then try again.";
+                    return "The backup drive doesn\u2019t have enough free space. Free up some space on it by removing other files (never anything inside the backup folder), then try again.";
                 case "volume_identity_mismatch":
                     return "The drive that holds your backups is not the one Rewindle expects. Plug in the original backup drive.";
                 case "repository_storage_unavailable":
@@ -2709,7 +2726,8 @@ namespace ResticBackuper.Dashboard
                     SnapshotShort = ShortSnapshot(item.SnapshotId),
                     TypeKey = item.TypeKey,
                     StateKey = item.StateKey,
-                    StartedUtc = DateTime.SpecifyKind(item.StartedUtc, DateTimeKind.Utc)
+                    StartedUtc = DateTime.SpecifyKind(item.StartedUtc, DateTimeKind.Utc),
+                    FinishedUtc = item.FinishedUtc
                 })
                 .ToList();
         }
@@ -3163,6 +3181,74 @@ namespace ResticBackuper.Dashboard
             }
             percent = value;
             return true;
+        }
+
+        // What the backups take on the backup location after the latest verified backup (last-success.json). The Rewindle engine measures
+        // it after each verified backup (repository_bytes_after). Otherwise, for a backup location in Google Drive, both engines count every
+        // object before the run (repository_readiness, or the legacy engine's repository_storage_preflight, total_bytes), and the run's own
+        // saved data is added to it: an estimate. Anything else is -1, so the page leaves the size out rather than guess.
+        internal static long ReadBackupsBytes(IDictionary<string, object> lastSuccess, out bool estimated)
+        {
+            estimated = false;
+            if (lastSuccess == null)
+            {
+                return -1;
+            }
+            long measured = ReadByteCount(lastSuccess, "repository_bytes_after");
+            if (measured >= 0)
+            {
+                return measured;
+            }
+            long counted = ReadByteCount(GetDictionary(lastSuccess, "repository_readiness"), "total_bytes");
+            if (counted < 0)
+            {
+                counted = ReadByteCount(GetDictionary(lastSuccess, "repository_storage_preflight"), "total_bytes");
+            }
+            if (counted < 0)
+            {
+                return -1;
+            }
+            IDictionary<string, object> summary = GetDictionary(lastSuccess, "summary");
+            long saved = ReadByteCount(summary, "data_added_packed");
+            if (saved < 0)
+            {
+                saved = ReadByteCount(summary, "data_added");
+            }
+            if (saved > 0 && counted > long.MaxValue - saved)
+            {
+                return -1;
+            }
+            estimated = true;
+            return counted + Math.Max(0, saved);
+        }
+
+        // A byte count as the engines write it: a whole number, 0 or more. A string, a fraction, true or false, or a number too large is
+        // not one (GetLong would read true as 1 and "123" as 123), so it is -1.
+        private static long ReadByteCount(IDictionary<string, object> source, string key)
+        {
+            object value;
+            if (source == null || !source.TryGetValue(key, out value) || value == null)
+            {
+                return -1;
+            }
+            if (value is int)
+            {
+                return Math.Max(-1, (int)value);
+            }
+            if (value is long)
+            {
+                return Math.Max(-1L, (long)value);
+            }
+            if (value is decimal)
+            {
+                decimal number = (decimal)value;
+                if (number < 0 || number > long.MaxValue || decimal.Truncate(number) != number)
+                {
+                    return -1;
+                }
+                return (long)number;
+            }
+            return -1;
         }
 
         private static IDictionary<string, object> GetDictionary(

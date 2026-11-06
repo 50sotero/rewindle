@@ -330,6 +330,7 @@ namespace ResticBackuper.Dashboard
             this.themePreference = this.themeResolution.Preference;
             this.motionResolution = DashboardMotion.LoadAndResolve();
             this.motionPreference = this.motionResolution.Preference;
+            LoadSpaceWarningPreference();
 
             Title = "Rewindle";
             // The width is fitted to the work area as the height is: 1280 DIPs is wider than a 1080p screen at 175%.
@@ -4285,6 +4286,9 @@ namespace ResticBackuper.Dashboard
                 repositoryVolumePath = path;
                 repositoryVolumeText = "Checking storage volume\u2026";
                 repositoryVolumeReady = true;
+                repositoryVolumeFreeBytes = -1;
+                repositoryVolumeTotalBytes = -1;
+                repositoryVolumeRead = false;
                 repositoryVolumeNextProbeAt = 0;
             }
             if (!repositoryVolumeProbeInFlight &&
@@ -4300,16 +4304,28 @@ namespace ResticBackuper.Dashboard
             repositoryVolumeProbeInFlight = true;
             string text;
             bool ready = true;
+            long freeBytes = -1;
+            long totalBytes = -1;
             try
             {
-                Tuple<string, bool> probed = await Task.Run(delegate
+                RepositoryVolumeProbe probed = await Task.Run(delegate
                 {
                     bool driveReady;
                     string described = DescribeRepositoryVolume(repositoryPath, out driveReady);
-                    return Tuple.Create(described, driveReady);
+                    // The free space and size for the Backup location card (DashboardWindow.BackupSpace.cs), from the drive root only.
+                    long driveFree;
+                    long driveTotal;
+                    if (!driveReady || !TryReadDriveSpace(repositoryPath, out driveFree, out driveTotal))
+                    {
+                        driveFree = -1;
+                        driveTotal = -1;
+                    }
+                    return new RepositoryVolumeProbe(described, driveReady, driveFree, driveTotal);
                 });
-                text = probed.Item1;
-                ready = probed.Item2;
+                text = probed.Text;
+                ready = probed.Ready;
+                freeBytes = probed.FreeBytes;
+                totalBytes = probed.TotalBytes;
             }
             catch
             {
@@ -4326,12 +4342,18 @@ namespace ResticBackuper.Dashboard
             }
             repositoryVolumeNextProbeAt = MonotonicAfter(RepositoryVolumeRefreshInterval);
             if (string.Equals(text, repositoryVolumeText, StringComparison.Ordinal) &&
-                ready == repositoryVolumeReady)
+                ready == repositoryVolumeReady &&
+                repositoryVolumeRead &&
+                freeBytes == repositoryVolumeFreeBytes &&
+                totalBytes == repositoryVolumeTotalBytes)
             {
                 return;
             }
             repositoryVolumeText = text;
             repositoryVolumeReady = ready;
+            repositoryVolumeFreeBytes = freeBytes;
+            repositoryVolumeTotalBytes = totalBytes;
+            repositoryVolumeRead = true;
             UpdateHeaderSubtitle();
             PublishWebPresentationState();
         }
@@ -7199,6 +7221,11 @@ namespace ResticBackuper.Dashboard
             // see it start) and the ones that return early below.
             bool wasActive = lastSnapshotWasActive;
             lastSnapshotWasActive = snapshot.IsActive;
+            if (wasActive && !snapshot.IsActive)
+            {
+                // The run that just ended changed how full the backup drive is.
+                ProbeRepositorySpaceSooner();
+            }
             if (lastStateKey == null)
             {
                 lastStateKey = snapshot.StateKey;

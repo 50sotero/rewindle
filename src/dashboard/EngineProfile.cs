@@ -140,6 +140,11 @@ namespace ResticBackuper.Dashboard
         // records only the immutable evidence hash. (Neither engine pins a repository path: a proof is bound to the
         // repository of the installed backup plan, see TelemetryReader.BuildOffsiteStatus.)
         public bool CloudProofRequiresAssetBinding { get; private set; }
+        // The Rewindle engine records how much space the backups take after each verified backup (repository_bytes_after), and the
+        // Backup location card forecasts from its runs when the drive will be full. The legacy personal edition records no such size,
+        // so with it the card shows only what the dashboard reads itself (free space, the drive's size and the engine's reserve) and
+        // says that the forecast isn't available with that backup program.
+        public bool ForecastsBackupSpace { get; private set; }
 
         internal static EngineProfile Rewindle
         {
@@ -519,6 +524,7 @@ namespace ResticBackuper.Dashboard
                 "offsite_promotion"
             });
             profile.CloudProofRequiresAssetBinding = true;
+            profile.ForecastsBackupSpace = true;
             profile.AnomalyReview = new AnomalyReviewWording
             {
                 ButtonHelp = "Far more changed in this backup than usual. If that's expected, confirm it here. This doesn't delete or change any backup.",
@@ -566,6 +572,7 @@ namespace ResticBackuper.Dashboard
             profile.RecoveryToolsDirectoryName = null;
             profile.AnomalyReviewScopes = Array.AsReadOnly(new[] { "offsite_promotion" });
             profile.CloudProofRequiresAssetBinding = false;
+            profile.ForecastsBackupSpace = false;
             profile.AnomalyReview = new AnomalyReviewWording
             {
                 ButtonHelp = "Far more changed in this backup than usual, so sending it to your off-site copy is on hold. If that's expected, approve it here. Nothing is deleted.",
