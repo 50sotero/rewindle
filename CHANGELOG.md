@@ -26,6 +26,13 @@ labels. Releases before 0.2.0 were published under the name ResticBackuper.
   by deleting anything inside the backup folder. With the earlier personal
   edition the card shows the free space and says that the forecast isn't
   available with that backup program.
+- **What each backup did.** Activity and a run's details count the files each
+  backup found new, changed and unchanged ("312 new, 41 changed, 12,040
+  unchanged"), and Protection and Restore say how far back your backups go
+  ("412 backups, oldest 3 Mar 2025"). Runs recorded before this version, and
+  anything Rewindle can't read, show nothing rather than a zero. With the
+  earlier personal edition of the backup service, the backups are counted the
+  first time Restore lists them.
 
 ### Changed
 

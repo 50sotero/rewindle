@@ -63,6 +63,9 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
 
 - One status line says when the last backup was verified and calls out a
   protected folder or backup drive that cannot be found.
+- The **Backup location** card says how far back your backups go ("412
+  backups, oldest 3 Mar 2025"), as counted by the last verified backup or the
+  last time Restore listed them; the Restore page says it too.
 - A backup missed while the PC was off, asleep or signed out shows as
   **Catching up** while Windows starts it, and becomes **Backup overdue** only
   if it has not started 45 minutes after you sign in or wake the PC.
@@ -103,6 +106,9 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
 - Every run Rewindle has observed (the newest 400), with search, date and
   result filters, and run details: an event timeline, the snapshot, and
   suggested next steps for a failure.
+- What each backup did: how many files were new, changed and unchanged
+  ("312 new, 41 changed, 12,040 unchanged"), under the run's totals and in its
+  details. Runs recorded before Rewindle kept these counts show none.
 - Duration and size trends of verified runs. Failed or cancelled runs are
   marked on the chart, never plotted as values.
 - Works from the keyboard: arrow keys, `Home`, `End`, `PageUp` and `PageDown`

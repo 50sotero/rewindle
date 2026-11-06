@@ -224,6 +224,16 @@ run record. The canary proves that this run can locate, decrypt, and restore a
 known small file; it does not prove that every user file is healthy. Independent
 restores of representative user data remain essential.
 
+The record also says what the run did and how far back the backups go, for the
+dashboard to show and for nothing else. Restic's summary, kept whole, has the
+new, changed and unchanged file counts. From the snapshot listing step 2 already
+read, the wrapper counts the snapshots the Restore list would offer (with
+`restore.py`'s own rule, imported only for this) and records the count and the
+oldest and newest times as `snapshot_inventory`. That step is guarded: a
+problem counting leaves the record out and never fails the backup. The
+dashboard also keeps the count the Restore list last read in its per-user
+`backup-range.json`, which is how the earlier personal edition gets one.
+
 ## Components
 
 The following table describes the protected runtime and the dashboard. The
