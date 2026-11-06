@@ -65,9 +65,13 @@ a folder of one, and every look at the folder to restore into, including the
 one Review restore and Restore now take again. Such a command is answered once
 the work has begun, and what it found reaches the page in the state; until then
 the restore flow is busy and refuses every other change. A button that asks for
-something once per press (Back up now, Stop backing up, Add folder, Restore now
-and the others in `ONE_SHOT_COMMANDS`, in `web/src/oneShot.ts`) stays off from
-the press until that answer, so a double-click is one request. The host still
+something once per press (Back up now, Stop backing up, Add folder, Restore now,
+Find, Look further back, Restore this and the others in `ONE_SHOT_COMMANDS`, in
+`web/src/oneShot.ts`) stays off from the press until that answer, so a
+double-click is one request. A file search runs in the restore flow's approved
+session the same way: the command is answered once the search has begun, the
+flow is busy until its page arrives (about 20 seconds at most), and the page
+reads what it found from `restoreFlow.search`. The host still
 refuses a second folder change while one is waiting for approval.
 
 `--native` starts an older WPF-only presentation instead of the web view, for
@@ -408,6 +412,7 @@ the shortcut, and leaves that folder in place. A launch with
 | `DashboardWindow.cs` | The main window, its state, and the WPF-only presentation. |
 | `DashboardWindow.Web.cs` | WebView2 hosting and policy, the message bridge, command handling and published state. |
 | `DashboardWindow.SourcePicker.cs` / `DashboardWindow.RestoreFlow.cs` | Folder review and guided restore state. |
+| `DashboardWindow.RestoreSearch.cs` / `RestoreFileSearch.cs` | Find a file on Restore's first step: the flow's search state, commands and wording, and the text rules and page checks for the restore session's `find_files` answer. |
 | `Telemetry.cs` / `BackupFreshness.cs` / `BackupSpace.cs` | Status, run history, verification evidence and freshness; how full the backup location is and when it fills (`BackupSpace.cs` is pure, `DashboardWindow.BackupSpace.cs` feeds it and `SpaceWarningStore.cs` keeps the Low space warning). |
 | `BackupAlerts.cs` / `DashboardWindow.Alerts.cs` | Backup alerts: why a backup was missed, the failing count, notifications, `alerts.json` and the tray mark. |
 | `SourceConfiguration.cs` / `TaskSchedule.cs` | Reading the installed plan and the backup task. |
@@ -417,7 +422,7 @@ the shortcut, and leaves that folder in place. A launch with
 | `*Window.cs` | The schedule, location, recovery-readiness, restore and run-details windows. |
 | `DiagnosticExporter.cs` / `CrashLog.cs` | Redacted diagnostics and the local crash log. |
 | `DashboardTheme.cs` / `DashboardMotion.cs` / `DashboardVisualStyle.cs` | Appearance, motion and Windows accessibility preferences. |
-| `web/src/` | Application shell (`App.tsx`), bridge types, state hook, and `project.ts` (the project address, written once). |
+| `web/src/` | Application shell (`App.tsx`), bridge types, state hook, `project.ts` (the project address, written once), and `fileSearch.ts` (Find a file's words, text rules and result lines, run by Node in `tests/test_dashboard_file_search.py`). |
 | `web/src/demo/` | Sample data and a stand-in bridge. Dev server and demo build only. |
 | `web/src/setup/`, `web/setup.html` | The setup wizard's pages (its own Vite entry, built by `installer/setup/build.ps1` and never part of this app's bundle) and their sample-data bridge. See [installer/setup](../../installer/setup/README.md). |
 | `web/components/` | Beautiful UI components and Rewindle's folder, health, run-details and restore views. |

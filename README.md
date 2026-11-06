@@ -124,6 +124,9 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
   files, choose an empty destination, then review and **Restore now**. Restic
   verifies what it restores and never overwrites a file, and Rewindle then
   checks that every item you chose is in the destination.
+- **Find a file** on the first step looks for a name in all your backups,
+  newest first, and lists each version it finds with its date, size and
+  folder; **Restore this** picks one and the usual steps follow.
 - **Check recovery readiness** inspects the repository, the active credential,
   the recovery key, the recovery-tools folder, locks, free space and when a
   sample of the backup data was last read back, without a prompt. From there
@@ -225,9 +228,12 @@ listings and at most one restore over a named pipe that only your account can
 open; each side checks the other's process, and the session ends after its
 restore, when Restore closes, when the plan changes, or after 10 idle or 60
 total minutes. Choosing a backup reads nothing until you click **Browse
-files**, and folders already listed are not read again. With the legacy
-engine, each step still asks separately. The protocol is in
-[`docs/engine-contract.md`](docs/engine-contract.md), section 9.
+files**, and folders already listed are not read again. **Find a file** runs
+in the same session: a read-only `restic find` under the run lock, about 20
+seconds at a time, refused while a backup runs or is about to start. With the
+legacy engine, each step still asks separately and there is no Find a file.
+The protocol is in [`docs/engine-contract.md`](docs/engine-contract.md),
+section 9.
 
 ### Where things live
 
@@ -488,7 +494,11 @@ separate system you have tested.
 **In the dashboard.** Go to **Restore > Open Restore Center**:
 
 1. **Choose a backup.** Search and filter snapshots by date. The newest 50 are
-   listed first; **Show older backups** lists 50 more each time.
+   listed first; **Show older backups** lists 50 more each time. Or choose
+   **Find a file**, type part of its name and choose **Restore this** next to
+   the version you want: that backup and that one item are chosen for you, and
+   the flow goes on at step 3. **Look further back** searches older backups
+   when the first pass did not reach them.
 2. **Choose the files.** Browse the snapshot and select files or folders (up to
    64 items; select a parent folder to cover more), or the whole snapshot.
 3. **Choose a destination.** It must be a new or empty local folder that does

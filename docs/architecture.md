@@ -635,6 +635,21 @@ legacy engine profile) it keeps one approval per step. The protocol, bindings
 and threat model are in [`docs/engine-contract.md`](engine-contract.md),
 section 9, and [`SECURITY.md`](../SECURITY.md).
 
+A session also serves **Find a file** (`find_files`) when the capability
+document names `restore_session.find_files`. The broker runs
+`restore.py --find-json` under the run lock: a read-only `restic find` over the
+listed backups, newest first, in batches of 1, 2, 4 up to 32, for a time the
+broker chooses (20 seconds, killed at 35), with byte and node caps per batch so
+a common name ends as "too broad" instead of running out the clock. The result
+is bound to a hash of the text and to the backup it started from, and the
+dashboard checks every backup it names against the list on screen before it
+merges the page (at most 100 items and 10 versions each). Restore this selects
+that one path and the restore goes on through the usual checks. There is no
+search without a session, so the legacy engine profile offers none; the page
+then shows no Find tab. The host side is `DashboardWindow.RestoreSearch.cs` and
+`RestoreFileSearch.cs`; the page side is `RestoreFileSearch.tsx` and
+`fileSearch.ts`.
+
 ## Clean-up of old backups
 
 Nothing is forgotten or pruned automatically; clean-up removes only a list the
