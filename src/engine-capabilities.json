@@ -4,7 +4,8 @@
   "restore_session": {
     "protocol": "ResticBackuper.RestoreSession.v1",
     "request_domain": "ResticBackuper.RestoreRequest.v3",
-    "manager": "Manage-Restore.ps1"
+    "manager": "Manage-Restore.ps1",
+    "find_files": "ResticBackuper.FileSearch.v1"
   },
   "retention": {
     "manager": "Manage-Retention.ps1",
