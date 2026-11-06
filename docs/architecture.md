@@ -50,6 +50,38 @@ automatically a bounded number of times before offering **Reload**; a page that
 stops responding is given time before the user is asked to keep waiting or
 reload. Scheduled backups run separately and are unaffected.
 
+### Backup drive space
+
+The Backup location card says how full the backup location is. The host reads
+the free space and size of the location's drive root (`TotalFreeSpace`, the
+number the engine's own free-space check compares with the reserve) off the
+window's thread every minute, and sooner after **Refresh** and when a backup
+ends; it never lists the backup folder. What the backups take comes from
+`repository_bytes_after` in `last-success.json` (for Google Drive locations, the
+engine's count before the run plus what the run saved, shown as "about"); the
+reserve is `minimum_free_gib` from the plan. `BackupSpace.cs` is pure: it
+forecasts from the run history the dashboard already keeps (what each verified
+backup of the last 8 weeks saved, leaving out the single biggest one, at the
+rate backups have run, anchored on the newest run rather than the clock) and
+decides the level. Red: less free space than the reserve, so the next backup
+would be refused. Amber: full within the person's **Low space warning** (4, 8
+or 12 weeks, kept in `space-warning.json` in the dashboard's own per-user
+folder, not protected configuration), less than 1.5 times the reserve (where
+**Check recovery readiness** warns too, so the card is never calmer than it),
+or, with no forecast yet, less than a tenth of the drive above the reserve.
+Readiness can still say a drive has plenty of free space beside an amber card:
+it looks at the space now, the card at the trend. While a backup runs, the card
+keeps what it said before the run (its own writes may take the free space
+below the reserve, which the engine checks only as a run starts). Every
+sentence that asks the person to make room also says never to delete anything
+inside the backup folder. The earlier personal edition records no size, so
+with it the card shows the free space and the drive's size, keeps the red and
+amber rules that need only those, and says the forecast isn't available with
+that backup program (`EngineProfile.ForecastsBackupSpace`). The forecast counts
+only what backups add: once a retention feature removes old data, it must
+switch to the measured size over time, or it would keep warning about a backup
+whose size is steady.
+
 ### Engine profiles
 
 Every name the dashboard uses to find an engine, ask it for something, and
@@ -142,9 +174,14 @@ rclone, Restic and its inventory helper as described below.
 
 `backup.py` obtains a single-run lock, validates the configured repository
 volume and available space, and invokes Restic with the exact source and
-exclusion set. When configured, Restic asks Windows VSS for filesystem
-snapshots of local fixed NTFS sources so open files can be read from a
-consistent view.
+exclusion set. After a run is verified, and before its finish time is taken,
+it adds up the size of the repository folder and records it as
+`repository_bytes_after` in `status.json` and `last-success.json`, for the
+dashboard. That walk is read-only, never enters a link, junction or other
+reparse point (it gives up instead), stops after 15 seconds, and leaves the
+field empty rather than ever failing a verified backup. When configured,
+Restic asks Windows VSS for filesystem snapshots of local fixed NTFS sources
+so open files can be read from a consistent view.
 
 The exclusion set is the installed `excludes.txt`, read with
 `--iexclude-file` (so every rule ignores letter case), plus `--exclude-caches`

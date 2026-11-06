@@ -388,9 +388,11 @@ menu shortcut. There is no separate dashboard installer.
 
 The dashboard's own per-user data lives in `%LOCALAPPDATA%\ResticBackuperDashboard`
 (`ResticPersonalBackupDashboard` for the legacy profile): appearance and motion
-settings, `alerts.json` (backup alerts), `run-history.json` (at most 400 runs), `heartbeat.json`, `crash.log`
-and the WebView2 profile. Uninstalling Rewindle removes the install root, the
-logon task and the shortcut, and leaves that folder in place. A launch with
+settings, the text size (`zoom.json`), `alerts.json` (backup alerts), the Low
+space warning (`space-warning.json`), `run-history.json` (at most 400 runs),
+`heartbeat.json`, `crash.log` and the WebView2 profile. Uninstalling Rewindle
+removes the install root, the logon task and the shortcut, and leaves that
+folder in place. A launch with
 `--isolated-presentation-store` uses `ResticBackuperBeautifulUI` and
 `ResticBackuperDashboardBeautifulUIWebView2` in `%TEMP%` instead.
 
@@ -403,7 +405,7 @@ logon task and the shortcut, and leaves that folder in place. A launch with
 | `DashboardWindow.cs` | The main window, its state, and the WPF-only presentation. |
 | `DashboardWindow.Web.cs` | WebView2 hosting and policy, the message bridge, command handling and published state. |
 | `DashboardWindow.SourcePicker.cs` / `DashboardWindow.RestoreFlow.cs` | Folder review and guided restore state. |
-| `Telemetry.cs` / `BackupFreshness.cs` | Status, run history, verification evidence and freshness. |
+| `Telemetry.cs` / `BackupFreshness.cs` / `BackupSpace.cs` | Status, run history, verification evidence and freshness; how full the backup location is and when it fills (`BackupSpace.cs` is pure, `DashboardWindow.BackupSpace.cs` feeds it and `SpaceWarningStore.cs` keeps the Low space warning). |
 | `BackupAlerts.cs` / `DashboardWindow.Alerts.cs` | Backup alerts: why a backup was missed, the failing count, notifications, `alerts.json` and the tray mark. |
 | `SourceConfiguration.cs` / `TaskSchedule.cs` | Reading the installed plan and the backup task. |
 | `*Manager.cs`, `*Controller.cs`, `ScheduleManagerLauncher.cs` | Adapters to the engine's protected managers and helpers. |
