@@ -318,7 +318,7 @@ namespace ResticBackuper.Dashboard
             trayBalloonIsAlert = false;
         }
 
-        // Edit schedule saved the schedule turned off: the pause that follows is the person's own and is not announced.
+        // Edit schedule saved the schedule turned off: the pause is the person's own and is not announced while it lasts.
         private void NoteBackupAlertScheduleSaved(ScheduleChangeRequest requested)
         {
             if (backupAlerts != null && requested != null && !requested.Enabled)

@@ -844,7 +844,9 @@ namespace ResticBackuper.Dashboard
 
     // Decides, refresh by refresh, what the tray mark shows and whether to show a notification now. One notification per problem:
     // a problem told once (remembered in alerts.json) is never told again, an amber one waits until it has lasted 15 minutes, and
-    // one that comes while nobody is at the PC waits for them. UI thread only; the clocks are passed in so a test can drive them.
+    // one that comes while nobody is at the PC waits for them. A pause made in Rewindle's own Edit schedule is never told while it
+    // lasts (alerts.json keeps it until a schedule read shows backups on again). UI thread only; the clocks are passed in so a
+    // test can drive them.
     internal sealed class BackupAlertMonitor
     {
         private readonly BackupAlertStore store;
@@ -859,7 +861,6 @@ namespace ResticBackuper.Dashboard
         private long episodeStartedAt;
         private bool scheduleUnreadable;
         private long scheduleUnreadableSince;
-        private bool userPausedSchedule;
 
         internal BackupAlertMonitor(BackupAlertStore store, bool notificationsAllowed)
             : this(
@@ -942,14 +943,13 @@ namespace ResticBackuper.Dashboard
                 lastExplanation = inputs.Explanation ?? MissedRunExplanation.None;
                 lastFailedInARow = Math.Max(0, inputs.FailedInARow);
             }
-            if (userPausedSchedule && readable && !inputs.RunActive && scheduleReadable && inputs.Freshness != null)
+            if (scheduleReadable &&
+                inputs.Freshness != null &&
+                inputs.Freshness.State != BackupFreshnessState.Paused &&
+                inputs.Freshness.State != BackupFreshnessState.Unavailable)
             {
-                // The person turned the schedule off in Rewindle a moment ago: that pause is not news to them. The mark stays.
-                if (current.Reason == BackupAlertReason.Paused)
-                {
-                    RememberTold(current.EpisodeKey);
-                }
-                userPausedSchedule = false;
+                // The schedule reads as on: a pause the person made in Rewindle has ended, and a later pause, made anywhere, is news.
+                store.SetUserPaused(false);
             }
             if (current.Level == BackupAlertLevel.None)
             {
@@ -964,6 +964,12 @@ namespace ResticBackuper.Dashboard
             // Held while a run is going or the status can't be read: nothing is told about a state that may be changing.
             if (!notificationsAllowed || !readable || inputs.RunActive || store.WasTold(current.EpisodeKey))
             {
+                return null;
+            }
+            if (current.Reason == BackupAlertReason.Paused && store.UserPaused)
+            {
+                // The person turned the schedule off in Rewindle: not news to them, however long it lasts and however many backups
+                // they make by hand meanwhile (each one is a new problem key). The amber mark stays as the reminder.
                 return null;
             }
             if (current.Level == BackupAlertLevel.Attention &&
@@ -989,10 +995,17 @@ namespace ResticBackuper.Dashboard
             return current.ToNotification(utcNow(), TimeZoneInfo.Local);
         }
 
-        // Edit schedule just saved the schedule turned off: the paused problem that follows counts as told.
+        // Edit schedule just saved, and read back, the schedule turned off. The pause is the person's own until a schedule read
+        // shows it on again. It is kept in alerts.json beside the told problems, not among them, so neither a restart, nor a
+        // backup made by hand while paused, nor the end of the told list brings it up.
         internal void NoteUserPausedSchedule()
         {
-            userPausedSchedule = true;
+            store.SetUserPaused(true);
+        }
+
+        internal bool UserPausedSchedule
+        {
+            get { return store.UserPaused; }
         }
 
         // Turns notifications on or off; true when the choice was saved for next time. Turning them on counts the problem shown
@@ -1026,8 +1039,9 @@ namespace ResticBackuper.Dashboard
         }
     }
 
-    // alerts.json beside the dashboard's other preferences: whether notifications are on, and the problems already told. Small,
-    // strict and written atomically. A file that is missing or damaged gives the defaults (on, nothing told), so a damaged
+    // alerts.json beside the dashboard's other preferences: whether notifications are on, the problems already told, and whether
+    // the schedule is paused by the person's own choice in Rewindle (user_paused, optional, false when absent). Small, strict and
+    // written atomically. A file that is missing or damaged gives the defaults (on, nothing told), so a damaged
     // preference fails toward telling the person about a backup problem. A file that can't be read just now (in use, refused) or
     // that a newer Rewindle wrote is left alone: this run keeps its choices in memory only, so the person's saved choice survives.
     internal sealed class BackupAlertStore
@@ -1057,6 +1071,7 @@ namespace ResticBackuper.Dashboard
         private readonly Func<DateTime> utcNow;
         private List<ToldEpisode> told = new List<ToldEpisode>();
         private bool notify = true;
+        private bool userPaused;
         private bool fileWritable;
 
         // directory "" keeps everything in memory.
@@ -1075,6 +1090,12 @@ namespace ResticBackuper.Dashboard
         internal bool Notify
         {
             get { return notify; }
+        }
+
+        // The person turned the schedule off in Rewindle's Edit schedule, and no read since has shown it on.
+        internal bool UserPaused
+        {
+            get { return userPaused; }
         }
 
         // Whether choices reach the file (false: memory only for this run).
@@ -1114,6 +1135,17 @@ namespace ResticBackuper.Dashboard
         {
             notify = on;
             return TrySave();
+        }
+
+        // Written only when it changes: every refresh with the schedule on asks to clear it.
+        internal void SetUserPaused(bool paused)
+        {
+            if (userPaused == paused)
+            {
+                return;
+            }
+            userPaused = paused;
+            TrySave();
         }
 
         private void Trim()
@@ -1186,6 +1218,7 @@ namespace ResticBackuper.Dashboard
                 }
                 notify = true;
                 told = new List<ToldEpisode>();
+                userPaused = false;
                 fileWritable = false;
             }
         }
@@ -1223,6 +1256,16 @@ namespace ResticBackuper.Dashboard
             if (version != SchemaVersion || !document.TryGetValue("notify", out rawNotify) || !(rawNotify is bool))
             {
                 return LoadOutcome.Malformed;
+            }
+            bool loadedUserPaused = false;
+            object rawUserPaused;
+            if (document.TryGetValue("user_paused", out rawUserPaused))
+            {
+                if (!(rawUserPaused is bool))
+                {
+                    return LoadOutcome.Malformed;
+                }
+                loadedUserPaused = (bool)rawUserPaused;
             }
             List<ToldEpisode> loaded = new List<ToldEpisode>();
             object rawTold;
@@ -1271,6 +1314,7 @@ namespace ResticBackuper.Dashboard
                 }
             }
             notify = (bool)rawNotify;
+            userPaused = loadedUserPaused;
             told = loaded;
             Trim();
             return LoadOutcome.Read;
@@ -1289,6 +1333,7 @@ namespace ResticBackuper.Dashboard
             Dictionary<string, object> document = new Dictionary<string, object>();
             document["schema_version"] = SchemaVersion;
             document["notify"] = notify;
+            document["user_paused"] = userPaused;
             document["told"] = entries;
             return new JavaScriptSerializer().Serialize(document);
         }

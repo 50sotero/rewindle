@@ -565,6 +565,11 @@ namespace ResticBackuper.Dashboard
             monitor.NoteUserPausedSchedule();
         }
 
+        public bool UserPausedSchedule
+        {
+            get { return monitor.UserPausedSchedule; }
+        }
+
         public bool SetNotifications(bool on)
         {
             return monitor.SetNotifications(on);
@@ -609,6 +614,16 @@ namespace ResticBackuper.Dashboard
         public bool SetNotify(bool on)
         {
             return store.TrySetNotify(on);
+        }
+
+        public bool UserPaused
+        {
+            get { return store.UserPaused; }
+        }
+
+        public void SetUserPaused(bool paused)
+        {
+            store.SetUserPaused(paused);
         }
 
         public static bool IsValidKey(string key)
@@ -1089,13 +1104,42 @@ try {
     Assert-Equal '' ($d.Update('status=0', 'present')) 'Nothing is shown while the status cannot be read.'
     Assert-True ($d.Update($failing, 'present').StartsWith('Backups keep failing|')) 'It is shown once things are settled.'
 
-    # A pause made in Rewindle is not news.
+    # A pause made in Rewindle is not news while it lasts: not when it is made, not after a backup made by hand meanwhile (a new
+    # last verified backup, so a new problem key), not after a restart. A read with the schedule on ends it, and a later pause
+    # made elsewhere is told.
     $d = New-Driver 'paused'
+    $pausedFile = Join-Path $fixtureRoot 'paused\alerts.json'
     $d.NoteUserPausedSchedule()
     Assert-Equal '' ($d.Update('freshness=Paused', 'present'))
     $d.Advance(60)
     Assert-Equal '' ($d.Update('freshness=Paused', 'present')) 'A pause the person made is never told.'
     Assert-Equal 'attention|paused' $d.Mark 'The amber mark stays for a pause.'
+    Assert-True ((Get-Content -LiteralPath $pausedFile -Raw).Contains('"user_paused":true')) 'The pause made in Rewindle is kept in alerts.json.'
+    $byHand = 'freshness=Paused;verified=2026-07-21T09:30:00Z'
+    Assert-Equal '' ($d.Update($byHand, 'present'))
+    $d.Advance(16)
+    Assert-Equal '' ($d.Update($byHand, 'present')) 'A pause the person made is not told after a backup made by hand.'
+    Assert-Equal 'attention|paused' $d.Mark 'The amber mark stays after a backup made by hand.'
+    $byHandAgain = 'freshness=Paused;verified=2026-07-21T10:45:00Z'
+    $d.Advance(60)
+    Assert-Equal '' ($d.Update($byHandAgain, 'present'))
+    $d.Advance(16)
+    Assert-Equal '' ($d.Update($byHandAgain, 'present')) 'Nor after the next one.'
+    Assert-Equal '' ($d.Update('active=1;freshness=Paused', 'present'))
+    Assert-Equal '' ($d.Update('schedule=0;freshness=Unavailable', 'present'))
+    Assert-True $d.UserPausedSchedule 'A run or a schedule that cannot be read does not end the pause made in Rewindle.'
+    Assert-True (-not $d.WasTold("paused|$key") -and -not $d.WasTold('paused|2026-07-21T09:30:00Z')) 'The pause made in Rewindle takes no place among the problems told.'
+    $again = New-Driver 'paused'
+    Assert-True $again.UserPausedSchedule 'A restart reads the pause made in Rewindle back.'
+    Assert-Equal '' ($again.Update($byHandAgain, 'present'))
+    $again.Advance(16)
+    Assert-Equal '' ($again.Update($byHandAgain, 'present')) 'A pause the person made is not told after a restart.'
+    Assert-Equal '' ($again.Update('freshness=Healthy;verified=2026-07-21T10:45:00Z', 'present'))
+    Assert-True (-not $again.UserPausedSchedule) 'A read with the schedule on ends the pause made in Rewindle.'
+    Assert-True ((Get-Content -LiteralPath $pausedFile -Raw).Contains('"user_paused":false')) 'The end of the pause made in Rewindle is saved.'
+    Assert-Equal '' ($again.Update($byHandAgain, 'present'))
+    $again.Advance(16)
+    Assert-True ($again.Update($byHandAgain, 'present').StartsWith('Automatic backups are paused|')) 'A later pause made elsewhere is told.'
     $d = New-Driver 'paused-elsewhere'
     Assert-Equal '' ($d.Update('freshness=Paused', 'present'))
     $d.Advance(16)
@@ -1147,6 +1191,15 @@ try {
     Assert-True ($text.Contains('"schema_version":1') -and $text.Contains('"notify":false') -and $text.Contains("overdue|$key")) "The file holds the choice and the told problem. Got '$text'."
     $s = New-Store $dir
     Assert-True ((-not $s.Notify) -and $s.WasTold("overdue|$key")) 'The choice and the told problem are read back.'
+    Assert-True (-not $s.UserPaused) 'Nothing is paused by the person until they pause in Rewindle.'
+    $s.SetUserPaused($true)
+    Assert-True ((Read-AlertsFile $dir).Contains('"user_paused":true')) 'A pause made in Rewindle is saved.'
+    $s = New-Store $dir
+    Assert-True ($s.UserPaused -and (-not $s.Notify) -and $s.WasTold("overdue|$key")) 'A pause made in Rewindle is read back beside the choice and the told problem.'
+    $dir = Join-Path $fixtureRoot 'store\no-user-paused'
+    Write-AlertsFile $dir '{"schema_version":1,"notify":false,"told":[]}'
+    $s = New-Store $dir
+    Assert-True ((-not $s.UserPaused) -and (-not $s.Notify) -and $s.Persists) 'A file without user_paused is read as not paused, with its choice.'
 
     foreach ($case in @(
         @('garbage', 'not json at all'),
@@ -1154,12 +1207,13 @@ try {
         @('no-notify', '{"schema_version":1,"told":[]}'),
         @('string-notify', '{"schema_version":1,"notify":"no","told":[]}'),
         @('old-schema', '{"schema_version":0,"notify":false,"told":[]}'),
-        @('bad-told', '{"schema_version":1,"notify":false,"told":"overdue|x"}')
+        @('bad-told', '{"schema_version":1,"notify":false,"told":"overdue|x"}'),
+        @('string-user-paused', '{"schema_version":1,"notify":false,"user_paused":"yes","told":[]}')
     )) {
         $dir = Join-Path $fixtureRoot ('store\' + $case[0])
         Write-AlertsFile $dir $case[1]
         $s = New-Store $dir
-        Assert-True ($s.Notify -and $s.Persists) "A damaged file ($($case[0])) gives the defaults and may be written again."
+        Assert-True ($s.Notify -and $s.Persists -and -not $s.UserPaused) "A damaged file ($($case[0])) gives the defaults and may be written again."
     }
     $dir = Join-Path $fixtureRoot 'store\bad-utf8'
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -1207,6 +1261,7 @@ try {
     Assert-True ($s.Notify -and -not $s.Persists) 'A newer file gives in-memory defaults.'
     Assert-True (-not $s.SetNotify($false)) 'Nothing is saved over a newer file.'
     $s.Remember("overdue|$key", $now)
+    $s.SetUserPaused($true)
     Assert-Equal $newer (Read-AlertsFile $dir) 'A newer file is never rewritten.'
 
     # A file another program holds open: this run keeps defaults in memory, and the saved Off survives.

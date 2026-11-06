@@ -202,8 +202,10 @@ preference, the text size (`zoom.json`), `run-history.json` (schema 1, at most 4
 profile in `WebView2\`. With `--isolated-presentation-store` the isolated folders are used instead and history and
 heartbeat writes are off.
 
-`alerts.json` (backup alerts, beside `settings.json`): `schema_version` 1, `notify` (bool, default true) and `told` (at
-most 8 entries of `key` `<reason>|<last verified UTC or none>` and `at_utc`; entries older than 30 days are dropped). At
+`alerts.json` (backup alerts, beside `settings.json`): `schema_version` 1, `notify` (bool, default true), `user_paused`
+(bool, optional, default false: the schedule was turned off in the dashboard's Edit schedule, and no read since has shown it
+on; that pause is not told) and `told` (at most 8 entries of `key` `<reason>|<last verified UTC or none>` and `at_utc`;
+entries older than 30 days are dropped). At
 most 16 KiB, strict UTF-8, written atomically, never through a reparse point. A missing or damaged file gives the
 defaults; one that cannot be read just now, or that a newer version wrote, is left untouched and this run keeps its
 choices in memory. With `--isolated-presentation-store`, or a `--state-dir` other than the engine's own, it is neither

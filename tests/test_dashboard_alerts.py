@@ -195,6 +195,12 @@ class BackupAlertsSourceTests(unittest.TestCase):
                 with self.subTest(text=text[:60], word=word):
                     self.assertNotIn(word, text.lower())
 
+    def test_a_pause_made_in_rewindle_is_kept_apart_from_the_told_problems(self) -> None:
+        note = block(self.alerts, "internal void NoteUserPausedSchedule(")
+        self.assertIn("store.SetUserPaused(true);", note)
+        self.assertNotIn("RememberTold", note)
+        self.assertIn('document["user_paused"] = userPaused;', self.alerts)
+
     def test_the_sample_data_shows_the_alerts(self) -> None:
         demo = read(WEB / "src" / "demo" / "demoState.ts")
         bridge = read(WEB / "src" / "demo" / "mockBridge.ts")
