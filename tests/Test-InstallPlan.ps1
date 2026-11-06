@@ -1085,7 +1085,7 @@ try {
     Remove-Junction $feedLink
 
     # ====================================================================================================================
-    # 8. Native calls are emitted in memory: nothing goes through the temporary folder
+    # 10. Native calls are emitted in memory: nothing goes through the temporary folder
     # ====================================================================================================================
     # The installer and the uninstaller run elevated with the account's own %TEMP%, which its unelevated programs can change.
     # Compiling P/Invoke code with csc.exe writes its source, command line and assembly there and loads the assembly back, so
@@ -1177,7 +1177,7 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
     Assert-Equal @('GetVolumeInformationW=True', 'CreateFileW=True', 'DeviceIoControl=True', 'CloseHandle=True') @($nativeResult.set_last_error) 'every emitted call imports kernel32 by its exact name with SetLastError'
 
     # ====================================================================================================================
-    # 9. A downloaded program is checked and run while held open
+    # 11. A downloaded program is checked and run while held open
     # ====================================================================================================================
     # The WebView2 bootstrapper is downloaded into a folder only administrators can change and held open, with only reading
     # shared, from before its signature check until it has exited. A copy of cmd.exe stands in for it here; nothing is
