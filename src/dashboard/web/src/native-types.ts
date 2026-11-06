@@ -271,7 +271,7 @@ export interface AlertsState {
   failedRuns: number;
   /** How many failed backups in a row turn the mark red (the host's own number). */
   failingAfter: number;
-  /** When Windows last started the backup task (ISO UTC) and what it recorded; null when that can't be read or it never ran. */
+  /** When Windows last started the backup task (ISO UTC) and what it recorded; null when that can't be read, it never ran, or Windows waited for a sign-in. */
   lastRun: { at: string; ok: boolean; code: string } | null;
   /** Set while the backup is overdue; null otherwise. */
   missedRun: MissedRunState | null;

@@ -201,6 +201,12 @@ class BackupAlertsSourceTests(unittest.TestCase):
         self.assertNotIn("RememberTold", note)
         self.assertIn('document["user_paused"] = userPaused;', self.alerts)
 
+    def test_the_schedule_card_names_no_start_windows_did_not_make(self) -> None:
+        card = block(self.glue, "private static Dictionary<string, object> BuildWebLastRunState(")
+        self.assertIn("MissedRunExplainer.LastStartUtc(schedule, DateTime.UtcNow, TimeZoneInfo.Local)", card)
+        start = block(self.alerts, "internal static DateTime? LastStartUtc(")
+        self.assertIn("BackupAlertPolicy.NotSignedIn", start)
+
     def test_the_sample_data_shows_the_alerts(self) -> None:
         demo = read(WEB / "src" / "demo" / "demoState.ts")
         bridge = read(WEB / "src" / "demo" / "mockBridge.ts")

@@ -326,8 +326,7 @@ namespace ResticBackuper.Dashboard
                         ? "The backup that started" + at + " was stopped before it finished."
                         : "The latest backup was stopped before it finished.";
                 case MissedRunKind.Busy:
-                    return "Windows started the backup" + at + ", but Rewindle was busy with another job, or a change it was " +
-                        "making hadn’t finished.";
+                    return "Windows started the backup" + at + ", but Rewindle was busy with another job or a change it was making.";
                 case MissedRunKind.ProgramProblem:
                     return "Windows couldn’t start the backup program" + at + (Code.Length > 0 ? " (" + Code + ")" : string.Empty) + ".";
                 case MissedRunKind.CouldNotStart:
@@ -384,6 +383,11 @@ namespace ResticBackuper.Dashboard
         {
             switch (Kind)
             {
+                case MissedRunKind.Busy:
+                case MissedRunKind.CouldNotStart:
+                    // Back up now can meet the same thing again (a folder change that hasn't finished answers busy again), so the
+                    // page's fallback comes with it.
+                    return "Open Rewindle and choose Back up now. If it happens again, save a problem report in Settings.";
                 case MissedRunKind.DriveMissing:
                     return "Plug it back in, then open Rewindle and choose Back up now.";
                 case MissedRunKind.RepairPending:
@@ -450,25 +454,11 @@ namespace ResticBackuper.Dashboard
             DateTime? lastRunUtc = null;
             if (schedule.LastRunTime.HasValue)
             {
-                // A local time; in the hour that repeats when the clocks go back it is the later of its two moments, as the
-                // freshness check takes it.
-                DateTime resolved;
-                DateTime ignored;
-                if (!BackupFreshnessEvaluator.TryResolveLocalToUtc(
-                    DateTime.SpecifyKind(schedule.LastRunTime.Value, DateTimeKind.Unspecified),
-                    facts.Zone ?? TimeZoneInfo.Local,
-                    true,
-                    out resolved,
-                    out ignored))
+                lastRunUtc = ResolveLastRun(schedule.LastRunTime.Value, facts.NowUtc, facts.Zone);
+                if (!lastRunUtc.HasValue)
                 {
                     return Make(MissedRunKind.Unknown, MissedRunTone.Warning, slot, null, drive, facts);
                 }
-                // A start more than a day ahead of the clock is not believed.
-                if (resolved > AlertWording.ToUtc(facts.NowUtc).AddDays(1))
-                {
-                    return Make(MissedRunKind.Unknown, MissedRunTone.Warning, slot, null, drive, facts);
-                }
-                lastRunUtc = resolved;
             }
             int? result = schedule.LastTaskResult;
             bool attempted = lastRunUtc.HasValue && lastRunUtc.Value >= attemptFrom &&
@@ -492,6 +482,45 @@ namespace ResticBackuper.Dashboard
                 return Make(MissedRunKind.NoCatchUp, MissedRunTone.Warning, slot, null, drive, facts);
             }
             return Make(MissedRunKind.PcOff, MissedRunTone.Warning, slot, null, drive, facts);
+        }
+
+        // When Windows last started the backup, in UTC, for the schedule card. Null when Task Scheduler recorded no start, it can't
+        // be placed or believed (see ResolveLastRun), or it was no start at all: 0x800704DD means the task waited for its user to
+        // sign in, which the explanation counts as not started, so the card must not say it started then.
+        internal static DateTime? LastStartUtc(TaskSchedule schedule, DateTime nowUtc, TimeZoneInfo zone)
+        {
+            if (schedule == null || !schedule.LastRunKnown || !schedule.LastRunTime.HasValue)
+            {
+                return null;
+            }
+            if (schedule.LastTaskResult.HasValue && schedule.LastTaskResult.Value == BackupAlertPolicy.NotSignedIn)
+            {
+                return null;
+            }
+            return ResolveLastRun(schedule.LastRunTime.Value, nowUtc, zone);
+        }
+
+        // Task Scheduler's last run time is a local time; in the hour that repeats when the clocks go back it is the later of its
+        // two moments, as the freshness check takes it. Null for a time that doesn't exist there, or one more than a day ahead
+        // of the clock, which is not believed.
+        private static DateTime? ResolveLastRun(DateTime lastRunLocal, DateTime nowUtc, TimeZoneInfo zone)
+        {
+            DateTime resolved;
+            DateTime ignored;
+            if (!BackupFreshnessEvaluator.TryResolveLocalToUtc(
+                DateTime.SpecifyKind(lastRunLocal, DateTimeKind.Unspecified),
+                zone ?? TimeZoneInfo.Local,
+                true,
+                out resolved,
+                out ignored))
+            {
+                return null;
+            }
+            if (resolved > AlertWording.ToUtc(nowUtc).AddDays(1))
+            {
+                return null;
+            }
+            return resolved;
         }
 
         private static MissedRunExplanation ExplainAttempt(

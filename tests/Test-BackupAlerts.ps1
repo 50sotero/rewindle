@@ -217,6 +217,17 @@ namespace ResticBackuper.Dashboard
             return explanation.Reason(true, facts.NowUtc, facts.Zone) + " / " + explanation.PageNextStep();
         }
 
+        // When the schedule card says Windows last started the backup (UTC), or "none".
+        public static string LastStart(string spec)
+        {
+            Dictionary<string, string> values = Spec(spec);
+            DateTime? started = MissedRunExplainer.LastStartUtc(
+                Schedule(values),
+                Utc(Get(values, "now", "2026-07-21T09:00:00Z")),
+                Zone(Get(values, "zone", string.Empty)));
+            return started.HasValue ? AlertWording.FormatUtc(started.Value) : "none";
+        }
+
         public static string NotificationWords(string spec, string culture)
         {
             CultureInfo saved = Thread.CurrentThread.CurrentCulture;
@@ -847,8 +858,12 @@ Assert-Equal "unknown|warning|$slot|" (Explain 'last=2026-07-21T02:00') 'A start
 foreach ($busy in @(@('75', 'code 75'), @('0x8004131F', 'error 0x8004131F'), @('0x80070420', 'error 0x80070420'))) {
     Assert-Equal ("busy|warning|$slot|" + $busy[1]) (Explain ('last=2026-07-21T02:00;result=' + $busy[0])) "Result $($busy[0]) must read as busy."
 }
-Assert-Equal "Windows started the backup today at 02:00, but Rewindle was busy with another job, or a change it was making hadn${q}t finished. / If it happens again, save a problem report in Settings." (
+Assert-Equal "Windows started the backup today at 02:00, but Rewindle was busy with another job or a change it was making. / If it happens again, save a problem report in Settings." (
     $H::PageWords('last=2026-07-21T02:00;result=75')) 'Busy must be hedged: it can be another job or an unfinished change.'
+# Back up now can meet the same busy answer again (a folder change that hasn't finished), so the notification keeps the fallback.
+Assert-Equal "Windows started the backup today at 2:00 AM, but Rewindle was busy with another job or a change it was making. / Open Rewindle and choose Back up now. If it happens again, save a problem report in Settings." (
+    $H::NotificationWords('last=2026-07-21T02:00;result=75', 'en-US')) 'The busy notification must keep the page fallback.'
+Assert-True ($H::NotificationWords('last=2026-07-21T02:00;result=0x80070002', 'en-GB').EndsWith(' / Open Rewindle and choose Back up now. If it happens again, save a problem report in Settings.')) 'The could-not-start notification must keep the page fallback.'
 foreach ($stopped in @('0xC000013A', '0x00041306', '0x8007042B', '0x800704C7')) {
     Assert-Equal "cancelled|warning|$slot|error $stopped" (Explain "last=2026-07-21T02:00;result=$stopped") "Result $stopped must read as stopped."
 }
@@ -874,6 +889,17 @@ Assert-Equal "unknown|warning|$slot|" (Explain 'last=2026-07-23T09:00;result=66'
 Assert-Equal "pcOff|warning|$slot|" (Explain 'last=2026-07-20T02:00;result=0') 'A slot passed with no start, catch-up on: the PC was off, asleep or signed out.'
 Assert-Equal "pcOff|warning|$slot|" (Explain 'last=never') 'A task that never ran was not started either.'
 Assert-Equal "pcOff|warning|$slot|" (Explain 'last=2026-07-21T02:00;result=0x800704DD') 'Not signed in counts as not started.'
+# The schedule card names a start only when Windows recorded one that can be placed. "Not signed in" is none: the sentence above
+# counts it as not started, and the card must not say the backup started then.
+Assert-Equal '2026-07-21T02:00:00Z' ($H::LastStart('last=2026-07-21T02:00;result=0')) 'A recorded start must reach the schedule card.'
+Assert-Equal '2026-07-21T02:00:00Z' ($H::LastStart('last=2026-07-21T02:00;result=66')) 'A start that failed is still a start.'
+Assert-Equal '2026-07-21T02:00:00Z' ($H::LastStart('last=2026-07-21T02:00')) 'A start with no result is still a start.'
+Assert-Equal 'none' ($H::LastStart('last=2026-07-21T02:00;result=0x800704DD')) 'Not signed in is no start for the schedule card.'
+Assert-Equal 'none' ($H::LastStart('last=never')) 'A task that never ran has no start.'
+Assert-Equal 'none' ($H::LastStart('last=unknown')) 'A last run that could not be read has no start.'
+Assert-Equal 'none' ($H::LastStart('schedule=none')) 'No schedule has no start.'
+Assert-Equal 'none' ($H::LastStart('last=2026-07-23T09:00;result=0')) 'A start two days ahead of the clock must not be believed.'
+Assert-Equal '2026-07-21T02:00:00Z' ($H::LastStart('zone=W. Europe Standard Time;last=2026-07-21T04:00;result=0')) 'The start is a local time and must be converted with the PC zone.'
 Assert-Equal "noCatchUp|warning|$slot|" (Explain 'last=2026-07-20T02:00;result=0;catchup=0') 'Without catch-up, the next slot is waited for.'
 Assert-Equal 'waitingForPower|warning||' (Explain 'last=2026-07-20T02:00;result=0;battery=0;onbattery=1') 'On battery with Wait for AC power, it waits for power.'
 Assert-Equal "pcOff|warning|$slot|" (Explain 'last=2026-07-20T02:00;result=0;battery=1;onbattery=1') 'On battery is not a reason when it may start on battery.'

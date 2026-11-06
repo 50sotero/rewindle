@@ -358,26 +358,17 @@ namespace ResticBackuper.Dashboard
             return alerts;
         }
 
+        // Left out when Windows recorded no start the card may name: none, one that can't be placed, or "not signed in" (which the
+        // missed-run sentence counts as not started, so the card must not say the backup started then).
         private static Dictionary<string, object> BuildWebLastRunState(TaskSchedule schedule)
         {
-            if (schedule == null || !schedule.LastRunKnown || !schedule.LastRunTime.HasValue)
-            {
-                return null;
-            }
-            DateTime utc;
-            DateTime ignored;
-            if (!BackupFreshnessEvaluator.TryResolveLocalToUtc(
-                DateTime.SpecifyKind(schedule.LastRunTime.Value, DateTimeKind.Unspecified),
-                TimeZoneInfo.Local,
-                true,
-                out utc,
-                out ignored) ||
-                utc > DateTime.UtcNow.AddDays(1))
+            DateTime? started = MissedRunExplainer.LastStartUtc(schedule, DateTime.UtcNow, TimeZoneInfo.Local);
+            if (!started.HasValue)
             {
                 return null;
             }
             Dictionary<string, object> lastRun = new Dictionary<string, object>();
-            lastRun["at"] = AlertWording.FormatUtc(utc);
+            lastRun["at"] = AlertWording.FormatUtc(started.Value);
             lastRun["ok"] = schedule.LastTaskResult.HasValue && schedule.LastTaskResult.Value == 0;
             lastRun["code"] = schedule.LastTaskResult.HasValue
                 ? AlertWording.FormatCode(schedule.LastTaskResult.Value)
