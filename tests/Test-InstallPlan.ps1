@@ -1432,6 +1432,187 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
     Assert-Equal @(Get-ErrorCodes $noArguments.Plan) @(Get-ErrorCodes $brokenRun.Plan) 'unreadable and malformed records add no error'
     Assert-Equal @(Get-WarningCodes $noArguments.Plan) @(Get-WarningCodes $brokenRun.Plan) 'unreadable and malformed records add no warning'
 
+    # ====================================================================================================================
+    # 13. Rolling back a failed install: what it started stops first, runtime-manifest.json goes last, and the folder is checked
+    # ====================================================================================================================
+    # The rollback helpers run in this process against a fixture program folder. Copies of the system's ping program stand in
+    # for the dashboard, under a name no real program uses, and no scheduled task is ever looked up.
+    . ([scriptblock]::Create((Get-InstallerFunctionText -Name @(
+        'Get-NormalizedPath', 'Write-Utf8NoBom', 'New-RuntimeManifest', 'Stop-OwnedProcesses', 'Stop-InstalledPrograms',
+        'Remove-RuntimeContent', 'Remove-InstalledRuntime', 'Write-InstallFailure'))))
+    $productName = 'ResticBackuper'
+    $primaryTaskEvidenceName = 'scheduled-task.xml'
+    $cloudTaskEvidenceName = 'google-drive-verification-task.xml'
+    $systemDirectory = [Environment]::SystemDirectory
+    $version = '9.9.9-fixture.1'
+    # The long spelling of the temporary folder, as a program's own path reports it (a hosted runner's is an 8.3 short name).
+    New-Item -ItemType Directory -Path (Join-Path $workspace 'rollback') -Force | Out-Null
+    $rollbackBase = Get-FeedLongPath (Join-Path $workspace 'rollback')
+    $programFilesRoot = Join-Path $rollbackBase 'Program Files'
+    $installRoot = Join-Path $programFilesRoot $productName
+    $rollbackManifest = Join-Path $installRoot 'runtime-manifest.json'
+    $fixtureProgram = 'RewindleRollbackFixture'
+    $pingProgram = Join-Path $env:SystemRoot 'System32\PING.EXE'
+    $script:fixtureProcesses = [Collections.Generic.List[Diagnostics.Process]]::new()
+    $script:heldFiles = [Collections.Generic.List[IDisposable]]::new()
+
+    function New-RollbackFixture {
+        param([switch]$NoManifest)
+        Assert-True (-not (Test-Path -LiteralPath $installRoot)) 'the previous rollback fixture is gone'
+        foreach ($relative in @('backup-config.json', 'VERSION', 'Python\python.txt', 'Python\Lib\site.py', 'web\index.html', 'WebView2Loader.dll')) {
+            Write-Text -Path (Join-Path $installRoot $relative) -Text "rollback fixture $relative"
+        }
+        Copy-Item -LiteralPath $pingProgram -Destination (Join-Path $installRoot "$fixtureProgram.exe")
+        if (-not $NoManifest) { [void](New-RuntimeManifest -Root $installRoot -Version $version) }
+    }
+    function Start-FixtureProgram {
+        param([string]$Path, [string]$WorkingDirectory)
+        $process = Start-Process -FilePath $Path -ArgumentList @('-n', '120', '127.0.0.1') -WorkingDirectory $WorkingDirectory -WindowStyle Hidden -PassThru
+        $script:fixtureProcesses.Add($process)
+        Start-Sleep -Milliseconds 300
+        Assert-True (-not $process.HasExited) "the fixture program $Path runs"
+        return $process
+    }
+    function Lock-FixtureFile {
+        param([string]$Path)
+        # Open for reading and shared for reading only, so the file can be neither deleted nor written while it is held.
+        $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        $script:heldFiles.Add($stream)
+        return $stream
+    }
+    function Get-FixtureFiles {
+        if (-not (Test-Path -LiteralPath $installRoot)) { return @() }
+        return @(Get-ChildItem -LiteralPath $installRoot -Recurse -File -Force | ForEach-Object { $_.FullName.Substring($installRoot.Length + 1) } | Sort-Object)
+    }
+    function Read-RollbackManifest { return ([IO.File]::ReadAllText($rollbackManifest) | ConvertFrom-Json) }
+
+    $savedDirectory = [Environment]::CurrentDirectory
+    Push-Location -LiteralPath $workspace
+    try {
+        # --- the dashboard the install started still runs from the program folder ---
+        New-RollbackFixture
+        $originalManifest = [IO.File]::ReadAllText($rollbackManifest)
+        $running = Start-FixtureProgram -Path (Join-Path $installRoot "$fixtureProgram.exe") -WorkingDirectory $installRoot
+        $otherCopy = Join-Path $rollbackBase "Elsewhere\$fixtureProgram.exe"
+        New-Item -ItemType Directory -Path (Split-Path -Parent $otherCopy) -Force | Out-Null
+        Copy-Item -LiteralPath $pingProgram -Destination $otherCopy
+        $other = Start-FixtureProgram -Path $otherCopy -WorkingDirectory (Split-Path -Parent $otherCopy)
+        Assert-Equal $installRoot (Remove-InstalledRuntime -Root $installRoot -Attempts 1) 'a program folder still in use is reported as left, not as removed'
+        Assert-Equal @("$fixtureProgram.exe", 'runtime-manifest.json') (Get-FixtureFiles) 'everything but the running program and runtime-manifest.json is removed'
+        Assert-Equal $originalManifest ([IO.File]::ReadAllText($rollbackManifest)) 'runtime-manifest.json stays as it was, since it lists the program left'
+        Stop-InstalledPrograms -TaskName @() -ProgramName @($fixtureProgram)
+        Assert-True ($running.WaitForExit(5000)) 'stopping what the install started ends the program running from the program folder'
+        Assert-True (-not $other.HasExited) 'a program with the same name elsewhere is left running'
+        Assert-True ($null -eq (Remove-InstalledRuntime -Root $installRoot)) 'once the program is stopped the program folder is removed'
+        Assert-True (-not (Test-Path -LiteralPath $installRoot)) 'the program folder is really gone'
+
+        # --- a file that is still open: runtime-manifest.json is kept with it ---
+        New-RollbackFixture
+        $held = Lock-FixtureFile (Join-Path $installRoot 'WebView2Loader.dll')
+        Assert-Equal $installRoot (Remove-InstalledRuntime -Root $installRoot -Attempts 2) 'a file still open leaves the program folder'
+        Assert-Equal @('runtime-manifest.json', 'WebView2Loader.dll') (Get-FixtureFiles) 'only the open file and runtime-manifest.json are left'
+        Assert-True (@((Read-RollbackManifest).files | ForEach-Object relative_path) -contains 'WebView2Loader.dll') 'runtime-manifest.json lists the file left'
+        $held.Dispose()
+        Assert-True ($null -eq (Remove-InstalledRuntime -Root $installRoot)) 'once the file is closed the program folder is removed'
+        Assert-True (-not (Test-Path -LiteralPath $installRoot)) 'the program folder is gone after the second try'
+
+        # --- a failure before runtime-manifest.json was written: one is written for what is left ---
+        New-RollbackFixture -NoManifest
+        $held = Lock-FixtureFile (Join-Path $installRoot 'Python\Lib\site.py')
+        Assert-Equal $installRoot (Remove-InstalledRuntime -Root $installRoot -Attempts 2) 'a file still open leaves a program folder that had no list of files'
+        Assert-Equal @('Python\Lib\site.py', 'runtime-manifest.json') (Get-FixtureFiles) 'the open file and a new runtime-manifest.json are left'
+        $written = Read-RollbackManifest
+        Assert-Equal @('Python\Lib\site.py') @($written.files | ForEach-Object relative_path) 'the new runtime-manifest.json lists exactly the file left'
+        Assert-True ($written.schema_version -eq 1 -and $written.product -eq $productName -and $written.file_count -eq 1) 'it is a manifest the uninstaller accepts (schema, product, count)'
+        Assert-Equal (Get-Sha256 (Join-Path $installRoot 'Python\Lib\site.py')) $written.files[0].sha256 'it carries the file hash'
+        $held.Dispose()
+        Assert-True ($null -eq (Remove-InstalledRuntime -Root $installRoot)) 'that folder is removed once the file is closed'
+
+        # --- a file left that runtime-manifest.json does not list: the list is written again ---
+        New-RollbackFixture
+        Write-Text -Path (Join-Path $installRoot 'Python\added-later.txt') -Text 'written after the list of files'
+        $held = Lock-FixtureFile (Join-Path $installRoot 'Python\added-later.txt')
+        Assert-Equal $installRoot (Remove-InstalledRuntime -Root $installRoot -Attempts 2) 'an unlisted file still open leaves the program folder'
+        Assert-Equal @('Python\added-later.txt') @((Read-RollbackManifest).files | ForEach-Object relative_path) 'runtime-manifest.json is written again to list it'
+        $held.Dispose()
+        Assert-True ($null -eq (Remove-InstalledRuntime -Root $installRoot)) 'that folder is removed once the file is closed'
+
+        # --- only the folder itself is in use, as some process's working directory ---
+        New-RollbackFixture
+        $inside = Start-FixtureProgram -Path $pingProgram -WorkingDirectory $installRoot
+        Assert-Equal $installRoot (Remove-InstalledRuntime -Root $installRoot -Attempts 2) 'a program folder that is still a working directory is reported as left'
+        Assert-Equal @('runtime-manifest.json') (Get-FixtureFiles) 'only a runtime-manifest.json is left in it'
+        $written = Read-RollbackManifest
+        Assert-True ($written.schema_version -eq 1 -and $written.product -eq $productName -and $written.file_count -eq 0 -and @($written.files).Count -eq 0) 'the empty folder still has a list of files, with no file in it'
+        $inside.Kill()
+        Assert-True ($inside.WaitForExit(5000)) 'the fixture working directory is released'
+        Assert-True ($null -eq (Remove-InstalledRuntime -Root $installRoot)) 'then the empty folder is removed'
+
+        # --- a reparse point is neither followed nor removed ---
+        New-RollbackFixture
+        $manifestBefore = [IO.File]::ReadAllText($rollbackManifest)
+        $outside = Join-Path $rollbackBase 'Outside'
+        Write-Text -Path (Join-Path $outside 'precious.txt') -Text 'outside the program folder'
+        $link = Join-Path $installRoot 'Python\Linked'
+        New-Junction -Link $link -Target $outside
+        Assert-Equal $installRoot (Remove-InstalledRuntime -Root $installRoot -Attempts 1) 'a program folder with a junction in it is reported as left'
+        Assert-True (Test-Path -LiteralPath (Join-Path $outside 'precious.txt') -PathType Leaf) 'nothing behind the junction is removed'
+        Assert-True (Test-Path -LiteralPath $link) 'the junction itself is left for the uninstaller to refuse'
+        Assert-Equal $manifestBefore ([IO.File]::ReadAllText($rollbackManifest)) 'runtime-manifest.json is not rewritten to vouch for a junction'
+        Remove-Junction $link
+        Assert-True ($null -eq (Remove-InstalledRuntime -Root $installRoot)) 'without the junction the program folder is removed'
+
+        # --- only the program folder itself is ever removed ---
+        $elsewhere = Join-Path $rollbackBase 'Elsewhere\ResticBackuper'
+        Write-Text -Path (Join-Path $elsewhere 'keep.txt') -Text 'not the program folder'
+        Assert-Equal $elsewhere (Remove-InstalledRuntime -Root $elsewhere) 'another folder is reported as left'
+        Assert-True (Test-Path -LiteralPath (Join-Path $elsewhere 'keep.txt') -PathType Leaf) 'and nothing in it is removed'
+        Assert-True ($null -eq (Remove-InstalledRuntime -Root $installRoot)) 'a program folder that is already gone counts as removed'
+    }
+    finally {
+        foreach ($stream in $script:heldFiles) { $stream.Dispose() }
+        foreach ($process in $script:fixtureProcesses) {
+            if (-not $process.HasExited) { $process.Kill(); [void]$process.WaitForExit(5000) }
+        }
+        Pop-Location
+        [Environment]::CurrentDirectory = $savedDirectory
+    }
+
+    # --- the progress feed says Setup undid its changes only when the program folder is gone ---
+    $installPhaseTitles = $null
+    $installPhaseFailures = $null
+    foreach ($table in @('installPhaseTitles', 'installPhaseFailures')) {
+        $tableText = [regex]::Match($installerText, '(?s)\$' + $table + ' = @\{.*?\n\}')
+        Assert-True $tableText.Success "the installer's $table table is found"
+        . ([scriptblock]::Create($tableText.Value))
+    }
+    function Get-RecoveryKeyFacts { return [ordered]@{ path = $null; readable = $null } }
+    $script:installWarnings = [Collections.Generic.List[object]]::new()
+    $lateFailure = $(try { throw 'Updating the recovery key failed with exit code 1.' } catch { $_ })
+    $rollbackMessages = @{}
+    foreach ($case in @('gone', 'left')) {
+        $script:FeedResultWritten = $false
+        $rollbackFeed = Join-Path $feedDirectory "rollback-$case.jsonl"
+        Open-ProgressFeed -Path $rollbackFeed -ExpectedSid $currentSid
+        Write-FeedPhase -Phase 'verification' -State 'started' -Title $installPhaseTitles['verification']
+        Write-InstallFailure -ErrorRecord $lateFailure -RolledBack $true -Leftover $(if ($case -eq 'left') { $installRoot } else { $null })
+        Close-ProgressFeed
+        $rollbackLines = @([IO.File]::ReadAllLines($rollbackFeed) | ForEach-Object { $_ | ConvertFrom-Json })
+        Assert-Equal @('phase', 'phase', 'result') @($rollbackLines | ForEach-Object type) "$case : the feed ends with the failed phase and the result"
+        Assert-Equal $rollbackLines[2].error.message $rollbackLines[1].detail "$case : the failed phase says the same as the result"
+        Assert-Equal 'verification_failed' $rollbackLines[2].error.code "$case : the code is the failed phase's"
+        $rollbackMessages[$case] = [string]$rollbackLines[2].error.message
+    }
+    Assert-True ($rollbackMessages['gone'].EndsWith(' Setup undid its changes. Backups and the recovery key it had already created were kept.')) "with the program folder gone Setup says it undid its changes (got: $($rollbackMessages['gone']))"
+    $leftMessage = $rollbackMessages['left']
+    Assert-True (-not $leftMessage.Contains('Setup undid its changes.')) "with program files left Setup does not say it undid all its changes (got: $leftMessage)"
+    foreach ($text in @("some of Rewindle's program files could not be removed", 'Restart your PC', 'run Setup again', 'Reinstall or repair', 'were kept.')) {
+        Assert-True $leftMessage.Contains($text) "with program files left the message says '$text' (got: $leftMessage)"
+    }
+    foreach ($word in @('restic', 'repository', 'snapshot', 'engine')) {
+        Assert-True (-not $leftMessage.ToLowerInvariant().Contains($word)) "the message for program files left uses plain words (found '$word')"
+    }
+
     $summary = [pscustomobject]@{
         ok = $true
         tests = $script:assertions
@@ -1449,6 +1630,7 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
         native_calls_compile_nothing = 'passed'
         downloaded_program_held = 'passed'
         kept_repository = 'passed'
+        rollback = 'passed'
     }
 }
 catch {

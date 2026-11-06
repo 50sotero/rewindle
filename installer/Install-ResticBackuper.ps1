@@ -3065,7 +3065,9 @@ function Get-RecoveryKeyFacts {
 function Write-InstallFailure {
     param(
         [Parameter(Mandatory)][Management.Automation.ErrorRecord]$ErrorRecord,
-        [bool]$RolledBack = $false
+        [bool]$RolledBack = $false,
+        # After a rollback: the program folder when Remove-InstalledRuntime could not remove all of it, otherwise empty.
+        [string]$Leftover
     )
     if ($null -eq $script:FeedStream) { return }
     $phase = $script:FeedCurrentPhase
@@ -3082,7 +3084,11 @@ function Write-InstallFailure {
         $code = 'setup_failed'
         $message = 'Setup could not finish.'
     }
-    if ($RolledBack) {
+    if ($RolledBack -and $Leftover) {
+        # The program folder is still there, so a new install refuses until it is removed; say how, in Setup's own words.
+        $message += " Setup undid its other changes, but some of Rewindle's program files could not be removed yet, usually because one of them was still in use. Restart your PC, then run Setup again and choose Reinstall or repair, which removes them first. Backups and the recovery key it had already created were kept."
+    }
+    elseif ($RolledBack) {
         $message += ' Setup undid its changes. Backups and the recovery key it had already created were kept.'
     }
     if ($phase) {
@@ -3233,6 +3239,191 @@ function Assert-InstallationVerified {
             Stop-Verification "the installed file $($entry.relative_path) is intact"
         }
     }
+}
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# Rolling back a failed install
+# ---------------------------------------------------------------------------------------------------------------------------
+# The dashboard starts from the program folder before the last checks, so a late failure finds it running, and its program file
+# and working directory keep the folder in use. The rollback stops it and the backup program first, while their tasks are still
+# registered, then removes the folder with runtime-manifest.json last. The uninstaller removes a program folder only when that
+# list names every file in it, so whatever cannot be removed yet is left in a state that Setup's Uninstall (and Reinstall or
+# repair) can remove later, instead of one that blocks every later install.
+
+# region owned-processes
+# This region is byte-identical in Install-ResticBackuper.ps1 and Uninstall-ResticBackuper.ps1; tests/test_setup_contract.py keeps
+# the two copies equal. It stops the processes of one program file in the program folder, and only that exact file, so another
+# copy of the same program elsewhere (an earlier edition, a build folder) is never touched.
+function Stop-OwnedProcesses {
+    param(
+        [string]$ProcessName,
+        [string]$ExpectedExecutable
+    )
+    $expected = Get-NormalizedPath $ExpectedExecutable
+    $stopped = @()
+    foreach ($process in Get-Process -Name $ProcessName -ErrorAction SilentlyContinue) {
+        try {
+            $actual = Get-NormalizedPath $process.MainModule.FileName
+            if ($actual -eq $expected) {
+                Stop-Process -Id $process.Id -Force -ErrorAction Stop
+                $stopped += $process
+            }
+        }
+        catch [System.ComponentModel.Win32Exception] {
+            throw "Could not verify process $($process.Id); refusing runtime removal."
+        }
+        catch [InvalidOperationException] {
+            continue
+        }
+    }
+    foreach ($process in $stopped) {
+        if (-not $process.WaitForExit(10000)) {
+            throw "Owned process did not exit; runtime is preserved: $ProcessName ($($process.Id))"
+        }
+    }
+}
+# endregion owned-processes
+
+# Stops what the install started from the program folder: the given scheduled tasks through Task Scheduler, waiting until they
+# no longer run, then every process of the given programs that runs from the program folder. It never throws: what could not be
+# stopped is reported as a warning, and its files are then the ones Remove-InstalledRuntime cannot remove.
+function Stop-InstalledPrograms {
+    param(
+        [string[]]$TaskName = @(),
+        [string[]]$ProgramName = @('ResticBackuperDashboard', 'ResticBackuperTaskLauncher')
+    )
+    $active = @('Running', 'Queued')
+    foreach ($name in $TaskName) {
+        try {
+            $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+            if ($task -and ([string]$task.State) -in $active) {
+                Stop-ScheduledTask -TaskName $name -ErrorAction Stop
+            }
+        }
+        catch {
+            Write-Warning "Could not stop the scheduled task ${name}: $($_.Exception.Message)"
+        }
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    foreach ($name in $TaskName) {
+        while ([DateTime]::UtcNow -lt $deadline) {
+            $task = $null
+            try { $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue } catch { }
+            if (-not $task -or ([string]$task.State) -notin $active) { break }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+    foreach ($name in $ProgramName) {
+        try {
+            Stop-OwnedProcesses -ProcessName $name -ExpectedExecutable (Join-Path $installRoot ($name + '.exe'))
+        }
+        catch {
+            Write-Warning "Could not stop ${name}: $($_.Exception.Message)"
+        }
+    }
+}
+
+# Removes everything in a folder of the program folder that can be removed, except the file -Keep, and returns what is left: the
+# files and folders that could not be removed, and every reparse point, which is never followed or removed.
+function Remove-RuntimeContent {
+    param(
+        [Parameter(Mandatory)][string]$Directory,
+        [Parameter(Mandatory)][string]$Keep
+    )
+    $left = [Collections.Generic.List[IO.FileSystemInfo]]::new()
+    $folder = [IO.DirectoryInfo]::new($Directory)
+    try {
+        $entries = $folder.GetFileSystemInfos()
+    }
+    catch {
+        $left.Add($folder)
+        return ,$left
+    }
+    foreach ($entry in $entries) {
+        if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            $left.Add($entry)
+        }
+        elseif ($entry -is [IO.DirectoryInfo]) {
+            $inner = Remove-RuntimeContent -Directory $entry.FullName -Keep $Keep
+            if ($inner.Count -gt 0) {
+                $left.AddRange($inner)
+            }
+            else {
+                try { $entry.Delete() } catch { $left.Add($entry) }
+            }
+        }
+        elseif (-not [string]::Equals($entry.FullName, $Keep, [StringComparison]::OrdinalIgnoreCase)) {
+            try {
+                $entry.Attributes = [IO.FileAttributes]::Normal
+                $entry.Delete()
+            }
+            catch {
+                $left.Add($entry)
+            }
+        }
+    }
+    return ,$left
+}
+
+# Removes the program folder of a failed install, runtime-manifest.json last, and checks that it is gone. Returns $null when it is,
+# otherwise the folder's path; runtime-manifest.json then lists every file left in it (it is written for them when the install
+# failed before writing it, or lacks one of them), so the uninstaller can remove the rest later. A reparse point is left alone,
+# and the uninstaller refuses it. Only the program folder itself is accepted. It never throws.
+function Remove-InstalledRuntime {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        # Each attempt after the first waits half a second: a program that was just stopped, or one it started (a web view
+        # helper), can keep a file or its working directory open a moment longer.
+        [int]$Attempts = 10
+    )
+    $resolved = [IO.Path]::GetFullPath($Root)
+    if ($resolved -ne [IO.Path]::GetFullPath((Join-Path $programFilesRoot $productName))) {
+        return $resolved
+    }
+    $manifestPath = Join-Path $resolved 'runtime-manifest.json'
+    try {
+        Set-Location -LiteralPath $systemDirectory
+        [Environment]::CurrentDirectory = $systemDirectory
+        $left = [Collections.Generic.List[IO.FileSystemInfo]]::new()
+        for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+            if (-not [IO.Directory]::Exists($resolved)) { return $null }
+            if ($attempt -gt 1) { Start-Sleep -Milliseconds 500 }
+            $left = Remove-RuntimeContent -Directory $resolved -Keep $manifestPath
+            if ($left.Count -eq 0) {
+                # Only the list of files is left. The folder can still be some process's working directory; then it stays
+                # empty, and the list is written again below.
+                if ([IO.File]::Exists($manifestPath)) { [IO.File]::Delete($manifestPath) }
+                try { [IO.Directory]::Delete($resolved) } catch { }
+            }
+        }
+        if (-not [IO.Directory]::Exists($resolved)) { return $null }
+        if (@($left | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -eq 0) {
+            $listed = $null
+            try {
+                $existing = [IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
+                if ($existing.schema_version -eq 1 -and $existing.product -eq $productName -and $existing.file_count -eq @($existing.files).Count) {
+                    $listed = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+                    foreach ($entry in @($existing.files)) { [void]$listed.Add([string]$entry.relative_path) }
+                }
+            }
+            catch {
+                $listed = $null
+            }
+            $unlisted = @(
+                $left | Where-Object { $_ -is [IO.FileInfo] } |
+                    ForEach-Object { $_.FullName.Substring($resolved.Length + 1) } |
+                    Where-Object { $_ -notin @($primaryTaskEvidenceName, $cloudTaskEvidenceName) -and ($null -eq $listed -or -not $listed.Contains($_)) }
+            )
+            if ($null -eq $listed -or $unlisted.Count -gt 0) {
+                [void](New-RuntimeManifest -Root $resolved -Version ([string]$version))
+            }
+        }
+    }
+    catch {
+        Write-Warning "Could not finish removing the program folder ${resolved}: $($_.Exception.Message)"
+    }
+    if (-not [IO.Directory]::Exists($resolved)) { return $null }
+    return $resolved
 }
 
 # Real installation: validate (the preflight phase), make sure WebView2 is present, then change the machine.
@@ -3513,6 +3704,14 @@ catch {
     if ($script:FeedCurrentPhase -eq 'credential') {
         Set-InitializationFailurePhase
     }
+    # The dashboard (started before the last checks) and the backup program run from the program folder and keep it in use,
+    # so they are stopped first, while their tasks are still registered.
+    if ($runtimeCreated) {
+        $startedTasks = @()
+        if ($dashboardTaskCreated) { $startedTasks += $dashboardTaskName }
+        if ($backupTaskCreated) { $startedTasks += $backupTaskName }
+        Stop-InstalledPrograms -TaskName $startedTasks
+    }
     if ($dashboardTaskCreated) {
         Unregister-ScheduledTask -TaskName $dashboardTaskName -Confirm:$false -ErrorAction SilentlyContinue
     }
@@ -3525,14 +3724,14 @@ catch {
     if ($registryCreated -and (Test-Path -LiteralPath $installRegistry)) {
         Remove-Item -LiteralPath $installRegistry -Recurse -Force -ErrorAction SilentlyContinue
     }
-    if ($runtimeCreated -and (Test-Path -LiteralPath $installRoot)) {
-        $resolved = [IO.Path]::GetFullPath($installRoot)
-        $expected = [IO.Path]::GetFullPath((Join-Path $programFilesRoot $productName))
-        if ($resolved -eq $expected) {
-            Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction SilentlyContinue
-        }
+    $leftover = $null
+    if ($runtimeCreated) {
+        $leftover = Remove-InstalledRuntime -Root $installRoot
     }
-    Write-InstallFailure -ErrorRecord $caught -RolledBack $true
+    Write-InstallFailure -ErrorRecord $caught -RolledBack $true -Leftover $leftover
+    if ($leftover) {
+        Write-Warning "Some program files could not be removed and are still in $leftover. Restart Windows, then remove them with Rewindle Setup (Reinstall or repair, or Uninstall) or with $(Join-Path $payloadRoot 'Uninstall-ResticBackuper.ps1')."
+    }
     Write-Error "INSTALLATION FAILED: $failure`nRepository, recovery key, recovery tools, and ProgramData state are intentionally preserved if they were created."
     exit 1
 }

@@ -374,7 +374,7 @@ Result line, **always the last line**, written even when the install fails or is
 | Property | Meaning |
 | --- | --- |
 | `ok` | The installation is complete and verified. |
-| `error` | null, or `{ "code", "message", "detail" }`. `code` is a validation code from section 2.4, or one of the failure codes in section 3.5. `message` is a plain sentence to show; on a failure after setup changed things it ends with a sentence saying setup undid its changes and kept the repository and recovery key. `detail` is the technical text for a log. |
+| `error` | null, or `{ "code", "message", "detail" }`. `code` is a validation code from section 2.4, or one of the failure codes in section 3.5. `message` is a plain sentence to show; on a failure after setup changed things it ends with a sentence saying setup undid its changes and kept the repository and recovery key, or, when some program files could not be removed, what to do about them (section 3.5). `detail` is the technical text for a log. |
 | `install_root` | `C:\Program Files\ResticBackuper`. |
 | `recovery_key_path` | The recovery key file, or null when none exists (a failure before it was written). |
 | `recovery_key_readable_by_user` | `true` or `false` as section 5 determines it; null when there is no key or it could not be determined. |
@@ -429,6 +429,18 @@ state, task or registration (a WebView2 Runtime that was installed stays, since 
 shortcut, the entry in Installed apps and the program folder. It keeps what must never be lost: the repository, the
 recovery key, the recovery-tools folder and the ProgramData state, **if they were created**. The result line comes after
 that cleanup.
+
+The order matters, because the dashboard is started (phase `dashboard`) before the last checks. The installer first stops
+the dashboard and the backup task launcher it started, through Task Scheduler while their tasks are still registered and
+then by their exact program files in the program folder. It then removes the tasks, the shortcut and the Installed apps
+entry, and finally the program folder, with `runtime-manifest.json` last: the uninstaller removes a program folder only
+when that file lists every file in it. If something in the folder still cannot be removed (a file stays in use), the
+manifest stays, or is written for exactly what is left when the install failed before writing it or it lacks a file that
+is left; reparse points are never followed or removed. Whether the folder is gone is checked before the result is
+written. Only when the folder is gone does `error.message` end with "Setup undid
+its changes. Backups and the recovery key it had already created were kept." Otherwise it says that some program files
+could not be removed yet and tells the user to restart the PC, then run Setup again and choose **Reinstall or repair**
+(which runs the uninstaller first); the next plan reports `already_installed` until then.
 
 In addition to the validation codes of section 2.4, `result.error.code` can be:
 

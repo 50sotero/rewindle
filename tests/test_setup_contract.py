@@ -21,6 +21,8 @@ CI = PROJECT / ".github" / "workflows" / "ci.yml"
 CONTRACT_TEST = PROJECT / "tests" / "Test-InstallerContract.ps1"
 
 REGION = re.compile(r"# region progress-feed.*?# endregion progress-feed", re.S)
+OWNED_PROCESSES = re.compile(r"# region owned-processes.*?# endregion owned-processes", re.S)
+MAINTENANCE = PROJECT / "src" / "dashboard" / "web" / "src" / "setup" / "screens" / "Maintenance.tsx"
 
 
 def read(path: Path) -> str:
@@ -473,6 +475,83 @@ class StateFolderOwnerTests(unittest.TestCase):
         self.assertIn("$acl.SetOwner($administrators)", security)
         self.assertIn("$acl.SetAccessRuleProtection($true, $false)", security)
         self.assertIn("New-ProtectedDirectorySecurity -UserSid $UserSid", self.defined["Set-ProtectedDirectory"])
+
+
+class FailedInstallRollbackTests(unittest.TestCase):
+    """A late failure stops what the install started before it removes the program folder, removes runtime-manifest.json last,
+    and says Setup undid its changes only when the folder is gone. Test-InstallPlan.ps1 runs the helpers themselves."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.installer = read(INSTALLER)
+        cls.defined = functions(cls.installer)
+        main = cls.installer.split("$preflightSucceeded = $false", 1)[1]
+        cls.rollback = main.rsplit("\ncatch {\n", 1)[1].split("\nfinally {\n", 1)[0]
+
+    def test_the_owned_processes_region_is_identical_in_both_scripts(self) -> None:
+        installer = OWNED_PROCESSES.search(self.installer)
+        uninstaller = OWNED_PROCESSES.search(read(UNINSTALLER))
+        self.assertIsNotNone(installer)
+        self.assertIsNotNone(uninstaller)
+        self.assertEqual(installer.group(0), uninstaller.group(0), "re-copy the region between the two scripts")
+        self.assertIn("function Stop-OwnedProcesses {", installer.group(0))
+
+    def test_the_rollback_helpers_are_install_only(self) -> None:
+        marker = self.installer.index("if ($PlanOnly) {\n    try {")
+        for name in ("Stop-OwnedProcesses", "Stop-InstalledPrograms", "Remove-RuntimeContent", "Remove-InstalledRuntime"):
+            self.assertGreater(self.installer.index(f"function {name} "), marker, f"{name} is defined after plan mode exits")
+
+    def test_the_started_programs_are_stopped_while_their_tasks_are_still_registered(self) -> None:
+        stop = self.rollback.index("Stop-InstalledPrograms -TaskName $startedTasks")
+        for later in (
+            "Unregister-ScheduledTask -TaskName $dashboardTaskName",
+            "Unregister-ScheduledTask -TaskName $backupTaskName",
+            "Remove-InstalledRuntime -Root $installRoot",
+        ):
+            self.assertLess(stop, self.rollback.index(later), later)
+        for task in ("$startedTasks += $dashboardTaskName", "$startedTasks += $backupTaskName"):
+            self.assertLess(self.rollback.index(task), stop)
+        body = self.defined["Stop-InstalledPrograms"]
+        self.assertIn("'ResticBackuperDashboard', 'ResticBackuperTaskLauncher'", body)
+        # Through Task Scheduler first, waiting until the task stops, and only then the processes; and it never throws.
+        self.assertLess(body.index("Stop-ScheduledTask"), body.index("Start-Sleep"))
+        self.assertLess(body.index("Start-Sleep"), body.index("Stop-OwnedProcesses"))
+        self.assertNotIn("throw", body)
+
+    def test_the_program_folder_is_removed_with_runtime_manifest_last_and_checked(self) -> None:
+        # No more Remove-Item -Recurse -ErrorAction SilentlyContinue of the program folder, which deleted the manifest and
+        # left the files in use without saying so.
+        self.assertNotRegex(self.rollback, r"Remove-Item[^\n]*(\$installRoot|\$resolved)")
+        self.assertIn("$leftover = Remove-InstalledRuntime -Root $installRoot", self.rollback)
+        self.assertIn("Write-InstallFailure -ErrorRecord $caught -RolledBack $true -Leftover $leftover", self.rollback)
+        remove = self.defined["Remove-InstalledRuntime"]
+        delete_manifest = remove.index("[IO.File]::Delete($manifestPath)")
+        self.assertLess(remove.index("Remove-RuntimeContent -Directory $resolved -Keep $manifestPath"), delete_manifest)
+        self.assertIn("if ($left.Count -eq 0) {", remove[:delete_manifest])
+        self.assertIn("Join-Path $programFilesRoot $productName", remove)
+        self.assertIn("New-RuntimeManifest -Root $resolved", remove)
+        self.assertNotIn("-Recurse", remove)
+        content = self.defined["Remove-RuntimeContent"]
+        self.assertLess(content.index("ReparsePoint"), content.index("$entry.Delete()"))
+
+    def test_the_leftover_message_names_a_choice_setup_really_offers(self) -> None:
+        failure = self.defined["Write-InstallFailure"]
+        undid = failure.index("' Setup undid its changes.")
+        self.assertIn("if ($RolledBack -and $Leftover) {", failure[:undid])
+        self.assertIn("elseif ($RolledBack) {", failure[:undid])
+        left = re.search(r'\$message \+= "( Setup undid its other changes[^"]*)"', failure).group(1)
+        for word in ("restic", "repository", "snapshot", "engine", "canary"):
+            self.assertNotIn(word, left.lower())
+        self.assertIn("Restart your PC, then run Setup again and choose Reinstall or repair", left)
+        self.assertIn("<strong>Reinstall or repair", read(MAINTENANCE))
+        section = self.contract_section()
+        for text in ("runtime-manifest.json", "stops the dashboard", "Reinstall or repair"):
+            self.assertIn(text, section)
+
+    @staticmethod
+    def contract_section() -> str:
+        section = read(CONTRACT).split("### 3.5 Failure semantics", 1)[1].split("\n### ", 1)[0]
+        return " ".join(section.split())
 
 
 class ContinuousIntegrationTests(unittest.TestCase):
