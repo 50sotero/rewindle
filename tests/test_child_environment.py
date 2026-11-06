@@ -11,6 +11,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -83,6 +84,7 @@ ALLOWED = {
 }
 DUMP_ENVIRONMENT = """import json, os, sys
 from pathlib import Path
+import re
 print("environment captured")
 Path(sys.argv[-1]).write_text(json.dumps(dict(os.environ)), encoding="utf-8")
 """
@@ -331,11 +333,28 @@ class PowerShellLauncherTests(unittest.TestCase):
         )
         self.assertNotRegex(text, r"&\s*\$python\b")
         self.assertEqual(2, text.count("Invoke-ProtectedPython -Python $python "))
+        # Once elevated, the install keeps its temporary files in a folder only
+        # administrators can change; the cleared environment gets it by name.
+        self.assertEqual(
+            2,
+            len(
+                re.findall(
+                    r"Invoke-ProtectedPython -Python \$python [^\n]*`\n\s*"
+                    r"-TemporaryDirectory \$script:protectedTemporaryFolder ",
+                    text,
+                )
+            ),
+        )
         launcher = _powershell_function(text, "Invoke-ProtectedPython")
         self.assertIn("$start.EnvironmentVariables.Clear()", launcher)
-        self.assertIn("New-PythonChildEnvironment", launcher)
+        self.assertIn(
+            "New-PythonChildEnvironment -TemporaryDirectory $TemporaryDirectory",
+            launcher,
+        )
         allow_list = _powershell_function(text, "New-PythonChildEnvironment")
         self.assertIn("SpecialFolder]::LocalApplicationData", allow_list)
+        self.assertIn("$environment['TEMP'] = $TemporaryDirectory", allow_list)
+        self.assertIn("$environment['TMP'] = $TemporaryDirectory", allow_list)
         self.assertNotIn("$env:", allow_list)
 
 

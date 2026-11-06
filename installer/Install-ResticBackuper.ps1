@@ -553,7 +553,9 @@ function New-PythonChildEnvironment {
     # from the user's profile (HKCU\Environment included), which any program the user runs can change without approval,
     # and Python and the Restic it starts read settings from it. So nothing is inherited: the Windows values come from the
     # Windows API, and LOCALAPPDATA is the user's local application-data folder as Windows reports it (the Google Drive
-    # cache check needs it).
+    # cache check needs it). TEMP and TMP are the folder only administrators can change that this install made for its
+    # temporary files once elevated (see Use-ProtectedTemporaryFolder), when one is given.
+    param([string]$TemporaryDirectory)
     $system = [Environment]::SystemDirectory
     $windows = [IO.Directory]::GetParent($system).FullName
     $environment = [ordered]@{
@@ -574,6 +576,10 @@ function New-PythonChildEnvironment {
     if (-not [string]::IsNullOrEmpty($localAppData)) {
         $environment['LOCALAPPDATA'] = $localAppData
     }
+    if (-not [string]::IsNullOrEmpty($TemporaryDirectory)) {
+        $environment['TEMP'] = $TemporaryDirectory
+        $environment['TMP'] = $TemporaryDirectory
+    }
     return $environment
 }
 
@@ -583,7 +589,9 @@ function Invoke-ProtectedPython {
     param(
         [Parameter(Mandatory = $true)] [string]$Python,
         [Parameter(Mandatory = $true)] [string[]]$Arguments,
-        [Parameter(Mandatory = $true)] [string]$WorkingDirectory
+        [Parameter(Mandatory = $true)] [string]$WorkingDirectory,
+        # The protected temporary folder for TEMP and TMP; this process's own TEMP is never passed on.
+        [string]$TemporaryDirectory
     )
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $Python
@@ -591,7 +599,7 @@ function Invoke-ProtectedPython {
     $start.WorkingDirectory = $WorkingDirectory
     $start.UseShellExecute = $false
     $start.EnvironmentVariables.Clear()
-    $environment = New-PythonChildEnvironment
+    $environment = New-PythonChildEnvironment -TemporaryDirectory $TemporaryDirectory
     foreach ($name in @($environment.Keys)) {
         $start.EnvironmentVariables[[string]$name] = [string]$environment[$name]
     }
@@ -966,9 +974,11 @@ function New-AdministratorsOnlyFolder {
 
 $script:protectedTemporaryFolder = $null
 
-# Once elevated, the install and every program it starts (Python, Restic, Microsoft's WebView2 installer) keep their temporary
-# files in a folder only administrators can change, not in the account's own %TEMP%, which its unelevated programs can change.
-# The progress feed is opened before this, so it is still checked against the account's own temporary folder.
+# Once elevated, the install and every program it starts (Python, Microsoft's WebView2 installer) keep their temporary files in
+# a folder only administrators can change, not in the account's own %TEMP%, which its unelevated programs can change. Python
+# starts with a cleared environment, so it is given this folder by name (Invoke-ProtectedPython -TemporaryDirectory), and the
+# Restic it starts uses the protected state folder's own temp folder. The progress feed is opened before this, so it is still
+# checked against the account's own temporary folder.
 function Use-ProtectedTemporaryFolder {
     $folder = New-AdministratorsOnlyFolder
     $script:protectedTemporaryFolder = $folder
@@ -3021,6 +3031,7 @@ try {
     $python = Join-Path $installRoot 'Python\python.exe'
     $initializer = Join-Path $installRoot 'initialize_repository.py'
     $initializerExit = Invoke-ProtectedPython -Python $python -WorkingDirectory $installRoot `
+        -TemporaryDirectory $script:protectedTemporaryFolder `
         -Arguments @('-I', '-S', '-B', $initializer, '--config', $configPath)
     if ($initializerExit -ne 0) {
         throw "Repository initialization failed with exit code $initializerExit."
@@ -3111,6 +3122,7 @@ try {
     # A recovery key kept from an installation that used another backup location is made to name this one only now, when
     # nothing is left that rolls the installation back: a reinstall that fails leaves it naming the backups it was made for.
     $commitExit = Invoke-ProtectedPython -Python $python -WorkingDirectory $installRoot `
+        -TemporaryDirectory $script:protectedTemporaryFolder `
         -Arguments @('-I', '-S', '-B', $initializer, '--config', $configPath, '--commit-recovery-key')
     if ($commitExit -ne 0) {
         throw "Updating the recovery key failed with exit code $commitExit."

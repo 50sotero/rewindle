@@ -304,11 +304,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File Install-ResticBackuper.p
 `-ProgressPath` along and the elevated copy writes the feed. **If the approval is declined, no feed is ever created**; the
 exit code is non-zero.
 
-Once elevated, the installer keeps its temporary files, and those of the programs it starts (Python, Restic, Microsoft's
-WebView2 installer), in a new folder `%ProgramData%\RewindleSetup-<32 hex>` that only Administrators and SYSTEM can change,
-and removes it when it exits. It opens the progress file before that, so the file is still checked against the account's own
-temporary folder (3.1). A folder an interrupted run leaves behind matches the name pattern of the Setup bootstrap's own
-folders, so a later Setup run removes it once it is over a day old.
+Once elevated, the installer keeps its temporary files, and those of the programs it starts (Python, Microsoft's WebView2
+installer), in a new folder `%ProgramData%\RewindleSetup-<32 hex>` that only Administrators and SYSTEM can change, and
+removes it when it exits. It opens the progress file before that, so the file is still checked against the account's own
+temporary folder (3.1). Python starts with a cleared environment that names this folder as `TEMP` and `TMP`; the Restic it
+starts keeps its temporary files in the `temp` folder of the protected state directory. A folder an interrupted run leaves
+behind matches the name pattern of the Setup bootstrap's own folders, so a later Setup run removes it once it is over a day
+old.
 
 ### 3.1 The progress file
 

@@ -363,6 +363,21 @@ try {
     Assert-ExactEnvironment -Actual $record.Environment -Expected $pythonExpected -Label 'the installer Python'
     Assert-True (($record.Arguments -join '|') -ceq ($pythonArguments -join '|')) 'the installer Python gets its arguments'
     Assert-True ($record.WorkingDirectory.TrimEnd('\') -ceq $installFolder) 'the installer Python runs in the install folder'
+    # Once elevated, the install keeps its temporary files in a folder only administrators can change. Python gets that
+    # folder by name as TEMP and TMP, never this process's own (planted) TEMP.
+    $installTemporary = Join-Path $fixtureRoot 'RewindleSetup-fixture'
+    [void][IO.Directory]::CreateDirectory($installTemporary)
+    $pythonTemporaryExpected = [ordered]@{}
+    foreach ($name in $pythonExpected.Keys) { $pythonTemporaryExpected[$name] = $pythonExpected[$name] }
+    $pythonTemporaryExpected['TEMP'] = $installTemporary
+    $pythonTemporaryExpected['TMP'] = $installTemporary
+    $pythonExit = Invoke-WithPlantedEnvironment {
+        Invoke-ProtectedPython -Python $fakeNative -WorkingDirectory $installFolder -TemporaryDirectory $installTemporary `
+            -Arguments $pythonArguments
+    }
+    Assert-True ($pythonExit -eq 0) 'the fake installer Python ran with the protected temporary folder'
+    Assert-ExactEnvironment -Actual (Read-FakeRecord).Environment -Expected $pythonTemporaryExpected -Label (
+        'the installer Python with the protected temporary folder')
     $failedExit = Invoke-ProtectedPython -Python $fakeNative -WorkingDirectory $installFolder -Arguments @('-I', 'exit-seven')
     Assert-True ($failedExit -eq 7) 'the installer sees the exit code of its Python'
     [IO.File]::Delete($fakeRecord)
