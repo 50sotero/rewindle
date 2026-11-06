@@ -84,7 +84,6 @@ ALLOWED = {
 }
 DUMP_ENVIRONMENT = """import json, os, sys
 from pathlib import Path
-import re
 print("environment captured")
 Path(sys.argv[-1]).write_text(json.dumps(dict(os.environ)), encoding="utf-8")
 """
