@@ -334,7 +334,9 @@ them, and only that job holds `id-token: write` and `attestations: write`,
 so the dependency installs, tests and build never run where a signing token
 can be minted. `gh attestation verify <file> --repo 50sotero/rewindle` checks
 that a file came from a workflow run of this repository and names the commit
-it was built from. It does not prove that the build inputs were clean, and it
+it was built from; the README adds `--signer-workflow` and `--source-ref
+refs/tags/v<VERSION>` so that only this workflow's build of a release tag
+passes. It does not prove that the build inputs were clean, and it
 does not replace Authenticode: SmartScreen still sees an unknown publisher.
 Every action the workflows use is pinned to a full commit SHA, with its
 release in a comment beside it, so a moved tag cannot change what runs.

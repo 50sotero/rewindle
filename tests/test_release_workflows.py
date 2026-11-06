@@ -176,6 +176,12 @@ class BuildProvenanceTests(unittest.TestCase):
         readme = read(PROJECT / "README.md")
         section = readme.split("### Download and verify", 1)[1].split("\n### ", 1)[0]
         self.assertRegex(section, rf"gh attestation verify \S+ --repo {re.escape(REPOSITORY)}")
+        # The example names no release that predates the records, so it does not fail as written, and it accepts only
+        # what the release workflow built from a release tag, not any run of any workflow on any branch.
+        self.assertRegex(section, r"gh attestation verify \.\\Rewindle-v<VERSION>-windows-x64-setup\.exe ")
+        self.assertIn(f"--signer-workflow {REPOSITORY}/.github/workflows/{INSTALLERS.name}", section)
+        self.assertIn("--source-ref refs/tags/v<VERSION>", section)
+        self.assertIn("push:\n    tags: [\"v*\"]", read(INSTALLERS))
         # An attestation is not a code signature; the README must not claim otherwise.
         self.assertIn("not code-signed", section)
 
