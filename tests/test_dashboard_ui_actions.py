@@ -14,6 +14,7 @@ WEB = DASHBOARD / "web"
 TONE = WEB / "src" / "protectionTone.ts"
 ONE_SHOT = WEB / "src" / "oneShot.ts"
 RANGE = WEB / "src" / "activityRange.ts"
+RESTORE_LIST = WEB / "src" / "restoreList.ts"
 
 
 def read(path: Path) -> str:
@@ -282,6 +283,77 @@ class RollingDateRangeTests(unittest.TestCase):
         self.assertEqual(self.report["none"], "")
 
 
+# Restore's list of backups, as a computer backed up every hour has it after a month: 730 backups, sent newest first by the host.
+RESTORE_LIST_RUNNER = """
+const list = await import(process.argv[1]);
+const start = Date.UTC(2026, 10, 6, 12, 0, 0);
+const backups = Array.from({ length: 730 }, (_, index) => ({ id: `b${index}`, when: new Date(start - index * 3600000).toISOString() }));
+const ids = page => page.shown.map(backup => backup.id);
+const first = list.pageSnapshots(backups, list.SNAPSHOT_PAGE);
+const chosenOld = list.pageSnapshots(backups, 50, 'b600');
+const chosenNext = list.pageSnapshots(backups, 50, 'b50');
+const two = list.pageSnapshots(backups, 100);
+// Handed over in another order, and with a backup whose time cannot be read: newest first, the unreadable one last, ties as given.
+const shuffled = [backups[5], { id: 'odd', when: 'not a time' }, backups[2], { id: 'tie-a', when: backups[3].when }, backups[3], { id: 'tie-b', when: backups[3].when }, backups[9]];
+const card = { id: 'b1', shortId: 'b1', when: backups[1].when, whenDisplay: '', hostname: 'PC', configGeneration: '1', fileCount: 12, fileCountDisplay: '12',
+  byteCount: 4096, sizeDisplay: '4 KiB', sourceSummary: 'Documents', bindingState: 'plan', isLegacyUnbound: false };
+const report = {
+  page: list.SNAPSHOT_PAGE,
+  first: { count: first.shown.length, head: ids(first).slice(0, 3), last: ids(first).at(-1), hidden: first.hidden, nextId: first.nextId },
+  chosenOld: { count: chosenOld.shown.length, last: ids(chosenOld).at(-1), hidden: chosenOld.hidden, nextId: chosenOld.nextId },
+  chosenNext: { count: chosenNext.shown.length, last: ids(chosenNext).at(-1), nextId: chosenNext.nextId },
+  chosenShown: list.pageSnapshots(backups, 50, 'b3').shown.length,
+  two: { count: two.shown.length, hidden: two.hidden },
+  everything: list.pageSnapshots(backups.slice(0, 20), 50),
+  order: list.newestFirst(shuffled).map(backup => backup.id),
+  sameCards: list.snapshotListSignature([card]) === list.snapshotListSignature([{ ...card }]),
+  changedCard: list.snapshotListSignature([card]) === list.snapshotListSignature([{ ...card, fileCount: 13 }]),
+  olderSetup: list.snapshotListSignature([card]) === list.snapshotListSignature([{ ...card, isLegacyUnbound: true }]),
+};
+report.everything = { count: report.everything.shown.length, hidden: report.everything.hidden, nextId: report.everything.nextId };
+console.log(JSON.stringify(report));
+"""
+
+
+class RestoreBackupListTests(unittest.TestCase):
+    """Restore's first step draws the newest backups a page at a time, so a long history does not slow the window down."""
+
+    report: dict
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.report = run_node(RESTORE_LIST_RUNNER, RESTORE_LIST.as_uri())
+
+    def test_the_newest_page_is_drawn_and_the_rest_wait(self) -> None:
+        self.assertEqual(self.report["page"], 50)
+        first = self.report["first"]
+        self.assertEqual(first["count"], 50)
+        self.assertEqual(first["head"], ["b0", "b1", "b2"])
+        self.assertEqual(first["last"], "b49")
+        self.assertEqual(first["hidden"], 680)
+        self.assertEqual(first["nextId"], "b50")
+        self.assertEqual(self.report["two"], {"count": 100, "hidden": 630})
+        self.assertEqual(self.report["everything"], {"count": 20, "hidden": 0, "nextId": ""})
+
+    def test_the_chosen_backup_stays_in_view(self) -> None:
+        chosen = self.report["chosenOld"]
+        self.assertEqual(chosen["count"], 51)
+        self.assertEqual(chosen["last"], "b600")
+        self.assertEqual(chosen["hidden"], 679)
+        self.assertEqual(chosen["nextId"], "b50")
+        # The next backup to draw is the first one not already in view.
+        self.assertEqual(self.report["chosenNext"], {"count": 51, "last": "b50", "nextId": "b51"})
+        self.assertEqual(self.report["chosenShown"], 50)
+
+    def test_newest_first_with_unreadable_times_last(self) -> None:
+        self.assertEqual(self.report["order"], ["b2", "tie-a", "b3", "tie-b", "b5", "b9", "odd"])
+
+    def test_the_cards_are_drawn_again_only_when_they_change(self) -> None:
+        self.assertTrue(self.report["sameCards"])
+        self.assertFalse(self.report["changedCard"])
+        self.assertFalse(self.report["olderSetup"])
+
+
 class ButtonsAndListsSourceTests(unittest.TestCase):
     """The page and the host use the helpers above where the buttons are drawn and where a folder change starts."""
 
@@ -293,6 +365,7 @@ class ButtonsAndListsSourceTests(unittest.TestCase):
         cls.picker = read(WEB / "components" / "primitives" / "FolderPickerModal.tsx")
         cls.restore = read(WEB / "components" / "primitives" / "RestoreFlowModal.tsx")
         cls.window = read(DASHBOARD / "DashboardWindow.cs")
+        cls.restore_flow = read(DASHBOARD / "DashboardWindow.RestoreFlow.cs")
 
     def assertHas(self, text: str, needle: str) -> None:
         # Names only what is missing; assertIn would print the whole source file.
@@ -360,6 +433,54 @@ class ButtonsAndListsSourceTests(unittest.TestCase):
         remove = self.body(self.window, "private async void OnRemoveSourceClick(")
         after_dialog = remove[remove.index("ConfirmSourceRemoval(selected)"):]
         self.assertHas(after_dialog[:after_dialog.index('await ApplySourceChange("Remove"')], "SourceChangeBlockedReason()")
+
+    def test_the_backup_list_is_paged_and_its_cards_are_kept(self) -> None:
+        # Filtered over every backup, then paged: the search still finds an old backup.
+        self.assertLacks(self.restore, "filteredSnapshots.map(")
+        self.assertHas(self.restore, "pageSnapshots(filteredSnapshots, snapshotLimit, selectedId)")
+        self.assertHas(self.restore, "snapshotPage.shown.map(")
+        self.assertHas(self.restore, "Show older backups")
+        self.assertHas(self.restore, "setSnapshotLimit(limit => limit + SNAPSHOT_PAGE)")
+        # A card is drawn again only when it changes, and the dates in words are worked out once per list, not per state.
+        self.assertHas(self.restore, "const SnapshotCard = memo(function SnapshotCard(")
+        self.assertHas(self.restore, "onSelect={selectSnapshot}")
+        self.assertHas(self.restore, "const selectSnapshot = useCallback(")
+        self.assertHas(self.restore, "useMemo(() => current?.snapshots ?? [], [snapshotSignature])")
+        self.assertLacks(self.restore, "backupWhen(snapshot, locale), backupWhenFull(snapshot, locale), snapshot.whenDisplay")
+
+    def test_the_restore_folder_is_never_looked_at_on_the_window_thread(self) -> None:
+        # A drive that has gone to sleep since Check folder can take seconds to answer: Review restore and Restore now must not wait
+        # for it on the window's thread.
+        for method in ("private bool ReviewRestoreFlow(", "private bool StartRestoreFlow("):
+            with self.subTest(method):
+                self.assertLacks(self.body(self.restore_flow, method), "InspectRestoreFlowDestination(")
+        calls = [match.start() for match in re.finditer(r"\bInspectRestoreFlowDestination\(", self.restore_flow)]
+        declaration = self.restore_flow.index("private static RestoreFlowDestinationInspection InspectRestoreFlowDestination(")
+        calls = [start for start in calls if not declaration <= start < declaration + 120]
+        self.assertEqual(len(calls), 1, "the destination is looked at somewhere other than InspectRestoreFlowDestinationOffThread")
+        off_thread = self.body(self.restore_flow, "private static async Task<RestoreFlowDestinationInspection> InspectRestoreFlowDestinationOffThread(")
+        self.assertTrue(re.search(r"await Task\.Run\(delegate\s*\{\s*return InspectRestoreFlowDestination\(", off_thread), off_thread)
+        review = self.body(self.restore_flow, "private bool ReviewRestoreFlow(")
+        self.assertHas(review, "BeginRestoreFlowDestinationCheck(configuration, restoreFlowDestinationPath, true);")
+        start = self.body(self.restore_flow, "private bool StartRestoreFlow(")
+        self.assertHas(start, "restoreFlowBusy = true;")
+        self.assertLacks(start, "RunRestoreFlowAsync(")
+        # The restore starts only after the look has answered and every check has passed again, the guards last.
+        then = self.body(self.restore_flow, "private async void CheckRestoreFlowDestinationThenRestoreAsync(")
+        self.assertLess(then.index("await InspectRestoreFlowDestinationOffThread("), then.index("DecideRestoreFlowStart("))
+        self.assertLess(then.index("DecideRestoreFlowStart("), then.index("BeginRestoreFlowRestore("))
+        decide = self.body(self.restore_flow, "private bool DecideRestoreFlowStart(")
+        self.assertLacks(decide, "RunRestoreFlowAsync(")
+        order = [decide.index(step) for step in (
+            "operation != restoreFlowOperationGeneration",
+            "TryGetFreshRestoreFlowConfiguration(",
+            "BuildRestoreFlowValidation(",
+            "restoreFlowReviewFingerprint",
+            "ApplyRestoreFlowDestinationInspectionWithoutPublish(inspection)",
+            "CheckRestoreFlowOperationGuards(",
+        )]
+        self.assertEqual(order, sorted(order))
+        self.assertHas(self.restore, "if (activeStep === 'review' && busy) return ['Checking the folder before restoring…', true];")
 
 
 if __name__ == "__main__":

@@ -914,7 +914,20 @@ namespace ResticBackuper.Dashboard
             {
                 return false;
             }
-            string requestedPath = path.Trim();
+            BeginRestoreFlowDestinationCheck(configuration, path.Trim(), false);
+            return true;
+        }
+
+        // Looks at the destination off the window's thread. The look reads the drive (whether it is ready, how much room it has, whether
+        // the folder holds anything), and a drive that has gone to sleep can take seconds to answer, or longer when it is failing; the
+        // window must keep answering meanwhile. Until the look has answered, every other change to the flow is refused
+        // (RequireRestoreFlowIdle), and what it found is used only if the flow is still waiting for it. `thenReview` is Review restore,
+        // which opens the review once the folder has passed; Check folder and Browse only report what the look found.
+        private void BeginRestoreFlowDestinationCheck(
+            SourceConfiguration configuration,
+            string requestedPath,
+            bool thenReview)
+        {
             int generation = ++restoreFlowDestinationValidationGeneration;
             restoreFlowDestinationPath = requestedPath;
             restoreFlowDestinationChecking = true;
@@ -928,38 +941,59 @@ namespace ResticBackuper.Dashboard
             restoreFlowStatus = "loading";
             SetRestoreFlowMessage("Checking folder", "Restore only writes to a new or empty folder.");
             PublishWebPresentationState();
-            ValidateRestoreFlowDestinationAsync(configuration, requestedPath, generation);
-            return true;
+            ValidateRestoreFlowDestinationAsync(configuration, requestedPath, generation, thenReview);
         }
 
         private async void ValidateRestoreFlowDestinationAsync(
             SourceConfiguration configuration,
             string requestedPath,
-            int generation)
+            int generation,
+            bool thenReview)
         {
-            RestoreFlowDestinationInspection inspection;
+            RestoreFlowDestinationInspection inspection =
+                await InspectRestoreFlowDestinationOffThread(configuration, requestedPath);
+            if (thenReview)
+            {
+                CompleteRestoreFlowReview(inspection, generation, requestedPath);
+                return;
+            }
+            if (!IsCurrentRestoreFlowDestinationCheck(generation, requestedPath))
+            {
+                return;
+            }
+            ApplyRestoreFlowDestinationInspection(inspection);
+        }
+
+        // The look at a destination (InspectRestoreFlowDestination), on a worker thread. Every caller looks this way, never on the
+        // window's thread. A look that fails is a folder that could not be checked.
+        private static async Task<RestoreFlowDestinationInspection> InspectRestoreFlowDestinationOffThread(
+            SourceConfiguration configuration,
+            string requestedPath)
+        {
             try
             {
-                inspection = await Task.Run(delegate
+                return await Task.Run(delegate
                 {
                     return InspectRestoreFlowDestination(configuration, requestedPath);
                 });
             }
             catch (Exception exception)
             {
-                inspection = new RestoreFlowDestinationInspection
+                return new RestoreFlowDestinationInspection
                 {
                     Valid = false,
                     Error = true,
                     Message = "That folder could not be checked: " + exception.Message
                 };
             }
-            if (!restoreFlowOpen || generation != restoreFlowDestinationValidationGeneration ||
-                !string.Equals(requestedPath, restoreFlowDestinationPath, StringComparison.Ordinal))
-            {
-                return;
-            }
-            ApplyRestoreFlowDestinationInspection(inspection);
+        }
+
+        // Whether a look at the destination that has just answered is still the one the flow waits for: the flow is open, no newer
+        // look has begun, and the folder is the one that was looked at.
+        private bool IsCurrentRestoreFlowDestinationCheck(int generation, string requestedPath)
+        {
+            return restoreFlowOpen && generation == restoreFlowDestinationValidationGeneration &&
+                string.Equals(requestedPath, restoreFlowDestinationPath, StringComparison.Ordinal);
         }
 
         private void ApplyRestoreFlowDestinationInspection(RestoreFlowDestinationInspection inspection)
@@ -1007,15 +1041,54 @@ namespace ResticBackuper.Dashboard
                 return false;
             }
 
-            RestoreFlowDestinationInspection inspection = InspectRestoreFlowDestination(
-                configuration,
-                restoreFlowDestinationPath);
+            // The folder may have changed since it was checked, so it is looked at again, off the window's thread like Check folder
+            // (see BeginRestoreFlowDestinationCheck). The review opens when the look has answered (CompleteRestoreFlowReview).
+            BeginRestoreFlowDestinationCheck(configuration, restoreFlowDestinationPath, true);
+            return true;
+        }
+
+        // Review restore, once its look at the folder has answered. The review opens only for a folder that passed, with the plan
+        // unchanged and the choices still complete, and its fingerprint is taken then. Anything else stays on Choose folder with the
+        // reason in the state: the command was answered when the look began. A look that is no longer the current one changes nothing.
+        // Returns whether the review opened.
+        private bool CompleteRestoreFlowReview(
+            RestoreFlowDestinationInspection inspection,
+            int generation,
+            string requestedPath)
+        {
+            if (!IsCurrentRestoreFlowDestinationCheck(generation, requestedPath))
+            {
+                return false;
+            }
             ApplyRestoreFlowDestinationInspectionWithoutPublish(inspection);
+            restoreFlowStatus = "ready";
             if (!restoreFlowDestinationValid)
             {
-                error = restoreFlowDestinationStatus;
                 restoreFlowStep = "destination";
-                restoreFlowStatus = "ready";
+                SetRestoreFlowMessage("Choose another folder", "Nothing is restored until the last step.");
+                PublishWebPresentationState();
+                return false;
+            }
+            SourceConfiguration configuration;
+            string error;
+            if (!TryGetFreshRestoreFlowConfiguration(out configuration, out error))
+            {
+                // A plan that changed has already moved the flow to its own result. One that could not be read leaves the folder
+                // checked, and Review restore can be pressed again.
+                if (restoreFlowStep == "destination")
+                {
+                    SetRestoreFlowMessage("Review is not ready", error + " Press Review restore to try again.");
+                    PublishWebPresentationState();
+                }
+                return false;
+            }
+            IList<string> errors;
+            IList<string> warnings;
+            BuildRestoreFlowValidation(out errors, out warnings);
+            if (errors.Count > 0)
+            {
+                restoreFlowStep = string.IsNullOrWhiteSpace(restoreFlowSelectedSnapshotId) ? "backup" : "files";
+                SetRestoreFlowMessage("Review is not ready", errors[0]);
                 PublishWebPresentationState();
                 return false;
             }
@@ -1027,7 +1100,6 @@ namespace ResticBackuper.Dashboard
                 restoreFlowDestinationPath);
             restoreFlowReviewReady = true;
             restoreFlowStep = "review";
-            restoreFlowStatus = "ready";
             SetRestoreFlowMessage(
                 "Review restore",
                 "Check your choices, then press Restore now.");
@@ -1095,26 +1167,160 @@ namespace ResticBackuper.Dashboard
                 error = "Confirm that you want to restore from this older backup first.";
                 return false;
             }
-
-            RestoreFlowDestinationInspection inspection = InspectRestoreFlowDestination(
-                configuration,
-                restoreFlowDestinationPath);
-            ApplyRestoreFlowDestinationInspectionWithoutPublish(inspection);
-            if (!restoreFlowDestinationValid)
-            {
-                error = restoreFlowDestinationStatus;
-                InvalidateRestoreFlowReview();
-                restoreFlowStep = "destination";
-                restoreFlowStatus = "ready";
-                PublishWebPresentationState();
-                return false;
-            }
-
             if (!CheckRestoreFlowOperationGuards(out error))
             {
                 return false;
             }
 
+            // The folder is looked at once more before anything is written, off the window's thread (see
+            // BeginRestoreFlowDestinationCheck). Until the look has answered the flow is busy, so every change to it is refused; the
+            // restore starts only if, when it has answered, every check above still passes (DecideRestoreFlowStart).
+            int operation = ++restoreFlowOperationGeneration;
+            restoreFlowBusy = true;
+            restoreFlowCancelRequested = false;
+            restoreFlowStatus = "loading";
+            SetRestoreFlowMessage(
+                "Checking the folder",
+                "Making sure the folder is still empty and ready before anything is restored.");
+            PublishWebPresentationState();
+            CheckRestoreFlowDestinationThenRestoreAsync(
+                configuration,
+                restoreFlowDestinationPath,
+                legacyConfirmed,
+                operation);
+            return true;
+        }
+
+        private async void CheckRestoreFlowDestinationThenRestoreAsync(
+            SourceConfiguration configuration,
+            string destination,
+            bool legacyConfirmed,
+            int operation)
+        {
+            RestoreFlowDestinationInspection inspection =
+                await InspectRestoreFlowDestinationOffThread(configuration, destination);
+            SourceConfiguration freshConfiguration;
+            RestoreSnapshot snapshot;
+            if (DecideRestoreFlowStart(
+                inspection,
+                destination,
+                legacyConfirmed,
+                operation,
+                out freshConfiguration,
+                out snapshot))
+            {
+                BeginRestoreFlowRestore(freshConfiguration, snapshot);
+            }
+        }
+
+        // Whether Restore now goes ahead, decided once its last look at the folder (`inspection`, of `destination`) has answered and
+        // right before anything starts. Only the operation the flow still waits for counts. The plan must be unchanged, the choices and
+        // the folder must be the ones reviewed, the folder must have passed the look, and no backup or settings change may have started
+        // meanwhile. This starts nothing itself. When the restore does not go ahead, the flow goes back to the step that needs
+        // attention, with the reason in the state, since the command was answered when the look began.
+        private bool DecideRestoreFlowStart(
+            RestoreFlowDestinationInspection inspection,
+            string destination,
+            bool legacyConfirmed,
+            int operation,
+            out SourceConfiguration configuration,
+            out RestoreSnapshot snapshot)
+        {
+            configuration = null;
+            snapshot = null;
+            if (!restoreFlowOpen || !restoreFlowBusy || operation != restoreFlowOperationGeneration)
+            {
+                return false;
+            }
+            restoreFlowBusy = false;
+            restoreFlowStatus = "ready";
+            if (restoreFlowCancelRequested)
+            {
+                restoreFlowCancelRequested = false;
+                restoreFlowFailedOperation = "restore";
+                CompleteRestoreFlowCancelled("Restore was stopped before anything was written. Nothing was restored.");
+                return false;
+            }
+            SourceConfiguration fresh;
+            string error;
+            if (!TryGetFreshRestoreFlowConfiguration(out fresh, out error))
+            {
+                // A plan that changed has already moved the flow to its own result. One that could not be read leaves the review as
+                // it was, and Restore now can be pressed again.
+                if (restoreFlowStep == "review")
+                {
+                    SetRestoreFlowMessage("Restore did not start", error + " Nothing was restored. Press Restore now to try again.");
+                    PublishWebPresentationState();
+                }
+                return false;
+            }
+            IList<string> errors;
+            IList<string> warnings;
+            BuildRestoreFlowValidation(out errors, out warnings);
+            string expectedFingerprint = ComputeRestoreFlowReviewFingerprint(
+                fresh,
+                restoreFlowSelectedSnapshotId,
+                restoreFlowSelectedPaths,
+                restoreFlowWholeSnapshotSelected,
+                restoreFlowDestinationPath);
+            if (errors.Count > 0)
+            {
+                ExpireRestoreFlowReview("destination", "Review expired", errors[0]);
+                return false;
+            }
+            if (!restoreFlowReviewReady || restoreFlowStep != "review" ||
+                !string.Equals(destination, restoreFlowDestinationPath, StringComparison.Ordinal) ||
+                !string.Equals(expectedFingerprint, restoreFlowReviewFingerprint, StringComparison.Ordinal))
+            {
+                ExpireRestoreFlowReview(
+                    "destination",
+                    "Review expired",
+                    "The restore review changed. Review it again before starting.");
+                return false;
+            }
+            RestoreSnapshot chosen = FindRestoreFlowSnapshot(restoreFlowSelectedSnapshotId);
+            if (chosen == null || (chosen.IsLegacyUnbound && !legacyConfirmed))
+            {
+                ExpireRestoreFlowReview(
+                    "backup",
+                    "Review expired",
+                    "That backup is no longer available. Choose a backup again.");
+                return false;
+            }
+            ApplyRestoreFlowDestinationInspectionWithoutPublish(inspection);
+            if (!restoreFlowDestinationValid)
+            {
+                ExpireRestoreFlowReview(
+                    "destination",
+                    "Choose another folder",
+                    "Nothing was restored. This folder can no longer be used; the reason is shown below.");
+                return false;
+            }
+            // Last, right before the restore starts: a backup or a settings change that began while the folder was looked at.
+            if (!CheckRestoreFlowOperationGuards(out error))
+            {
+                SetRestoreFlowMessage("Restore did not start", error + " Nothing was restored.");
+                PublishWebPresentationState();
+                return false;
+            }
+            configuration = fresh;
+            snapshot = chosen;
+            return true;
+        }
+
+        // A restore that was reviewed but must not start: the review is dropped and the flow goes back to `step`, saying why.
+        private void ExpireRestoreFlowReview(string step, string title, string detail)
+        {
+            InvalidateRestoreFlowReview();
+            restoreFlowStep = step;
+            restoreFlowStatus = "ready";
+            SetRestoreFlowMessage(title, detail);
+            PublishWebPresentationState();
+        }
+
+        // Starts the restore Restore now asked for, once DecideRestoreFlowStart has said it may.
+        private void BeginRestoreFlowRestore(SourceConfiguration configuration, RestoreSnapshot snapshot)
+        {
             restoreFlowConfiguration = configuration;
             restoreFlowBusy = true;
             restoreFlowCancelRequested = false;
@@ -1140,7 +1346,6 @@ namespace ResticBackuper.Dashboard
                 snapshot,
                 includes,
                 operation);
-            return true;
         }
 
         private async void RunRestoreFlowAsync(

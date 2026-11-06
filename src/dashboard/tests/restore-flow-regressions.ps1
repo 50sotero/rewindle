@@ -559,6 +559,9 @@ try {
         $retryArgs = [object[]]@($null)
         $retryResult = Invoke-Private $dashboard 'RetryRestoreFlow' $retryArgs
         Assert-True ([bool]$retryResult) 'Try again after a declined restore approval was rejected'
+        # Review looks at the folder again off the window's thread, so the review opens once that look has answered.
+        $reviewDeadline = [DateTime]::UtcNow.AddSeconds(10)
+        while ((Get-FieldValue $dashboard 'restoreFlowStep') -ne 'review' -and [DateTime]::UtcNow -lt $reviewDeadline) { Start-Sleep -Milliseconds 25 }
         Assert-True ((Get-FieldValue $dashboard 'restoreFlowStep') -eq 'review') 'Try again after a declined restore approval did not return to Review'
         Assert-True ([bool](Get-FieldValue $dashboard 'restoreFlowReviewReady')) 'Try again after a declined restore approval did not rebuild the review'
         Assert-True ((Get-FieldValue $dashboard 'restoreFlowDestinationPath') -eq $retryDestination) 'Try again discarded the destination'
@@ -1261,6 +1264,125 @@ try {
         if (Test-Path -LiteralPath $fixturePlanPath) { Remove-Item -LiteralPath $fixturePlanPath -Force }
         throw
     }
+
+    # Review restore and Restore now look at the folder once more, off the window's thread (a drive that has gone to sleep can take
+    # seconds to answer), and act on that look only when it has answered. These are the steps that act on it, given looks made up here:
+    # no drive is read, nothing is elevated and no restore is started. The plan is the fixture above.
+    $inspectionType = $dashboardType.GetNestedType('RestoreFlowDestinationInspection', $flags)
+    function New-Inspection([bool]$Valid, [string]$Message) {
+        $made = [Activator]::CreateInstance($inspectionType, $true)
+        $inspectionType.GetField('Valid', $flags).SetValue($made, $Valid)
+        $inspectionType.GetField('Error', $flags).SetValue($made, (-not $Valid))
+        $inspectionType.GetField('Message', $flags).SetValue($made, $Message)
+        return $made
+    }
+    $lookedAt = [string](Join-Path $tempRoot 'looked-at-folder')
+    $fullFolder = 'That folder already has files in it. Choose a new or empty folder; Rewindle never overwrites files.'
+    function Get-ReviewFingerprint {
+        $fingerprintArgs = New-Object object[] 5
+        $fingerprintArgs[0] = $fixtureConfig
+        $fingerprintArgs[1] = 'snapshot'
+        $fingerprintArgs[2] = (New-StringList @())
+        $fingerprintArgs[3] = $true
+        $fingerprintArgs[4] = $lookedAt
+        return [string](Invoke-Private $dashboard 'ComputeRestoreFlowReviewFingerprint' $fingerprintArgs)
+    }
+    # A flow with everything in the backup chosen, a folder that passed Check folder and, for Restore now, the review open.
+    function Set-LookedAtFlow([string]$Step, [bool]$Busy, [bool]$Reviewed) {
+        Set-PrivateField $dashboard 'restoreFlowOpen' $true
+        Set-PrivateField $dashboard 'restoreFlowBusy' $Busy
+        Set-PrivateField $dashboard 'restoreFlowCancelRequested' $false
+        Set-PrivateField $dashboard 'restoreFlowConfiguration' $fixtureConfig
+        Set-PrivateField $dashboard 'restoreFlowConfigHash' $fixtureHash
+        Set-PrivateField $dashboard 'restoreFlowConfigGeneration' $fixtureConfig.ConfigGeneration
+        Set-PrivateField $dashboard 'restoreFlowPlanId' $fixtureConfig.PlanId
+        Set-PrivateField $dashboard 'restoreFlowSnapshots' $twoSnapshots
+        Set-PrivateField $dashboard 'restoreFlowSelectedSnapshotId' 'snapshot'
+        Set-PrivateField $dashboard 'restoreFlowSelectedPaths' (New-StringList @())
+        Set-PrivateField $dashboard 'restoreFlowWholeSnapshotSelected' $true
+        Set-PrivateField $dashboard 'restoreFlowDestinationPath' $lookedAt
+        Set-PrivateField $dashboard 'restoreFlowDestinationValid' $true
+        Set-PrivateField $dashboard 'restoreFlowDestinationChecking' $false
+        Set-PrivateField $dashboard 'restoreFlowStep' $Step
+        Set-PrivateField $dashboard 'restoreFlowStatus' 'ready'
+        Set-PrivateField $dashboard 'restoreFlowReviewReady' $Reviewed
+        Set-PrivateField $dashboard 'restoreFlowReviewFingerprint' $(if ($Reviewed) { Get-ReviewFingerprint } else { '' })
+        Set-PrivateField $dashboard 'backupStartInProgress' $false
+    }
+
+    # Review restore: the review opens only for the look it began, and only for a folder that passed.
+    Set-LookedAtFlow 'destination' $false $false
+    Set-PrivateField $dashboard 'restoreFlowDestinationChecking' $true
+    Set-PrivateField $dashboard 'restoreFlowDestinationValid' $false
+    $lookGeneration = [int](Get-FieldValue $dashboard 'restoreFlowDestinationValidationGeneration')
+    foreach ($stale in @(@(($lookGeneration - 1), $lookedAt), @($lookGeneration, ($lookedAt + '-other')))) {
+        $reviewArgs = [object[]]@((New-Inspection $true 'Ready.'), [int]$stale[0], [string]$stale[1])
+        Assert-True (-not [bool](Invoke-Private $dashboard 'CompleteRestoreFlowReview' $reviewArgs)) 'a look at the folder that was no longer the current one opened the review'
+        Assert-True ([bool](Get-FieldValue $dashboard 'restoreFlowDestinationChecking') -and (Get-FieldValue $dashboard 'restoreFlowStep') -eq 'destination' -and
+            -not (Get-FieldValue $dashboard 'restoreFlowReviewReady')) 'a look at the folder that was no longer the current one changed the flow'
+    }
+    $reviewArgs = [object[]]@((New-Inspection $false $fullFolder), $lookGeneration, $lookedAt)
+    Assert-True (-not [bool](Invoke-Private $dashboard 'CompleteRestoreFlowReview' $reviewArgs)) 'a folder that failed its last look opened the review'
+    Assert-True ((Get-FieldValue $dashboard 'restoreFlowStep') -eq 'destination' -and -not (Get-FieldValue $dashboard 'restoreFlowDestinationChecking') -and
+        -not (Get-FieldValue $dashboard 'restoreFlowDestinationValid') -and -not (Get-FieldValue $dashboard 'restoreFlowReviewReady') -and
+        (Get-FieldValue $dashboard 'restoreFlowDestinationStatus') -eq $fullFolder -and (Get-FieldValue $dashboard 'restoreFlowStatus') -eq 'ready') 'a folder that failed its last look did not stay on Choose folder with the reason'
+    Set-PrivateField $dashboard 'restoreFlowDestinationChecking' $true
+    $reviewArgs = [object[]]@((New-Inspection $true 'Ready.'), $lookGeneration, $lookedAt)
+    Assert-True ([bool](Invoke-Private $dashboard 'CompleteRestoreFlowReview' $reviewArgs)) 'a folder that passed its last look did not open the review'
+    Assert-True ((Get-FieldValue $dashboard 'restoreFlowStep') -eq 'review' -and [bool](Get-FieldValue $dashboard 'restoreFlowReviewReady') -and
+        -not (Get-FieldValue $dashboard 'restoreFlowDestinationChecking') -and (Get-FieldValue $dashboard 'restoreFlowReviewFingerprint') -eq (Get-ReviewFingerprint)) 'the review that opened was not the one for the folder that was looked at'
+
+    # Restore now: the restore goes ahead only for the operation the flow waits for, with the review and the folder unchanged and no
+    # backup or settings change started meanwhile. Deciding starts nothing.
+    function Invoke-StartDecision([object]$Inspection, [int]$Operation, [string]$Folder) {
+        $decisionArgs = New-Object object[] 6
+        $decisionArgs[0] = $Inspection
+        $decisionArgs[1] = $Folder
+        $decisionArgs[2] = $false
+        $decisionArgs[3] = $Operation
+        $go = [bool](Invoke-Private $dashboard 'DecideRestoreFlowStart' $decisionArgs)
+        return [pscustomobject]@{ Go = $go; Configuration = $decisionArgs[4]; Snapshot = $decisionArgs[5] }
+    }
+    function Get-Operation { return [int](Get-FieldValue $dashboard 'restoreFlowOperationGeneration') }
+    Set-LookedAtFlow 'review' $true $true
+    $decision = Invoke-StartDecision (New-Inspection $true 'Ready.') ((Get-Operation) - 1) $lookedAt
+    Assert-True (-not $decision.Go -and [bool](Get-FieldValue $dashboard 'restoreFlowBusy') -and (Get-FieldValue $dashboard 'restoreFlowStep') -eq 'review' -and
+        [bool](Get-FieldValue $dashboard 'restoreFlowReviewReady')) 'a look that was no longer the one Restore now waited for decided the restore'
+    Set-LookedAtFlow 'review' $true $true
+    $decision = Invoke-StartDecision (New-Inspection $false $fullFolder) (Get-Operation) $lookedAt
+    Assert-True (-not $decision.Go -and $null -eq $decision.Configuration -and $null -eq $decision.Snapshot) 'a restore went ahead into a folder that failed its last look'
+    Assert-True ((Get-FieldValue $dashboard 'restoreFlowStep') -eq 'destination' -and -not (Get-FieldValue $dashboard 'restoreFlowBusy') -and
+        -not (Get-FieldValue $dashboard 'restoreFlowReviewReady') -and -not (Get-FieldValue $dashboard 'restoreFlowDestinationValid') -and
+        (Get-FieldValue $dashboard 'restoreFlowDestinationStatus') -eq $fullFolder) 'a folder that failed its last look did not go back to Choose folder with the reason'
+    Set-LookedAtFlow 'review' $true $true
+    Set-PrivateField $dashboard 'restoreFlowReviewFingerprint' ('0' * 64)
+    $decision = Invoke-StartDecision (New-Inspection $true 'Ready.') (Get-Operation) $lookedAt
+    Assert-True (-not $decision.Go -and (Get-FieldValue $dashboard 'restoreFlowStep') -eq 'destination' -and -not (Get-FieldValue $dashboard 'restoreFlowReviewReady') -and
+        (Get-FieldValue $dashboard 'restoreFlowMessageDetail') -match 'review changed') 'a restore went ahead after its review changed'
+    Set-LookedAtFlow 'review' $true $true
+    $decision = Invoke-StartDecision (New-Inspection $true 'Ready.') (Get-Operation) ($lookedAt + '-other')
+    Assert-True (-not $decision.Go -and -not (Get-FieldValue $dashboard 'restoreFlowReviewReady')) 'a restore went ahead after a look at another folder'
+    Set-LookedAtFlow 'review' $true $true
+    Set-PrivateField $dashboard 'backupStartInProgress' $true
+    $decision = Invoke-StartDecision (New-Inspection $true 'Ready.') (Get-Operation) $lookedAt
+    Set-PrivateField $dashboard 'backupStartInProgress' $false
+    Assert-True (-not $decision.Go -and (Get-FieldValue $dashboard 'restoreFlowStep') -eq 'review' -and [bool](Get-FieldValue $dashboard 'restoreFlowReviewReady') -and
+        -not (Get-FieldValue $dashboard 'restoreFlowBusy') -and (Get-FieldValue $dashboard 'restoreFlowMessageDetail') -match 'Nothing was restored') 'a restore went ahead while a backup started during the look at the folder'
+    Set-LookedAtFlow 'review' $true $true
+    Set-PrivateField $dashboard 'restoreFlowCancelRequested' $true
+    $decision = Invoke-StartDecision (New-Inspection $true 'Ready.') (Get-Operation) $lookedAt
+    Assert-True (-not $decision.Go -and (Get-FieldValue $dashboard 'restoreFlowResultStatus') -eq 'cancelled' -and
+        (Invoke-Private $dashboard 'ResolveRestoreFlowRetryRoute') -eq 'review') 'a restore stopped during the look at the folder went ahead, or Try again did not go back to Review'
+    Set-LookedAtFlow 'review' $true $true
+    $operationBefore = Get-Operation
+    $decision = Invoke-StartDecision (New-Inspection $true 'Ready.') $operationBefore $lookedAt
+    Assert-True ($decision.Go -and $null -ne $decision.Configuration -and $decision.Snapshot.Id -eq 'snapshot') 'a reviewed restore into a folder that passed its last look did not go ahead'
+    Assert-True ((Get-Operation) -eq $operationBefore -and (Get-FieldValue $dashboard 'restoreFlowStep') -eq 'review' -and -not (Get-FieldValue $dashboard 'restoreFlowBusy')) 'deciding to restore started something'
+    Set-PrivateField $dashboard 'restoreFlowStep' 'error'
+    Set-PrivateField $dashboard 'restoreFlowReviewReady' $false
+    Set-PrivateField $dashboard 'restoreFlowCancelRequested' $false
+    Set-PrivateField $dashboard 'restoreFlowResultStatus' $null
+
     $nullLauncherRefused = $false
     try { [void][Activator]::CreateInstance($sessionHostType, $constructorFlags, $null, [object[]]@($null), $null) }
     catch { $nullLauncherRefused = $_.Exception.ToString() -match 'ArgumentNullException' }
@@ -2526,4 +2648,4 @@ finally {
 }
 
 foreach ($note in $skipped) { Write-Output $note }
-Write-Output 'Regressions passed: snapshot scope reset, explicit whole-snapshot validation, observed-path enforcement, review invalidation, reload, retry routing, inline folder-read failures, launch guards, honest cancellation, UNC/reparse/no-overwrite/overlap destination guards and their plain-language refusals, diagnostics redaction of object keys, of whole paths (either slash, any root) and of account IDs, capped run history that is not rewritten for an evicted baseline, no live samples written and the old file removed, readable run-details timelines from long and odd logs, the restore approval wait, one Windows approval per restore session (every listing and one restore, a new session only after one ended, closed with the flow and a changed plan, a declined approval, a pipe served by another process, oversized and foreign frames), no folder read on choosing a backup or restoring all of it, folder listings kept per snapshot and bounded, the session-or-per-step choice from the installed engine, the published reason a restore cannot start, Open and Copy on a restore result acting only on the folder the restore reported once it has finished, an unreadable schedule and the outcome of a schedule change, schedule summaries for every day and lenient schedule times, capped automatic web view reloads, missing-runtime detection, a configuration check that could not complete ending the read it followed, cut-short folder listings and the published path limit, history lists bound again only when a run differs, one not-responding notice per stuck web view, backup freshness across a change of the clocks and of the run times, a missed backup Windows catches up on after a sign-in or a wake, an off-site check that is overdue, the tray balloon for a backup starting once per run, the not-started note for an accepted backup request that started nothing, timers on a clock that setting the time does not move, the window hiding to the tray again after a cancelled sign-out, the bounded crash log and its redacted copy in a diagnostic bundle, the installed plan read without keeping its writer out (and still refused when cut short, not an object or too large) with an install root that follows Program Files, the backup-location window''s done/current/failed steps and refused folders, the recovery-readiness window''s explained actions, the folder picker''s cloud-only walk (bounded by entries and time, skipping excluded folders and links), OneDrive paths and wording, the free-space warning for a whole snapshot that will not fit (a warning and never an error), the history limit the page is told, the schedule, location and readiness dialogs sharing the page tokens and the schedule wording, a status that cannot be read for a moment, a missing state folder, the retired legacy cloud file, a run history that is never written over while it is unreadable, the tray hover text and first-close hint, the setup state the page is told, and diagnostics that say what they left out and read a log cut inside a character.'
+Write-Output 'Regressions passed: snapshot scope reset, explicit whole-snapshot validation, observed-path enforcement, review invalidation, reload, retry routing, inline folder-read failures, launch guards, the restore folder looked at again before Review and Restore now and acted on only while that look is current and passes, honest cancellation, UNC/reparse/no-overwrite/overlap destination guards and their plain-language refusals, diagnostics redaction of object keys, of whole paths (either slash, any root) and of account IDs, capped run history that is not rewritten for an evicted baseline, no live samples written and the old file removed, readable run-details timelines from long and odd logs, the restore approval wait, one Windows approval per restore session (every listing and one restore, a new session only after one ended, closed with the flow and a changed plan, a declined approval, a pipe served by another process, oversized and foreign frames), no folder read on choosing a backup or restoring all of it, folder listings kept per snapshot and bounded, the session-or-per-step choice from the installed engine, the published reason a restore cannot start, Open and Copy on a restore result acting only on the folder the restore reported once it has finished, an unreadable schedule and the outcome of a schedule change, schedule summaries for every day and lenient schedule times, capped automatic web view reloads, missing-runtime detection, a configuration check that could not complete ending the read it followed, cut-short folder listings and the published path limit, history lists bound again only when a run differs, one not-responding notice per stuck web view, backup freshness across a change of the clocks and of the run times, a missed backup Windows catches up on after a sign-in or a wake, an off-site check that is overdue, the tray balloon for a backup starting once per run, the not-started note for an accepted backup request that started nothing, timers on a clock that setting the time does not move, the window hiding to the tray again after a cancelled sign-out, the bounded crash log and its redacted copy in a diagnostic bundle, the installed plan read without keeping its writer out (and still refused when cut short, not an object or too large) with an install root that follows Program Files, the backup-location window''s done/current/failed steps and refused folders, the recovery-readiness window''s explained actions, the folder picker''s cloud-only walk (bounded by entries and time, skipping excluded folders and links), OneDrive paths and wording, the free-space warning for a whole snapshot that will not fit (a warning and never an error), the history limit the page is told, the schedule, location and readiness dialogs sharing the page tokens and the schedule wording, a status that cannot be read for a moment, a missing state folder, the retired legacy cloud file, a run history that is never written over while it is unreadable, the tray hover text and first-close hint, the setup state the page is told, and diagnostics that say what they left out and read a log cut inside a character.'
