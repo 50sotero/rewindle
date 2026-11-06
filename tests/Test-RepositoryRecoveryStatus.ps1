@@ -85,6 +85,7 @@ namespace ResticBackuper.Dashboard
 $sources = @(
     (Read-DashboardSource 'EngineProfile.cs'),
     (Read-DashboardSource 'AtomicFile.cs'),
+    (Read-DashboardSource 'ElevatedRequestSecurity.cs'),
     (Read-DashboardSource 'SourceConfiguration.cs'),
     (Read-DashboardSource 'ProcessLiveness.cs'),
     (Read-DashboardSource 'RepositoryManager.cs')
