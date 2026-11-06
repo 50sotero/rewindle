@@ -93,6 +93,58 @@ namespace ResticBackuper.Dashboard
                 result.StatusLabel + "|" + result.Detail;
         }
 
+        // A daily schedule whose start was written with a UTC offset (as New-ScheduledTaskTrigger writes it), evaluated in
+        // a real time zone so the clocks change between the start date and now.
+        public static string EvaluatePinned(
+            string time,
+            int offsetMinutes,
+            string lastVerifiedUtc,
+            string nowUtc,
+            TimeZoneInfo timeZone)
+        {
+            TimeSpan parsedTime = TimeSpan.ParseExact(time, @"hh\:mm", CultureInfo.InvariantCulture);
+            DateTime verified = DateTime.Parse(
+                lastVerifiedUtc,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
+            DateTime utc = DateTime.Parse(
+                nowUtc,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
+            DateTime local = DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(utc, timeZone), DateTimeKind.Unspecified);
+            TaskSchedule schedule = new TaskSchedule(
+                BackupScheduleCadence.Daily,
+                parsedTime,
+                TimeSpan.FromMinutes(offsetMinutes),
+                new DayOfWeek[0],
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                "ResticBackuper",
+                "S-1-5-21-test",
+                "launcher.exe",
+                "C:\\Program Files\\ResticBackuper",
+                BackupTaskState.Ready,
+                null,
+                "fixture");
+            BackupFreshnessResult result = BackupFreshnessEvaluator.Evaluate(
+                schedule,
+                verified,
+                local,
+                utc,
+                timeZone,
+                BackupFreshnessEvaluator.DefaultGracePeriod);
+            TimeSpan shown = schedule.LocalTimeOfDayOn(utc, timeZone);
+            return result.State.ToString() + "|" +
+                Format(result.LatestDueLocal) + "|" +
+                Format(result.NextScheduledLocal) + "|" +
+                shown.ToString(@"hh\:mm", CultureInfo.InvariantCulture) + "|" +
+                (schedule.ClockChangeNote.Length > 0 ? "note" : "no-note");
+        }
+
         // Moves every Windows folder an engine path is built from (the installed plan, the cloud proof, the dashboard's own
         // folder) under the fixture, so the telemetry reader below never looks at a real installation.
         public static void UseFixtureFolderRoots(string root)
@@ -178,6 +230,22 @@ function Evaluate-Freshness {
         $TimeZone,
         $GraceMinutes)
 }
+
+# A start written with a UTC offset ("2026-07-20T01:00:00+01:00", as New-ScheduledTaskTrigger left it) runs at 00:00 UTC
+# every day: 02:00 in summer, 01:00 in winter. The run at 01:00 in winter is the one that was due, not a missed 02:00.
+$westEurope = [TimeZoneInfo]::FindSystemTimeZoneById('W. Europe Standard Time')
+$pinnedWinter = [ResticBackuper.Dashboard.BackupFreshnessFixtureHarness]::EvaluatePinned(
+    '01:00', 60, '2026-11-06T00:22:57Z', '2026-11-06T11:22:22Z', $westEurope)
+Assert-Equal 'Healthy|2026-11-06T01:00:00|2026-11-07T01:00:00|01:00|note' $pinnedWinter 'A UTC-pinned winter run must count as the due slot and read as 01:00.'
+$pinnedSummer = [ResticBackuper.Dashboard.BackupFreshnessFixtureHarness]::EvaluatePinned(
+    '01:00', 60, '2026-07-21T00:22:00Z', '2026-07-21T10:00:00Z', $westEurope)
+Assert-Equal 'Healthy|2026-07-21T02:00:00|2026-07-22T02:00:00|02:00|note' $pinnedSummer 'The same UTC-pinned start reads as 02:00 in summer.'
+$pinnedOverdue = [ResticBackuper.Dashboard.BackupFreshnessFixtureHarness]::EvaluatePinned(
+    '01:00', 60, '2026-11-04T00:22:00Z', '2026-11-06T11:00:00Z', $westEurope)
+Assert-Match '^Overdue\|2026-11-06T01:00:00\|' $pinnedOverdue 'A UTC-pinned schedule is still overdue when its real slot was missed.'
+$pinnedClockChangeDay = [ResticBackuper.Dashboard.BackupFreshnessFixtureHarness]::EvaluatePinned(
+    '01:00', 60, '2026-10-25T00:20:00Z', '2026-10-25T10:00:00Z', $westEurope)
+Assert-Match '^Healthy\|2026-10-25T02:00:00\|2026-10-26T01:00:00\|' $pinnedClockChangeDay 'On the day the clocks go back, the slot before the change is the summer one and the next is the winter one.'
 
 $dailyHealthy = Evaluate-Freshness `
     -LastVerifiedUtc '2026-07-21T02:30:00Z' `
@@ -352,7 +420,8 @@ $freshnessCode = Get-Content -LiteralPath (Join-Path $project 'src\dashboard\Bac
 Assert-True (-not $freshnessCode.Contains('Process.Start')) 'The freshness evaluator must not launch processes.'
 Assert-True (-not $freshnessCode.Contains('File.')) 'The freshness evaluator must not read or write files.'
 Assert-True (-not $freshnessCode.Contains('TaskScheduleReader')) 'The freshness evaluator must not query or mutate Task Scheduler.'
-Assert-True ($freshnessCode.Contains('date.Add(schedule.TimeOfDay)')) 'Freshness must derive occurrences from local calendar dates.'
+Assert-True ($freshnessCode.Contains('date.Add(schedule.WrittenTimeOfDay)')) 'Freshness must derive occurrences from local calendar dates.'
+Assert-True ($freshnessCode.Contains('schedule.FixedOccurrenceUtc(date)')) 'A start written in UTC must be due at its UTC moment.'
 Assert-True (-not $freshnessCode.Contains('TimeSpan.FromHours(24)')) 'Freshness must not model recurrence as fixed 24-hour intervals.'
 
 [pscustomobject]@{

@@ -1075,6 +1075,11 @@ $action = ScheduledTasks\New-ScheduledTaskAction `
 $dailyTrigger = ScheduledTasks\New-ScheduledTaskTrigger `
     -Daily `
     -At ([DateTime]::Today.AddHours(3))
+# New-ScheduledTaskTrigger writes the start in UTC, which keeps the task at one UTC moment and moves it an hour whenever the
+# clocks change. Without an offset it stays at 03:00 local time all year.
+$dailyTrigger.StartBoundary = [DateTime]::Today.AddHours(3).ToString(
+    'yyyy-MM-dd''T''HH:mm:ss',
+    [Globalization.CultureInfo]::InvariantCulture)
 $taskPrincipal = ScheduledTasks\New-ScheduledTaskPrincipal `
     -UserId $account `
     -LogonType Interactive `

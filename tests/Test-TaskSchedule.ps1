@@ -51,6 +51,34 @@ namespace ResticBackuper.Dashboard
                 schedule.SemanticFingerprint;
         }
 
+        // How a trigger's start was written: its clock time, the UTC offset it carries (none for a local start), and
+        // whether the page is told the runs move with the clocks.
+        public static string ParseStart(
+            string xml,
+            string launcher,
+            string root,
+            string sid)
+        {
+            TaskSchedule schedule;
+            string error;
+            if (!TaskScheduleReader.TryParseTaskXml(
+                xml,
+                launcher,
+                root,
+                sid,
+                new TaskScheduleRuntimeInfo(BackupTaskState.Ready, null),
+                out schedule,
+                out error))
+            {
+                return "ERROR|" + error;
+            }
+            return TaskScheduleCanonicalizer.FormatTime(schedule.WrittenTimeOfDay) + "|" +
+                (schedule.FixedUtcOffset.HasValue
+                    ? schedule.FixedUtcOffset.Value.ToString(@"hh\:mm", System.Globalization.CultureInfo.InvariantCulture)
+                    : "local") + "|" +
+                (schedule.ClockChangeNote.Length > 0 ? "note" : "no-note");
+        }
+
         public static string Request(
             string cadence,
             string time,
@@ -144,6 +172,15 @@ $daily = '<CalendarTrigger><StartBoundary>2026-07-21T02:05:00</StartBoundary><En
 $dailyResult = Parse (New-Xml -Trigger $daily)
 Assert-Match '^OK\|Daily\|02:05\|\|1\|1\|1\|1\|0\|Daily at 02:05\|' $dailyResult 'Daily policy must parse with its flags and summary.'
 Assert-Match '\|Tue, 21 Jul 02:00\|[0-9a-f]{64}$' $dailyResult 'Next-run display and semantic fingerprint must be exposed.'
+
+# A start written with a UTC offset (New-ScheduledTaskTrigger writes one) keeps its clock time in that offset rather than
+# the local time on its start date; a start without one is local time and says nothing about the clocks.
+function Parse-Start { param([string]$Trigger) return [ResticBackuper.Dashboard.TaskScheduleFixtureHarness]::ParseStart((New-Xml -Trigger $Trigger), $launcher, $root, $sid) }
+$pinnedStart = Parse-Start ($daily.Replace('2026-07-21T02:05:00', '2026-07-20T01:00:00+01:00'))
+Assert-Match '^01:00\|01:00\|note$' $pinnedStart 'A start with an offset must keep its written time and offset.'
+$utcStart = Parse-Start ($daily.Replace('2026-07-21T02:05:00', '2026-07-20T00:00:00Z'))
+Assert-Match '^00:00\|00:00\|note$' $utcStart 'A start in UTC (Z) must be read as offset zero.'
+Assert-Match '^02:05\|local\|no-note$' (Parse-Start $daily) 'A local start must stay local with no clock-change note.'
 
 $defaultEnabledSettings = '<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><AllowHardTerminate>true</AllowHardTerminate><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Hidden>false</Hidden><RunOnlyIfIdle>false</RunOnlyIfIdle><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><WakeToRun>true</WakeToRun><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>7</Priority>'
 Assert-Match '^OK\|Daily\|02:05\|\|1\|' (Parse (New-Xml -Trigger $daily -Settings $defaultEnabledSettings)) 'An omitted task Enabled setting must use the Windows schema default of true.'

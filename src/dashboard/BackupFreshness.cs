@@ -176,7 +176,7 @@ namespace ResticBackuper.Dashboard
                     "Rewindle could not read the Windows backup schedule, so it cannot tell whether backups are on time.");
             }
 
-            DateTime? nextScheduledLocal = FindNextScheduledLocal(schedule, localNow, localTimeZone);
+            DateTime? nextScheduledLocal = FindNextScheduledLocal(schedule, localNow, utcNow, localTimeZone);
             if (!schedule.Enabled || schedule.State == BackupTaskState.Disabled)
             {
                 return Result(
@@ -326,6 +326,30 @@ namespace ResticBackuper.Dashboard
         {
             latestDueLocal = null;
             latestDueUtc = null;
+            if (schedule.FixedUtcOffset.HasValue)
+            {
+                // A start in UTC (see TaskSchedule.FixedUtcOffset) runs at one UTC moment on each date of the offset it was
+                // written in, whatever the local clocks did in between, so each slot is that moment.
+                DateTime writtenToday = (utcNow + schedule.FixedUtcOffset.Value).Date;
+                for (int offset = 0; offset <= MaximumCalendarLookbackDays; offset++)
+                {
+                    DateTime date = writtenToday.AddDays(-offset);
+                    if (!RunsOnDate(schedule, date.DayOfWeek))
+                    {
+                        continue;
+                    }
+                    DateTime fixedUtc = schedule.FixedOccurrenceUtc(date);
+                    if (fixedUtc.Add(gracePeriod) <= utcNow)
+                    {
+                        latestDueUtc = fixedUtc;
+                        latestDueLocal = DateTime.SpecifyKind(
+                            TimeZoneInfo.ConvertTimeFromUtc(fixedUtc, localTimeZone),
+                            DateTimeKind.Unspecified);
+                        return;
+                    }
+                }
+                return;
+            }
             for (int offset = 0; offset <= MaximumCalendarLookbackDays; offset++)
             {
                 DateTime date = localNow.Date.AddDays(-offset);
@@ -334,7 +358,7 @@ namespace ResticBackuper.Dashboard
                     continue;
                 }
                 DateTime scheduledLocal = DateTime.SpecifyKind(
-                    date.Add(schedule.TimeOfDay),
+                    date.Add(schedule.WrittenTimeOfDay),
                     DateTimeKind.Unspecified);
                 DateTime scheduledUtc;
                 // A slot in the hour that repeats when the clocks go back is due from its first occurrence, so a run at either
@@ -360,10 +384,31 @@ namespace ResticBackuper.Dashboard
         private static DateTime? FindNextScheduledLocal(
             TaskSchedule schedule,
             DateTime localNow,
+            DateTime utcNow,
             TimeZoneInfo localTimeZone)
         {
             if (!schedule.Enabled || schedule.State == BackupTaskState.Disabled)
             {
+                return null;
+            }
+            if (schedule.FixedUtcOffset.HasValue)
+            {
+                DateTime writtenToday = (utcNow + schedule.FixedUtcOffset.Value).Date;
+                for (int offset = 0; offset <= MaximumCalendarLookaheadDays; offset++)
+                {
+                    DateTime date = writtenToday.AddDays(offset);
+                    if (!RunsOnDate(schedule, date.DayOfWeek))
+                    {
+                        continue;
+                    }
+                    DateTime fixedUtc = schedule.FixedOccurrenceUtc(date);
+                    if (fixedUtc > utcNow)
+                    {
+                        return DateTime.SpecifyKind(
+                            TimeZoneInfo.ConvertTimeFromUtc(fixedUtc, localTimeZone),
+                            DateTimeKind.Unspecified);
+                    }
+                }
                 return null;
             }
             for (int offset = 0; offset <= MaximumCalendarLookaheadDays; offset++)
@@ -374,7 +419,7 @@ namespace ResticBackuper.Dashboard
                     continue;
                 }
                 DateTime scheduledLocal = DateTime.SpecifyKind(
-                    date.Add(schedule.TimeOfDay),
+                    date.Add(schedule.WrittenTimeOfDay),
                     DateTimeKind.Unspecified);
                 DateTime ignoredUtc;
                 if (!TryResolveLocalToUtc(

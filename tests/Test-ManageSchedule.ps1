@@ -445,6 +445,30 @@ try {
     [IO.File]::WriteAllText($script:taskXmlPath, $validDailyXml, $encoding)
     $dailyFingerprint = Get-TaskFingerprint
 
+    # New-ScheduledTaskTrigger writes the start in UTC, which Windows keeps at one UTC moment all year. Saving the same
+    # schedule writes it back as a local clock time, and that counts as a change.
+    foreach ($pinnedStart in @('2026-07-20T01:30:00+01:00', '2026-07-20T01:30:00Z')) {
+        [IO.File]::WriteAllText($script:taskXmlPath, $validDailyXml, $encoding)
+        Set-TaskNodeText -XPath 't:Triggers/t:CalendarTrigger/t:StartBoundary' -Value $pinnedStart
+        $pinnedFingerprint = Get-TaskFingerprint
+        $repaired = Invoke-Manager `
+            -Cadence 'Daily' -Time '01:30' -Days '' `
+            -Enabled '0' -StartWhenAvailable '0' -WakeToRun '1' `
+            -AllowStartOnBatteries '1' -StopIfGoingOnBatteries '0' `
+            -ExpectedFingerprint $pinnedFingerprint
+        Assert-True -Condition ($repaired.ExitCode -eq 0 -and [bool]$repaired.Json.ok -and [bool]$repaired.Json.changed) `
+            -Message "saving a UTC-pinned start ($pinnedStart) is a change: $($repaired.Text)"
+        $repairedDocument = Read-TaskDocument
+        $repairedStart = $repairedDocument.DocumentElement.SelectSingleNode(
+            't:Triggers/t:CalendarTrigger/t:StartBoundary', (Get-NamespaceManager -Document $repairedDocument)).InnerText
+        Assert-True -Condition ($repairedStart -eq '2026-07-20T01:30:00') `
+            -Message "saving a UTC-pinned start ($pinnedStart) writes a local clock time, got $repairedStart"
+        Assert-ProbesEqual -Expected $originalProbe -Actual (Get-PreservedProbe) `
+            -Message 'repairing the start preserved every probed non-schedule field'
+    }
+    [IO.File]::WriteAllText($script:taskXmlPath, $validDailyXml, $encoding)
+    $dailyFingerprint = Get-TaskFingerprint
+
     foreach ($failure in @('Verify', 'Register')) {
         $beforeFailure = Get-TaskFingerprint
         $failureResult = Invoke-Manager `
@@ -536,12 +560,13 @@ try {
     $global:LASTEXITCODE = 0
     [pscustomobject]@{
         ok = $true
-        tests = 27
+        tests = 29
         windows_powershell_51 = 'passed'
         selected_days = 'passed'
         daily = 'passed'
         flags = 'passed'
         idempotent = 'passed'
+        utc_pinned_start_saved_as_local = 'passed'
         baseline_binding = 'passed'
         nonce_digest_sid_binding = 'passed'
         exact_task_validation = 'passed'
