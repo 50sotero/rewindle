@@ -721,13 +721,26 @@ try {
         'started_utc' = $newStarted.ToString('o')
         'finished_utc' = $newStarted.AddMinutes(1).ToString('o')
         'snapshot_id' = 'snapnew0'
-        'summary' = @{ 'total_files_processed' = 5; 'total_bytes_processed' = 500; 'data_added' = 50; 'total_duration' = 3.5 }
+        'summary' = @{ 'total_files_processed' = 5; 'total_bytes_processed' = 500; 'data_added' = 50; 'total_duration' = 3.5; 'files_new' = 2; 'files_changed' = 1; 'files_unmodified' = 2 }
     }), $utf8)
     $thirdLoad = $reader.Load()
     Assert-True ($thirdLoad.History.Count -eq 400) 'a new run changed the size of the capped history'
     Assert-True ((Get-Content -LiteralPath $historyFile -Raw) -match 'run-new') 'a new run was not persisted to the run history'
     Assert-True ([IO.File]::GetLastWriteTimeUtc($historyFile).Ticks -ne $historyTicksBefore) 'a new run did not update the run history file'
     Assert-True (-not (Test-Path -LiteralPath $retiredSamples)) 'a run wrote live samples that nothing reads'
+    # What each backup found: kept with the run in the history file, shown with it, and absent (never zero) for the runs recorded
+    # before the counts were kept. The page gets the sentence only, and only for a run that has it.
+    Assert-True ((Get-Content -LiteralPath $historyFile -Raw) -match '"files_new":2') 'the new run''s counts were not kept in the run history'
+    Assert-True ((Get-Content -LiteralPath $historyFile -Raw) -match '"schema_version":1') 'the run history with counts was not kept at schema 1'
+    $newRunView = @($thirdLoad.History | Where-Object { $_.RunId -eq 'run-new' })[0]
+    $seededView = @($thirdLoad.History | Where-Object { $_.RunId -eq 'run-0000' })[0]
+    Assert-True ($newRunView.ChangesDisplay -eq '2 new, 1 changed, 2 unchanged') ('the new run did not say what its backup found: ' + $newRunView.ChangesDisplay)
+    Assert-True ($seededView.FilesNew -eq -1 -and [string]::IsNullOrEmpty($seededView.ChangesDisplay)) 'a run recorded before the counts were kept was given counts'
+    $historyStates = @(Invoke-Private $dashboard 'BuildWebHistoryStates' @($thirdLoad))
+    $newRunState = @($historyStates | Where-Object { $_['id'] -eq 'run-new' })[0]
+    $seededState = @($historyStates | Where-Object { $_['id'] -eq 'run-0000' })[0]
+    Assert-True ($newRunState['changesDisplay'] -eq '2 new, 1 changed, 2 unchanged') 'the page was not told what the new run''s backup found'
+    Assert-True (-not $seededState.ContainsKey('changesDisplay') -and -not $seededState.ContainsKey('filesNew')) 'the page was told counts for a run that has none'
 
     # What the reader does with a file it depends on that cannot be used. Every path below is under the temporary folder (the state folder,
     # the dashboard's own folder, the history file and each place an off-site proof can come from), so nothing outside it is read or
@@ -919,6 +932,28 @@ try {
     Assert-True ($copyLines[0] -eq 'Rewindle backup run details' -and $copyLines[3] -eq 'Result: Verified') 'the copied run summary changed its first lines'
     Assert-True (($copyLines -join "`n") -match 'Started at: 2026-10-02 12:00:00 [+-]\d\d:\d\d') 'the copied run summary did not carry the full start with its time zone'
     Assert-True (($copyLines -join "`n") -match 'Files: .*\n.*Processed: .*\n.*Stored: ') 'the copied run summary did not carry the run totals'
+    # What the backup found comes last, after the totals; a run without the counts has a dash, never a zero.
+    Assert-True ($copyLines[-1] -eq 'Changes: -') ('the copied summary of a run without counts did not end with a dash: ' + $copyLines[-1])
+    $countedView = [Activator]::CreateInstance($runViewType)
+    $runViewType.GetProperty('StartedLocal').SetValue($countedView, $detailsStartLocal)
+    $runViewType.GetProperty('RunId').SetValue($countedView, 'run-one')
+    $runViewType.GetProperty('TypeLabel').SetValue($countedView, 'Backup')
+    $runViewType.GetProperty('StateLabel').SetValue($countedView, 'Verified')
+    $runViewType.GetProperty('Success').SetValue($countedView, $true)
+    $runViewType.GetProperty('FilesNew').SetValue($countedView, [long]2)
+    $runViewType.GetProperty('FilesChanged').SetValue($countedView, [long]1)
+    $runViewType.GetProperty('FilesUnmodified').SetValue($countedView, [long]2)
+    $countedDetails = $runDetailsReaderType.GetMethod('Load', $flags).Invoke($null, [object[]]@($config, $countedView))
+    $countedLines = $countedDetails.CopyText() -split "`r?`n"
+    Assert-True ($countedLines[-1] -eq 'Changes: 2 new, 1 changed, 2 unchanged') ('the copied summary did not say what the backup found: ' + $countedLines[-1])
+    Assert-True ($countedLines[0] -eq 'Rewindle backup run details' -and $countedLines[3] -eq 'Result: Verified') 'the copied summary with counts changed its first lines'
+    $countedDetailsArgs = New-Object object[] 0
+    Set-PrivateField $dashboard 'webRunDetails' $countedDetails
+    Set-PrivateField $dashboard 'webRunDetailsRun' $countedView
+    $countedDetailsState = Invoke-Private $dashboard 'BuildWebRunDetailsState' $countedDetailsArgs
+    Assert-True ($countedDetailsState['changesDisplay'] -eq '2 new, 1 changed, 2 unchanged') 'the run details the page was sent did not say what the backup found'
+    Set-PrivateField $dashboard 'webRunDetails' $null
+    Set-PrivateField $dashboard 'webRunDetailsRun' $null
 
     $bigLogPath = Join-Path $detailsLogs 'backup-run-big.jsonl.log'
     $bigLog = [IO.File]::Create($bigLogPath)
@@ -964,6 +999,76 @@ try {
     Assert-True ($historyBefore -ne (Get-HistorySignature @((New-HistoryRun 'run-a' 60.0 'aaaa1111'), (New-HistoryRun 'run-b' 62.0 'bbbb2222')))) 'a run that took longer was not noticed'
     Assert-True ($historyBefore -ne (Get-HistorySignature @((New-HistoryRun 'run-a' 60.0 'aaaa1111'), (New-HistoryRun 'run-b' 61.5 'cccc3333')))) 'a run with another snapshot was not noticed'
     Assert-True ($historyBefore -ne (Get-HistorySignature @((New-HistoryRun 'run-a' 60.0 'aaaa1111'), (New-HistoryRun 'run-b' 61.5 'bbbb2222'), (New-HistoryRun 'run-c' 10.0 'dddd4444')))) 'a new run was not noticed'
+    # Run details take the run from this list, so a run whose counts arrived later is bound again.
+    $countedRun = New-HistoryRun 'run-b' 61.5 'bbbb2222'
+    $runViewType.GetProperty('FilesNew').SetValue($countedRun, [long]2)
+    $runViewType.GetProperty('FilesChanged').SetValue($countedRun, [long]1)
+    $runViewType.GetProperty('FilesUnmodified').SetValue($countedRun, [long]2)
+    Assert-True ($historyBefore -ne (Get-HistorySignature @((New-HistoryRun 'run-a' 60.0 'aaaa1111'), $countedRun))) 'a run whose counts arrived later was not noticed'
+
+    # How far back the backups go, as the Restore list counted them. Once the list is shown the dashboard keeps the count in memory,
+    # the next refresh writes backup-range.json in the dashboard's own folder (under the fixture roots here), and the page is told it
+    # only for the plan and backup location in use and never while the status is a data error. A list whose count cannot be kept
+    # still ends ready: the count is only ever shown.
+    $rangeState = Join-Path $telemetryRoot 'range-state'
+    New-Item -ItemType Directory -Path $rangeState -Force | Out-Null
+    $rangeReader = [Activator]::CreateInstance($readerType, $constructorFlags, $null, [object[]]@([string]$rangeState, $true, [string]$offsiteOverride), $null)
+    $rangeFile = Join-Path ([string](Get-FieldValue $rangeReader 'dashboardDirectory')) 'backup-range.json'
+    Assert-True ($rangeFile.StartsWith($engineFixtureRoot + '\', [StringComparison]::OrdinalIgnoreCase)) ('the count file is not under the fixture folders: ' + $rangeFile)
+    $showArgs = New-Object object[] 2
+    $showArgs[0] = $snapshotList
+    $showArgs[1] = $config
+    Set-PrivateField $dashboard 'restoreFlowOpen' $true
+    Set-PrivateField $dashboard 'restoreFlowSelectedSnapshotId' ''
+    foreach ($keeper in @($null, 'no-file')) {
+        if ($null -eq $keeper) { Set-PrivateField $dashboard 'reader' $null }
+        else {
+            $quietReader = [Activator]::CreateInstance($readerType, $constructorFlags, $null, [object[]]@([string]$rangeState, $false, [string]$offsiteOverride), $null)
+            Set-PrivateField $quietReader 'backupRangePath' ''
+            Set-PrivateField $dashboard 'reader' $quietReader
+        }
+        Set-PrivateField $dashboard 'restoreFlowStatus' 'loading'
+        Invoke-Private $dashboard 'ShowRestoreFlowSnapshotList' $showArgs | Out-Null
+        Assert-True ((Get-FieldValue $dashboard 'restoreFlowStatus') -eq 'ready' -and (Get-FieldValue $dashboard 'restoreFlowMessageTitle') -eq 'Choose a backup') ('a list of backups whose count could not be kept did not end ready (' + $keeper + ')')
+        if ($null -ne $keeper) { [void]$quietReader.Load() }
+        Assert-True (-not (Test-Path -LiteralPath $rangeFile)) 'a count that could not be kept was written'
+    }
+    Set-PrivateField $dashboard 'reader' $rangeReader
+    Set-PrivateField $dashboard 'restoreFlowStatus' 'loading'
+    Invoke-Private $dashboard 'ShowRestoreFlowSnapshotList' $showArgs | Out-Null
+    Assert-True ((Get-FieldValue $dashboard 'restoreFlowStatus') -eq 'ready') 'a list of backups did not end ready'
+    Assert-True (-not (Test-Path -LiteralPath $rangeFile)) 'the count was written on the window''s thread'
+    $rangeSnapshot = $rangeReader.Load()
+    Assert-True (Test-Path -LiteralPath $rangeFile) 'the refresh after a listing did not write the count'
+    Assert-True ($null -ne $rangeSnapshot.ListedBackupRange -and $rangeSnapshot.ListedBackupRange.Count -eq 1 -and $rangeSnapshot.ListedBackupRange.Source -eq 'restore') 'the count of the list was not kept'
+    Assert-True ($null -eq $rangeSnapshot.EngineBackupRange) 'a count was read from a state folder with no verified backup'
+    $rangeArgs = New-Object object[] 1
+    $rangeArgs[0] = $rangeSnapshot
+    Set-PrivateField $dashboard 'currentSourceConfiguration' $config
+    Set-PrivateField $dashboard 'webTelemetryError' ''
+    $rangeWeb = Invoke-Private $dashboard 'BuildWebBackupRangeState' $rangeArgs
+    Assert-True ($null -ne $rangeWeb -and $rangeWeb['count'] -eq 1 -and $rangeWeb['source'] -eq 'restore' -and $rangeWeb['oldestAt'] -eq '2026-09-14T00:00:00.0000000Z' -and ([string]$rangeWeb['countedAt']).EndsWith('Z')) 'the page was not told how far back the backups go'
+    Assert-True (-not $rangeWeb.ContainsKey('newestAt')) 'the page was sent a figure it does not show'
+    $movedConfig = New-SyntheticConfiguration $installRoot $planConfigurationFile (Join-Path $planRoot 'moved-repository') $stateRoot @($sourceRoot)
+    Set-PrivateField $dashboard 'currentSourceConfiguration' $movedConfig
+    Assert-True ($null -eq (Invoke-Private $dashboard 'BuildWebBackupRangeState' $rangeArgs)) 'a count for another backup location was shown'
+    Set-PrivateField $dashboard 'currentSourceConfiguration' $null
+    Assert-True ($null -eq (Invoke-Private $dashboard 'BuildWebBackupRangeState' $rangeArgs)) 'a count was shown with no backup plan in use'
+    Set-PrivateField $dashboard 'currentSourceConfiguration' $config
+    Set-PrivateField $dashboard 'webTelemetryError' 'The backup status could not be read.'
+    Assert-True ($null -eq (Invoke-Private $dashboard 'BuildWebBackupRangeState' $rangeArgs)) 'a count was shown while the status had a data error'
+    Set-PrivateField $dashboard 'webTelemetryError' ''
+    # A list that found nothing is a count too: it hides the older one rather than contradicting it.
+    $emptyArgs = New-Object object[] 2
+    $emptyArgs[0] = (New-GenericList $snapshotType)
+    $emptyArgs[1] = $config
+    Invoke-Private $dashboard 'ShowRestoreFlowSnapshotList' $emptyArgs | Out-Null
+    $rangeArgs[0] = $rangeReader.Load()
+    Assert-True ($null -eq (Invoke-Private $dashboard 'BuildWebBackupRangeState' $rangeArgs)) 'a list that found no backups left an older count on the page'
+    Set-PrivateField $dashboard 'reader' $null
+    Set-PrivateField $dashboard 'currentSourceConfiguration' $null
+    Set-PrivateField $dashboard 'webTelemetryError' $null
+    Set-PrivateField $dashboard 'restoreFlowOpen' $false
 
     # While the protected restore waits for the Windows prompt the page is told so; once approved, or on any other
     # step, it is not. A cancelled approval keeps the host's own headline, and a headline the host does not have is sent

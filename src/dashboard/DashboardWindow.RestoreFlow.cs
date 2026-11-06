@@ -407,7 +407,14 @@ namespace ResticBackuper.Dashboard
                 PublishWebPresentationState();
                 return;
             }
-            restoreFlowSnapshots = result.Snapshots ?? new List<RestoreSnapshot>();
+            ShowRestoreFlowSnapshotList(result.Snapshots, freshAfterRead);
+        }
+
+        // A list of backups that was read and accepted, for the plan and backup location in `freshAfterRead` (the configuration
+        // read again after the listing): the dialog shows it, and then keeps what it says about how far back the backups go.
+        private void ShowRestoreFlowSnapshotList(IList<RestoreSnapshot> snapshots, SourceConfiguration freshAfterRead)
+        {
+            restoreFlowSnapshots = snapshots ?? new List<RestoreSnapshot>();
             // The manager's whole list, as it was read (never a page of it that the dialog shows), for the count below.
             IList<RestoreSnapshot> listedSnapshots = restoreFlowSnapshots;
             RestoreSnapshot selected = FindRestoreFlowSnapshot(restoreFlowSelectedSnapshotId);
