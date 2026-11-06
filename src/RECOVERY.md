@@ -22,8 +22,10 @@ If the installed runtime and DPAPI credential are still available:
 
 `--source` must exactly match a source listed by the configuration. It restores
 that source without recreating absolute-path ancestors and their ACLs. Repeat
-the command for other configured sources. The target must be absent or empty
-and must not overlap a source or repository.
+the command for other configured sources. The target must be absent or empty,
+must not overlap a source or repository, and must not be inside Windows,
+Program Files or ProgramData. While the restore runs, the files go into a
+hidden folder inside the target and move into the target when it finishes.
 
 ## Recovery-key restore
 

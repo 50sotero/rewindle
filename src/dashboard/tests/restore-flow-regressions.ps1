@@ -483,6 +483,14 @@ try {
         Assert-True (-not (Test-RestoreDestination $config ([string](Join-Path $installRoot 'restore')))) 'destination inside the installation was accepted'
         Assert-True (-not (Test-RestoreDestination $config ([string](Join-Path $sourceRoot 'Restored')))) 'destination inside a protected folder was accepted'
         Assert-True (-not (Test-RestoreDestination $config ([string]$planRoot))) 'a folder containing the repository and protected folders was accepted'
+        # Windows, both Program Files folders and ProgramData are refused in plain words. They are the fixture's stand-ins under
+        # the temporary folder (see UseFolderRootsForTesting above), never the real ones.
+        foreach ($systemFolder in @('Windows', 'ProgramFiles', 'ProgramFilesX86', 'ProgramData')) {
+            $systemTarget = [string](Join-Path (Join-Path $engineFixtureRoot $systemFolder) 'Restored')
+            $systemMessage = Get-RestoreDestinationMessage $config $systemTarget
+            Assert-True (-not (Test-RestoreDestination $config $systemTarget) -and $systemMessage -match 'belongs to Windows or to installed programs') ("a destination inside $systemFolder was not refused in plain words: " + $systemMessage)
+        }
+        Assert-True (-not (Test-RestoreDestination $config ([string](Join-Path $engineFixtureRoot 'programdata')))) 'a system folder in other letter case was accepted'
     }
     else {
         $skipped.Add('SKIPPED: the temporary folder is not an ordinary local folder on this computer (overlap guards)')
@@ -1110,6 +1118,14 @@ try {
     Assert-True ($droppedRestore -match 'lost its connection' -and $droppedRestore -match 'may already be in the folder you chose' -and $droppedRestore -notmatch 'Nothing was changed') ('a restore whose session dropped claimed nothing changed: ' + $droppedRestore)
     $droppedListing = [string](Invoke-Static $restoreLauncherType 'SanitizeAnswer' @('The protected restore session failed: the pipe closed.', 'list_tree'))
     Assert-True ($droppedListing -match 'lost its connection' -and $droppedListing -match 'Nothing was changed' -and $droppedListing -notmatch 'folder you chose') ('a listing whose session dropped was worded like a restore: ' + $droppedListing)
+    # The restore step's own refusals of a Windows or program folder, of a drive without permissions, and of a folder that moved
+    # while it was prepared reach the person in plain words, not in the engine's.
+    $systemRefusal = [string](Invoke-Static $restoreLauncherType 'SanitizeAnswer' @('restore target must not be inside a Windows or program folder', 'restore'))
+    Assert-True ($systemRefusal -match 'belongs to Windows or to installed programs' -and $systemRefusal -notmatch 'restore target') ('the restore step''s system-folder refusal was not put plainly: ' + $systemRefusal)
+    $permissionsRefusal = [string](Invoke-Static $restoreLauncherType 'SanitizeAnswer' @('restore target must be on a drive that keeps folder permissions', 'restore'))
+    Assert-True ($permissionsRefusal -match 'Choose a folder on another drive' -and $permissionsRefusal -notmatch 'restore target') ('the restore step''s drive refusal was not put plainly: ' + $permissionsRefusal)
+    $movedRefusal = [string](Invoke-Static $restoreLauncherType 'SanitizeAnswer' @('restore target changed while it was being prepared', 'restore'))
+    Assert-True ($movedRefusal -match 'nothing was restored' -and $movedRefusal -notmatch 'restore target') ('the restore step''s moved-folder refusal was not put plainly: ' + $movedRefusal)
     # Only a plan with the "strict" cloud placeholder policy (or none) refuses a folder for online-only files, as the backup does.
     Assert-True ([bool](Invoke-Static $dashboardType 'RefusesOnlineOnlyFiles' @('strict')) -and -not [bool](Invoke-Static $dashboardType 'RefusesOnlineOnlyFiles' @('allow'))) 'the folder check did not follow the plan''s cloud placeholder policy'
     $rewindleEngine = $engineProfileType.GetProperty('Rewindle', $flags).GetValue($null)

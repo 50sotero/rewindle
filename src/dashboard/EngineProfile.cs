@@ -283,7 +283,9 @@ namespace ResticBackuper.Dashboard
                     Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
                     Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    Path.GetTempPath());
+                    Path.GetTempPath(),
+                    Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                    Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86));
             }
         }
 
@@ -319,7 +321,9 @@ namespace ResticBackuper.Dashboard
                 Path.Combine(root, "ProgramFiles"),
                 Path.Combine(root, "ProgramData"),
                 Path.Combine(root, "LocalAppData"),
-                Path.Combine(root, "Temp"));
+                Path.Combine(root, "Temp"),
+                Path.Combine(root, "Windows"),
+                Path.Combine(root, "ProgramFilesX86"));
             lock (gate)
             {
                 folderRootsOverride = roots;
@@ -639,21 +643,31 @@ namespace ResticBackuper.Dashboard
         }
     }
 
-    // The Windows folders engine paths are built from.
+    // The Windows folders engine paths are built from, and the system folders a restore must stay out of.
     internal sealed class EngineFolderRoots
     {
-        public EngineFolderRoots(string programFiles, string programData, string localAppData, string temp)
+        public EngineFolderRoots(
+            string programFiles,
+            string programData,
+            string localAppData,
+            string temp,
+            string windows,
+            string programFilesX86)
         {
             ProgramFiles = programFiles ?? string.Empty;
             ProgramData = programData ?? string.Empty;
             LocalAppData = localAppData ?? string.Empty;
             Temp = temp ?? string.Empty;
+            Windows = windows ?? string.Empty;
+            ProgramFilesX86 = programFilesX86 ?? string.Empty;
         }
 
         public string ProgramFiles { get; private set; }
         public string ProgramData { get; private set; }
         public string LocalAppData { get; private set; }
         public string Temp { get; private set; }
+        public string Windows { get; private set; }
+        public string ProgramFilesX86 { get; private set; }
     }
 
     internal sealed class EngineProbe

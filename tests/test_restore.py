@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
+import ctypes
+from ctypes import wintypes
 import hashlib
 import io
 import json
 import os
 from pathlib import Path
+import re
+import stat
 import sys
 import tempfile
 import unittest
@@ -61,9 +65,32 @@ if "ls" in args:
     raise SystemExit(int(control.get("tree_exit", 0)))
 if "restore" in args:
     target = Path(args[args.index("--target") + 1])
-    target.mkdir(parents=True, exist_ok=True)
     mode = control.get("restore_mode", "success")
-    if mode == "success":
+    if mode == "swap":
+        # Act as the requesting user while Restic loads its index: move a folder on the way to the target aside and
+        # put a junction to a decoy in its place, so that Restic's writes would land in the decoy.
+        import _winapi
+        outcomes = {}
+        for victim in control["swap_victims"]:
+            victim = str(target) if victim == "--target" else victim
+            try:
+                os.rename(victim, victim + ".moved")
+            except OSError as error:
+                outcomes[victim] = getattr(error, "winerror", None) or error.errno
+                continue
+            _winapi.CreateJunction(control["decoy"], victim)
+            outcomes[victim] = "renamed"
+            break
+        Path(control["swap_log"]).write_text(json.dumps(outcomes), encoding="utf-8")
+    target.mkdir(parents=True, exist_ok=True)
+    Path(control["log"]).with_suffix(".target.txt").write_text(str(target), encoding="utf-8")
+    if mode == "tree":
+        (target / "nested").mkdir()
+        (target / "nested" / "inner.txt").write_text("nested fake data", encoding="utf-8")
+    if mode == "collide":
+        # The same name appears in the chosen folder while the restore runs.
+        (target.parent / "restored.txt").write_text("made by the user meanwhile", encoding="utf-8")
+    if mode in ("success", "swap", "tree", "collide"):
         (target / "restored.txt").write_text("verified fake data", encoding="utf-8")
         raise SystemExit(0)
     (target / "partial.txt").write_text("retained partial fake data", encoding="utf-8")
@@ -90,6 +117,50 @@ def snapshot(
         "paths": [source],
         "summary": {"total_files_processed": 3, "total_bytes_processed": 42},
     }
+
+
+SYSTEM_FOLDER_REFUSAL = "restore target must not be inside a Windows or program folder"
+
+
+def dacl_entries(path: Path) -> list[tuple[str, ...]]:
+    """The access entries of a file or folder as Windows stores them, without the inherited marks."""
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32.GetFileSecurityW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)
+    ]
+    advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
+        ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p
+    ]
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    needed = wintypes.DWORD()
+    advapi32.GetFileSecurityW(str(path), 4, None, 0, ctypes.byref(needed))
+    descriptor = ctypes.create_string_buffer(needed.value)
+    if not advapi32.GetFileSecurityW(str(path), 4, descriptor, needed, ctypes.byref(needed)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    text = ctypes.c_void_p()
+    if not advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor, 1, 4, ctypes.byref(text), None):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        sddl = ctypes.wstring_at(text.value)
+    finally:
+        kernel32.LocalFree(text)
+    entries = []
+    for ace in re.findall(r"\(([^)]*)\)", sddl):
+        parts = ace.split(";")
+        parts[1] = parts[1].replace("ID", "")
+        entries.append(tuple(parts))
+    return entries
+
+
+def short_path(path: Path) -> str | None:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = kernel32.GetShortPathNameW(str(path), buffer, len(buffer))
+    if not 0 < length < len(buffer) or buffer.value.casefold() == str(path).casefold():
+        return None
+    return buffer.value
 
 
 def tree_fingerprint(path: Path) -> dict[str, str]:
@@ -1013,6 +1084,162 @@ class RestoreBackendTests(unittest.TestCase):
                         str(self.config_path),
                     ]
                 )
+
+    def restore_into(self, target: Path, report_name: str) -> tuple[int, dict]:
+        report = self.state / report_name
+        result, _, _ = self.invoke(
+            ["--snapshot", "latest", "--target", str(target), "--report", str(report)]
+        )
+        return result, json.loads(report.read_text(encoding="utf-8"))
+
+    def assert_swap_refused(self, target: Path, victims: list[str]) -> None:
+        decoy = self.root / "decoy"
+        decoy.mkdir()
+        swap_log = self.root / "swap.json"
+        self.write_control(
+            restore_mode="swap",
+            swap_victims=victims,
+            decoy=str(decoy),
+            swap_log=str(swap_log),
+        )
+        result, payload = self.restore_into(target, "swap-report.json")
+        outcomes = json.loads(swap_log.read_text(encoding="utf-8"))
+        self.assertEqual([], list(decoy.iterdir()), "a restore wrote through a swapped-in junction")
+        self.assertTrue(outcomes)
+        for victim, outcome in outcomes.items():
+            with self.subTest(victim=victim):
+                # 32: held open without delete sharing; 5: a folder below it is held open.
+                self.assertIn(outcome, (5, 32))
+        self.assertEqual(0, result)
+        self.assertEqual("verified", payload["result"])
+        self.assertTrue((target / "restored.txt").is_file())
+        self.assertEqual(["restored.txt"], sorted(item.name for item in target.iterdir()))
+
+    def test_target_swapped_for_a_link_during_restore_is_never_written_through(self) -> None:
+        target = self.root / "swap-target"
+        self.assert_swap_refused(target, ["--target", str(target)])
+
+    def test_folder_above_the_target_cannot_be_swapped_during_restore(self) -> None:
+        parent = self.root / "swap-parent"
+        self.assert_swap_refused(parent / "target", [str(parent)])
+
+    def test_windows_and_program_folders_are_refused(self) -> None:
+        fake_windows = self.root / "Fake Windows"
+        fake_program_files = self.root / "Fake Program Files With A Long Name"
+        fake_program_data = self.root / "Fake ProgramData"
+        for folder in (fake_windows, fake_program_files, fake_program_data):
+            folder.mkdir()
+        (fake_program_files / "Vendor").mkdir()
+        cases = {
+            "new folder": (fake_windows / "Setup" / "Scripts", fake_windows / "Setup"),
+            "existing empty folder": (fake_program_files / "Vendor", None),
+            "the folder itself": (fake_program_data, None),
+            "other letter case": (Path(str(fake_program_data).upper()) / "New", fake_program_data / "New"),
+        }
+        alias = short_path(fake_program_files)
+        if alias is not None:
+            cases["short name"] = (Path(alias) / "Alias", fake_program_files / "Alias")
+        roots = [str(fake_windows), str(fake_program_files), str(fake_program_data)]
+        with mock.patch.object(restore, "system_folder_roots", create=True, return_value=roots):
+            for label, (target, created) in cases.items():
+                with self.subTest(label=label):
+                    report = self.state / "system-folder-report.json"
+                    with self.assertRaisesRegex(RuntimeError, SYSTEM_FOLDER_REFUSAL):
+                        self.invoke(["--target", str(target), "--report", str(report)])
+                    payload = json.loads(report.read_text(encoding="utf-8"))
+                    self.assertEqual(SYSTEM_FOLDER_REFUSAL, payload["error"])
+                    if created is not None:
+                        self.assertFalse(created.exists())
+                    self.assertEqual([], list((fake_program_files / "Vendor").iterdir()))
+            # The recovery drill keeps its own folder below ProgramData.
+            drill_target, _ = restore.validate_restore_target(
+                fake_program_data / "drill-1",
+                self.config,
+                self.config_path,
+                self.repository,
+                allow_system_folders=True,
+            )
+            self.assertEqual(fake_program_data / "drill-1", drill_target)
+        self.assertFalse(any("restore" in args for args in self.read_log()))
+        if alias is None:
+            self.skipTest("this volume does not make short names; the other cases ran")
+
+    def test_system_folders_come_from_known_folders_not_environment(self) -> None:
+        expected = restore.system_folder_roots()
+        self.assertGreaterEqual(len(expected), 3)
+        fake = str(self.root / "environment")
+        names = (
+            "ProgramFiles",
+            "ProgramFiles(x86)",
+            "ProgramW6432",
+            "SystemRoot",
+            "windir",
+            "ProgramData",
+            "ALLUSERSPROFILE",
+        )
+        with mock.patch.dict(os.environ, {name: fake + "\\" + name for name in names}):
+            patched = restore.system_folder_roots()
+        self.assertEqual(expected, patched)
+        for root in patched:
+            self.assertFalse(root.casefold().startswith(fake.casefold()))
+            self.assertRegex(root, r"^[A-Za-z]:\\")
+
+    def test_restore_folder_is_admin_only_when_elevated(self) -> None:
+        administrators_and_system = "(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+        self.assertEqual("O:BAD:PAI" + administrators_and_system, restore.restore_folder_sddl(True))
+        self.assertEqual(
+            "D:PAI" + administrators_and_system + "(A;OICI;FA;;;S-1-9-1234-5678)",
+            restore.restore_folder_sddl(False, "S-1-9-1234-5678"),
+        )
+        with self.assertRaisesRegex(RuntimeError, "could not be identified"):
+            restore.restore_folder_sddl(False, "BA)(A;OICI;FA;;;WD")
+        # The restore really goes through that folder: Restic was given a new hidden folder inside the target.
+        target = self.root / "folder-check"
+        with mock.patch.object(restore, "restore_folder_sddl", wraps=restore.restore_folder_sddl) as sddl:
+            result, payload = self.restore_into(target, "folder-report.json")
+        self.assertEqual(0, result)
+        self.assertEqual("verified", payload["result"])
+        sddl.assert_called_once_with(restore.process_is_elevated(), restore.current_user_sid())
+        written = Path(self.fake_log.with_suffix(".target.txt").read_text(encoding="utf-8"))
+        self.assertEqual(target, written.parent)
+        self.assertTrue(written.name.startswith(restore.RESTORE_FOLDER_PREFIX))
+        self.assertFalse(written.exists())
+
+    def test_restored_items_get_the_permissions_of_the_chosen_folder(self) -> None:
+        target = self.root / "permissions"
+        self.write_control(restore_mode="tree")
+        result, payload = self.restore_into(target, "permissions-report.json")
+        self.assertEqual(0, result)
+        self.assertEqual("verified", payload["result"])
+        (target / "control").mkdir()
+        (target / "control.txt").write_text("made in place", encoding="utf-8")
+        self.assertEqual(["control", "control.txt", "nested", "restored.txt"], sorted(i.name for i in target.iterdir()))
+        self.assertEqual(dacl_entries(target / "control.txt"), dacl_entries(target / "restored.txt"))
+        self.assertEqual(dacl_entries(target / "control"), dacl_entries(target / "nested"))
+        self.assertEqual(dacl_entries(target / "control.txt"), dacl_entries(target / "nested" / "inner.txt"))
+
+    def test_partial_restore_is_handed_over_and_leaves_no_restore_folder(self) -> None:
+        self.write_control(restore_mode="failure", restore_exit=23)
+        target = self.root / "partial-handover"
+        result, payload = self.restore_into(target, "partial-handover.json")
+        self.assertEqual(23, result)
+        self.assertEqual("partial", payload["result"])
+        self.assertTrue(payload["partial_target_retained"])
+        self.assertEqual(["partial.txt"], sorted(item.name for item in target.iterdir()))
+
+    def test_a_name_taken_meanwhile_is_left_in_a_visible_restore_folder(self) -> None:
+        self.write_control(restore_mode="collide")
+        target = self.root / "collide"
+        result, payload = self.restore_into(target, "collide.json")
+        self.assertEqual(1, result)
+        self.assertEqual("partial", payload["result"])
+        self.assertTrue(payload["partial_target_retained"])
+        self.assertEqual("made by the user meanwhile", (target / "restored.txt").read_text(encoding="utf-8"))
+        folders = [item for item in target.iterdir() if item.is_dir()]
+        self.assertEqual(1, len(folders))
+        self.assertIn(folders[0].name, payload["error"])
+        self.assertEqual("verified fake data", (folders[0] / "restored.txt").read_text(encoding="utf-8"))
+        self.assertFalse(os.stat(folders[0]).st_file_attributes & stat.FILE_ATTRIBUTE_HIDDEN)
 
 
 if __name__ == "__main__":

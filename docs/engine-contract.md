@@ -83,6 +83,22 @@ re-inspects readiness afterwards instead of reading a result file:
 | `key_rotation.py` | — | 0, 3, 2 | Yes | Yes |
 | `anomaly_review.py` | `--expected-run-id`, `--expected-snapshot-id`, `--expected-evidence-sha256` (SHA-256 of `last-success.json`) | 0, 2 | Yes, scope `anomaly_review_acknowledgement` | Yes, scope `offsite_promotion` |
 
+**Restore target (Rewindle `restore.py`).** A target inside Windows, either Program Files folder or ProgramData is refused
+with `restore target must not be inside a Windows or program folder`; those folders come from the known-folder API, never
+from environment variables, and are compared after short names are expanded. The recovery drill's own folder under
+ProgramData is the one exception. The target is opened one folder at a time from the drive root, each relative to the
+handle of the folder above it and without following links, and is held open without delete sharing until the restore
+ends, so neither it nor any folder above it can be renamed. Restic's `--target` is a new hidden folder
+`<target>\.rewindle-restore-<16 hex>` created with a protected DACL for SYSTEM and Administrators only (the user is added
+only when `restore.py` runs unelevated). Afterwards every restored item gets, through its own handle, the DACL it would
+inherit in the target (links are never followed, permissions Restic restored as protected are kept, a file with a second
+name is left as it is) and is moved into the target by handle without replacing anything. A name that appeared in the
+target meanwhile stays in that folder, which is then left visible and open, and the report is `partial` with an `error`
+that names it. The report's `target` is still the chosen folder. Other new refusals: `restore target changed while it
+was being prepared` and `restore target must be on a drive that keeps folder permissions` (a drive without permissions
+that can hold links). The dashboard words all three plainly and refuses the same system folders at the destination step
+for both profiles; the legacy engine's own `restore.py` does neither.
+
 ## 4. Task Scheduler contract
 
 Read with `schtasks.exe /Query /TN "<backup task>" /XML` (as the user, 15 s, 256 K characters) and the

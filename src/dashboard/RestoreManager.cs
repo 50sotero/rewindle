@@ -1551,6 +1551,18 @@ namespace ResticBackuper.Dashboard
             {
                 return "That folder already has files in it. Choose a new or empty folder; Rewindle never overwrites files.";
             }
+            if (text.Contains("restore target must not be inside a windows or program folder"))
+            {
+                return DashboardWindow.RestoreFlowSystemFolderMessage;
+            }
+            if (text.Contains("restore target must be on a drive that keeps folder permissions"))
+            {
+                return "That drive cannot keep restored files private while Rewindle restores them. Choose a folder on another drive.";
+            }
+            if (text.Contains("restore target changed while it was being prepared"))
+            {
+                return "That folder changed while Rewindle was getting it ready, so nothing was restored. Choose the folder again and try once more.";
+            }
             if (text.Contains("restore target must not overlap"))
             {
                 return "That folder is part of what Rewindle backs up or where its backups are kept. Choose a different folder, for example a new folder on another drive.";

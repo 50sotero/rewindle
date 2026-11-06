@@ -1682,6 +1682,10 @@ namespace ResticBackuper.Dashboard
             {
                 return InvalidRestoreFlowDestination("Your backup settings are unavailable.");
             }
+            if (IsRestoreFlowSystemFolder(normalized))
+            {
+                return InvalidRestoreFlowDestination(RestoreFlowSystemFolderMessage);
+            }
             if (!HasNormalRestoreFlowDirectoryChain(normalized))
             {
                 return InvalidRestoreFlowDestination(
@@ -1832,6 +1836,30 @@ namespace ResticBackuper.Dashboard
                 char.IsLetter(trimmed[0]) &&
                 trimmed[1] == ':' &&
                 (trimmed[2] == '\\' || trimmed[2] == '/');
+        }
+
+        internal const string RestoreFlowSystemFolderMessage =
+            "That folder belongs to Windows or to installed programs, so Rewindle will not restore into it. " +
+            "Choose a folder in your own files, for example a new folder in Documents or on another drive.";
+
+        // Windows, both Program Files folders and ProgramData belong to the system and to installed programs. The elevated
+        // restore refuses them as well (the final word); refusing here keeps the person from choosing one in the first place.
+        private static bool IsRestoreFlowSystemFolder(string normalized)
+        {
+            EngineFolderRoots roots = EngineProfile.FolderRoots;
+            string path = normalized.TrimEnd('\\', '/');
+            foreach (string root in new[] { roots.Windows, roots.ProgramFiles, roots.ProgramFilesX86, roots.ProgramData })
+            {
+                if (string.IsNullOrWhiteSpace(root) || !Path.IsPathRooted(root))
+                {
+                    continue;
+                }
+                if (RestoreFlowPathWithin(path, SourceConfiguration.NormalizePath(root).TrimEnd('\\', '/')))
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private static bool RestoreFlowPathsOverlap(string first, string second)

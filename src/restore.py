@@ -63,6 +63,19 @@ GENERATION_TAG_PREFIX = "restic-backuper-generation:"
 SNAPSHOT_BINDING_PLAN = "plan"
 SNAPSHOT_BINDING_LEGACY = "legacy_unbound"
 SNAPSHOT_BINDING_CONFIGURATION = "configuration"
+SYSTEM_FOLDER_REFUSAL = "restore target must not be inside a Windows or program folder"
+# FOLDERID_Windows, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86, FOLDERID_ProgramFilesX64 and
+# FOLDERID_ProgramData. The x86 and x64 folders are optional: a 32-bit process or an older Windows may not
+# report them.
+SYSTEM_KNOWN_FOLDERS = (
+    ("F38BF404-1D43-42F2-9305-67DE0B28FC23", True),
+    ("905E63B6-C1BF-494E-B29C-65B732D3D21A", True),
+    ("7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E", False),
+    ("6D809377-6AF0-444B-8957-A3773F02200E", False),
+    ("62AB5D82-FDC1-4DC3-A9DD-070D1D495D97", True),
+)
+KF_FLAG_DONT_VERIFY = 0x00004000
+RESTORE_FOLDER_PREFIX = ".rewindle-restore-"
 
 
 class ResticReadError(RuntimeError):
@@ -1293,6 +1306,74 @@ def ensure_local_volume(path: Path) -> None:
         raise RuntimeError("restore target must be on a writable local drive")
 
 
+class _Guid(ctypes.Structure):
+    _fields_ = [
+        ("Data1", ctypes.c_uint32),
+        ("Data2", ctypes.c_uint16),
+        ("Data3", ctypes.c_uint16),
+        ("Data4", ctypes.c_ubyte * 8),
+    ]
+
+
+def system_folder_roots() -> list[str]:
+    """Windows, Program Files (both) and ProgramData, as the shell's known-folder API names them.
+
+    Environment variables are never consulted: the requesting user can set them for an elevated process. The API
+    reads its own records (KF_FLAG_DONT_VERIFY), so asking does not touch the folders themselves.
+    """
+
+    if os.name != "nt":
+        return []
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    ole32 = ctypes.WinDLL("ole32")
+    get_path = shell32.SHGetKnownFolderPath
+    get_path.argtypes = [
+        ctypes.POINTER(_Guid),
+        wintypes.DWORD,
+        wintypes.HANDLE,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    get_path.restype = ctypes.c_long
+    ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+    ole32.CoTaskMemFree.restype = None
+    roots: list[str] = []
+    for folder_id, required in SYSTEM_KNOWN_FOLDERS:
+        guid = _Guid.from_buffer_copy(uuid.UUID(folder_id).bytes_le)
+        pointer = ctypes.c_void_p()
+        result = get_path(ctypes.byref(guid), KF_FLAG_DONT_VERIFY, None, ctypes.byref(pointer))
+        try:
+            value = ctypes.wstring_at(pointer.value) if result >= 0 and pointer.value else ""
+        finally:
+            if pointer.value:
+                ole32.CoTaskMemFree(pointer)
+        if value:
+            roots.append(value)
+        elif required:
+            raise RuntimeError("Windows and program folders could not be identified")
+    return roots
+
+
+def _system_root_key(root: str) -> str:
+    absolute = ntpath.normpath(ntpath.abspath(root))
+    # Known folders are recorded with long names. Expand a short-name alias only when one appears, so the check
+    # never has to look inside a Windows or program folder.
+    if "~" in absolute:
+        return canonical_path(absolute)
+    return ntpath.normcase(absolute)
+
+
+def ensure_outside_system_folders(path: Path | str) -> None:
+    candidate = canonical_path(path)
+    for root in system_folder_roots():
+        key = _system_root_key(root)
+        try:
+            inside = ntpath.commonpath([candidate, key]) == key
+        except ValueError:
+            inside = False
+        if inside:
+            raise RuntimeError(SYSTEM_FOLDER_REFUSAL)
+
+
 def forbidden_restore_paths(
     config: dict[str, Any],
     config_path: Path,
@@ -1335,12 +1416,17 @@ def validate_restore_target(
     config_path: Path,
     repository: Path,
     snapshot_paths: list[str] | None = None,
+    *,
+    allow_system_folders: bool = False,
 ) -> tuple[Path, bool]:
     target = Path(os.path.abspath(str(requested)))
     drive, tail = ntpath.splitdrive(canonical_path(target))
     if not drive or tail in ("", "\\", "/"):
         raise RuntimeError("restore target must not be a drive root")
     ensure_local_volume(target)
+    # Only the recovery drill writes below ProgramData, into the protected manager's own drill folder.
+    if not allow_system_folders:
+        ensure_outside_system_folders(target)
     ensure_no_reparse_ancestor(target)
     for forbidden in forbidden_restore_paths(
         config, config_path, repository, snapshot_paths
@@ -1360,6 +1446,807 @@ def validate_restore_target(
         else:
             raise RuntimeError("restore target must be absent or an empty directory")
     return target, existed
+
+
+# ----------------------------------------------------------------------------------------------------------
+# The restore folder: no gap between the target check and Restic's writes.
+#
+# An elevated restore must never write through a junction that the requesting user puts in place after the
+# target was checked. So the target is opened one folder at a time from the drive root, each relative to the
+# handle of the folder above it and without following any link, and it stays open without delete sharing until
+# the restore is handed over: Windows then refuses to rename it or any folder above it. Restic writes into a
+# new hidden folder inside the target that only Administrators and SYSTEM can change (when the restore runs
+# elevated), so nothing can be planted below it while Restic writes; Restic applies a restored folder's own
+# permissions only after everything below that folder is written. Afterwards every restored item gets, through
+# its own handle, the permissions it would have inherited inside the target, and moves into the target by
+# handle, never replacing anything. Nothing is followed, and no path is walked again once a part of the tree
+# may be writable by the user.
+
+_FILE_LIST_DIRECTORY = 0x0001
+_FILE_READ_ATTRIBUTES = 0x0080
+_FILE_WRITE_ATTRIBUTES = 0x0100
+_DELETE = 0x00010000
+_READ_CONTROL = 0x00020000
+_WRITE_DAC = 0x00040000
+_SYNCHRONIZE = 0x00100000
+_SHARE_READ_WRITE = 0x1 | 0x2
+_SHARE_ALL = 0x1 | 0x2 | 0x4
+_OPEN_EXISTING = 3
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_FILE_OPEN = 1
+_FILE_CREATE = 2
+_FILE_OPEN_IF = 3
+_FILE_DIRECTORY_FILE = 0x00000001
+_FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
+_FILE_NON_DIRECTORY_FILE = 0x00000040
+_FILE_OPEN_REPARSE_POINT = 0x00200000
+_OBJ_CASE_INSENSITIVE = 0x00000040
+_FILE_ATTRIBUTE_HIDDEN = 0x0002
+_FILE_ATTRIBUTE_DIRECTORY = 0x0010
+_FILE_ATTRIBUTE_NORMAL = 0x0080
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
+_FILE_PERSISTENT_ACLS = 0x0008
+_FILE_SUPPORTS_REPARSE_POINTS = 0x0080
+_FILE_ID_BOTH_DIRECTORY_INFO = 10
+_FILE_ID_BOTH_DIRECTORY_RESTART_INFO = 11
+_FILE_BASIC_INFORMATION = 4
+_FILE_RENAME_INFORMATION = 10
+_FILE_DISPOSITION_INFORMATION = 13
+_ERROR_NO_MORE_FILES = 18
+_OWNER_GROUP_DACL_INFORMATION = 0x1 | 0x2 | 0x4
+_DACL_SECURITY_INFORMATION = 0x4
+_SE_DACL_AUTO_INHERIT_REQ = 0x0100
+_SE_DACL_AUTO_INHERITED = 0x0400
+_SE_DACL_PROTECTED = 0x1000
+_SEF_DACL_AUTO_INHERIT = 0x01
+_SEF_AVOID_PRIVILEGE_CHECK = 0x08
+_SEF_AVOID_OWNER_CHECK = 0x10
+_TOKEN_QUERY = 0x0008
+_TOKEN_USER = 1
+_TOKEN_ELEVATION = 20
+# The target and the restore folder are held with list access and without delete sharing: Windows then
+# refuses to rename or delete them, or any folder above them. They never hold delete access themselves,
+# which would make Restic's own opens of the folder fail.
+_TARGET_ACCESS = _FILE_LIST_DIRECTORY | _FILE_READ_ATTRIBUTES | _READ_CONTROL
+_RESTORE_FOLDER_ACCESS = _TARGET_ACCESS | _FILE_WRITE_ATTRIBUTES | _WRITE_DAC
+_FILE_GENERIC_MAPPING = (0x00120089, 0x00120116, 0x001200A0, 0x001F01FF)
+_LEFT_IN_RESTORE_FOLDER = (
+    "Some restored files could not be moved into the folder you chose, because files with the same names "
+    "appeared there while the restore ran. They are in the folder named {name} inside it."
+)
+
+
+class _UnicodeString(ctypes.Structure):
+    _fields_ = [
+        ("Length", ctypes.c_ushort),
+        ("MaximumLength", ctypes.c_ushort),
+        ("Buffer", ctypes.c_wchar_p),
+    ]
+
+
+class _ObjectAttributes(ctypes.Structure):
+    _fields_ = [
+        ("Length", ctypes.c_ulong),
+        ("RootDirectory", wintypes.HANDLE),
+        ("ObjectName", ctypes.POINTER(_UnicodeString)),
+        ("Attributes", ctypes.c_ulong),
+        ("SecurityDescriptor", ctypes.c_void_p),
+        ("SecurityQualityOfService", ctypes.c_void_p),
+    ]
+
+
+class _IoStatusBlock(ctypes.Structure):
+    _fields_ = [("Status", ctypes.c_void_p), ("Information", ctypes.c_size_t)]
+
+
+class _FileInformation(ctypes.Structure):
+    _fields_ = [
+        ("dwFileAttributes", wintypes.DWORD),
+        ("ftCreationTime", wintypes.FILETIME),
+        ("ftLastAccessTime", wintypes.FILETIME),
+        ("ftLastWriteTime", wintypes.FILETIME),
+        ("dwVolumeSerialNumber", wintypes.DWORD),
+        ("nFileSizeHigh", wintypes.DWORD),
+        ("nFileSizeLow", wintypes.DWORD),
+        ("nNumberOfLinks", wintypes.DWORD),
+        ("nFileIndexHigh", wintypes.DWORD),
+        ("nFileIndexLow", wintypes.DWORD),
+    ]
+
+
+class _DirectoryEntry(ctypes.Structure):
+    # FILE_ID_BOTH_DIR_INFO without its trailing name, which starts right after this header.
+    _fields_ = [
+        ("NextEntryOffset", wintypes.DWORD),
+        ("FileIndex", wintypes.DWORD),
+        ("CreationTime", ctypes.c_longlong),
+        ("LastAccessTime", ctypes.c_longlong),
+        ("LastWriteTime", ctypes.c_longlong),
+        ("ChangeTime", ctypes.c_longlong),
+        ("EndOfFile", ctypes.c_longlong),
+        ("AllocationSize", ctypes.c_longlong),
+        ("FileAttributes", wintypes.DWORD),
+        ("FileNameLength", wintypes.DWORD),
+        ("EaSize", wintypes.DWORD),
+        ("ShortNameLength", ctypes.c_byte),
+        ("ShortName", ctypes.c_wchar * 12),
+        ("FileId", ctypes.c_longlong),
+    ]
+
+
+class _RenameInformation(ctypes.Structure):
+    # FILE_RENAME_INFORMATION without its trailing name, which starts right after FileNameLength.
+    _fields_ = [
+        ("ReplaceIfExists", ctypes.c_ulong),
+        ("RootDirectory", wintypes.HANDLE),
+        ("FileNameLength", ctypes.c_ulong),
+    ]
+
+
+class _BasicInformation(ctypes.Structure):
+    _fields_ = [
+        ("CreationTime", ctypes.c_longlong),
+        ("LastAccessTime", ctypes.c_longlong),
+        ("LastWriteTime", ctypes.c_longlong),
+        ("ChangeTime", ctypes.c_longlong),
+        ("FileAttributes", ctypes.c_ulong),
+    ]
+
+
+class _GenericMapping(ctypes.Structure):
+    _fields_ = [
+        ("GenericRead", wintypes.DWORD),
+        ("GenericWrite", wintypes.DWORD),
+        ("GenericExecute", wintypes.DWORD),
+        ("GenericAll", wintypes.DWORD),
+    ]
+
+
+class _Win32:
+    """The Windows calls the restore folder needs, loaded once and only when a restore runs."""
+
+    def __init__(self) -> None:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        ntdll = ctypes.WinDLL("ntdll")
+        handle = wintypes.HANDLE
+        dword = wintypes.DWORD
+        self.create_file = kernel32.CreateFileW
+        self.create_file.argtypes = [wintypes.LPCWSTR, dword, dword, ctypes.c_void_p, dword, dword, handle]
+        self.create_file.restype = handle
+        self.close_handle = kernel32.CloseHandle
+        self.close_handle.argtypes = [handle]
+        self.file_information = kernel32.GetFileInformationByHandle
+        self.file_information.argtypes = [handle, ctypes.POINTER(_FileInformation)]
+        self.file_information_ex = kernel32.GetFileInformationByHandleEx
+        self.file_information_ex.argtypes = [handle, ctypes.c_int, ctypes.c_void_p, dword]
+        self.final_path = kernel32.GetFinalPathNameByHandleW
+        self.final_path.argtypes = [handle, wintypes.LPWSTR, dword, dword]
+        self.final_path.restype = dword
+        self.volume_information = kernel32.GetVolumeInformationByHandleW
+        self.volume_information.argtypes = [
+            handle,
+            wintypes.LPWSTR,
+            dword,
+            ctypes.POINTER(dword),
+            ctypes.POINTER(dword),
+            ctypes.POINTER(dword),
+            wintypes.LPWSTR,
+            dword,
+        ]
+        self.local_free = kernel32.LocalFree
+        self.local_free.argtypes = [ctypes.c_void_p]
+        self.local_free.restype = ctypes.c_void_p
+        self.current_process = kernel32.GetCurrentProcess
+        self.current_process.restype = handle
+        self.nt_create_file = ntdll.NtCreateFile
+        self.nt_create_file.argtypes = [
+            ctypes.POINTER(handle),
+            ctypes.c_ulong,
+            ctypes.POINTER(_ObjectAttributes),
+            ctypes.POINTER(_IoStatusBlock),
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+        ]
+        self.nt_create_file.restype = ctypes.c_long
+        self.nt_set_information = ntdll.NtSetInformationFile
+        self.nt_set_information.argtypes = [
+            handle,
+            ctypes.POINTER(_IoStatusBlock),
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+            ctypes.c_int,
+        ]
+        self.nt_set_information.restype = ctypes.c_long
+        self.status_to_error = ntdll.RtlNtStatusToDosError
+        self.status_to_error.argtypes = [ctypes.c_long]
+        self.status_to_error.restype = ctypes.c_ulong
+        self.get_security = advapi32.GetKernelObjectSecurity
+        self.get_security.argtypes = [handle, dword, ctypes.c_void_p, dword, ctypes.POINTER(dword)]
+        self.set_security = advapi32.SetKernelObjectSecurity
+        self.set_security.argtypes = [handle, dword, ctypes.c_void_p]
+        self.descriptor_control = advapi32.GetSecurityDescriptorControl
+        self.descriptor_control.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.WORD),
+            ctypes.POINTER(dword),
+        ]
+        self.set_descriptor_control = advapi32.SetSecurityDescriptorControl
+        self.set_descriptor_control.argtypes = [ctypes.c_void_p, wintypes.WORD, wintypes.WORD]
+        self.descriptor_length = advapi32.GetSecurityDescriptorLength
+        self.descriptor_length.argtypes = [ctypes.c_void_p]
+        self.descriptor_length.restype = dword
+        self.from_sddl = advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW
+        self.from_sddl.argtypes = [wintypes.LPCWSTR, dword, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+        self.create_private = advapi32.CreatePrivateObjectSecurityEx
+        self.create_private.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_void_p,
+            wintypes.BOOL,
+            wintypes.ULONG,
+            handle,
+            ctypes.POINTER(_GenericMapping),
+        ]
+        self.destroy_private = advapi32.DestroyPrivateObjectSecurity
+        self.destroy_private.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+        self.open_process_token = advapi32.OpenProcessToken
+        self.open_process_token.argtypes = [handle, dword, ctypes.POINTER(handle)]
+        self.token_information = advapi32.GetTokenInformation
+        self.token_information.argtypes = [handle, ctypes.c_int, ctypes.c_void_p, dword, ctypes.POINTER(dword)]
+        self.sid_to_string = advapi32.ConvertSidToStringSidW
+        self.sid_to_string.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+
+
+_WIN32_CALLS: _Win32 | None = None
+
+
+def _win32() -> _Win32:
+    global _WIN32_CALLS
+    if _WIN32_CALLS is None:
+        _WIN32_CALLS = _Win32()
+    return _WIN32_CALLS
+
+
+def _last_error() -> OSError:
+    return ctypes.WinError(ctypes.get_last_error())
+
+
+def _close(handle: int | None) -> None:
+    if handle:
+        _win32().close_handle(handle)
+
+
+def _open_relative(
+    directory: int,
+    name: str,
+    access: int,
+    disposition: int = _FILE_OPEN,
+    options: int = 0,
+    *,
+    share: int = _SHARE_READ_WRITE,
+    attributes: int = 0,
+    security: int | None = None,
+) -> int:
+    """Open or create one name inside an open folder, never following a link (NtCreateFile, root handle)."""
+
+    if not name or name in (".", "..") or any(character in name for character in "\\/:\x00"):
+        raise RuntimeError("restore target contains an invalid folder name")
+    native = _win32()
+    length = len(name.encode("utf-16-le"))
+    object_name = _UnicodeString(length, length, name)
+    object_attributes = _ObjectAttributes(
+        ctypes.sizeof(_ObjectAttributes),
+        directory,
+        ctypes.pointer(object_name),
+        _OBJ_CASE_INSENSITIVE,
+        security,
+        None,
+    )
+    handle = wintypes.HANDLE()
+    status_block = _IoStatusBlock()
+    status = native.nt_create_file(
+        ctypes.byref(handle),
+        access | _SYNCHRONIZE,
+        ctypes.byref(object_attributes),
+        ctypes.byref(status_block),
+        None,
+        attributes,
+        share,
+        disposition,
+        options | _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT,
+        None,
+        0,
+    )
+    if status < 0:
+        raise ctypes.WinError(native.status_to_error(status))
+    return int(handle.value)
+
+
+def _set_information(handle: int, information: Any, information_class: int) -> None:
+    native = _win32()
+    status_block = _IoStatusBlock()
+    status = native.nt_set_information(
+        handle,
+        ctypes.byref(status_block),
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+        information_class,
+    )
+    if status < 0:
+        raise ctypes.WinError(native.status_to_error(status))
+
+
+def _information(handle: int) -> _FileInformation:
+    information = _FileInformation()
+    if not _win32().file_information(handle, ctypes.byref(information)):
+        raise _last_error()
+    return information
+
+
+def _identity(information: _FileInformation) -> tuple[int, int]:
+    return (
+        int(information.dwVolumeSerialNumber),
+        (int(information.nFileIndexHigh) << 32) | int(information.nFileIndexLow),
+    )
+
+
+def _final_path(handle: int) -> str:
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = _win32().final_path(handle, buffer, len(buffer), 0)
+    if length == 0:
+        raise _last_error()
+    if length >= len(buffer):
+        raise RuntimeError("restore target path is too long")
+    text = buffer.value
+    if text.startswith("\\\\?\\UNC\\") or not text.startswith("\\\\?\\"):
+        raise RuntimeError("restore target must be on a local drive")
+    return text[4:]
+
+
+def _directory_entries(handle: int, limit: int | None = None) -> list[tuple[str, int, int]]:
+    """The names in an open folder, with their attributes and file IDs, read through the folder's own handle."""
+
+    native = _win32()
+    buffer = ctypes.create_string_buffer(64 * 1024)
+    header_size = ctypes.sizeof(_DirectoryEntry)
+    entries: list[tuple[str, int, int]] = []
+    information_class = _FILE_ID_BOTH_DIRECTORY_RESTART_INFO
+    while True:
+        if not native.file_information_ex(handle, information_class, buffer, len(buffer)):
+            error = ctypes.get_last_error()
+            if error == _ERROR_NO_MORE_FILES:
+                return entries
+            raise ctypes.WinError(error)
+        information_class = _FILE_ID_BOTH_DIRECTORY_INFO
+        offset = 0
+        while True:
+            entry = _DirectoryEntry.from_buffer(buffer, offset)
+            name = ctypes.wstring_at(ctypes.addressof(buffer) + offset + header_size, entry.FileNameLength // 2)
+            if name not in (".", ".."):
+                entries.append((name, int(entry.FileAttributes), int(entry.FileId) & 0xFFFFFFFFFFFFFFFF))
+                if limit is not None and len(entries) >= limit:
+                    return entries
+            if entry.NextEntryOffset == 0:
+                break
+            offset += entry.NextEntryOffset
+
+
+def _read_security(handle: int) -> ctypes.Array:
+    native = _win32()
+    needed = wintypes.DWORD()
+    native.get_security(handle, _OWNER_GROUP_DACL_INFORMATION, None, 0, ctypes.byref(needed))
+    if needed.value == 0:
+        raise _last_error()
+    buffer = ctypes.create_string_buffer(needed.value)
+    if not native.get_security(handle, _OWNER_GROUP_DACL_INFORMATION, buffer, needed, ctypes.byref(needed)):
+        raise _last_error()
+    return buffer
+
+
+def _dacl_protected(descriptor: Any) -> bool:
+    control = wintypes.WORD()
+    revision = wintypes.DWORD()
+    if not _win32().descriptor_control(descriptor, ctypes.byref(control), ctypes.byref(revision)):
+        raise _last_error()
+    return bool(control.value & _SE_DACL_PROTECTED)
+
+
+def _write_dacl(handle: int, descriptor: Any) -> None:
+    native = _win32()
+    # In auto-inherit form the folder's inherited entries stay marked as inherited, and so do its children's.
+    flags = _SE_DACL_AUTO_INHERIT_REQ | _SE_DACL_AUTO_INHERITED
+    if not native.set_descriptor_control(descriptor, flags, flags):
+        raise _last_error()
+    if not native.set_security(handle, _DACL_SECURITY_INFORMATION, descriptor):
+        raise _last_error()
+
+
+def _inherited_security(parent: Any, current: Any, directory: bool) -> ctypes.Array:
+    """The descriptor `current` would have under `parent`: own entries kept, inherited ones from `parent`."""
+
+    native = _win32()
+    created = ctypes.c_void_p()
+    mapping = _GenericMapping(*_FILE_GENERIC_MAPPING)
+    if not native.create_private(
+        parent,
+        current,
+        ctypes.byref(created),
+        None,
+        bool(directory),
+        _SEF_DACL_AUTO_INHERIT | _SEF_AVOID_PRIVILEGE_CHECK | _SEF_AVOID_OWNER_CHECK,
+        None,
+        ctypes.byref(mapping),
+    ):
+        raise _last_error()
+    try:
+        length = native.descriptor_length(created)
+        copy = ctypes.create_string_buffer(length)
+        ctypes.memmove(copy, created, length)
+        return copy
+    finally:
+        native.destroy_private(ctypes.byref(created))
+
+
+def _security_from_sddl(text: str) -> ctypes.c_void_p:
+    pointer = ctypes.c_void_p()
+    if not _win32().from_sddl(text, 1, ctypes.byref(pointer), None):
+        raise _last_error()
+    return pointer
+
+
+def _process_token_information(information_class: int) -> ctypes.Array:
+    native = _win32()
+    token = wintypes.HANDLE()
+    if not native.open_process_token(native.current_process(), _TOKEN_QUERY, ctypes.byref(token)):
+        raise _last_error()
+    try:
+        needed = wintypes.DWORD()
+        native.token_information(token, information_class, None, 0, ctypes.byref(needed))
+        buffer = ctypes.create_string_buffer(max(needed.value, 4))
+        if not native.token_information(token, information_class, buffer, len(buffer), ctypes.byref(needed)):
+            raise _last_error()
+        return buffer
+    finally:
+        _close(token.value)
+
+
+def process_is_elevated() -> bool:
+    return bool(wintypes.DWORD.from_buffer(_process_token_information(_TOKEN_ELEVATION)).value)
+
+
+def current_user_sid() -> str:
+    native = _win32()
+    sid = ctypes.c_void_p.from_buffer(_process_token_information(_TOKEN_USER)).value
+    text = ctypes.c_void_p()
+    if not native.sid_to_string(sid, ctypes.byref(text)):
+        raise _last_error()
+    try:
+        return ctypes.wstring_at(text.value)
+    finally:
+        native.local_free(text)
+
+
+def restore_folder_sddl(elevated: bool, user_sid: str | None = None) -> str:
+    """Protected permissions for the folder Restic writes into: Administrators and SYSTEM only when elevated.
+
+    Without elevation Restic runs with the user's own rights, so there is no boundary to keep: the user is
+    added.
+    """
+
+    administrators_and_system = "(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+    if elevated:
+        return "O:BAD:PAI" + administrators_and_system
+    if not isinstance(user_sid, str) or not re.fullmatch(r"S-1-\d+(-\d+)+", user_sid):
+        raise RuntimeError("the current Windows account could not be identified")
+    return "D:PAI" + administrators_and_system + f"(A;OICI;FA;;;{user_sid})"
+
+
+def _open_target(target: Path) -> int:
+    """Open (creating where missing) each folder of `target` from the drive root, relative to the one above."""
+
+    native = _win32()
+    absolute = ntpath.normpath(ntpath.abspath(str(target)))
+    drive, tail = ntpath.splitdrive(absolute)
+    components = [part for part in tail.split("\\") if part]
+    if not re.fullmatch(r"[A-Za-z]:", drive) or not components:
+        raise RuntimeError("restore target must not be a drive root")
+    handle = native.create_file(
+        "\\\\?\\" + drive + "\\",
+        _FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
+        _SHARE_ALL,
+        None,
+        _OPEN_EXISTING,
+        _FILE_FLAG_BACKUP_SEMANTICS,
+        None,
+    )
+    if not handle or handle == ctypes.c_void_p(-1).value:
+        raise _last_error()
+    try:
+        for index, component in enumerate(components):
+            last = index == len(components) - 1
+            try:
+                child = _open_relative(
+                    handle,
+                    component,
+                    _TARGET_ACCESS if last else _FILE_READ_ATTRIBUTES,
+                    _FILE_OPEN_IF,
+                    _FILE_DIRECTORY_FILE,
+                    share=_SHARE_READ_WRITE if last else _SHARE_ALL,
+                )
+            except NotADirectoryError as error:
+                raise RuntimeError("restore target parent must be a normal directory") from error
+            _close(handle)
+            handle = child
+            attributes = _information(handle).dwFileAttributes
+            if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+                raise RuntimeError("restore target must not traverse a reparse point")
+            if not attributes & _FILE_ATTRIBUTE_DIRECTORY:
+                raise RuntimeError("restore target parent must be a normal directory")
+        return int(handle)
+    except BaseException:
+        _close(handle)
+        raise
+
+
+def _hand_back_entry(
+    directory: int, parent: Any, name: str, attributes: int, file_id: int
+) -> tuple[int, ctypes.Array] | None:
+    """Give one restored item the permissions it inherits in the target; returns an open folder to enter."""
+
+    if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+        # A link restored from the backup is left exactly as restored, and never followed.
+        return None
+    is_directory = bool(attributes & _FILE_ATTRIBUTE_DIRECTORY)
+    try:
+        handle = _open_relative(
+            directory,
+            name,
+            _READ_CONTROL | _WRITE_DAC | _FILE_READ_ATTRIBUTES | (_FILE_LIST_DIRECTORY if is_directory else 0),
+            _FILE_OPEN,
+            _FILE_DIRECTORY_FILE if is_directory else _FILE_NON_DIRECTORY_FILE,
+        )
+    except OSError as error:
+        # Gone, replaced by another kind of item, or restored with its own permissions that leave Administrators
+        # out: Restic set those itself, so nothing below it inherits from the restore folder.
+        if getattr(error, "winerror", None) in (2, 3, 5, 32, 267):
+            return None
+        raise
+    keep = False
+    try:
+        information = _information(handle)
+        if information.dwFileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+            return None
+        if bool(information.dwFileAttributes & _FILE_ATTRIBUTE_DIRECTORY) != is_directory:
+            return None
+        if file_id and _identity(information)[1] != file_id:
+            return None
+        # A file with a second name might be reached from outside the restore; its permissions stay as they are.
+        if not is_directory and information.nNumberOfLinks != 1:
+            return None
+        current = _read_security(handle)
+        # Restored with its own protected permissions: nothing changes here, and nothing below inherits from
+        # above.
+        if _dacl_protected(current):
+            return None
+        updated = _inherited_security(parent, current, is_directory)
+        _write_dacl(handle, updated)
+        if is_directory:
+            keep = True
+            return handle, updated
+        return None
+    finally:
+        if not keep:
+            _close(handle)
+
+
+def _hand_back_tree(directory: int, parent: Any) -> None:
+    """Hand back everything below an open folder, one open folder per level, without following any link."""
+
+    stack: list[tuple[int, Any, Any, bool]] = [(directory, parent, iter(_directory_entries(directory)), False)]
+    try:
+        while stack:
+            handle, descriptor, entries, owned = stack[-1]
+            entry = next(entries, None)
+            if entry is None:
+                stack.pop()
+                if owned:
+                    _close(handle)
+                continue
+            opened = _hand_back_entry(handle, descriptor, *entry)
+            if opened is None:
+                continue
+            child, child_descriptor = opened
+            try:
+                listing = iter(_directory_entries(child))
+            except BaseException:
+                _close(child)
+                raise
+            stack.append((child, child_descriptor, listing, True))
+    finally:
+        for handle, _descriptor, _entries, owned in stack:
+            if owned:
+                _close(handle)
+
+
+def _rename_into(handle: int, directory: int, name: str) -> None:
+    encoded = name.encode("utf-16-le")
+    name_offset = _RenameInformation.FileNameLength.offset + ctypes.sizeof(ctypes.c_ulong)
+    buffer = ctypes.create_string_buffer(max(ctypes.sizeof(_RenameInformation), name_offset + len(encoded)) + 2)
+    header = _RenameInformation.from_buffer(buffer)
+    header.ReplaceIfExists = 0
+    header.RootDirectory = directory
+    header.FileNameLength = len(encoded)
+    ctypes.memmove(ctypes.addressof(buffer) + name_offset, encoded, len(encoded))
+    native = _win32()
+    status_block = _IoStatusBlock()
+    status = native.nt_set_information(
+        handle, ctypes.byref(status_block), buffer, len(buffer), _FILE_RENAME_INFORMATION
+    )
+    if status < 0:
+        raise ctypes.WinError(native.status_to_error(status))
+
+
+class RestoreFolder:
+    """The checked target, held open for the whole restore, and the protected folder Restic writes into."""
+
+    def __init__(self, target: Path) -> None:
+        self.target = target
+        self.name = RESTORE_FOLDER_PREFIX + uuid.uuid4().hex[:16]
+        self.path = ""
+        self.target_handle: int | None = None
+        self.handle: int | None = None
+        self.identity: tuple[int, int] | None = None
+        self.permissions = True
+
+    @classmethod
+    def open(cls, target: Path) -> "RestoreFolder":
+        folder = cls(target)
+        try:
+            folder._prepare()
+        except BaseException:
+            folder._abandon()
+            raise
+        return folder
+
+    def _prepare(self) -> None:
+        self.target_handle = _open_target(self.target)
+        final = _final_path(self.target_handle)
+        # A folder above the target swapped for another before it was held open shows up here.
+        if ntpath.normcase(ntpath.normpath(final)) != canonical_path(self.target):
+            raise RuntimeError("restore target changed while it was being prepared")
+        ensure_outside_system_folders(final)
+        if _directory_entries(self.target_handle, limit=1):
+            raise RuntimeError("restore target became non-empty before restore started")
+        flags = wintypes.DWORD()
+        native = _win32()
+        if not native.volume_information(self.target_handle, None, 0, None, None, ctypes.byref(flags), None, 0):
+            raise _last_error()
+        self.permissions = bool(flags.value & _FILE_PERSISTENT_ACLS)
+        if not self.permissions and flags.value & _FILE_SUPPORTS_REPARSE_POINTS:
+            raise RuntimeError("restore target must be on a drive that keeps folder permissions")
+        security = None
+        if self.permissions:
+            elevated = process_is_elevated()
+            user_sid = None if elevated else current_user_sid()
+            security = _security_from_sddl(restore_folder_sddl(elevated, user_sid))
+        try:
+            # Created with its protected permissions in the same call, so nobody else ever holds it open.
+            self.handle = _open_relative(
+                self.target_handle,
+                self.name,
+                _RESTORE_FOLDER_ACCESS,
+                _FILE_CREATE,
+                _FILE_DIRECTORY_FILE,
+                attributes=_FILE_ATTRIBUTE_HIDDEN,
+                security=security.value if security is not None else None,
+            )
+            if security is not None:
+                # The same permissions again, now in auto-inherit form, which a create does not keep.
+                _write_dacl(self.handle, security)
+        finally:
+            if security is not None:
+                _win32().local_free(security)
+        self.identity = _identity(_information(self.handle))
+        self.path = _final_path(self.handle)
+        if ntpath.normcase(self.path) != ntpath.normcase(ntpath.join(final, self.name)):
+            raise RuntimeError("restore target changed while it was being prepared")
+        if _directory_entries(self.handle, limit=1):
+            raise RuntimeError("restore target changed while it was being prepared")
+
+    def hand_over(self) -> list[str]:
+        """Move what Restic restored into the target with the target's inherited permissions.
+
+        Returns the names left in the restore folder because the same name appeared in the target meanwhile; the
+        folder is then left visible and open to the user.
+        """
+
+        try:
+            if ntpath.normcase(_final_path(self.handle)) != ntpath.normcase(self.path):
+                raise RuntimeError("the restore folder changed during the restore")
+            if self.permissions:
+                _hand_back_tree(self.handle, _read_security(self.target_handle))
+            left: list[str] = []
+            for name, _attributes, _file_id in _directory_entries(self.handle):
+                try:
+                    entry = _open_relative(self.handle, name, _DELETE | _FILE_READ_ATTRIBUTES)
+                except OSError:
+                    left.append(name)
+                    continue
+                try:
+                    _rename_into(entry, self.target_handle, name)
+                except OSError:
+                    left.append(name)
+                finally:
+                    _close(entry)
+            if left:
+                self._release()
+            else:
+                self._remove()
+            return left
+        except BaseException:
+            try:
+                self._release()
+            except Exception:
+                pass
+            raise
+        finally:
+            self.close()
+
+    def _release(self) -> None:
+        """Leave the restore folder visible, with the permissions it would inherit in the target."""
+
+        if self.handle is None:
+            return
+        if self.permissions:
+            creator = _security_from_sddl("O:SYG:SYD:AI")
+            try:
+                updated = _inherited_security(_read_security(self.target_handle), creator, True)
+            finally:
+                _win32().local_free(creator)
+            _write_dacl(self.handle, updated)
+        visible = _BasicInformation(0, 0, 0, 0, _FILE_ATTRIBUTE_NORMAL)
+        _set_information(self.handle, visible, _FILE_BASIC_INFORMATION)
+
+    def _remove(self) -> None:
+        """Delete the now empty restore folder, after checking that the name still leads to it."""
+
+        _close(self.handle)
+        self.handle = None
+        try:
+            handle = _open_relative(
+                self.target_handle, self.name, _DELETE | _FILE_READ_ATTRIBUTES, _FILE_OPEN, _FILE_DIRECTORY_FILE
+            )
+        except OSError:
+            return
+        try:
+            if _identity(_information(handle)) == self.identity:
+                _set_information(handle, ctypes.c_ubyte(1), _FILE_DISPOSITION_INFORMATION)
+        except OSError:
+            # An empty folder left behind holds nothing; the user can delete it.
+            pass
+        finally:
+            _close(handle)
+
+    def _abandon(self) -> None:
+        if self.handle is not None:
+            try:
+                self._remove()
+            except Exception:
+                pass
+        self.close()
+
+    def close(self) -> None:
+        _close(self.handle)
+        self.handle = None
+        _close(self.target_handle)
+        self.target_handle = None
 
 
 def validate_includes(includes: list[str]) -> list[str]:
@@ -1743,17 +2630,24 @@ def main(argv: list[str] | None = None) -> int:
             config_path,
             repository,
             snapshot.get("paths") if isinstance(snapshot.get("paths"), list) else None,
+            allow_system_folders=bool(args.recovery_drill),
         )
         if report is not None:
             report["target"] = str(target)
             report["target_preexisted_empty"] = target_existed
 
-        target.mkdir(parents=True, exist_ok=True)
-        # Recheck immediately before Restic runs.  A race cannot turn the
-        # alternate location into an implicit merge target unnoticed.
-        ensure_no_reparse_ancestor(target)
-        if any(target.iterdir()):
-            raise RuntimeError("restore target became non-empty before restore started")
+        restore_folder: RestoreFolder | None = None
+        left_in_restore_folder: list[str] = []
+        if args.recovery_drill:
+            # The drill writes only below the protected manager's own drill folder, which the user cannot
+            # change.
+            target.mkdir(parents=True, exist_ok=True)
+            ensure_no_reparse_ancestor(target)
+            if any(target.iterdir()):
+                raise RuntimeError("restore target became non-empty before restore started")
+        else:
+            # Held open, with Restic's own protected folder inside it, until the restored files are handed over.
+            restore_folder = RestoreFolder.open(target)
         drill_outputs: dict[str, Path] = {}
         if args.recovery_drill:
             returncode = 0
@@ -1789,12 +2683,13 @@ def main(argv: list[str] | None = None) -> int:
                 for item in group["items"]:
                     drill_outputs[str(item["path"]).casefold()] = slot / str(item["leaf"])
         else:
+            assert restore_folder is not None
             restore_command = [
                 *command,
                 "restore",
                 exact_selector,
                 "--target",
-                str(target),
+                restore_folder.path,
                 "--overwrite",
                 "never",
                 "--verify",
@@ -1802,15 +2697,19 @@ def main(argv: list[str] | None = None) -> int:
             for pattern in includes:
                 restore_command.extend(["--include", pattern])
             restore_started = True
-            returncode = subprocess.call(
-                restore_command,
-                cwd=SCRIPT_DIRECTORY,
-                stdin=None if interactive_password else subprocess.DEVNULL,
-                env=environment,
-                shell=False,
-                creationflags=CREATE_NO_WINDOW,
-            )
-        restore_succeeded = returncode == 0
+            try:
+                returncode = subprocess.call(
+                    restore_command,
+                    cwd=SCRIPT_DIRECTORY,
+                    stdin=None if interactive_password else subprocess.DEVNULL,
+                    env=environment,
+                    shell=False,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+            finally:
+                # Also after a failed restore, so a partial restore is still found in the chosen folder.
+                left_in_restore_folder = restore_folder.hand_over()
+        restore_succeeded = returncode == 0 and not left_in_restore_folder
         if report is not None:
             report["restic_exit_code"] = int(returncode)
             report["finished_utc"] = utc_now()
@@ -1857,9 +2756,13 @@ def main(argv: list[str] | None = None) -> int:
                 report["sample_paths_sha256"] = hashlib.sha256(path_manifest).hexdigest()
                 report["result"] = "verified"
                 report["verified"] = True
-            elif returncode == 0:
+            elif returncode == 0 and not left_in_restore_folder:
                 report["result"] = "verified"
                 report["verified"] = True
+            elif returncode == 0:
+                report["result"] = "partial"
+                report["partial_target_retained"] = True
+                report["error"] = _LEFT_IN_RESTORE_FOLDER.format(name=restore_folder.name)
             else:
                 report["result"] = "partial"
                 report["partial_target_retained"] = True
@@ -1867,14 +2770,24 @@ def main(argv: list[str] | None = None) -> int:
                     f"Restic restore failed with exit code {returncode}; "
                     "the alternate target was retained for inspection"
                 )
+                if left_in_restore_folder:
+                    report["error"] += "; " + _LEFT_IN_RESTORE_FOLDER.format(name=restore_folder.name)
         if returncode != 0:
             print(
                 f"RESTORE INCOMPLETE: Restic exited with {returncode}; "
                 f"the partial alternate target was retained at {target}",
                 file=sys.stderr,
             )
+        elif left_in_restore_folder:
+            print(
+                "RESTORE INCOMPLETE: some restored items were left in "
+                f"{restore_folder.path} because the same names appeared in {target}",
+                file=sys.stderr,
+            )
         if report is not None:
             atomic_write_report(report_path, report)
+        if returncode == 0 and left_in_restore_folder:
+            return 1
         return int(returncode)
     except Exception as error:
         if report is not None:

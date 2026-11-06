@@ -188,8 +188,11 @@ vulnerability) to discuss it first.
    other reparse points in a protected or restore path; DOS 8.3 short-name
    aliases expanded before paths are compared; no overlap between sources, the
    repository, the runtime and the state folders; restore targets that are new
-   or empty, restored with `--overwrite never` and verification. Existing files
-   are never overwritten.
+   or empty, never inside Windows, Program Files or ProgramData, restored with
+   `--overwrite never` and verification. The target stays open, without delete
+   sharing, for the whole restore, and Restic writes into an
+   administrator-only folder inside it, so nothing can be swapped or planted
+   between the check and the write. Existing files are never overwritten.
 4. **Runtime-manifest hashes.** The installer verifies every payload file
    against its SHA-256 manifest, and the managers that check the installed
    runtime against `runtime-manifest.json` keep doing so. Do not add exemptions

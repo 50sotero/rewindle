@@ -101,7 +101,7 @@ flowchart LR
     X -->|"set protected per-run event"| B
     B -->|"targeted Ctrl-Break"| R
     D -->|"immutable snapshot + one UAC per restore session (pipe)"| E["Protected restore manager"]
-    E --> Z["New or empty restore target"]
+    E --> Z["New or empty restore target, held open"]
     D -->|"copy, verify, activate + UAC"| P["Protected repository manager"]
     P --> Q2["Reviewed repository backend/location"]
     D -->|"readiness and guided repair"| Y["Recovery health helpers"]
@@ -180,7 +180,7 @@ branded Rewindle release.
 | `Manage-Schedule.ps1` | Applies a reviewed daily or selected-day trigger and supported task settings with fingerprint binding, verification, and rollback | Exact backup task definition only |
 | `Manage-Backup.ps1` | Revalidates the exact active run and protected task, then signals only that run's protected cancellation event | Per-run event signal and bound result file only |
 | `Manage-Repository.ps1` | Copies, manifest-checks, and atomically activates a reviewed local or explicit DriveFS repository destination; resumes or rolls back interrupted relocation | New repository, separate protected-NTFS recovery-tools destination, protected configuration, and journal |
-| `Manage-Restore.ps1` and `restore.py` | Bind browsing and restore requests to the current plan, generation, repository, and immutable snapshot ID; restore to a non-overlapping new or empty target | Explicit restore target and protected restore report only |
+| `Manage-Restore.ps1` and `restore.py` | Bind browsing and restore requests to the current plan, generation, repository, and immutable snapshot ID; restore to a non-overlapping new or empty target outside Windows and program folders, held open while an administrator-only folder inside it receives the files | Explicit restore target and protected restore report only |
 | Recovery helpers | Inspect independent recovery paths and perform explicitly approved credential repair, stale-lock cleanup, key rotation, and anomaly acknowledgement | Narrow protected records or Restic credential/lock commands for the selected action |
 | `DiagnosticExporter.cs` | Builds a bounded support ZIP after removing secrets, identities, host names, command lines, and personal paths | User-selected diagnostic ZIP only |
 | Google Drive verifier | Holds the protected run lock, compares the sole DriveFS repository with a read-only API inventory, and restores the canary through a direct cloud backend | Protected verification runs/evidence only; no repository writes |
@@ -436,9 +436,19 @@ full immutable ID and a separately digest-bound opt-in; `latest` and ID prefixes
 cannot opt in. Snapshot metadata is never rewritten or retagged. The final
 request carries an exact immutable snapshot ID and the current configuration
 fingerprint. The destination must be absent or empty, local, and outside all
-sources, repository, runtime, and state paths. Restic receives `--overwrite
+sources, repository, runtime, and state paths, and outside Windows, both
+Program Files folders and ProgramData. Restic receives `--overwrite
 never` and verification is required. A partial target is retained and labelled
 if the operation fails so potentially useful recovered data is not destroyed.
+
+There is no gap between that check and Restic's writes. `restore.py` opens the
+destination one folder at a time from the drive root without following links
+and holds it open, without delete sharing, for the whole restore, so neither it
+nor any folder above it can be renamed or swapped for a junction. Restic writes
+into a new hidden folder inside it that only Administrators and SYSTEM can
+change, so nothing can be planted below it meanwhile. Afterwards each restored
+item gets the permissions it would inherit in the destination and is moved
+into it by handle, never replacing a name that appeared there in the meantime.
 
 Recovery Readiness authenticates the active DPAPI credential and separately
 parses and authenticates the configured recovery key. It also checks the
@@ -520,8 +530,10 @@ section 9, and [`SECURITY.md`](../SECURITY.md).
   silently hard-killing it.
 - Installer rollback removes newly created application objects while
   preserving repository and recovery data.
-- Restore operations reject overlapping or non-empty targets and never need to
-  modify the repository.
+- Restore operations reject overlapping or non-empty targets and targets inside
+  Windows, Program Files or ProgramData, hold the target open while Restic
+  writes into an administrator-only folder inside it, and never need to modify
+  the repository.
 
 ## Boundaries and non-goals for the alpha
 

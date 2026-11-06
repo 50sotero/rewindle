@@ -117,6 +117,15 @@ ones a home user reads without a glossary.
   read-only access and My Drive root in the connection itself, and Restic keeps
   its temporary files in Rewindle's protected data folder instead of the user's
   temp folder.
+- **A restore can no longer be steered into Windows or program folders.** The
+  restore checked the folder you chose and then wrote into it with
+  administrator rights, but a program running as you could swap that folder
+  for a link in between, so the restored files landed in Windows or Program
+  Files instead. The chosen folder now stays open for the whole restore, so it
+  cannot be moved, and the files go into a hidden folder inside it that only
+  Windows and administrators can change, then move into your folder with its
+  usual permissions. A folder inside Windows, Program Files or ProgramData is
+  refused outright, with a suggestion of where to restore instead.
 
 ## [0.2.0-alpha.2] - 2026-10-08
 
