@@ -102,9 +102,11 @@ left visible and open, and the report is `partial` with an `error` that names th
 in the target meanwhile or another program was using the item. The report's `target` is still the chosen folder. If
 `restore.py` is stopped during the restore (a power cut, for example), the hidden folder stays in the target with its
 administrator-only DACL; nothing removes it automatically yet (`src/RECOVERY.md` says how to delete it). Other new
-refusals: `restore target changed while it was being prepared` and `restore target must be on a drive that keeps folder
-permissions` (a drive without permissions that can hold links). The dashboard words all three plainly and refuses the
-same system folders at the destination step for both profiles; the legacy engine's own `restore.py` does neither.
+refusals: `restore target changed while it was being prepared`, `restore target must be on a drive that keeps folder
+permissions` (a drive without permissions that can hold links), `restore target path is too long`, `restore target
+contains an invalid folder name`, `Windows and program folders could not be identified` and `the current Windows account
+could not be identified` (only when `restore.py` runs unelevated). The dashboard words all of them plainly and refuses
+the same system folders at the destination step for both profiles; the legacy engine's own `restore.py` does neither.
 
 **Moving the repository (Rewindle `Manage-Repository.ps1`).** The stages `.restic-repository-<nonce>.staging` and
 `.restic-recovery-<nonce>.staging` are held open (list access, read and write sharing, no delete access, no delete

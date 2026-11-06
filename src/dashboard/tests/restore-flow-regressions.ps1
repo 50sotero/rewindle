@@ -1129,6 +1129,15 @@ try {
     Assert-True ($permissionsRefusal -match 'Choose a folder on another drive' -and $permissionsRefusal -notmatch 'restore target') ('the restore step''s drive refusal was not put plainly: ' + $permissionsRefusal)
     $movedRefusal = [string](Invoke-Static $restoreLauncherType 'SanitizeAnswer' @('restore target changed while it was being prepared', 'restore'))
     Assert-True ($movedRefusal -match 'nothing was restored' -and $movedRefusal -notmatch 'restore target') ('the restore step''s moved-folder refusal was not put plainly: ' + $movedRefusal)
+    # The rarer refusals from getting the folder ready, and a restore folder that moved after Restic ran, also get a next step.
+    $longRefusal = [string](Invoke-Static $restoreLauncherType 'SanitizeAnswer' @('restore target path is too long', 'restore'))
+    Assert-True ($longRefusal -match 'nothing was restored' -and $longRefusal -match 'Choose a folder closer to the top' -and $longRefusal -notmatch 'restore target') ('the restore step''s long-path refusal was not put plainly: ' + $longRefusal)
+    foreach ($preparation in @('restore target contains an invalid folder name', 'Windows and program folders could not be identified', 'the current Windows account could not be identified')) {
+        $preparationRefusal = [string](Invoke-Static $restoreLauncherType 'SanitizeAnswer' @($preparation, 'restore'))
+        Assert-True ($preparationRefusal -match 'could not get that folder ready safely, so nothing was restored' -and $preparationRefusal -match 'choose a different folder' -and $preparationRefusal -ne $preparation) ('the restore step''s refusal was not put plainly: ' + $preparation + ' -> ' + $preparationRefusal)
+    }
+    $handOverFailure = [string](Invoke-Static $restoreLauncherType 'SanitizeAnswer' @('the restore folder changed during the restore', 'restore'))
+    Assert-True ($handOverFailure -match 'could not finish putting the restored files in place' -and $handOverFailure -match 'may already be in the folder you chose' -and $handOverFailure -notmatch 'restore folder changed') ('a restore folder that moved during the restore was not put plainly: ' + $handOverFailure)
     # Only a plan with the "strict" cloud placeholder policy (or none) refuses a folder for online-only files, as the backup does.
     Assert-True ([bool](Invoke-Static $dashboardType 'RefusesOnlineOnlyFiles' @('strict')) -and -not [bool](Invoke-Static $dashboardType 'RefusesOnlineOnlyFiles' @('allow'))) 'the folder check did not follow the plan''s cloud placeholder policy'
     $rewindleEngine = $engineProfileType.GetProperty('Rewindle', $flags).GetValue($null)
