@@ -116,8 +116,8 @@ its volume serial and, when Windows gives one, its drive-letter path must equal 
 stage with delete access, requires the same file ID and renames it through that handle without replacing anything; the
 promoted folders stay held until the move is committed. Rollback and recovery hold a folder and prove its file ID before
 emptying it. Before the journal of a move to DriveFS is written, the same steps run on a throwaway folder
-`.resticbackuper-hold-<32 hex>` in the destination's parent (hold, final-path check, rename through the handle, hold
-again by file ID under the new name); if any fails, the move is refused with `Google Drive could not keep a folder in
+`.resticbackuper-hold-<32 hex>.tmp` in the destination's parent (hold, final-path check, rename through the handle to
+`.resticbackuper-hold-<32 hex>.commit`, hold again by file ID under the new name); if any fails, the move is refused with `Google Drive could not keep a folder in
 place while it was renamed, so the backup location was not moved and nothing was changed. ...` before anything is
 copied. Only Restic's own files are copied: `config`, 64-hex files in `keys`, `index` and `snapshots`, and 64-hex
 files in `data\<two hex>` that start with those two digits; `locks` is skipped as before. Anything else is left in the
