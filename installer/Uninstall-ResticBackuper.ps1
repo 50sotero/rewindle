@@ -76,38 +76,38 @@ $script:FeedPath = $null
 $script:FeedSequence = 0
 $script:FeedResultWritten = $false
 $script:FeedCurrentPhase = $null
+$script:FeedNative = $null
 
-function Initialize-FeedNative {
-    if (-not ('ResticBackuperSetup.NativePath' -as [type])) {
-        Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-namespace ResticBackuperSetup {
-  public static class NativePath {
-    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
-    static extern uint GetLongPathNameW(string shortPath, StringBuilder longPath, uint size);
-    public static string Long(string path) {
-      StringBuilder buffer = new StringBuilder(1024);
-      uint length = GetLongPathNameW(path, buffer, (uint)buffer.Capacity);
-      if (length == 0) { return path; }
-      if (length > buffer.Capacity) {
-        buffer = new StringBuilder((int)length + 1);
-        length = GetLongPathNameW(path, buffer, (uint)buffer.Capacity);
-        if (length == 0) { return path; }
-      }
-      return buffer.ToString();
-    }
-  }
-}
-'@
-    }
+# GetLongPathNameW, which expands DOS 8.3 short names, has no managed equivalent. The P/Invoke stub is emitted in memory
+# (Reflection.Emit, run only), never compiled: csc.exe would work through files in %TEMP%, a folder the account's own
+# unelevated programs can change while this script runs elevated and loads what was compiled there.
+function Get-FeedNativeMethods {
+    if ($null -ne $script:FeedNative) { return $script:FeedNative }
+    $assemblyName = [Reflection.AssemblyName]::new('ResticBackuperSetup.Native.' + [Guid]::NewGuid().ToString('N'))
+    $assembly = [Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly($assemblyName, [Reflection.Emit.AssemblyBuilderAccess]::Run)
+    $module = $assembly.DefineDynamicModule($assemblyName.Name)
+    $type = $module.DefineType('ResticBackuperSetup.NativePath', [Reflection.TypeAttributes]'Public, Class, Sealed, Abstract')
+    $method = $type.DefinePInvokeMethod('GetLongPathNameW', 'kernel32.dll',
+        [Reflection.MethodAttributes]'Public, Static, PinvokeImpl',
+        [Reflection.CallingConventions]::Standard, [uint32],
+        [Type[]]@([string], [Text.StringBuilder], [uint32]),
+        [Runtime.InteropServices.CallingConvention]::Winapi, [Runtime.InteropServices.CharSet]::Unicode)
+    $method.SetImplementationFlags([Reflection.MethodImplAttributes]::PreserveSig)
+    $script:FeedNative = $type.CreateType()
+    return $script:FeedNative
 }
 
 function Get-FeedLongPath {
     param([string]$Path)
-    Initialize-FeedNative
-    $long = [ResticBackuperSetup.NativePath]::Long([IO.Path]::GetFullPath($Path))
+    $native = Get-FeedNativeMethods
+    $full = [IO.Path]::GetFullPath($Path)
+    $buffer = [Text.StringBuilder]::new(1024)
+    $length = $native::GetLongPathNameW($full, $buffer, [uint32]$buffer.Capacity)
+    if ($length -gt $buffer.Capacity) {
+        $buffer = [Text.StringBuilder]::new([int]$length + 1)
+        $length = $native::GetLongPathNameW($full, $buffer, [uint32]$buffer.Capacity)
+    }
+    $long = if ($length -eq 0) { $full } else { $buffer.ToString() }
     $root = [IO.Path]::GetPathRoot($long)
     if ($long.Length -gt $root.Length) {
         $long = $long.TrimEnd('\')

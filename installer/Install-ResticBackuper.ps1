@@ -211,38 +211,38 @@ $script:FeedPath = $null
 $script:FeedSequence = 0
 $script:FeedResultWritten = $false
 $script:FeedCurrentPhase = $null
+$script:FeedNative = $null
 
-function Initialize-FeedNative {
-    if (-not ('ResticBackuperSetup.NativePath' -as [type])) {
-        Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-namespace ResticBackuperSetup {
-  public static class NativePath {
-    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
-    static extern uint GetLongPathNameW(string shortPath, StringBuilder longPath, uint size);
-    public static string Long(string path) {
-      StringBuilder buffer = new StringBuilder(1024);
-      uint length = GetLongPathNameW(path, buffer, (uint)buffer.Capacity);
-      if (length == 0) { return path; }
-      if (length > buffer.Capacity) {
-        buffer = new StringBuilder((int)length + 1);
-        length = GetLongPathNameW(path, buffer, (uint)buffer.Capacity);
-        if (length == 0) { return path; }
-      }
-      return buffer.ToString();
-    }
-  }
-}
-'@
-    }
+# GetLongPathNameW, which expands DOS 8.3 short names, has no managed equivalent. The P/Invoke stub is emitted in memory
+# (Reflection.Emit, run only), never compiled: csc.exe would work through files in %TEMP%, a folder the account's own
+# unelevated programs can change while this script runs elevated and loads what was compiled there.
+function Get-FeedNativeMethods {
+    if ($null -ne $script:FeedNative) { return $script:FeedNative }
+    $assemblyName = [Reflection.AssemblyName]::new('ResticBackuperSetup.Native.' + [Guid]::NewGuid().ToString('N'))
+    $assembly = [Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly($assemblyName, [Reflection.Emit.AssemblyBuilderAccess]::Run)
+    $module = $assembly.DefineDynamicModule($assemblyName.Name)
+    $type = $module.DefineType('ResticBackuperSetup.NativePath', [Reflection.TypeAttributes]'Public, Class, Sealed, Abstract')
+    $method = $type.DefinePInvokeMethod('GetLongPathNameW', 'kernel32.dll',
+        [Reflection.MethodAttributes]'Public, Static, PinvokeImpl',
+        [Reflection.CallingConventions]::Standard, [uint32],
+        [Type[]]@([string], [Text.StringBuilder], [uint32]),
+        [Runtime.InteropServices.CallingConvention]::Winapi, [Runtime.InteropServices.CharSet]::Unicode)
+    $method.SetImplementationFlags([Reflection.MethodImplAttributes]::PreserveSig)
+    $script:FeedNative = $type.CreateType()
+    return $script:FeedNative
 }
 
 function Get-FeedLongPath {
     param([string]$Path)
-    Initialize-FeedNative
-    $long = [ResticBackuperSetup.NativePath]::Long([IO.Path]::GetFullPath($Path))
+    $native = Get-FeedNativeMethods
+    $full = [IO.Path]::GetFullPath($Path)
+    $buffer = [Text.StringBuilder]::new(1024)
+    $length = $native::GetLongPathNameW($full, $buffer, [uint32]$buffer.Capacity)
+    if ($length -gt $buffer.Capacity) {
+        $buffer = [Text.StringBuilder]::new([int]$length + 1)
+        $length = $native::GetLongPathNameW($full, $buffer, [uint32]$buffer.Capacity)
+    }
+    $long = if ($length -eq 0) { $full } else { $buffer.ToString() }
     $root = [IO.Path]::GetPathRoot($long)
     if ($long.Length -gt $root.Length) {
         $long = $long.TrimEnd('\')
@@ -873,22 +873,96 @@ function Get-WebView2RuntimeVersion {
     return $null
 }
 
+# The access list of a folder that only Administrators and SYSTEM can change: owned by Administrators, inheriting nothing, and
+# passing full control for those two on to everything inside it (the access list the Setup bootstrap gives its own folder).
+function New-AdministratorsOnlyFolderSecurity {
+    $administrators = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetOwner($administrators)
+    $security.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @($administrators, [Security.Principal.SecurityIdentifier]::new('S-1-5-18'))) {
+        $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
+    }
+    return $security
+}
+
+# A new, empty folder (under ProgramData unless a parent is given) that only Administrators and SYSTEM can change. It gets that
+# access list as it is created, so there is no moment when the account's unelevated programs can write to it. Needs an
+# administrator token. The name follows the Setup bootstrap's own (RewindleSetup-<32 hex>), so a folder an interrupted run
+# leaves behind is removed by a later Setup run.
+function New-AdministratorsOnlyFolder {
+    param([string]$Parent = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData))
+    $path = Join-Path $Parent ('RewindleSetup-' + [Guid]::NewGuid().ToString('N'))
+    if (Test-Path -LiteralPath $path) {
+        throw "The name for a protected setup folder is already in use: $path"
+    }
+    $null = [IO.Directory]::CreateDirectory($path, (New-AdministratorsOnlyFolderSecurity))
+    # A folder someone else made at that name in the meantime would have kept its own owner and access list.
+    $item = Get-Item -LiteralPath $path -Force
+    $security = [IO.Directory]::GetAccessControl($path)
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or -not $security.AreAccessRulesProtected -or
+        $security.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544') {
+        throw "Setup could not create a folder that only administrators can change: $path"
+    }
+    return $path
+}
+
+$script:protectedTemporaryFolder = $null
+
+# Once elevated, the install and every program it starts (Python, Restic, Microsoft's WebView2 installer) keep their temporary
+# files in a folder only administrators can change, not in the account's own %TEMP%, which its unelevated programs can change.
+# The progress feed is opened before this, so it is still checked against the account's own temporary folder.
+function Use-ProtectedTemporaryFolder {
+    $folder = New-AdministratorsOnlyFolder
+    $script:protectedTemporaryFolder = $folder
+    $env:TEMP = $folder
+    $env:TMP = $folder
+}
+
+function Remove-ProtectedTemporaryFolder {
+    $folder = $script:protectedTemporaryFolder
+    if ($null -eq $folder) { return }
+    $script:protectedTemporaryFolder = $null
+    Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# Runs a program this script downloaded and returns its exit code. The file is held open, with only reading shared, from before
+# its signature check until the program has exited: while it is held nothing can change, delete or rename it, or rename a
+# folder above it, so what runs is exactly what was checked.
+function Invoke-HeldExecutable {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string[]]$ArgumentList = @(),
+        # The finding code when the signature check fails.
+        [Parameter(Mandatory)][string]$Code
+    )
+    $held = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        Assert-MicrosoftSignedExecutable -Path $Path -Code $Code
+        $process = Start-Process -FilePath $Path -ArgumentList $ArgumentList -WindowStyle Hidden -Wait -PassThru
+        return $process.ExitCode
+    }
+    finally {
+        $held.Dispose()
+    }
+}
+
 function Ensure-WebView2Runtime {
     $existing = Get-WebView2RuntimeVersion
     if ($existing) {
         return $existing
     }
 
-    $bootstrapper = Join-Path ([IO.Path]::GetTempPath()) (
-        'Rewindle-WebView2-' + [Guid]::NewGuid().ToString('N') + '.exe'
-    )
+    # Downloaded into a new folder only administrators can change, never the account's own %TEMP%, where its unelevated
+    # programs could swap the file between the signature check and the start.
+    $folder = New-AdministratorsOnlyFolder
+    $bootstrapper = Join-Path $folder 'MicrosoftEdgeWebview2Setup.exe'
     try {
         Write-Host 'Microsoft Edge WebView2 Runtime is missing; downloading the Microsoft bootstrapper.' -ForegroundColor Yellow
         Invoke-WebRequest -UseBasicParsing -Uri $webView2BootstrapperUri -OutFile $bootstrapper
-        Assert-MicrosoftSignedExecutable -Path $bootstrapper -Code 'webview2_installer_untrusted'
-        $process = Start-Process -FilePath $bootstrapper -ArgumentList @('/silent', '/install') -WindowStyle Hidden -Wait -PassThru
-        if ($process.ExitCode -ne 0) {
-            throw "WebView2 Runtime bootstrapper failed with exit code $($process.ExitCode)."
+        $exitCode = Invoke-HeldExecutable -Path $bootstrapper -ArgumentList @('/silent', '/install') -Code 'webview2_installer_untrusted'
+        if ($exitCode -ne 0) {
+            throw "WebView2 Runtime bootstrapper failed with exit code $exitCode."
         }
         $installed = Get-WebView2RuntimeVersion
         if (-not $installed) {
@@ -897,9 +971,7 @@ function Ensure-WebView2Runtime {
         return $installed
     }
     finally {
-        if (Test-Path -LiteralPath $bootstrapper) {
-            Remove-Item -LiteralPath $bootstrapper -Force -ErrorAction SilentlyContinue
-        }
+        Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -1161,6 +1233,40 @@ function Assert-SourceDrive {
         -DriveFormat $(if ($ready) { [string]$drive.DriveFormat } else { '' }) -UseVss $UseVss -Field $Field
 }
 
+$script:installerNative = $null
+
+# GetVolumeInformationW (the file-system flags and the longest name a volume allows, which tell a Google Drive mount apart) and
+# the three calls that ask Windows which physical disks hold a volume. The P/Invoke stubs are emitted in memory (Reflection.Emit,
+# run only), never compiled: csc.exe would work through files in %TEMP%, a folder the account's own unelevated programs can
+# change while the installer runs elevated and loads what was compiled there. SetLastError is set, as DllImport would set it,
+# so Marshal.GetLastWin32Error reports each call's own error.
+function Get-InstallerNativeMethods {
+    if ($null -ne $script:installerNative) { return $script:installerNative }
+    $assemblyName = [Reflection.AssemblyName]::new('ResticBackuperInstaller.Native.' + [Guid]::NewGuid().ToString('N'))
+    $assembly = [Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly($assemblyName, [Reflection.Emit.AssemblyBuilderAccess]::Run)
+    $module = $assembly.DefineDynamicModule($assemblyName.Name)
+    $type = $module.DefineType('ResticBackuperInstaller.NativeMethods', [Reflection.TypeAttributes]'Public, Class, Sealed, Abstract')
+    $dllImport = [Runtime.InteropServices.DllImportAttribute]
+    $constructor = $dllImport.GetConstructor([Type[]]@([string]))
+    $fields = [Reflection.FieldInfo[]]@(
+        $dllImport.GetField('SetLastError'), $dllImport.GetField('CallingConvention'), $dllImport.GetField('CharSet'),
+        $dllImport.GetField('EntryPoint'), $dllImport.GetField('ExactSpelling'))
+    $outUInt32 = [uint32].MakeByRefType()
+    foreach ($definition in @(
+        @{ Name = 'GetVolumeInformationW'; Return = [bool]; Parameters = @([string], [Text.StringBuilder], [int], $outUInt32, $outUInt32, $outUInt32, [Text.StringBuilder], [int]) },
+        @{ Name = 'CreateFileW'; Return = [IntPtr]; Parameters = @([string], [uint32], [uint32], [IntPtr], [uint32], [uint32], [IntPtr]) },
+        @{ Name = 'DeviceIoControl'; Return = [bool]; Parameters = @([IntPtr], [uint32], [IntPtr], [uint32], [byte[]], [uint32], $outUInt32, [IntPtr]) },
+        @{ Name = 'CloseHandle'; Return = [bool]; Parameters = @([IntPtr]) }
+    )) {
+        $method = $type.DefineMethod($definition.Name, [Reflection.MethodAttributes]'Public, Static, PinvokeImpl, HideBySig',
+            $definition.Return, [Type[]]$definition.Parameters)
+        $method.SetCustomAttribute([Reflection.Emit.CustomAttributeBuilder]::new($constructor, [object[]]@('kernel32.dll'), $fields,
+            [object[]]@($true, [Runtime.InteropServices.CallingConvention]::Winapi, [Runtime.InteropServices.CharSet]::Unicode, $definition.Name, $true)))
+    }
+    $script:installerNative = $type.CreateType()
+    return $script:installerNative
+}
+
 function Get-RepositoryVolume {
     param(
         [string]$Path,
@@ -1201,37 +1307,21 @@ function Get-RepositoryVolume {
             -Message "Windows would not tell setup the identity of the drive $root, so setup can't use it." `
             -Console "Could not read the repository volume serial: $root" -Path $Path
     }
-    if (-not ('ResticBackuperInstaller.NativeVolume' -as [type])) {
-        Add-Type -TypeDefinition @'
-using System;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-namespace ResticBackuperInstaller {
-  public static class NativeVolume {
-    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
-    static extern bool GetVolumeInformation(
-      string root, System.Text.StringBuilder volume, int volumeSize,
-      out uint serial, out uint maximumComponentLength, out uint fileSystemFlags,
-      System.Text.StringBuilder fileSystemName, int fileSystemNameSize);
-    public static UInt32[] Details(string root) {
-      uint serial, maximum, flags;
-      if (!GetVolumeInformation(root, null, 0, out serial, out maximum, out flags, null, 0))
-        throw new Win32Exception(Marshal.GetLastWin32Error());
-      return new UInt32[] { serial, maximum, flags };
+    $native = Get-InstallerNativeMethods
+    [uint32]$volumeSerial = 0
+    [uint32]$maximumComponentLength = 0
+    [uint32]$filesystemFlags = 0
+    if (-not $native::GetVolumeInformationW($root, $null, 0, [ref]$volumeSerial, [ref]$maximumComponentLength, [ref]$filesystemFlags, $null, 0)) {
+        throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error())
     }
-  }
-}
-'@
-    }
-    $details = [ResticBackuperInstaller.NativeVolume]::Details($root)
     $result = [ordered]@{
         root = $root
         serial = ([string]$records[0].VolumeSerialNumber).ToUpperInvariant()
         filesystem = [string]$drive.DriveFormat
         drive_type = [int]$drive.DriveType
         free_bytes = [long]$drive.AvailableFreeSpace
-        maximum_component_length = [long]$details[1]
-        filesystem_flags = [long]$details[2]
+        maximum_component_length = [long]$maximumComponentLength
+        filesystem_flags = [long]$filesystemFlags
     }
     $script:volumeCache[$cacheKey] = $result
     return $result
@@ -1387,56 +1477,35 @@ function New-RuntimeManifest {
 # take plain objects so tests can feed synthetic volumes.
 # ---------------------------------------------------------------------------------------------------------------------------
 
-function Initialize-NativeSetup {
-    if (-not ('ResticBackuperInstaller.NativeDisk' -as [type])) {
-        Add-Type -TypeDefinition @'
-using System;
-using System.Collections.Generic;
-using System.Runtime.InteropServices;
-namespace ResticBackuperInstaller {
-  public static class NativeDisk {
-    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
-    static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
-    [DllImport("kernel32.dll", SetLastError=true)]
-    static extern bool DeviceIoControl(IntPtr handle, uint code, IntPtr inBuffer, uint inSize, byte[] outBuffer, uint outSize, out uint returned, IntPtr overlapped);
-    [DllImport("kernel32.dll", SetLastError=true)]
-    static extern bool CloseHandle(IntPtr handle);
-    // The physical disks that hold a volume (IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS). Opening the volume with no access rights
-    // is enough, so this works for a standard user. Returns null when Windows will not say.
-    public static int[] DiskNumbers(string drive) {
-      IntPtr handle = CreateFileW("\\\\.\\" + drive, 0, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
-      if (handle == new IntPtr(-1)) { return null; }
-      try {
-        uint size = 1024;
-        for (int attempt = 0; attempt < 4; attempt++) {
-          byte[] buffer = new byte[size];
-          uint returned;
-          if (DeviceIoControl(handle, 0x00560000, IntPtr.Zero, 0, buffer, size, out returned, IntPtr.Zero)) {
-            int count = BitConverter.ToInt32(buffer, 0);
-            List<int> numbers = new List<int>();
-            for (int index = 0; index < count; index++) { numbers.Add(BitConverter.ToInt32(buffer, 8 + 24 * index)); }
-            return numbers.ToArray();
-          }
-          if (Marshal.GetLastWin32Error() != 234) { return null; }
-          size *= 4;
-        }
-        return null;
-      }
-      finally { CloseHandle(handle); }
-    }
-  }
-}
-'@
-    }
-}
-
+# The physical disks that hold a volume (IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS), or null when Windows will not say. Opening the
+# volume with no access rights is enough, so this works for a standard user.
 function Get-VolumeDiskNumbers {
     param([Parameter(Mandatory)][string]$Drive)
     try {
-        Initialize-NativeSetup
-        $numbers = [ResticBackuperInstaller.NativeDisk]::DiskNumbers($Drive.TrimEnd('\'))
-        if ($null -eq $numbers -or $numbers.Count -eq 0) { return $null }
-        return $numbers
+        $native = Get-InstallerNativeMethods
+        $handle = $native::CreateFileW('\\.\' + $Drive.TrimEnd('\'), [uint32]0, [uint32]3, [IntPtr]::Zero, [uint32]3, [uint32]0, [IntPtr]::Zero)
+        if ($handle.ToInt64() -eq -1) { return $null }
+        try {
+            $size = 1024
+            for ($attempt = 0; $attempt -lt 4; $attempt++) {
+                $buffer = [byte[]]::new($size)
+                [uint32]$returned = 0
+                if ($native::DeviceIoControl($handle, [uint32]0x00560000, [IntPtr]::Zero, [uint32]0, $buffer, [uint32]$size, [ref]$returned, [IntPtr]::Zero)) {
+                    $count = [BitConverter]::ToInt32($buffer, 0)
+                    $numbers = [Collections.Generic.List[int]]::new()
+                    for ($index = 0; $index -lt $count; $index++) { $numbers.Add([BitConverter]::ToInt32($buffer, 8 + 24 * $index)) }
+                    if ($numbers.Count -eq 0) { return $null }
+                    return $numbers.ToArray()
+                }
+                # ERROR_MORE_DATA: the volume spans more disks than the buffer holds.
+                if ([Runtime.InteropServices.Marshal]::GetLastWin32Error() -ne 234) { return $null }
+                $size *= 4
+            }
+            return $null
+        }
+        finally {
+            [void]$native::CloseHandle($handle)
+        }
     }
     catch {
         return $null
@@ -2696,6 +2765,7 @@ function Invoke-InstallPreflight {
     if (-not (Test-Administrator)) {
         Invoke-SelfElevation
     }
+    Use-ProtectedTemporaryFolder
 
     $script:identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $script:currentSid = $identity.User.Value
@@ -2799,6 +2869,9 @@ catch {
 finally {
     if (-not $preflightSucceeded -and $progressOpened) {
         Complete-InstallFeed
+    }
+    if (-not $preflightSucceeded) {
+        Remove-ProtectedTemporaryFolder
     }
 }
 
@@ -3085,4 +3158,5 @@ catch {
 }
 finally {
     Complete-InstallFeed
+    Remove-ProtectedTemporaryFolder
 }

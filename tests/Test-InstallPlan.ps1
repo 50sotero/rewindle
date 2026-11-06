@@ -912,6 +912,185 @@ try {
     Close-ProgressFeed
     Remove-Junction $feedLink
 
+    # ====================================================================================================================
+    # 8. Native calls are emitted in memory: nothing goes through the temporary folder
+    # ====================================================================================================================
+    # The installer and the uninstaller run elevated with the account's own %TEMP%, which its unelevated programs can change.
+    # Compiling P/Invoke code with csc.exe writes its source, command line and assembly there and loads the assembly back, so
+    # the scripts emit their native calls in memory instead. A child process with TEMP and TMP pointed at an empty, watched
+    # folder defines every installer function, calls each helper that uses native code, and reports what appeared there.
+    $watchedTemp = Join-Path $workspace 'watched-temp'
+    $nativeFolderName = 'A folder with a long name for short-name expansion'
+    $nativeFolder = Join-Path $workspace $nativeFolderName
+    New-Item -ItemType Directory -Path $watchedTemp, $nativeFolder | Out-Null
+    $usedLetters = @([Environment]::GetLogicalDrives() | ForEach-Object { $_.Substring(0, 1).ToUpperInvariant() })
+    $unusedLetter = @('Z', 'Y', 'X', 'W', 'V', 'U', 'T', 'S', 'R', 'Q') | Where-Object { $usedLetters -notcontains $_ } | Select-Object -First 1
+    Assert-True ($null -ne $unusedLetter) 'a drive letter nobody uses is found for the error check'
+    $nativeProbe = Join-Path $workspace 'native-probe.ps1'
+    Write-Text -Path $nativeProbe -Text @'
+param([string]$Installer, [string]$Watched, [string]$Folder, [string]$UnusedRoot)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$created = [Collections.Concurrent.ConcurrentQueue[string]]::new()
+$watcher = [IO.FileSystemWatcher]::new($Watched)
+$watcher.IncludeSubdirectories = $true
+$null = Register-ObjectEvent -InputObject $watcher -EventName Created -MessageData $created -Action { $Event.MessageData.Enqueue($EventArgs.Name) }
+$watcher.EnableRaisingEvents = $true
+$text = [IO.File]::ReadAllText($Installer)
+$ast = [Management.Automation.Language.Parser]::ParseInput($text, [ref]$null, [ref]$null)
+foreach ($definition in @($ast.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.FunctionDefinitionAst] })) {
+    . ([scriptblock]::Create($definition.Extent.Text))
+}
+. ([scriptblock]::Create([regex]::Match($text, '(?s)# region progress-feed.*?# endregion progress-feed').Value))
+$script:volumeCache = @{}
+$script:installerNative = $null
+function Get-ProbeValue {
+    param([scriptblock]$Probe)
+    try { & $Probe } catch { 'error: ' + $_.Exception.Message }
+}
+$result = [ordered]@{}
+$short = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($Folder).ShortPath
+$result.short_leaf = Split-Path -Leaf $short
+$result.long_leaf = Get-ProbeValue { Split-Path -Leaf (Get-FeedLongPath $short) }
+$result.system_disks = @(Get-ProbeValue { Get-VolumeDiskNumbers -Drive ([IO.Path]::GetPathRoot([Environment]::SystemDirectory)) })
+$result.volume = Get-ProbeValue {
+    $volume = Get-RepositoryVolume -Path $Folder -Scope 'system'
+    [ordered]@{
+        filesystem = $volume.filesystem
+        maximum_component_length = $volume.maximum_component_length
+        filesystem_flags = $volume.filesystem_flags
+        serial_well_formed = ([string]$volume.serial -cmatch '^[0-9A-F]{8}$')
+    }
+}
+$result.unused_drive_error = Get-ProbeValue {
+    $native = Get-InstallerNativeMethods
+    [uint32]$serial = 0
+    [uint32]$maximum = 0
+    [uint32]$flags = 0
+    $ok = $native::GetVolumeInformationW($UnusedRoot, $null, 0, [ref]$serial, [ref]$maximum, [ref]$flags, $null, 0)
+    $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    if ($ok) { 'succeeded' } else { $code }
+}
+$result.set_last_error = @(Get-ProbeValue {
+    $native = Get-InstallerNativeMethods
+    foreach ($name in @('GetVolumeInformationW', 'CreateFileW', 'DeviceIoControl', 'CloseHandle')) {
+        $import = @($native.GetMethod($name).GetCustomAttributes([Runtime.InteropServices.DllImportAttribute], $false))[0]
+        '{0}={1}' -f $name, ($import.Value -eq 'kernel32.dll' -and $import.SetLastError -and $import.EntryPoint -ceq $name)
+    }
+})
+Start-Sleep -Milliseconds 500
+$watcher.EnableRaisingEvents = $false
+$names = [Collections.Generic.List[string]]::new()
+$item = $null
+while ($created.TryDequeue([ref]$item)) { $names.Add($item) }
+$result.created_in_temp = @($names)
+ConvertTo-Json -InputObject $result -Depth 4 -Compress
+'@
+    $probeRun = Invoke-ProcessCapture -FileName $windowsPowerShell -Arguments @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $nativeProbe, '-Installer', $installerScript,
+        '-Watched', $watchedTemp, '-Folder', $nativeFolder, '-UnusedRoot', ($unusedLetter + ':\')
+    ) -Environment @{ TEMP = $watchedTemp; TMP = $watchedTemp }
+    Assert-Equal 0 $probeRun.ExitCode "the native-call probe ran (stderr: $($probeRun.Error))"
+    $nativeResult = $probeRun.Output | ConvertFrom-Json
+    Assert-Equal @() @($nativeResult.created_in_temp) 'the installer''s native helpers created nothing in %TEMP% (a compiler would leave its .cs, .cmdline and .dll files there)'
+    Assert-Equal $nativeFolderName $nativeResult.long_leaf "the feed's path check expands a short (8.3) name ($($nativeResult.short_leaf))"
+    $systemDisks = @($nativeResult.system_disks)
+    Assert-True ($systemDisks.Count -ge 1 -and @($systemDisks | Where-Object { $_ -isnot [int] -and $_ -isnot [long] }).Count -eq 0) "the disks that hold the system drive are found (got: $($systemDisks -join ', '))"
+    Assert-True ($nativeResult.volume -isnot [string]) "the volume of a local folder is read (got: $($nativeResult.volume))"
+    $nativeDrive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($nativeFolder))
+    Assert-Equal $nativeDrive.DriveFormat $nativeResult.volume.filesystem 'the volume reports its file system'
+    Assert-True ($nativeResult.volume.maximum_component_length -gt 0 -and $nativeResult.volume.filesystem_flags -ne 0) 'the volume reports its longest name and its file-system flags'
+    Assert-True $nativeResult.volume.serial_well_formed 'the volume serial is eight hexadecimal digits'
+    Assert-True (@(3, 15) -contains $nativeResult.unused_drive_error) "a call on an unused drive letter reports Windows' own error, so SetLastError is set (got: $($nativeResult.unused_drive_error))"
+    Assert-Equal @('GetVolumeInformationW=True', 'CreateFileW=True', 'DeviceIoControl=True', 'CloseHandle=True') @($nativeResult.set_last_error) 'every emitted call imports kernel32 by its exact name with SetLastError'
+
+    # ====================================================================================================================
+    # 9. A downloaded program is checked and run while held open
+    # ====================================================================================================================
+    # The WebView2 bootstrapper is downloaded into a folder only administrators can change and held open, with only reading
+    # shared, from before its signature check until it has exited. A copy of cmd.exe stands in for it here; nothing is
+    # downloaded, and the real folder (under ProgramData) is created only where these checks run elevated, as in CI.
+    . ([scriptblock]::Create((Get-InstallerFunctionText -Name @('Invoke-HeldExecutable', 'New-AdministratorsOnlyFolderSecurity', 'New-AdministratorsOnlyFolder'))))
+    $script:signatureChecks = [Collections.Generic.List[object]]::new()
+    $script:signatureRejected = $false
+    # Stands in for the real check: it records what it was asked, tries everything another program could do to the file
+    # while it is being checked, and passes or rejects as the test says.
+    function Assert-MicrosoftSignedExecutable {
+        param([string]$Path, [string]$Code)
+        $refused = [ordered]@{}
+        foreach ($attempt in @(
+            @{ Name = 'write'; Action = { [IO.File]::Open($Path, 'Open', 'ReadWrite', 'ReadWrite').Dispose() } },
+            @{ Name = 'delete'; Action = { [IO.File]::Delete($Path) } },
+            @{ Name = 'rename'; Action = { [IO.File]::Move($Path, $Path + '.moved') } },
+            @{ Name = 'rename the folder'; Action = { $parent = Split-Path -Parent $Path; [IO.Directory]::Move($parent, $parent + '-moved') } }
+        )) {
+            $refused[$attempt.Name] = $false
+            try { & $attempt.Action } catch { $refused[$attempt.Name] = $true }
+        }
+        $script:signatureChecks.Add([pscustomobject]@{ Path = $Path; Code = $Code; Refused = $refused })
+        if ($script:signatureRejected) { throw 'The test rejected the signature.' }
+    }
+    $heldFolder = Join-Path $workspace 'held'
+    New-Item -ItemType Directory -Path $heldFolder | Out-Null
+    $systemShell = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
+    $heldProgram = Join-Path $heldFolder 'bootstrapper.exe'
+    Copy-Item -LiteralPath $systemShell -Destination $heldProgram
+    # The program tries to rename its own file while it runs: Windows allows that for a running program nobody holds.
+    $heldExit = Invoke-HeldExecutable -Path $heldProgram -ArgumentList @('/d', '/c', ('ren "' + $heldProgram + '" swapped.exe')) -Code 'webview2_installer_untrusted'
+    Assert-Equal 1 $script:signatureChecks.Count 'the signature is checked once, before the program runs'
+    Assert-Equal $heldProgram $script:signatureChecks[0].Path 'the downloaded file itself is checked'
+    Assert-Equal 'webview2_installer_untrusted' $script:signatureChecks[0].Code 'a rejected signature reports the WebView2 installer code'
+    foreach ($name in @('write', 'delete', 'rename', 'rename the folder')) {
+        Assert-True $script:signatureChecks[0].Refused[$name] "while it is checked, the file is held: $name is refused"
+    }
+    Assert-Equal 1 $heldExit 'while it runs, the program cannot rename its own file (cmd reports the failed rename)'
+    Assert-True ((Test-Path -LiteralPath $heldProgram -PathType Leaf) -and -not (Test-Path -LiteralPath (Join-Path $heldFolder 'swapped.exe'))) 'the checked file stayed in place while it ran'
+    [IO.File]::Delete($heldProgram)
+    Assert-True (-not (Test-Path -LiteralPath $heldProgram)) 'the hold is released once the program has exited'
+    # The same rename without the hold succeeds, so the hold is what kept the file in place.
+    $freeProgram = Join-Path $heldFolder 'unheld.exe'
+    Copy-Item -LiteralPath $systemShell -Destination $freeProgram
+    $freeRun = Start-Process -FilePath $freeProgram -ArgumentList @('/d', '/c', ('ren "' + $freeProgram + '" unheld-swapped.exe')) -WindowStyle Hidden -Wait -PassThru
+    Assert-True ($freeRun.ExitCode -eq 0 -and (Test-Path -LiteralPath (Join-Path $heldFolder 'unheld-swapped.exe'))) 'without the hold, a running program can rename its own file'
+    # A program that fails the check never runs, and is released.
+    $script:signatureRejected = $true
+    $rejectedProgram = Join-Path $heldFolder 'rejected.exe'
+    $ranMarker = Join-Path $heldFolder 'ran.txt'
+    Copy-Item -LiteralPath $systemShell -Destination $rejectedProgram
+    $rejected = $false
+    try { [void](Invoke-HeldExecutable -Path $rejectedProgram -ArgumentList @('/d', '/c', ('echo ran> "' + $ranMarker + '"')) -Code 'webview2_installer_untrusted') }
+    catch { $rejected = $true }
+    Assert-True ($rejected -and -not (Test-Path -LiteralPath $ranMarker)) 'a program that fails the signature check is never run'
+    [IO.File]::Delete($rejectedProgram)
+    Assert-True (-not (Test-Path -LiteralPath $rejectedProgram)) 'and its hold is released'
+
+    # The folder it is downloaded into: owned by Administrators, inheriting nothing, full control for Administrators and SYSTEM.
+    $folderSecurity = New-AdministratorsOnlyFolderSecurity
+    Assert-Equal 'S-1-5-32-544' $folderSecurity.GetOwner([Security.Principal.SecurityIdentifier]).Value 'the protected folder is owned by Administrators'
+    Assert-True $folderSecurity.AreAccessRulesProtected 'the protected folder inherits nothing from its parent'
+    $folderRules = @($folderSecurity.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+    Assert-Equal @('S-1-5-18', 'S-1-5-32-544') @($folderRules | ForEach-Object { $_.IdentityReference.Value } | Sort-Object) 'only SYSTEM and Administrators are named in the protected folder'
+    foreach ($rule in $folderRules) {
+        Assert-True ($rule.AccessControlType -eq 'Allow' -and $rule.FileSystemRights -eq 'FullControl' -and -not $rule.IsInherited -and
+            $rule.InheritanceFlags -eq 'ContainerInherit, ObjectInherit' -and $rule.PropagationFlags -eq 'None') "$($rule.IdentityReference.Value) has full control of the protected folder and everything in it"
+    }
+    $protectedParent = Join-Path $workspace 'protected-parent'
+    New-Item -ItemType Directory -Path $protectedParent | Out-Null
+    if ($isElevated) {
+        $protectedFolder = New-AdministratorsOnlyFolder -Parent $protectedParent
+        Assert-True ((Split-Path -Leaf $protectedFolder) -cmatch '^RewindleSetup-[0-9a-f]{32}$') 'the protected folder follows the Setup bootstrap''s name pattern'
+        $protectedAcl = [IO.Directory]::GetAccessControl($protectedFolder)
+        Assert-True ($protectedAcl.AreAccessRulesProtected -and $protectedAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq 'S-1-5-32-544') 'the protected folder was created owned by Administrators and inheriting nothing'
+        [IO.Directory]::Delete($protectedFolder)
+    }
+    else {
+        # A standard user cannot make Administrators the owner, so the folder is refused outright, never left open.
+        $folderRefused = $false
+        try { [void](New-AdministratorsOnlyFolder -Parent $protectedParent) } catch { $folderRefused = $true }
+        Assert-True $folderRefused 'without an administrator token the protected folder is refused'
+        Assert-Equal @() @(Get-ChildItem -LiteralPath $protectedParent -Force | ForEach-Object Name) 'and nothing is left behind'
+    }
+
     $summary = [pscustomobject]@{
         ok = $true
         tests = $script:assertions
@@ -924,6 +1103,8 @@ try {
         volume_recommendation = 'passed'
         recovery_key_access_check = 'passed'
         progress_feed = 'passed'
+        native_calls_compile_nothing = 'passed'
+        downloaded_program_held = 'passed'
     }
 }
 catch {

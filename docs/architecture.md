@@ -261,8 +261,16 @@ launches the existing reviewed PowerShell installer; it does not introduce a
 second installer implementation. Both paths embed pinned Windows x64 releases
 of Python 3.14.6 and Restic 0.19.1, so installation does not execute an
 unpinned Restic or Python download. If WebView2 is missing, the setup flow
-downloads Microsoft's signed WebView2 bootstrapper and verifies that the
-runtime is available before opening the dashboard.
+downloads Microsoft's signed WebView2 bootstrapper into a new folder that only
+Administrators and SYSTEM can change, holds the file open from its signature
+check until it has exited, and verifies that the runtime is available before
+opening the dashboard. Once elevated, the installer keeps its own temporary
+files, and those of the programs it starts, in such a folder too, instead of
+the account's `%TEMP%`, which the account's unelevated programs can change.
+No elevated script compiles code: the Windows calls the installer, the
+uninstaller and the repository and restore managers make through P/Invoke are
+emitted in memory with `Reflection.Emit`, so nothing is built in, or loaded
+from, a folder the requesting account can write.
 
 The Windows release build verifies the upstream archive hashes recorded in
 `dependencies.json`, verifies the extracted Restic executable hash, and emits

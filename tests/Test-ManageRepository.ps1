@@ -663,6 +663,82 @@ raise SystemExit(4)
     $probeOutput = $probe | & $python - (Join-Path $projectRoot 'src') $journalFixture.ConfigPath 2>&1
     Assert-True ($LASTEXITCODE -eq 0) 'pending journal blocks backup config loading'
 
+    # The manager runs elevated with the requesting account's own %TEMP%, which its unelevated programs can change, so its
+    # native call is emitted in memory, never compiled through files there. A child process with TEMP and TMP pointed at an
+    # empty, watched folder defines every manager function, reads a volume's details, and reports what appeared there.
+    $nativeRoot = Join-Path ([IO.Path]::GetTempPath()) ('RRM-T-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    $fixtureRoots.Add($nativeRoot)
+    $watchedTemp = Join-Path $nativeRoot 'watched-temp'
+    [void][IO.Directory]::CreateDirectory($watchedTemp)
+    $usedLetters = @([Environment]::GetLogicalDrives() | ForEach-Object { $_.Substring(0, 1).ToUpperInvariant() })
+    $unusedLetter = @('Z', 'Y', 'X', 'W', 'V', 'U', 'T', 'S', 'R', 'Q') | Where-Object { $usedLetters -notcontains $_ } | Select-Object -First 1
+    Assert-True ($null -ne $unusedLetter) 'a drive letter nobody uses is found for the error check'
+    $nativeProbe = Join-Path $nativeRoot 'native-probe.ps1'
+    [IO.File]::WriteAllText($nativeProbe, @'
+param([string]$Manager, [string]$Watched, [string]$Folder, [string]$UnusedRoot)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$created = [Collections.Concurrent.ConcurrentQueue[string]]::new()
+$watcher = [IO.FileSystemWatcher]::new($Watched)
+$watcher.IncludeSubdirectories = $true
+$null = Register-ObjectEvent -InputObject $watcher -EventName Created -MessageData $created -Action { $Event.MessageData.Enqueue($EventArgs.Name) }
+$watcher.EnableRaisingEvents = $true
+$ast = [Management.Automation.Language.Parser]::ParseFile($Manager, [ref]$null, [ref]$null)
+foreach ($definition in @($ast.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.FunctionDefinitionAst] })) {
+    . ([scriptblock]::Create($definition.Extent.Text))
+}
+$script:repositoryNative = $null
+function Get-ProbeValue {
+    param([scriptblock]$Probe)
+    try { & $Probe } catch { 'error: ' + $_.Exception.Message }
+}
+$result = [ordered]@{}
+$result.serial = Get-ProbeValue { Get-VolumeSerial -Path $Folder }
+$result.metadata = Get-ProbeValue {
+    $metadata = Get-VolumeMetadata -Path $Folder
+    [ordered]@{ serial = $metadata.Serial; file_system = $metadata.FileSystem; maximum = $metadata.MaximumComponentLength; flags = $metadata.Flags }
+}
+$result.unused_drive_error = Get-ProbeValue {
+    try { [void](Get-VolumeDetails -Root $UnusedRoot); 'succeeded' }
+    catch [ComponentModel.Win32Exception] { $_.Exception.NativeErrorCode }
+}
+$result.set_last_error = Get-ProbeValue {
+    $import = @((Get-RepositoryNativeMethods).GetMethod('GetVolumeInformationW').GetCustomAttributes([Runtime.InteropServices.DllImportAttribute], $false))[0]
+    $import.Value -eq 'kernel32.dll' -and $import.SetLastError -and $import.EntryPoint -ceq 'GetVolumeInformationW'
+}
+Start-Sleep -Milliseconds 500
+$watcher.EnableRaisingEvents = $false
+$names = [Collections.Generic.List[string]]::new()
+$item = $null
+while ($created.TryDequeue([ref]$item)) { $names.Add($item) }
+$result.created_in_temp = @($names)
+ConvertTo-Json -InputObject $result -Depth 4 -Compress
+'@, $encoding)
+    $probeStart = [Diagnostics.ProcessStartInfo]::new($powershell)
+    $probeArguments = @($nativeProbe, $managerSource, $watchedTemp, $nativeRoot, $unusedLetter)
+    $probeStart.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Manager "{1}" -Watched "{2}" -Folder "{3}" -UnusedRoot {4}:\' -f $probeArguments
+    $probeStart.UseShellExecute = $false
+    $probeStart.RedirectStandardOutput = $true
+    $probeStart.RedirectStandardError = $true
+    $probeStart.CreateNoWindow = $true
+    $probeStart.EnvironmentVariables['TEMP'] = $watchedTemp
+    $probeStart.EnvironmentVariables['TMP'] = $watchedTemp
+    $probeProcess = [Diagnostics.Process]::Start($probeStart)
+    $probeError = $probeProcess.StandardError.ReadToEndAsync()
+    $probeText = $probeProcess.StandardOutput.ReadToEnd()
+    $probeProcess.WaitForExit()
+    Assert-True ($probeProcess.ExitCode -eq 0) "the native-call probe ran (stderr: $($probeError.Result))"
+    $nativeResult = $probeText | ConvertFrom-Json
+    Assert-True (@($nativeResult.created_in_temp).Count -eq 0) "reading volume details created nothing in %TEMP% (a compiler would leave its .cs, .cmdline and .dll files there; got: $(@($nativeResult.created_in_temp) -join ', '))"
+    $referenceSerial = Get-VolumeSerial -Path $nativeRoot
+    Assert-True ([string]$nativeResult.serial -ceq $referenceSerial) 'the manager reads the volume serial'
+    Assert-True ($nativeResult.metadata -isnot [string]) 'the manager reads the volume metadata'
+    Assert-True ([string]$nativeResult.metadata.serial -ceq $referenceSerial) 'the volume metadata carries the same serial'
+    Assert-True ([string]$nativeResult.metadata.file_system -eq ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($nativeRoot))).DriveFormat) 'the volume metadata names the file system'
+    Assert-True ([long]$nativeResult.metadata.maximum -gt 0 -and [long]$nativeResult.metadata.flags -ne 0) 'the volume metadata carries the longest name and the file-system flags'
+    Assert-True (@(3, 15) -contains $nativeResult.unused_drive_error) "an unused drive letter fails with Windows' own error, so SetLastError is set (got: $($nativeResult.unused_drive_error))"
+    Assert-True ($nativeResult.set_last_error -eq $true) 'the emitted call imports kernel32 by its exact name with SetLastError'
+
     $productionHashAfter = if (Test-Path -LiteralPath $productionConfig) { Get-Hash -Path $productionConfig } else { $null }
     $taskXmlAfter = try { (Export-ScheduledTask -TaskName 'ResticBackuper' -ErrorAction Stop).Replace("`r`n", "`n") } catch { $null }
     Assert-True ($productionHashAfter -eq $productionHashBefore) 'production protected config untouched'
@@ -684,6 +760,7 @@ raise SystemExit(4)
         drivefs_crash_recovery = 'passed'
         installer_style_canary_state_exception = 'passed'
         pending_journal_backup_gate = 'passed'
+        native_call_compiles_nothing = 'passed'
         fake_restic_no_backup_or_init = 'passed'
         old_repository_retention = 'passed'
         production_config_untouched = 'passed'
