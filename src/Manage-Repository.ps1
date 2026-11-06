@@ -1898,13 +1898,26 @@ function ConvertTo-WindowsArgument {
 function Set-AllowListedChildEnvironment {
     param([Diagnostics.ProcessStartInfo]$StartInfo, [string]$TemporaryDirectory)
     # The elevated child, and the password helper Restic starts from it, get only what a Windows
-    # program needs. Nothing from the user's own environment (HKCU\Environment) reaches them, so
-    # no RESTIC_* or RCLONE_* setting can replace the password source or redirect a file.
-    $windows = [IO.Path]::GetDirectoryName([Environment]::SystemDirectory)
+    # program needs, with the Windows values taken from Windows itself. Nothing from the user's
+    # own environment (HKCU\Environment) reaches them, so no RESTIC_* or RCLONE_* setting can
+    # replace the password source or redirect a file.
+    $system = [Environment]::SystemDirectory
+    $windows = [IO.Directory]::GetParent($system).FullName
     $StartInfo.EnvironmentVariables.Clear()
     $StartInfo.EnvironmentVariables['SystemRoot'] = $windows
     $StartInfo.EnvironmentVariables['windir'] = $windows
-    $StartInfo.EnvironmentVariables['Path'] = [Environment]::SystemDirectory
+    $StartInfo.EnvironmentVariables['SystemDrive'] = [IO.Path]::GetPathRoot($windows).TrimEnd('\')
+    $StartInfo.EnvironmentVariables['ComSpec'] = Join-Path $system 'cmd.exe'
+    $StartInfo.EnvironmentVariables['PATH'] = (@(
+        $system, $windows, (Join-Path $system 'Wbem'), (Join-Path $system 'WindowsPowerShell\v1.0')
+    ) -join ';')
+    $StartInfo.EnvironmentVariables['PATHEXT'] = '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC'
+    $StartInfo.EnvironmentVariables['OS'] = 'Windows_NT'
+    $StartInfo.EnvironmentVariables['NUMBER_OF_PROCESSORS'] = [string][Environment]::ProcessorCount
+    $architecture = [Environment]::GetEnvironmentVariable('PROCESSOR_ARCHITECTURE', 'Process')
+    if ($architecture -cin @('AMD64', 'x86', 'ARM64')) {
+        $StartInfo.EnvironmentVariables['PROCESSOR_ARCHITECTURE'] = $architecture
+    }
     $StartInfo.EnvironmentVariables['TEMP'] = $TemporaryDirectory
     $StartInfo.EnvironmentVariables['TMP'] = $TemporaryDirectory
 }
@@ -1912,8 +1925,13 @@ function Set-AllowListedChildEnvironment {
 function Invoke-ResticCapture {
     param([pscustomobject]$Validated, [string]$Repository, [string[]]$CommandArguments)
     $cache = Join-Path $stateRoot 'cache'
-    if (-not (Test-Path -LiteralPath $cache)) { [void][IO.Directory]::CreateDirectory($cache) }
-    Assert-NormalDirectoryChain -Directory $cache
+    # Restic's temporary files get their own protected folder next to its cache, so they never
+    # mix with cached backup data.
+    $temporary = Join-Path $stateRoot 'temp'
+    foreach ($directory in @($cache, $temporary)) {
+        if (-not (Test-Path -LiteralPath $directory)) { [void][IO.Directory]::CreateDirectory($directory) }
+        Assert-NormalDirectoryChain -Directory $directory
+    }
     $arguments = @(
         '--repo', $Repository, '--password-command', (ConvertTo-PasswordCommand -Validated $Validated),
         '--cache-dir', $cache, '--retry-lock', '0s'
@@ -1932,7 +1950,7 @@ function Invoke-ResticCapture {
     $start.RedirectStandardError = $true
     $start.StandardOutputEncoding = $utf8
     $start.StandardErrorEncoding = $utf8
-    Set-AllowListedChildEnvironment -StartInfo $start -TemporaryDirectory $cache
+    Set-AllowListedChildEnvironment -StartInfo $start -TemporaryDirectory $temporary
     $process = [Diagnostics.Process]::new(); $process.StartInfo = $start
     try {
         if (-not $process.Start()) { throw 'Windows did not start the backup service to check the backup.' }
@@ -2179,16 +2197,23 @@ function Set-RepositoryRecordBytes {
     # The installer leaves the record owned by Administrators with only the permissions the state
     # folder passes down (Set-ProtectedDirectory: icacls /reset, then /setowner). Give the
     # rewritten record exactly that: the user can still read it and nobody else can change it.
+    # The same record is written when a move commits, when it is undone and by Repair, so the
+    # advice has to fit all three: trying again is safe in each.
+    $tryAgain = 'Try again. If it keeps failing, choose Save problem report in Settings and ask for help.'
     $icacls = Get-TrustedIcacls
     & $icacls $repositoryRecordPath /reset /C /L | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Windows could not reset the permissions of the backup location record (icacls exit code $LASTEXITCODE)." }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Windows could not set the permissions of Rewindle's record of your backup location (error code $LASTEXITCODE). $tryAgain"
+    }
     & $icacls $repositoryRecordPath /setowner '*S-1-5-32-544' /C /L | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Windows could not make Administrators the owner of the backup location record (icacls exit code $LASTEXITCODE)." }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Windows could not make Administrators the owner of Rewindle's record of your backup location (error code $LASTEXITCODE). $tryAgain"
+    }
     $acl = Get-Acl -LiteralPath $repositoryRecordPath
     if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544' -or
         $acl.AreAccessRulesProtected -or
         @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier])).Count -ne 0) {
-        throw 'The backup location record did not get the protected owner and the state folder permissions.'
+        throw "Rewindle's record of your backup location did not get the right owner and permissions. $tryAgain"
     }
 }
 
@@ -2365,32 +2390,34 @@ function Repair-PendingRelocation {
     $currentRecordHash = $null
     $savedRecordProperty = $journal.PSObject.Properties['original_repository_record_base64']
     if ($null -ne $savedRecordProperty -and $null -ne $savedRecordProperty.Value) {
+        # These checks stop Repair before it changes anything, and trying again gives the same
+        # answer, so the person is told what is safe and where to get help.
+        $askForHelp = "It stopped before changing anything, and your backups were not touched. Choose Save problem report in Settings and ask for help; don't delete anything in the backup location."
+        $damagedNotes = "Rewindle's record of the unfinished move is damaged, so it can't repair the move by itself. $askForHelp"
         try {
             [byte[]]$savedRecord = [Convert]::FromBase64String([string]$savedRecordProperty.Value)
             $savedRecordJson = [Text.UTF8Encoding]::new($false, $true).GetString($savedRecord) | ConvertFrom-Json
         }
-        catch { throw 'Pending relocation journal contains an invalid original repository record.' }
+        catch { throw $damagedNotes }
         if ($null -eq $savedRecordJson -or $savedRecordJson -isnot [Management.Automation.PSCustomObject] -or
             $null -eq $savedRecordJson.PSObject.Properties['schema_version'] -or $savedRecordJson.schema_version -ne 1) {
-            throw 'Pending relocation journal contains an invalid original repository record.'
+            throw $damagedNotes
         }
         $savedRecordHash = Get-Sha256Hex -Bytes $savedRecord
         $intendedRecordHash = $null
         $intendedRecordProperty = $journal.PSObject.Properties['intended_repository_record_sha256']
         if ($null -ne $intendedRecordProperty -and $null -ne $intendedRecordProperty.Value) {
             $intendedRecordHash = [string]$intendedRecordProperty.Value
-            if ($intendedRecordHash -cnotmatch '^[0-9a-f]{64}$') {
-                throw 'Pending relocation journal has an invalid intended repository record hash.'
-            }
+            if ($intendedRecordHash -cnotmatch '^[0-9a-f]{64}$') { throw $damagedNotes }
         }
         if (-not [IO.File]::Exists($repositoryRecordPath)) {
-            throw 'The repository record disappeared during the pending relocation; automatic recovery is unsafe.'
+            throw "Rewindle's record of your backup location is missing, so it can't repair the move by itself. $askForHelp"
         }
         [void](Assert-NormalFile -File $repositoryRecordPath)
         $currentRecordHash = Get-FileSha256Hex -File $repositoryRecordPath
         if ($currentRecordHash -cne $savedRecordHash -and
             ($null -eq $intendedRecordHash -or $currentRecordHash -cne $intendedRecordHash)) {
-            throw 'Protected metadata changed outside the pending relocation transaction; automatic recovery is unsafe.'
+            throw "Rewindle's record of your backup location changed while the move was stopped, so it can't repair the move by itself. $askForHelp"
         }
     }
 
@@ -3028,7 +3055,7 @@ catch {
                 Set-RepositoryRecordBytes -Bytes $originalRepositoryRecordBytes
             }
         }
-        catch { $rollbackErrors.Add("repository record: $($_.Exception.Message)") }
+        catch { $rollbackErrors.Add("backup location record: $($_.Exception.Message)") }
         try {
             if ($repositoryPromoted) {
                 Remove-OwnedTree -Path $canonicalNew -ExpectedParent (Split-Path -Parent $canonicalNew) `

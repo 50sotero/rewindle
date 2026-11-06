@@ -274,15 +274,37 @@ public static class FakeRestic {
       string name = ((string)entry.Key).ToUpperInvariant();
       if (name.StartsWith("RESTIC_") || name.StartsWith("RCLONE_")) return Refuse("inherited environment variable " + name);
     }
-    string[] allowed = new string[] { "SYSTEMROOT", "WINDIR", "PATH", "TEMP", "TMP" };
+    // Exactly the Windows values, as Windows itself reports them, and TEMP/TMP in the protected temp folder next to
+    // the cache. PROCESSOR_ARCHITECTURE is passed on only when it is one of Windows' own values.
+    string system = Environment.SystemDirectory;
+    string windows = Directory.GetParent(system).FullName;
+    string temporary = Path.Combine(stateRoot, "temp");
+    Dictionary<string, string> required = new Dictionary<string, string>();
+    required["SYSTEMROOT"] = windows;
+    required["WINDIR"] = windows;
+    required["SYSTEMDRIVE"] = Path.GetPathRoot(windows).TrimEnd('\\');
+    required["COMSPEC"] = Path.Combine(system, "cmd.exe");
+    required["PATH"] = String.Join(";", new string[] {
+      system, windows, Path.Combine(system, "Wbem"), Path.Combine(system, "WindowsPowerShell\\v1.0") });
+    required["PATHEXT"] = ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC";
+    required["OS"] = "Windows_NT";
+    required["NUMBER_OF_PROCESSORS"] = Environment.ProcessorCount.ToString();
+    required["TEMP"] = temporary;
+    required["TMP"] = temporary;
     foreach (DictionaryEntry entry in environment) {
       string name = ((string)entry.Key).ToUpperInvariant();
-      if (Array.IndexOf(allowed, name) < 0) return Refuse("environment variable outside the allow-list " + name);
+      string value = (string)entry.Value;
+      if (name == "PROCESSOR_ARCHITECTURE") {
+        if (Array.IndexOf(new string[] { "AMD64", "x86", "ARM64" }, value) < 0) return Refuse("unexpected PROCESSOR_ARCHITECTURE " + value);
+        continue;
+      }
+      if (!required.ContainsKey(name)) return Refuse("environment variable outside the allow-list " + name);
+      if (!String.Equals(value, required[name], StringComparison.OrdinalIgnoreCase)) return Refuse(name + " is not the expected value: " + value);
     }
-    foreach (string name in new string[] { "TEMP", "TMP" }) {
-      string value = Environment.GetEnvironmentVariable(name);
-      if (String.IsNullOrEmpty(value) || !IsWithin(value, stateRoot)) return Refuse(name + " is not inside the protected state folder");
+    foreach (string name in required.Keys) {
+      if (String.IsNullOrEmpty(Environment.GetEnvironmentVariable(name))) return Refuse("missing environment variable " + name);
     }
+    if (!Directory.Exists(temporary)) return Refuse("the protected temp folder does not exist");
 
     if (String.IsNullOrEmpty(repo)) return Refuse("missing --repo");
     if (String.IsNullOrEmpty(cacheDirectory) || !IsWithin(cacheDirectory, stateRoot)) return Refuse("--cache-dir is not inside the protected state folder");
@@ -1116,6 +1138,53 @@ try {
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $crashFixture.StateRoot 'repository-relocation.journal.json'))) "crash state $($case.Name) clears journal"
     }
 
+    # Repair stops before it changes anything when the record of the backup location, or the record of the move, is not
+    # what the move left behind. Trying again gives the same answer, so what the person reads must say, in plain words,
+    # what is safe and where to get help.
+    $refusedFixture = New-Fixture
+    $refusedRecordBefore = Get-RecordHash -Fixture $refusedFixture
+    $refusedCrash = Invoke-Relocation -Fixture $refusedFixture -Destination $refusedFixture.NewRepository -CrashPoint 5
+    Assert-True ($refusedCrash.ExitCode -ne 0 -and (Test-Path -LiteralPath $refusedFixture.JournalPath -PathType Leaf)) 'refused repair fixture stops mid-move'
+    [byte[]]$refusedJournalBytes = [IO.File]::ReadAllBytes($refusedFixture.JournalPath)
+    $refusedJournalText = $encoding.GetString($refusedJournalBytes)
+    [byte[]]$refusedRecordBytes = [IO.File]::ReadAllBytes($refusedFixture.RecordPath)
+    $refusedConfigHash = Get-Hash -Path $refusedFixture.ConfigPath
+    $refusedManifestHash = Get-Hash -Path $refusedFixture.ManifestPath
+    $schemaTwoRecord = [Convert]::ToBase64String($encoding.GetBytes('{"schema_version":2}'))
+    $refusedCases = @(
+        [pscustomobject]@{ Name='record changed'; Reason="Rewindle's record of your backup location changed while the move was stopped"; Record='changed'; Field=$null; Value=$null },
+        [pscustomobject]@{ Name='record missing'; Reason="Rewindle's record of your backup location is missing"; Record='missing'; Field=$null; Value=$null },
+        [pscustomobject]@{ Name='saved record not readable'; Reason="Rewindle's record of the unfinished move is damaged"; Record=$null; Field='original_repository_record_base64'; Value='not base64!' },
+        [pscustomobject]@{ Name='saved record of another kind'; Reason="Rewindle's record of the unfinished move is damaged"; Record=$null; Field='original_repository_record_base64'; Value=$schemaTwoRecord },
+        [pscustomobject]@{ Name='rewrite fingerprint damaged'; Reason="Rewindle's record of the unfinished move is damaged"; Record=$null; Field='intended_repository_record_sha256'; Value='not-a-fingerprint' }
+    )
+    foreach ($case in $refusedCases) {
+        $journalText = $refusedJournalText
+        if ($null -ne $case.Field) {
+            $journalText = [regex]::Replace($refusedJournalText, '("' + $case.Field + '"\s*:\s*)"[^"]*"', ('${1}"' + $case.Value + '"'))
+            Assert-True ($journalText -cne $refusedJournalText) "refused repair ($($case.Name)) fixture changes the saved field"
+            [IO.File]::WriteAllText($refusedFixture.JournalPath, $journalText, $encoding)
+        }
+        if ($case.Record -eq 'changed') { [IO.File]::WriteAllText($refusedFixture.RecordPath, "{`"schema_version`": 1}`n", $encoding) }
+        if ($case.Record -eq 'missing') { [IO.File]::Delete($refusedFixture.RecordPath) }
+        $recordBeforeAttempt = Get-RecordHash -Fixture $refusedFixture
+        $refusedRun = Invoke-Recovery -Fixture $refusedFixture
+        $refusedText = if ($null -eq $refusedRun.Result) { '' } else { [string]$refusedRun.Result.error }
+        Assert-True ($refusedRun.ExitCode -ne 0 -and $null -ne $refusedRun.Result -and $refusedRun.Result.ok -eq $false) "refused repair ($($case.Name)) stops"
+        Assert-True ($refusedText.StartsWith($case.Reason, [StringComparison]::Ordinal)) "refused repair ($($case.Name)) says why: $refusedText"
+        Assert-True ($refusedText -notmatch '(?i)repositor|journal|relocat|metadata|snapshot|restic|engine|canary') "refused repair ($($case.Name)) uses plain words: $refusedText"
+        Assert-True ($refusedText.EndsWith("It stopped before changing anything, and your backups were not touched. Choose Save problem report in Settings and ask for help; don't delete anything in the backup location.", [StringComparison]::Ordinal)) "refused repair ($($case.Name)) names a next step that can help: $refusedText"
+        Assert-True ((Get-Hash -Path $refusedFixture.ConfigPath) -eq $refusedConfigHash -and
+            (Get-Hash -Path $refusedFixture.ManifestPath) -eq $refusedManifestHash -and
+            (Get-RecordHash -Fixture $refusedFixture) -ceq $recordBeforeAttempt -and
+            $encoding.GetString([IO.File]::ReadAllBytes($refusedFixture.JournalPath)) -ceq $journalText) "refused repair ($($case.Name)) changes nothing"
+        [IO.File]::WriteAllBytes($refusedFixture.JournalPath, $refusedJournalBytes)
+        [IO.File]::WriteAllBytes($refusedFixture.RecordPath, $refusedRecordBytes)
+    }
+    $acceptedRepair = Invoke-Recovery -Fixture $refusedFixture
+    Assert-True ($acceptedRepair.ExitCode -eq 0 -and $acceptedRepair.Result.ok -eq $true -and
+        (Get-RecordHash -Fixture $refusedFixture) -ceq $refusedRecordBefore) 'refused repairs leave the move repairable'
+
     $managerText = Get-Content -LiteralPath $managerSource -Raw
     Assert-True ($managerText -match 'New-RepositoryStagingDirectory -Path \$repositoryStage -StorageMode \$destinationStorageMode') 'repository staging uses storage-mode-specific protection contract'
     Assert-True ($managerText -match 'New-ProtectedStagingDirectory -Path \$recoveryStage') 'recovery staging protected before copy contract'
@@ -1148,6 +1217,16 @@ try {
     # Outside test mode the rewritten record gets the installer's owner and inherited permissions; that needs elevation,
     # so only the source can be checked here.
     Assert-True ($managerText -match '(?s)function Set-RepositoryRecordBytes \{.+?Set-AtomicFileBytes -Target \$repositoryRecordPath.+?if \(\$isTestMode\) \{ return \}.+?/reset /C /L.+?/setowner ''\*S-1-5-32-544'' /C /L.+?AreAccessRulesProtected.+?GetAccessRules\(\$true, \$false') 'repository record gets the installer owner and inherited permissions'
+    # The same goes for what the person reads when that step fails (on a move, its undo or a repair): plain words and a
+    # next step. An undo that fails names the record in plain words too.
+    $recordWriter = [regex]::Match($managerText, '(?s)\nfunction Set-RepositoryRecordBytes \{.+?\n\}\n').Value
+    $recordWriterTexts = @([regex]::Matches($recordWriter, 'throw "([^"]*)"') | ForEach-Object { $_.Groups[1].Value })
+    Assert-True ($recordWriter.Contains("`$tryAgain = 'Try again. If it keeps failing, choose Save problem report in Settings and ask for help.'")) 'record permission failures name a next step'
+    Assert-True ($recordWriterTexts.Count -eq 3 -and @($recordWriterTexts | Where-Object {
+        -not $_.EndsWith(' $tryAgain', [StringComparison]::Ordinal) -or $_ -match '(?i)repositor|journal|relocat|metadata|icacls'
+    }).Count -eq 0) "record permission failures use plain words and end with the next step: $($recordWriterTexts -join ' | ')"
+    Assert-True ($managerText.Contains('$rollbackErrors.Add("backup location record: ') -and
+        -not $managerText.Contains('$rollbackErrors.Add("repository record: ')) 'a failed undo names the backup location record in plain words'
     $builderText = Get-Content -LiteralPath (Join-Path $projectRoot 'build\Build-Release.ps1') -Raw
     $installerText = Get-Content -LiteralPath (Join-Path $projectRoot 'installer\Install-ResticBackuper.ps1') -Raw
     $commonText = Get-Content -LiteralPath (Join-Path $projectRoot 'src\restic_common.py') -Raw
@@ -1288,6 +1367,7 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
         unsafe_destinations_and_capacity = 'passed'
         activation_rollback_points = 5
         abrupt_termination_recovery_states = $crashCases.Count
+        refused_repairs_in_plain_words = $refusedCases.Count
         empty_destination_removal_crash_states = 2
         existing_empty_acl_and_attributes_restored = 'passed'
         protected_staging_and_activation_acl_contract = 'passed'
@@ -1318,8 +1398,12 @@ finally {
         if (Test-Path -LiteralPath $root) {
             $full = [IO.Path]::GetFullPath($root)
             $temp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+            # Only roots this run made are listed. Both prefixes are this suite's: 'RRM T-' for fixtures (with the
+            # space) and 'RRM-T-' for any root made without one.
+            $rootName = [IO.Path]::GetFileName($full)
             if ($full.StartsWith($temp, [StringComparison]::OrdinalIgnoreCase) -and
-                [IO.Path]::GetFileName($full).StartsWith('RRM T-', [StringComparison]::Ordinal)) {
+                ($rootName.StartsWith('RRM T-', [StringComparison]::Ordinal) -or
+                    $rootName.StartsWith('RRM-T-', [StringComparison]::Ordinal))) {
                 Remove-Item -LiteralPath $full -Recurse -Force
             }
         }

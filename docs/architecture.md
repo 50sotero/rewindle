@@ -451,9 +451,11 @@ without deleting the old tree, checks every path/size/hash plus repository
 identity/history/structure, and revalidates final trees immediately before
 publishing configuration and manifest metadata. Restic runs with an argument
 string built by the Windows quoting rules and an allow-listed environment
-(`SystemRoot`, `windir`, `Path` = System32, `TEMP`/`TMP` = the protected
-`<state>\cache`), so nothing from the user's own environment reaches it or the
-password helper it starts. Just before committing, the manager rewrites
+(`SystemRoot`, `windir`, `SystemDrive`, `ComSpec`, `PATH`, `PATHEXT`, `OS`,
+`NUMBER_OF_PROCESSORS` and `PROCESSOR_ARCHITECTURE` taken from Windows itself,
+and `TEMP`/`TMP` = the protected `<state>\temp` next to the cache), so nothing
+from the user's own environment reaches it or the password helper it starts.
+Just before committing, the manager rewrites
 `<state>\repository.json` (same repository ID, new location, volume, storage
 mode and recovery tools, other fields kept) with the owner and inherited
 permissions the installer gives it, so the backup keeps reading its repository
