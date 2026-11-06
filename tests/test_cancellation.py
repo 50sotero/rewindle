@@ -636,6 +636,11 @@ class CancellationTests(unittest.TestCase):
                             json.loads(last_success.read_text(encoding="utf-8")),
                             previous_success,
                         )
+                        # A cancelled data check is not recorded, so the
+                        # next backup runs it again.
+                        self.assertFalse(
+                            (state / "data-check.json").exists()
+                        )
                     else:
                         self.assertFalse(last_success.exists())
 

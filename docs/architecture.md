@@ -156,9 +156,14 @@ also requires:
 3. A successful `restic check` of repository structure.
 4. A restore of the installed canary file into a temporary state directory,
    including Restic verification and a local SHA-256/content-size comparison.
-5. On the configured weekday, a successful rotating read of one repository
-   data subset. The default configuration divides this deeper check into 30
-   parts.
+5. About once a week, a successful rotating read of one repository data
+   subset. The default configuration divides this deeper check into 30 parts.
+   It runs on the first task run (scheduled or Back up now) on or after the
+   seventh calendar day since the last passed check, and on the first one when
+   none is recorded, whatever the weekday. Each passed check is recorded in the protected
+   `data-check.json` (time, part, number of parts and repository ID); a
+   failed or cancelled check is not recorded, so the next run tries again.
+   The older `read_data_subset_weekday` setting is still accepted but unused.
 
 Only after these checks does the wrapper atomically update the last-successful
 run record. The canary proves that this run can locate, decrypt, and restore a
@@ -502,9 +507,10 @@ variables, which the requesting user can set for the elevated process.
 
 Recovery Readiness authenticates the active DPAPI credential and separately
 parses and authenticates the configured recovery key. It also checks the
-portable bundle, repository capacity/identity, Restic locks, and protected
-restore-drill evidence. The normal-user dashboard can request a representative
-drill but never invokes Restic or reads either credential. A same-user
+portable bundle, repository capacity/identity, Restic locks, the age of the
+last passed data-subset check, and protected restore-drill evidence. The
+normal-user dashboard can request a representative drill but never invokes
+Restic or reads either credential. A same-user
 UAC-elevated, request-digest-bound manager selects the exact latest verified
 plan-bound snapshot, derives a new nonce-bound protected destination, and uses
 the restricted recovery key to restore the protected canary plus a bounded

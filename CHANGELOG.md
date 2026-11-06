@@ -116,6 +116,17 @@ ones a home user reads without a glossary.
   list last and checks that the folder is gone; if something is still in use,
   it says so and asks you to restart the PC and choose Reinstall or repair in
   Setup.
+- **The weekly deep check really happens, and a failed backup names the right
+  cause.** About once a week a backup also reads back a sample of the saved
+  data, but only a backup that ran on a Sunday did it, so a PC that was off on
+  Sundays, or a schedule without Sunday, never had it. It now runs on the first
+  backup on or after the seventh day since the last check that passed,
+  whatever the weekday; it counts only once it passes, and the recovery
+  readiness check says how long ago that was. A full backup drive, a different
+  drive at the backup drive's letter and a protected folder's drive that
+  doesn't answer now each get their own explanation and next step. Before, the
+  first two said to reconnect the backup drive and the third blamed the backup
+  drive.
 
 ### Security
 
