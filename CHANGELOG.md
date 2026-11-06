@@ -147,7 +147,8 @@ ones a home user reads without a glossary.
   reading was enough to hold the lock, so any program you ran could keep every
   backup from starting. Now only Administrators and Windows can open it. An
   older lock file is repaired the next time a backup or a protected change
-  runs, and Setup protects it again after it sets the folder's permissions.
+  starts, even while a program holds it open, and Setup protects it again
+  after it sets the folder's permissions.
   The dashboard now prepares every request for administrator approval, and
   checks every answer it gets back, with one shared set of checks. Two older
   copies had fallen behind the rest: one quoted line breaks loosely, and one

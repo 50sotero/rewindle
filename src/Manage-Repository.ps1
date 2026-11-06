@@ -566,7 +566,8 @@ function Protect-RunLock {
     if (Test-RunLockSecurity -Acl ([IO.File]::GetAccessControl($File, $sections))) { return }
     [IO.File]::SetAccessControl($File, $Policy)
     if (-not (Test-RunLockSecurity -Acl ([IO.File]::GetAccessControl($File, $sections)))) {
-        throw 'The run lock could not be limited to Administrators and SYSTEM.'
+        throw "The run lock $File could not be limited to Administrators and SYSTEM. An administrator can delete it so " +
+            'the next backup creates it again.'
     }
 }
 
@@ -578,9 +579,19 @@ function Open-RunLockFile {
         return [IO.File]::Open($File, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite)
     }
     # A new run.lock is created with its final permissions, so the user can never open it, not even for a moment.
-    $stream = [IO.FileStream]::new($File, [IO.FileMode]::OpenOrCreate,
-        ([Security.AccessControl.FileSystemRights]::Read -bor [Security.AccessControl.FileSystemRights]::Write),
-        [IO.FileShare]::ReadWrite, 4096, [IO.FileOptions]::None, $security)
+    try {
+        $stream = [IO.FileStream]::new($File, [IO.FileMode]::OpenOrCreate,
+            ([Security.AccessControl.FileSystemRights]::Read -bor [Security.AccessControl.FileSystemRights]::Write),
+            [IO.FileShare]::ReadWrite, 4096, [IO.FileOptions]::None, $security)
+    }
+    catch {
+        # A program that holds an older, user-readable run.lock open without sharing blocks this open, but not a
+        # repair: changing permissions needs no access to the contents. Repair it anyway, so that program cannot open
+        # the file again once it lets go, then report the failed open.
+        $openFailure = $_
+        if (Test-Path -LiteralPath $File -PathType Leaf) { Protect-RunLock -File $File -Policy (New-RunLockSecurity) }
+        throw $openFailure
+    }
     try { Protect-RunLock -File $File -Policy $security }
     catch { $stream.Dispose(); throw }
     return $stream

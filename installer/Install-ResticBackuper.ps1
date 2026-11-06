@@ -1336,7 +1336,8 @@ function Protect-RunLock {
     if (Test-RunLockSecurity -Acl ([IO.File]::GetAccessControl($File, $sections))) { return }
     [IO.File]::SetAccessControl($File, $Policy)
     if (-not (Test-RunLockSecurity -Acl ([IO.File]::GetAccessControl($File, $sections)))) {
-        throw 'The run lock could not be limited to Administrators and SYSTEM.'
+        throw "The run lock $File could not be limited to Administrators and SYSTEM. An administrator can delete it so " +
+            'the next backup creates it again.'
     }
 }
 
@@ -1350,6 +1351,10 @@ function Protect-RunLockFile {
         if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             throw "Expected a normal, non-reparse file: $file"
         }
+        # Changing permissions needs no access to the contents, so a program that holds the file open, even without
+        # sharing, can stop neither this repair nor the upgrade, and cannot open the file again once it lets go.
+        Protect-RunLock -File $file -Policy (New-RunLockSecurity)
+        return
     }
     $security = New-RunLockSecurity
     $stream = [IO.FileStream]::new($file, [IO.FileMode]::OpenOrCreate,

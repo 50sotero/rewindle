@@ -2648,6 +2648,11 @@ def _open_protected_run_lock(path: Path, sddl: str):
         if handle is None or handle == api.invalid_handle:
             error = ctypes.get_last_error()
             if error in _RUN_LOCK_BUSY_ERRORS:
+                # A program that holds an older, user-readable run.lock open without
+                # sharing blocks this open, but not a repair: changing permissions
+                # needs no access to the contents. Repair it anyway, so that program
+                # cannot open the file again once it lets go.
+                _protect_existing_run_lock(path, sddl)
                 raise RunLockUnavailable(
                     "another backup process already holds the run lock"
                 )
@@ -2668,11 +2673,48 @@ def _open_protected_run_lock(path: Path, sddl: str):
         raise
 
 
+def _protect_existing_run_lock(path: Path, sddl: str) -> None:
+    """Repair run.lock through a handle that can change its permissions, not its contents.
+
+    Windows applies share modes only to access to a file's contents, so no other open
+    handle can keep this one from opening. A file that is not there needs nothing: the
+    next open creates it with the protected descriptor.
+    """
+    api = _run_lock_security_api()
+    ctypes = api.ctypes
+    access = 0x00020000 | 0x00040000  # READ_CONTROL, WRITE_DAC
+    if sddl.startswith("O:"):
+        access |= 0x00080000  # WRITE_OWNER
+    handle = api.kernel32.CreateFileW(
+        str(path),
+        access,
+        0x1 | 0x2 | 0x4,  # share read, write and delete
+        None,
+        3,  # OPEN_EXISTING
+        0x00200000,  # FILE_FLAG_OPEN_REPARSE_POINT: never repair what a link points at
+        None,
+    )
+    if handle is None or handle == api.invalid_handle:
+        error = ctypes.get_last_error()
+        if error in (2, 3):  # file or path not found
+            return
+        failure = ctypes.WinError(error)
+        failure.filename = str(path)
+        raise failure
+    try:
+        _protect_run_lock_handle(api, handle, path, sddl)
+    finally:
+        api.kernel32.CloseHandle(handle)
+
+
 def _protect_run_lock(handle, path: Path, sddl: str) -> None:
     """Give an open run.lock exactly the protected descriptor, or fail closed."""
     api = _run_lock_security_api()
+    _protect_run_lock_handle(api, msvcrt.get_osfhandle(handle.fileno()), path, sddl)
+
+
+def _protect_run_lock_handle(api, os_handle: int, path: Path, sddl: str) -> None:
     ctypes = api.ctypes
-    os_handle = msvcrt.get_osfhandle(handle.fileno())
     if _run_lock_descriptor_matches(_handle_owner_and_dacl_sddl(api, os_handle), sddl):
         return
     descriptor = _security_descriptor_from_sddl(api, sddl)

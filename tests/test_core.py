@@ -447,6 +447,7 @@ class CoreSafetyTests(unittest.TestCase):
     def test_run_lock_held_open_without_sharing_reports_unavailable(self) -> None:
         with tempfile.TemporaryDirectory(prefix="resticbackuper-run-lock-") as root_text:
             lock_path = Path(root_text) / "run.lock"
+            # An older, user-readable run.lock, held open without sharing by a program running with standard rights.
             lock_path.write_bytes(b"\0")
             error, handle = self._standard_open_error(lock_path, share=0)
             self.assertEqual(0, error)
@@ -460,6 +461,9 @@ class CoreSafetyTests(unittest.TestCase):
                             pass
             finally:
                 self._close_handle(handle)
+            # That open kept the backup from opening the file, but not from repairing it: once that program lets go,
+            # it cannot open run.lock again.
+            self._assert_admin_only(lock_path)
 
     def test_run_lock_fails_closed_when_its_repair_does_not_hold(self) -> None:
         with tempfile.TemporaryDirectory(prefix="resticbackuper-run-lock-") as root_text:

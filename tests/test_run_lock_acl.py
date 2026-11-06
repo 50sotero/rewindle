@@ -61,18 +61,37 @@ class RunLockSourceTests(unittest.TestCase):
                 self.assertRegex(protected_branch, r"\[IO\.FileStream\]::new\(\$File,[^;]*\$security\)")
                 self.assertIn("Protect-RunLock -File $File -Policy $security", protected_branch)
                 self.assertLess(enter.index("Open-RunLockFile"), enter.index(".Lock(0, 1)"))
+                # A program holding the file open without sharing makes the open fail, but must not stop the repair.
+                after_open = protected_branch.split("[IO.FileStream]::new($File,", 1)[1]
+                refused = after_open.split("catch {", 1)[1].split("\n    }\n", 1)[0]
+                self.assertIn("Protect-RunLock -File $File -Policy (New-RunLockSecurity)", refused)
+                self.assertLess(refused.index("Protect-RunLock"), refused.index("throw $openFailure"))
 
     def test_the_installer_protects_run_lock_after_resetting_the_state_folder(self) -> None:
         script = read(INSTALLER)
-        reset = "    Set-ProtectedDirectory -Path $stateRoot -UserSid $currentSid\n"
-        self.assertTrue(
-            reset + "    Protect-RunLockFile -StateRoot $stateRoot\n" in script,
-            "the installer must protect run.lock right after it resets the state folder's permissions",
+        calls = [match.start() for match in re.finditer(r"(?m)^ *Protect-RunLockFile -StateRoot \$stateRoot *$", script)]
+        self.assertEqual(1, len(calls), "the installer must protect run.lock once, in its permissions step")
+        resets = [match.start() for match in re.finditer(r"(?m)^ *Set-ProtectedDirectory -Path \$stateRoot\b", script)]
+        self.assertTrue(resets)
+        self.assertLess(
+            max(resets), calls[0], "the installer must protect run.lock after it last resets the state folder"
         )
+        phase = script.index("Start-InstallPhase 'permissions'")
+        self.assertLess(phase, calls[0])
+        self.assertLess(calls[0], script.index("Complete-InstallPhase 'permissions'", phase))
         protect = function_text(script, "Protect-RunLockFile")
         self.assertIn("New-RunLockSecurity", protect)
         self.assertIn("Protect-RunLock -File $file -Policy $security", protect)
         self.assertNotIn("[IO.File]::Open(", protect)
+        # An existing file is repaired by its path and never opened, so a program that holds it open, even without
+        # sharing, can stop neither the repair nor the upgrade.
+        existing, _created = protect.split("    $security = New-RunLockSecurity\n", 1)
+        self.assertIn("Protect-RunLock -File $file -Policy (New-RunLockSecurity)\n        return\n", existing)
+        self.assertNotIn("FileStream", existing)
+
+    def test_a_failed_repair_says_what_to_do(self) -> None:
+        protect = function_text(read(MANAGERS[0]), "Protect-RunLock")
+        self.assertRegex(protect, r"could not be limited to Administrators and SYSTEM\. An administrator can delete it")
 
     def test_every_copy_of_the_run_lock_policy_is_the_same(self) -> None:
         # The managers and the installer run alone, each with its own copy; they must not drift apart.
@@ -190,6 +209,164 @@ class RunLockPolicyBehaviourTests(unittest.TestCase):
                     )
                     self.assertEqual(0, result.returncode, result.stderr)
                     self.assertEqual(expected, json.loads(result.stdout.strip().splitlines()[-1]))
+
+
+OPENER_PROBE = r"""
+param([string]$Script, [string]$Work)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile($Script, [ref]$null, [ref]$errors)
+if ($errors.Count -ne 0) { throw "$Script does not parse." }
+$wanted = @('Protect-RunLock', 'Open-RunLockFile', 'Protect-RunLockFile')
+$found = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in $wanted }, $true))
+. ([scriptblock]::Create((($found | ForEach-Object { $_.Extent.Text }) -join "`n")))
+
+# The script's own policy makes Administrators the owner, which only an elevated process may do. As test_core does for
+# the engine, this probe applies the same DACL without the owner part.
+function New-RunLockSecurity {
+    $security = [Security.AccessControl.FileSecurity]::new()
+    $security.SetAccessRuleProtection($true, $false)
+    foreach ($sidText in @('S-1-5-18', 'S-1-5-32-544')) {
+        $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new($sidText),
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.AccessControl.AccessControlType]::Allow))
+    }
+    return $security
+}
+function Test-RunLockSecurity {
+    param([Security.AccessControl.FileSystemSecurity]$Acl)
+    if (-not $Acl.AreAccessRulesProtected) { return $false }
+    $seen = [Collections.Generic.HashSet[string]]::new()
+    foreach ($rule in $Acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        if ($rule.IsInherited -or
+            $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+            $rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+            -not $seen.Add($rule.IdentityReference.Value)) {
+            return $false
+        }
+    }
+    return $seen.SetEquals([string[]]@('S-1-5-18', 'S-1-5-32-544'))
+}
+
+$isTestMode = $false
+$elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)
+
+function Get-Outcome {
+    param([string]$File)
+    $state = if (Test-RunLockSecurity -Acl ([IO.File]::GetAccessControl($File, 'Access'))) { 'protected' } else { 'open to others' }
+    # Unelevated, this process stands for a program with standard rights, which must no longer be able to open it.
+    if ($elevated) { return "$state/not checked" }
+    try { ([IO.File]::Open($File, 'Open', 'Read', 'ReadWrite')).Dispose(); return "$state/opened" }
+    catch {
+        if ($_.Exception.GetBaseException() -is [UnauthorizedAccessException]) { return "$state/denied" }
+        throw
+    }
+}
+
+function New-InheritedFile {
+    param([string]$Folder)
+    [void][IO.Directory]::CreateDirectory($Folder)
+    $file = Join-Path $Folder 'run.lock'
+    [IO.File]::WriteAllBytes($file, [byte[]](0))
+    return $file
+}
+
+function Invoke-Step {
+    param([string]$File)
+    if (Get-Command Protect-RunLockFile -ErrorAction SilentlyContinue) {
+        Protect-RunLockFile -StateRoot (Split-Path -Parent $File)
+    }
+    else {
+        (Open-RunLockFile -File $File).Dispose()
+    }
+}
+
+$results = [ordered]@{ elevated = $elevated }
+$created = Join-Path (Join-Path $Work 'new') 'run.lock'
+[void][IO.Directory]::CreateDirectory((Split-Path -Parent $created))
+Invoke-Step -File $created
+$results['create'] = Get-Outcome -File $created
+
+$inherited = New-InheritedFile -Folder (Join-Path $Work 'inherited')
+Invoke-Step -File $inherited
+$results['repair'] = Get-Outcome -File $inherited
+
+# A program that opened the older, user-readable file without sharing, and keeps it open.
+$held = New-InheritedFile -Folder (Join-Path $Work 'held')
+$holder = [IO.File]::Open($held, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+try {
+    try { Invoke-Step -File $held; $results['held step'] = 'went ahead' }
+    catch { $results['held step'] = 'refused' }
+    $results['held repaired while open'] = Test-RunLockSecurity -Acl ([IO.File]::GetAccessControl($held, 'Access'))
+}
+finally { $holder.Dispose() }
+$results['held'] = Get-Outcome -File $held
+$results | ConvertTo-Json -Compress
+"""
+
+
+class RunLockOpenerBehaviourTests(unittest.TestCase):
+    """Run each script's protected opener (not its test mode) on real files, as the managers and the installer do."""
+
+    def run_probe(self, script: Path, work: Path) -> dict:
+        probe = work.parent / "opener-probe.ps1"
+        if not probe.exists():
+            probe.write_text(OPENER_PROBE, encoding="ascii", newline="\n")
+        work.mkdir()
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(probe),
+                "-Script",
+                str(script),
+                "-Work",
+                str(work),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout.strip().splitlines()[-1])
+
+    @staticmethod
+    def protected(elevated: bool) -> str:
+        return "protected/not checked" if elevated else "protected/denied"
+
+    def test_the_managers_repair_run_lock_even_while_a_program_holds_it_without_sharing(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="resticbackuper-run-lock-opener-") as root_text:
+            for manager in MANAGERS:
+                with self.subTest(manager=manager.name):
+                    result = self.run_probe(manager, Path(root_text) / manager.stem)
+                    protected = self.protected(result["elevated"])
+                    self.assertEqual(protected, result["create"])
+                    self.assertEqual(protected, result["repair"])
+                    # The manager cannot take the lock, and says so, but the file is repaired all the same.
+                    self.assertEqual("refused", result["held step"])
+                    self.assertTrue(result["held repaired while open"])
+                    self.assertEqual(protected, result["held"])
+
+    def test_the_installer_repairs_run_lock_even_while_a_program_holds_it_without_sharing(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="resticbackuper-run-lock-opener-") as root_text:
+            result = self.run_probe(INSTALLER, Path(root_text) / "installer")
+            protected = self.protected(result["elevated"])
+            self.assertEqual(protected, result["create"])
+            self.assertEqual(protected, result["repair"])
+            # The upgrade goes on: it never needs the file's contents.
+            self.assertEqual("went ahead", result["held step"])
+            self.assertTrue(result["held repaired while open"])
+            self.assertEqual(protected, result["held"])
 
 
 if __name__ == "__main__":
