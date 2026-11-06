@@ -1278,7 +1278,24 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
     # ====================================================================================================================
     # 12. Where an earlier installation kept its backups (the state folder an uninstall leaves)
     # ====================================================================================================================
-    . ([scriptblock]::Create((Get-InstallerFunctionText -Name @('Test-KeptRepositoryPath', 'ConvertTo-KeptRecordTime', 'Get-KeptRepository', 'Get-RepositoryInput'))))
+    . ([scriptblock]::Create((Get-InstallerFunctionText -Name @('Test-TrustedStateOwner', 'Test-KeptRepositoryPath', 'ConvertTo-KeptRecordTime', 'Get-KeptRepository', 'Get-RepositoryInput'))))
+    # Only a state folder that Administrators or SYSTEM own is read (section 8). This account owns the fixture folders, so for
+    # the fixture state folder Get-FeedOwnerSid answers $script:keptStateOwner ($null: the owner can't be read). The stand-in is
+    # defined in a scope of its own, so the real Get-FeedOwnerSid stays in place for the progress feed checks below.
+    $script:keptStateOwner = 'S-1-5-32-544'
+    function Use-KeptStateOwner {
+        param([scriptblock]$Action)
+        return & {
+            function Get-FeedOwnerSid {
+                param([string]$Path)
+                if ($Path -ne $stateRoot) { throw "Unexpected owner lookup: $Path" }
+                if ($null -eq $script:keptStateOwner) { throw [UnauthorizedAccessException]::new('Access is denied.') }
+                return $script:keptStateOwner
+            }
+            & $Action
+        }
+    }
+    function Find-KeptRepository { return (Use-KeptStateOwner { Get-KeptRepository }) }
     function Write-KeptRecord {
         param([string]$Folder, [string]$Name, $Record)
         $text = if ($Record -is [string]) { $Record } else { ConvertTo-Json -InputObject $Record -Depth 4 }
@@ -1307,20 +1324,43 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
         if (-not $NoSecret) { Write-Text -Path $secretFile -Text '{}' }
         foreach ($name in $Records.Keys) { Write-KeptRecord -Folder $stateRoot -Name $name -Record $Records[$name] }
     }
-    function Get-KeptPath { $found = Get-KeptRepository; if ($null -eq $found) { return '<none>' } return [string]$found.repository }
+    function Get-KeptPath { $found = Find-KeptRepository; if ($null -eq $found) { return '<none>' } return [string]$found.repository }
     Remove-Item -LiteralPath (Split-Path -Parent $stateRoot) -Recurse -Force -ErrorAction SilentlyContinue
-    Assert-True ($null -eq (Get-KeptRepository)) 'no state folder: nothing was kept'
+    Assert-True ($null -eq (Find-KeptRepository)) 'no state folder: nothing was kept'
     Reset-KeptState -Records @{ 'repository.json' = $setUp }
-    $found = Get-KeptRepository
+    $found = Find-KeptRepository
     Assert-Equal @($keptFirst, 'local_ntfs') @($found.repository, $found.storage_mode) 'repository.json names the kept backups and how they are stored'
     Reset-KeptState -Records @{ 'repository.json' = $setUp } -NoSecret
     Assert-Equal '<none>' (Get-KeptPath) 'without the stored password setup could not carry on with them, so none is reported'
+
+    # Nothing is read from a state folder that Administrators or SYSTEM don't own, or that is a link: any account can create it.
+    Reset-KeptState -Records @{ 'repository.json' = $setUp }
+    $script:keptStateOwner = 'S-1-5-18'
+    Assert-Equal $keptFirst (Get-KeptPath) 'a state folder SYSTEM owns is read'
+    foreach ($owner in @($currentSid, 'S-1-5-32-545', $null)) {
+        $script:keptStateOwner = $owner
+        Assert-Equal '<none>' (Get-KeptPath) "a state folder owned by '$owner' names no kept backups"
+    }
+    $script:keptStateOwner = 'S-1-5-32-544'
+    Set-OwnerToCurrentUser $stateRoot
+    Assert-Equal '<none>' (& { $found = Get-KeptRepository; if ($null -eq $found) { '<none>' } else { [string]$found.repository } }) 'a real state folder this account owns names no kept backups'
+    $keptLink = Join-Path $workspace 'kept-unit\Linked'
+    New-Junction -Link $keptLink -Target $stateRoot
+    $realKeptState = $stateRoot
+    $stateRoot = $keptLink
+    $secretFile = Join-Path $keptLink 'repository-password.dpapi.json'
+    try { Assert-Equal '<none>' (Get-KeptPath) 'a state folder that is a link names no kept backups' }
+    finally {
+        $stateRoot = $realKeptState
+        $secretFile = Join-Path $stateRoot 'repository-password.dpapi.json'
+        Remove-Junction $keptLink
+    }
     $cloud = [ordered]@{ schema_version = 1; initialized_utc = '2026-09-01T10:00:00Z'; repository = (Join-Path $workspace 'console\My Drive\Rewindle\Backups'); repository_storage_mode = 'google_drivefs_stream' }
     Reset-KeptState -Records @{ 'repository.json' = $cloud }
-    Assert-Equal 'google_drivefs_stream' (Get-KeptRepository).storage_mode 'backups kept in Google Drive are reported as such'
+    Assert-Equal 'google_drivefs_stream' (Find-KeptRepository).storage_mode 'backups kept in Google Drive are reported as such'
     $noMode = [ordered]@{ schema_version = 1; initialized_utc = '2026-09-01T10:00:00Z'; repository = $keptFirst }
     Reset-KeptState -Records @{ 'repository.json' = $noMode }
-    Assert-Equal 'local_ntfs' (Get-KeptRepository).storage_mode 'a record without a storage mode is local'
+    Assert-Equal 'local_ntfs' (Find-KeptRepository).storage_mode 'a record without a storage mode is local'
 
     # The newest record wins: a backup after a move of the backup location names the new place, and a later rewrite of
     # repository.json (updated_utc) wins over older backups.
@@ -1391,7 +1431,7 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
             $RepositoryStorageMode = $Mode
             $DriveFsMyDriveRoot = Join-Path $workspace 'console\My Drive'
             $defaultRepositorySuffix = 'ResticBackups\Personal'
-            Get-RepositoryInput
+            Use-KeptStateOwner { Get-RepositoryInput }
         }
         return $script:Repository
     }
@@ -1410,27 +1450,44 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
     $keptState = Join-Path $keptRoots.ProgramData 'ResticBackuper'
     Write-Text -Path (Join-Path $keptState 'repository-password.dpapi.json') -Text '{}'
     Write-KeptRecord -Folder $keptState -Name 'repository.json' -Record $setUp
-    $keptRun = Invoke-Plan -Bundle $bundle -Roots $keptRoots -Temp $temp -Arguments @('-MinimumFreeGiB', '1')
-    Assert-Equal 0 $keptRun.ExitCode "a plan over the state an uninstall kept is written (stderr: $($keptRun.Error))"
-    Assert-Equal $keptFirst $keptRun.Plan.environment.existing_install.kept_repository 'existing_install.kept_repository names the kept backups'
-    Assert-True ($null -eq $keptRun.Plan.environment.existing_install.rewindle) 'kept state alone is not an installation'
-    Assert-Equal $keptRoots.DefaultRepository $keptRun.Plan.defaults.repository 'defaults.repository stays the recommendation'
-    Assert-Equal @(Get-ErrorCodes $noArguments.Plan) @(Get-ErrorCodes $keptRun.Plan) 'the kept state adds no error'
-    Assert-Equal @(Get-WarningCodes $noArguments.Plan) @(Get-WarningCodes $keptRun.Plan) 'the kept state adds no warning'
-    Write-KeptRecord -Folder $keptState -Name 'last-success.json' -Record $afterMove
-    $movedRun = Invoke-Plan -Bundle $bundle -Roots $keptRoots -Temp $temp -Arguments @('-MinimumFreeGiB', '1')
-    Assert-Equal $keptMoved $movedRun.Plan.environment.existing_install.kept_repository 'after a move of the backup location the plan names the new place'
-    Assert-Equal @(Get-ErrorCodes $noArguments.Plan) @(Get-ErrorCodes $movedRun.Plan) 'the kept plan identity adds no error'
-    # Records this account can't read, or that are malformed, mean "not known": no error, no warning, a plan all the same.
-    Write-KeptRecord -Folder $keptState -Name 'last-success.json' -Record '{not json'
-    Write-KeptRecord -Folder $keptState -Name 'status.json' -Record ([ordered]@{ schema_version = 1; started_utc = '2026-10-05T02:00:00Z'; repository = 'relative\Backups' })
-    Set-ReadDenied -Path (Join-Path $keptState 'repository.json') -Denied $true
-    try { $brokenRun = Invoke-Plan -Bundle $bundle -Roots $keptRoots -Temp $temp -Arguments @('-MinimumFreeGiB', '1') }
-    finally { Set-ReadDenied -Path (Join-Path $keptState 'repository.json') -Denied $false }
-    Assert-Equal 0 $brokenRun.ExitCode "unreadable and malformed records still give a plan (stderr: $($brokenRun.Error))"
-    Assert-True ($null -eq $brokenRun.Plan.environment.existing_install.kept_repository) 'unreadable and malformed records name no kept backups'
-    Assert-Equal @(Get-ErrorCodes $noArguments.Plan) @(Get-ErrorCodes $brokenRun.Plan) 'unreadable and malformed records add no error'
-    Assert-Equal @(Get-WarningCodes $noArguments.Plan) @(Get-WarningCodes $brokenRun.Plan) 'unreadable and malformed records add no warning'
+    if ($isElevated) {
+        # The folder an install leaves belongs to Administrators, and only such a folder is read.
+        $keptStateAcl = Get-Acl -LiteralPath $keptState
+        $keptStateAcl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+        Set-Acl -LiteralPath $keptState -AclObject $keptStateAcl
+        $keptRun = Invoke-Plan -Bundle $bundle -Roots $keptRoots -Temp $temp -Arguments @('-MinimumFreeGiB', '1')
+        Assert-Equal 0 $keptRun.ExitCode "a plan over the state an uninstall kept is written (stderr: $($keptRun.Error))"
+        Assert-Equal $keptFirst $keptRun.Plan.environment.existing_install.kept_repository 'existing_install.kept_repository names the kept backups'
+        Assert-True ($null -eq $keptRun.Plan.environment.existing_install.rewindle) 'kept state alone is not an installation'
+        Assert-Equal $keptRoots.DefaultRepository $keptRun.Plan.defaults.repository 'defaults.repository stays the recommendation'
+        Assert-Equal @(Get-ErrorCodes $noArguments.Plan) @(Get-ErrorCodes $keptRun.Plan) 'the kept state adds no error'
+        Assert-Equal @(Get-WarningCodes $noArguments.Plan) @(Get-WarningCodes $keptRun.Plan) 'the kept state adds no warning'
+        Write-KeptRecord -Folder $keptState -Name 'last-success.json' -Record $afterMove
+        $movedRun = Invoke-Plan -Bundle $bundle -Roots $keptRoots -Temp $temp -Arguments @('-MinimumFreeGiB', '1')
+        Assert-Equal $keptMoved $movedRun.Plan.environment.existing_install.kept_repository 'after a move of the backup location the plan names the new place'
+        Assert-Equal @(Get-ErrorCodes $noArguments.Plan) @(Get-ErrorCodes $movedRun.Plan) 'the kept plan identity adds no error'
+        # Records this account can't read, or that are malformed, mean "not known": no error, no warning, a plan all the same.
+        Write-KeptRecord -Folder $keptState -Name 'last-success.json' -Record '{not json'
+        Write-KeptRecord -Folder $keptState -Name 'status.json' -Record ([ordered]@{ schema_version = 1; started_utc = '2026-10-05T02:00:00Z'; repository = 'relative\Backups' })
+        Set-ReadDenied -Path (Join-Path $keptState 'repository.json') -Denied $true
+        try { $brokenRun = Invoke-Plan -Bundle $bundle -Roots $keptRoots -Temp $temp -Arguments @('-MinimumFreeGiB', '1') }
+        finally { Set-ReadDenied -Path (Join-Path $keptState 'repository.json') -Denied $false }
+        Assert-Equal 0 $brokenRun.ExitCode "unreadable and malformed records still give a plan (stderr: $($brokenRun.Error))"
+        Assert-True ($null -eq $brokenRun.Plan.environment.existing_install.kept_repository) 'unreadable and malformed records name no kept backups'
+        Assert-Equal @(Get-ErrorCodes $noArguments.Plan) @(Get-ErrorCodes $brokenRun.Plan) 'unreadable and malformed records add no error'
+        Assert-Equal @(Get-WarningCodes $noArguments.Plan) @(Get-WarningCodes $brokenRun.Plan) 'unreadable and malformed records add no warning'
+    }
+    else {
+        # A standard user cannot make Administrators the owner, and a state folder this account owns is never read: the plan
+        # names no kept backups and reports the folder instead (section 2), and adds nothing else.
+        Set-OwnerToCurrentUser $keptState
+        $untrustedRun = Invoke-Plan -Bundle $bundle -Roots $keptRoots -Temp $temp -Arguments @('-MinimumFreeGiB', '1')
+        Assert-Equal 0 $untrustedRun.ExitCode "a plan over a kept state folder this account owns is written (stderr: $($untrustedRun.Error))"
+        Assert-True ($null -eq $untrustedRun.Plan.environment.existing_install.kept_repository) 'a state folder this account owns names no kept backups'
+        Assert-True ((Get-ErrorCodes $untrustedRun.Plan) -contains 'state_folder_untrusted') 'the plan reports the state folder this account owns'
+        Assert-Equal @(Get-ErrorCodes $noArguments.Plan) @(Get-ErrorCodes $untrustedRun.Plan | Where-Object { $_ -cne 'state_folder_untrusted' }) 'the untrusted kept state adds no other error'
+        Assert-Equal @(Get-WarningCodes $noArguments.Plan) @(Get-WarningCodes $untrustedRun.Plan) 'the untrusted kept state adds no warning'
+    }
 
     # ====================================================================================================================
     # 13. Rolling back a failed install: what it started stops first, runtime-manifest.json goes last, and the folder is checked

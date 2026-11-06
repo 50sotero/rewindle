@@ -452,6 +452,16 @@ class StateFolderOwnerTests(unittest.TestCase):
         statements = [line.strip() for line in body.splitlines() if line.strip() and not line.strip().startswith("#")]
         self.assertEqual("Assert-StateFolderOwner", statements[0])
 
+    def test_the_kept_backup_location_is_read_only_from_a_folder_they_own(self) -> None:
+        # Get-KeptRepository reads a reinstall's suggested backup location from the same folder. It never raises a finding, so
+        # it checks the folder itself, and an owner it can't read counts as one Administrators and SYSTEM don't have.
+        reader = self.defined["Get-KeptRepository"]
+        owner = reader.index("if (-not (Test-TrustedStateOwner -OwnerSid (Get-FeedOwnerSid -Path $stateRoot))) { return $null }")
+        self.assertLess(reader.index("[IO.FileAttributes]::ReparsePoint) { return $null }"), owner)
+        for later in ("Test-Path -LiteralPath $secretFile", "Join-Path $stateRoot $record[0]", "ReadAllText"):
+            with self.subTest(later=later):
+                self.assertLess(owner, reader.index(later))
+
     def test_plan_mode_reports_it_whatever_backup_location_is_chosen(self) -> None:
         plan = self.defined["Invoke-PlanMode"]
         stage = plan.index("[void](Invoke-PlanStage { Assert-StateFolderOwner })")

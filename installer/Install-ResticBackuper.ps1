@@ -1982,9 +1982,14 @@ function ConvertTo-KeptRecordTime {
 # so they follow a later move of the backup location). The newest record wins. Returns { repository, storage_mode }, or $null
 # when there is no such record, when this account can't read the records (only the account that installed is given access),
 # when they are malformed, or when the stored password those backups need is gone, so setup could not carry on with them. It
-# reads those small files only, never the backup folder (which may be on Google Drive), and never throws.
+# reads those small files only, never the backup folder (which may be on Google Drive), and never throws. As everywhere else
+# (Assert-StateFolderOwner), nothing is read from a state folder that is a link or that Administrators or SYSTEM don't own,
+# since any account can create that folder; here an owner that can't be read counts as one they don't own.
 function Get-KeptRepository {
     try {
+        if (-not (Test-Path -LiteralPath $stateRoot -PathType Container)) { return $null }
+        if ((Get-Item -LiteralPath $stateRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { return $null }
+        if (-not (Test-TrustedStateOwner -OwnerSid (Get-FeedOwnerSid -Path $stateRoot))) { return $null }
         if (-not (Test-Path -LiteralPath $secretFile -PathType Leaf)) { return $null }
         $kept = $null
         $keptTime = $null
