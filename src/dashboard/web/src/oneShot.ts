@@ -12,6 +12,8 @@ export const ONE_SHOT_COMMANDS: ReadonlySet<CommandName> = new Set<CommandName>(
   'backupNow', 'cancelBackup', 'addSource', 'removeSource', 'editSchedule', 'changeRepository', 'repairRepository',
   'reviewChanges', 'openRestore', 'checkReadiness', 'exportDiagnostics', 'retrySourceChange', 'confirmSourcePicker',
   'viewRunDetails', 'restoreFlowReview', 'restoreFlowStart', 'restoreFlowRetry',
+  // Find a file: Find, Look further back and Restore this each ask the restore session (or move the flow) once per press.
+  'restoreFlowFindFiles', 'restoreFlowFindMore', 'restoreFlowPickFound',
   'retentionConfigure', 'retentionCheckNow', 'retentionOpenReview', 'retentionApply',
 ]);
 
