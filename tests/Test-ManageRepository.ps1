@@ -1227,6 +1227,71 @@ try {
     }).Count -eq 0) "record permission failures use plain words and end with the next step: $($recordWriterTexts -join ' | ')"
     Assert-True ($managerText.Contains('$rollbackErrors.Add("backup location record: ') -and
         -not $managerText.Contains('$rollbackErrors.Add("repository record: ')) 'a failed undo names the backup location record in plain words'
+    # Those permissions, and the held copy folders' own, are set by running System32's icacls.exe as administrator, and only
+    # once Microsoft itself has signed it: the installer's rule (Get-MicrosoftSignerProblem), not a signer name that merely
+    # contains "Microsoft". The rule gets made-up facts here, and Get-TrustedIcacls gets Windows' answer about the file
+    # replaced by a certificate made in memory and never stored. Nothing runs icacls.
+    & {
+        $signerAst = [Management.Automation.Language.Parser]::ParseFile($managerSource, [ref]$null, [ref]$null)
+        $signerFunctions = @($signerAst.EndBlock.Statements | Where-Object {
+                $_ -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $_.Name -in @('Assert-NormalFile', 'Get-MicrosoftSignerProblem', 'Get-AuthenticodeSignerFacts', 'Get-TrustedIcacls')
+            })
+        Assert-True ($signerFunctions.Count -eq 4) "the manager defines the installer's signer rule and Get-TrustedIcacls once each (got: $(@($signerFunctions | ForEach-Object { $_.Name }) -join ', '))"
+        foreach ($definition in $signerFunctions) { . ([scriptblock]::Create($definition.Extent.Text)) }
+        $leaf = '1111111111111111111111111111111111111111'
+        $intermediate = '2222222222222222222222222222222222222222'
+        $windowsSubject = "C=US`r`nS=Washington`r`nL=Redmond`r`nO=Microsoft Corporation`r`nCN=Microsoft Windows"
+        foreach ($case in @(
+                @{ Label = 'Microsoft Corporation through Microsoft Root Certificate Authority 2010'; Pass = $true; Root = '3B1EFD3A66EA28B16697394703A72CA340A05BD5' },
+                @{ Label = 'Microsoft Corporation through Microsoft Root Certificate Authority 2011'; Pass = $true; Root = '8F43288AD272F3103B6FB1428485EA3014C0BCFE' },
+                @{ Label = 'a file Windows reports as its own, without its chain'; Pass = $true; OSBinary = $true; Chain = @(); ChainValid = $false },
+                @{ Label = 'an organization that merely contains Microsoft'; Pass = $false; OSBinary = $true; Subject = "C=US`r`nO=Contoso Microsoftware Ltd`r`nCN=Microsoft Corporation" },
+                @{ Label = 'Microsoft Corporation in the common name only'; Pass = $false; OSBinary = $true; Subject = "C=US`r`nO=Contoso Ltd`r`nCN=Microsoft Corporation" },
+                @{ Label = 'Microsoft Corporation and a second organization'; Pass = $false; Subject = "O=Microsoft Corporation`r`nCN=x + O=Contoso Ltd" },
+                @{ Label = "Microsoft's root for other publishers"; Pass = $false; Root = 'F40042E2E5F7E8EF8189FED15519AECE42C3BFA2' },
+                @{ Label = 'a chain that did not validate'; Pass = $false; ChainValid = $false },
+                @{ Label = 'a signature that is not valid'; Pass = $false; OSBinary = $true; Status = 'NotTrusted' }
+            )) {
+            $root = if ($case.ContainsKey('Root')) { $case.Root } else { '8F43288AD272F3103B6FB1428485EA3014C0BCFE' }
+            $problem = Get-MicrosoftSignerProblem `
+                -Status $(if ($case.ContainsKey('Status')) { $case.Status } else { 'Valid' }) `
+                -Subject $(if ($case.ContainsKey('Subject')) { $case.Subject } else { $windowsSubject }) `
+                -ChainThumbprints $(if ($case.ContainsKey('Chain')) { $case.Chain } else { @($leaf, $intermediate, $root) }) `
+                -ChainValid $(if ($case.ContainsKey('ChainValid')) { $case.ChainValid } else { $true }) `
+                -IsOSBinary $($case.ContainsKey('OSBinary') -and $case.OSBinary)
+            if ($case.Pass) { Assert-True ($null -eq $problem) "the icacls signer rule passes $($case.Label) (got: $problem)" }
+            else { Assert-True (-not [string]::IsNullOrEmpty($problem)) "the icacls signer rule refuses $($case.Label)" }
+        }
+        $systemIcacls = Join-Path ([Environment]::SystemDirectory) 'icacls.exe'
+        foreach ($case in @(
+                @{ Label = 'a valid signature by a publisher with Microsoft in its name, even one Windows calls its own'; Subject = 'CN=Microsoft Corporation, O=Contoso Microsoft Fans Ltd, C=US'; OSBinary = $true; Pass = $false },
+                @{ Label = "a valid signature named Microsoft Corporation that doesn't lead to Microsoft's root"; Subject = 'CN=Microsoft Corporation, O=Microsoft Corporation, C=US'; OSBinary = $false; Pass = $false },
+                @{ Label = 'a file Windows reports as its own, signed by Microsoft Corporation'; Subject = 'CN=Microsoft Windows, O=Microsoft Corporation, C=US'; OSBinary = $true; Pass = $true }
+            )) {
+            $key = [Security.Cryptography.RSA]::Create(2048)
+            $request = [Security.Cryptography.X509Certificates.CertificateRequest]::new($case.Subject, $key,
+                [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+            $fixtureSignature = [pscustomobject]@{
+                Status = 'Valid'
+                SignatureType = 'Authenticode'
+                SignerCertificate = $request.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOffset]::UtcNow.AddDays(30))
+                IsOSBinary = $case.OSBinary
+            }
+            $answer = & {
+                function Get-AuthenticodeSignature { param([string]$LiteralPath) return $fixtureSignature }
+                try { 'returned ' + (Get-TrustedIcacls) } catch { 'refused: ' + $_.Exception.Message }
+            }
+            if ($case.Pass) {
+                Assert-True ($answer -ceq "returned $systemIcacls") "Get-TrustedIcacls accepts $($case.Label) (got: $answer)"
+            }
+            else {
+                Assert-True ($answer.StartsWith("refused: Windows' permissions tool didn't pass Microsoft's signature check (", [StringComparison]::Ordinal) -and
+                    $answer.EndsWith(' Choose Save problem report in Settings and ask for help.', [StringComparison]::Ordinal)) "Get-TrustedIcacls refuses $($case.Label) in plain words with a next step (got: $answer)"
+            }
+        }
+        Assert-True ((Get-TrustedIcacls) -ceq $systemIcacls) "System32's own icacls.exe passes with Windows' real answer"
+    }
     $builderText = Get-Content -LiteralPath (Join-Path $projectRoot 'build\Build-Release.ps1') -Raw
     $installerText = Get-Content -LiteralPath (Join-Path $projectRoot 'installer\Install-ResticBackuper.ps1') -Raw
     $commonText = Get-Content -LiteralPath (Join-Path $projectRoot 'src\restic_common.py') -Raw
@@ -1380,6 +1445,7 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
         old_repository_retention = 'passed'
         only_restic_files_copied = 'passed'
         stages_held_during_copy = 'passed'
+        icacls_signed_by_microsoft_itself = 'passed'
         production_config_untouched = $productionCheck
         production_task_untouched = $productionCheck
     } | ConvertTo-Json -Compress

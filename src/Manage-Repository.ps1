@@ -1345,6 +1345,122 @@ function Assert-ProtectedTreeAcl {
     }
 }
 
+# Whether a file's signer is Microsoft itself, from facts Get-AuthenticodeSignerFacts reads. Returns $null when it is, or a
+# short reason. A name that merely contains "Microsoft" is not enough: the signature must be valid, the signer's subject must
+# hold exactly one organization (O), "Microsoft Corporation" exactly, and its certificate chain must end at one of Microsoft's
+# own root certificates. Windows' own files, which Windows signs through its catalogs and reports as such (IsOSBinary), pass
+# without the chain, so an offline PC that can't fetch a missing intermediate certificate still passes them.
+# Microsoft Identity Verification Root Certificate Authority 2020 (F40042E2E5F7E8EF8189FED15519AECE42C3BFA2) is left out on
+# purpose: it anchors certificates that Microsoft issues to other publishers.
+function Get-MicrosoftSignerProblem {
+    param(
+        [string]$Status,
+        [string]$Subject,
+        [string[]]$ChainThumbprints = @(),
+        [bool]$ChainValid,
+        [bool]$IsOSBinary
+    )
+    $microsoftRoots = @(
+        '3B1EFD3A66EA28B16697394703A72CA340A05BD5', # Microsoft Root Certificate Authority 2010
+        '8F43288AD272F3103B6FB1428485EA3014C0BCFE'  # Microsoft Root Certificate Authority 2011
+    )
+    if ($Status -cne 'Valid') {
+        return "the signature is not valid ($Status)"
+    }
+    # The subject as X500DistinguishedName.Decode('UseNewLines') writes it: one attribute per line, and ' + ' between the
+    # attributes of a multi-valued part. A value holding a line break or ' + ' is quoted and would be split, so every piece must
+    # be a whole TYPE=value with balanced quotes.
+    $organizations = @()
+    foreach ($line in @([string]$Subject -split "`r?`n")) {
+        if ($line.Length -eq 0) { continue }
+        foreach ($attribute in @($line -split ' \+ ')) {
+            $quotes = $attribute.Length - $attribute.Replace('"', '').Length
+            if ($attribute -cnotmatch '^(?:[A-Za-z][A-Za-z0-9.-]*|[0-9]+(?:\.[0-9]+)+)=' -or ($quotes % 2) -ne 0) {
+                return "the signer's name could not be read"
+            }
+            if ($attribute -match '^O=') { $organizations += $attribute }
+        }
+    }
+    if ($organizations.Count -ne 1 -or $organizations[0] -cne 'O=Microsoft Corporation') {
+        return 'the signer is not Microsoft Corporation'
+    }
+    if ($IsOSBinary) {
+        return $null
+    }
+    $chain = @($ChainThumbprints | ForEach-Object { ([string]$_ -replace '\s', '').ToUpperInvariant() })
+    if (-not $ChainValid -or $chain.Count -lt 2) {
+        return 'its certificate chain could not be verified'
+    }
+    if ($microsoftRoots -cnotcontains $chain[-1]) {
+        return "its certificate chain ends at a root that is not Microsoft's ($($chain[-1]))"
+    }
+    return $null
+}
+
+# What Get-MicrosoftSignerProblem decides on, read from the file: the signature's status, the signer's subject, whether Windows
+# reports the file as its own, and the signer's certificate chain, leaf first. The chain is built with the certificates the
+# file carries (Windows keeps those of its catalogs), without revocation checks (the signature check made them) and ignoring
+# expired certificates, since a time stamp keeps a signature valid after its certificate expires.
+function Get-AuthenticodeSignerFacts {
+    param([string]$Path)
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    $facts = [pscustomobject][ordered]@{
+        status = [string]$signature.Status
+        subject = $null
+        chain = @()
+        chain_valid = $false
+        os_binary = [bool]$signature.IsOSBinary
+    }
+    $signer = $signature.SignerCertificate
+    if ($null -eq $signer) {
+        return $facts
+    }
+    $facts.subject = $signer.SubjectName.Decode([Security.Cryptography.X509Certificates.X500DistinguishedNameFlags]::UseNewLines)
+    $chain = [Security.Cryptography.X509Certificates.X509Chain]::new()
+    try {
+        $chain.ChainPolicy.RevocationMode = [Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+        $chain.ChainPolicy.VerificationFlags = [Security.Cryptography.X509Certificates.X509VerificationFlags]::IgnoreNotTimeValid
+        $chain.ChainPolicy.UrlRetrievalTimeout = [TimeSpan]::FromSeconds(15)
+        if ([string]$signature.SignatureType -eq 'Authenticode') {
+            try {
+                $carried = [Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
+                $carried.Import($Path)
+                $chain.ChainPolicy.ExtraStore.AddRange($carried)
+            }
+            catch {
+                # The chain is then built from Windows' own certificate stores alone.
+            }
+        }
+        try {
+            $facts.chain_valid = [bool]$chain.Build($signer)
+        }
+        catch {
+            $facts.chain_valid = $false
+        }
+        $facts.chain = @($chain.ChainElements | ForEach-Object { [string]$_.Certificate.Thumbprint })
+    }
+    finally {
+        $chain.Reset()
+    }
+    return $facts
+}
+
+# System32's icacls.exe, which Set-ProtectedTreeAcl and Set-RepositoryRecordBytes run as administrator, once it is a normal
+# file that Microsoft itself signed. The rule is the installer's: the two functions above are exact copies of its own, and
+# tests/test_setup_contract.py keeps them so.
+function Get-TrustedIcacls {
+    $icacls = Join-Path ([Environment]::SystemDirectory) 'icacls.exe'
+    [void](Assert-NormalFile -File $icacls)
+    $facts = Get-AuthenticodeSignerFacts -Path $icacls
+    $problem = Get-MicrosoftSignerProblem -Status $facts.status -Subject $facts.subject -ChainThumbprints $facts.chain `
+        -ChainValid $facts.chain_valid -IsOSBinary $facts.os_binary
+    if ($null -ne $problem) {
+        throw ("Windows' permissions tool didn't pass Microsoft's signature check ($problem), so Rewindle didn't use it. " +
+            'Choose Save problem report in Settings and ask for help.')
+    }
+    return $icacls
+}
+
 function Set-ProtectedTreeAcl {
     # icacls /T follows a junction planted inside the tree, and Set-Acl and icacls both work by path. So this runs only on
     # a held stage (nothing can swap it or a folder above it) whose contents only Administrators and SYSTEM can change
@@ -1361,12 +1477,7 @@ function Set-ProtectedTreeAcl {
     $policy = New-ProtectedDirectorySecurity
     Assert-ProtectedAclDescriptor -Acl $policy
     if ($isTestMode) { return }
-    $icacls = Join-Path ([Environment]::SystemDirectory) 'icacls.exe'
-    $icaclsItem = Assert-NormalFile -File $icacls
-    $signature = Get-AuthenticodeSignature -LiteralPath $icacls
-    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notlike '*Microsoft*') {
-        throw 'System32 icacls.exe did not pass Microsoft signature verification.'
-    }
+    $icacls = Get-TrustedIcacls
     Set-Acl -LiteralPath $Path -AclObject $policy
     & $icacls (Join-Path $Path '*') /reset /T /C /L | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Resetting protected relocation child ACLs failed: $LASTEXITCODE" }
@@ -2178,16 +2289,6 @@ function New-RelocatedRepositoryRecordBytes {
     }
     Set-JsonProperty -Object $updated -Name 'relocated_utc' -Value ([DateTime]::UtcNow.ToString('o'))
     return ConvertTo-Utf8JsonBytes -Value $updated
-}
-
-function Get-TrustedIcacls {
-    $icacls = Join-Path ([Environment]::SystemDirectory) 'icacls.exe'
-    [void](Assert-NormalFile -File $icacls)
-    $signature = Get-AuthenticodeSignature -LiteralPath $icacls
-    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notlike '*Microsoft*') {
-        throw 'System32 icacls.exe did not pass Microsoft signature verification.'
-    }
-    return $icacls
 }
 
 function Set-RepositoryRecordBytes {
