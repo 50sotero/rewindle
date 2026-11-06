@@ -821,6 +821,7 @@ try {
     Assert-True (Test-FindPayloadAccepted { param($p) }) 'a file-search payload bound to the search is accepted'
     Assert-True (Test-FindPayloadAccepted { param($p) $p.status = 'complete'; $p.next_from_snapshot_id = $null }) 'a finished search without a next start is accepted'
     Assert-True (Test-FindPayloadAccepted { param($p) $p.matches = @(); $p.status = 'too_broad' }) 'a search that found nothing is accepted'
+    Assert-True (Test-FindPayloadAccepted { param($p) $p.status = 'too_many'; $p.next_from_snapshot_id = $null }) 'too many matches up to the oldest backup is accepted without a next start'
     Assert-True (Test-FindPayloadAccepted { param($p) $p.matches[0].versions[0].binding_state = 'legacy_unbound' }) 'a version in an older-setup backup is accepted'
     $findDefects = @(
         @{ Name = 'another schema'; Change = { param($p) $p.schema = 'ResticBackuper.FileSearch.v2' } },
@@ -833,6 +834,7 @@ try {
         @{ Name = 'a count that is text'; Change = { param($p) $p.snapshots_total = '3' } },
         @{ Name = 'too many backups'; Change = { param($p) $p.snapshots_total = 10001 } },
         @{ Name = 'an unfinished search without a next start'; Change = { param($p) $p.next_from_snapshot_id = $null } },
+        @{ Name = 'a search cut short without a next start'; Change = { param($p) $p.status = 'too_slow'; $p.next_from_snapshot_id = $null } },
         @{ Name = 'a finished search with a next start'; Change = { param($p) $p.status = 'complete' } },
         @{ Name = 'a next start that is not exact'; Change = { param($p) $p.next_from_snapshot_id = $legacySnapshotId.ToUpperInvariant() } },
         @{ Name = 'no list of matches'; Change = { param($p) $p.matches = $null } },

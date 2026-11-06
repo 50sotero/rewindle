@@ -1667,7 +1667,9 @@ namespace RewindleRegression {
           if (type == "close") { Closes++; Write(server, new Dictionary<string, object> { { "type", "closed" }, { "reason", "client_closed" } }); return; }
           if (mode == "closeAfterFirst" && served == 1) { Write(server, new Dictionary<string, object> { { "type", "closed" }, { "reason", "idle_timeout" } }); return; }
           string action = (string)message["action"];
-          lock (Requests) Requests.Add(action + " " + message["tree_path"]);
+          string findText = action == "find_files" ? (string)message["find_text"] : null;
+          string findFrom = action == "find_files" ? (string)message["find_from_snapshot_id"] : null;
+          lock (Requests) Requests.Add(action + " " + (action == "find_files" ? findText : (string)message["tree_path"]));
           if (mode == "oversized") { server.Write(BitConverter.GetBytes(9 * 1024 * 1024), 0, 4); return; }
           object id = message["request_id"];
           Write(server, new Dictionary<string, object> { { "type", "progress" }, { "request_id", id }, { "stage", "reading" }, { "message", "Reading." }, { "percent", 35 } });
@@ -1686,6 +1688,20 @@ namespace RewindleRegression {
               { "schema", "ResticBackuper.SnapshotTree.v1" }, { "schema_version", 1 }, { "snapshot_id", snapshotId }, { "snapshot_binding", "plan" },
               { "snapshot", new Dictionary<string, object> { { "binding_state", "plan" }, { "plan_id", info["PlanId"] } } },
               { "entries", new object[] { new Dictionary<string, object> { { "name", "a.txt" }, { "path", treePath.TrimEnd('/') + "/a.txt" }, { "type", "file" }, { "size", 3 } } } } };
+          } else if (action == "find_files") {
+            // One file named after the text, in the backup the search started from. findForeignText answers another search.
+            payload = new Dictionary<string, object> {
+              { "schema", "ResticBackuper.FileSearch.v1" }, { "schema_version", 1 }, { "repository", "C:\\Fixture" },
+              { "binding", new Dictionary<string, object> { { "plan_id", info["PlanId"] }, { "legacy_match_policy", "exact-host-scheduled-tags-and-sources" } } },
+              { "query", new Dictionary<string, object> { { "text", mode == "findForeignText" ? findText + "x" : findText }, { "from_snapshot_id", findFrom } } },
+              { "status", "complete" }, { "snapshots_total", 1 }, { "snapshots_searched", 1 },
+              { "searched_newest_time", "2026-09-14T00:00:00.0000000Z" }, { "searched_oldest_time", "2026-09-14T00:00:00.0000000Z" },
+              { "next_from_snapshot_id", null }, { "matches_total", 1 }, { "skipped", 0 }, { "elapsed_ms", 10 },
+              { "matches", new object[] { new Dictionary<string, object> {
+                { "path", "/C/Docs/" + findText + ".txt" }, { "name", findText + ".txt" }, { "type", "file" }, { "versions_total", 1 },
+                { "versions", new object[] { new Dictionary<string, object> {
+                  { "size", 10 }, { "mtime", "2026-09-13T08:00:00.0000000Z" }, { "snapshot_id", findFrom }, { "snapshot_time", "2026-09-14T00:00:00.0000000Z" },
+                  { "first_snapshot_id", findFrom }, { "first_snapshot_time", "2026-09-14T00:00:00.0000000Z" }, { "backups", 1 }, { "binding_state", "plan" } } } } } } } };
           } else {
             payload = new Dictionary<string, object> {
               { "schema", "ResticBackuper.RestoreReport.v1" }, { "schema_version", 1 }, { "snapshot_id", snapshotId }, { "snapshot_binding", "plan" },
@@ -1700,7 +1716,17 @@ namespace RewindleRegression {
             { "includes_sha256", Hex(Hash(Convert.FromBase64String((string)message["includes_base64"]))) },
             { "ok", true }, { "backend_exit_code", 0 }, { "history_recorded", action == "restore" ? (object)true : null }, { "history_error", null },
             { "payload", payload }, { "error", null } };
-          Write(server, new Dictionary<string, object> { { "type", "result" }, { "request_id", id }, { "exit_code", 0 }, { "result", result } });
+          int exitCode = 0;
+          if (action == "find_files") {
+            // A search's result names its text (as a hash) and where it started; findWrongHash names another text.
+            result["find_text_sha256"] = mode == "findWrongHash" ? new string('0', 64) : Hex(Hash(Encoding.UTF8.GetBytes(findText)));
+            result["find_from_snapshot_id"] = findFrom;
+            if (mode == "findRunLock") {
+              result["ok"] = false; result["backend_exit_code"] = 1; result["payload"] = null; exitCode = 1;
+              result["error"] = "A backup or another protected operation already holds the run lock.";
+            }
+          }
+          Write(server, new Dictionary<string, object> { { "type", "result" }, { "request_id", id }, { "exit_code", exitCode }, { "result", result } });
           served++;
           if (action == "restore") return;
         }
@@ -1796,6 +1822,42 @@ namespace RewindleRegression {
     Assert-True (-not $foreign.Succeeded -and $foreign.ErrorMessage -match 'did not match what was asked for') ('a session result bound to another request was accepted: ' + $foreign.ErrorMessage)
     Invoke-Private $sessionHost 'Close' | Out-Null
 
+    # Find a file goes only to a session. The request carries the text and where to start, the answer must name both and be a
+    # page for that search, and the session stays open for the next step.
+    $findFrom = 'a' * 64
+    $searchUnavailable = [string]$dashboardType.GetField('RestoreFlowSearchUnavailableMessage', $flags).GetValue($null)
+    function Invoke-SessionFind([object]$SessionHost, [string]$Text, [string]$From = $findFrom) {
+        return $restoreLaunchMethod['FindFiles'].Invoke($null, [object[]]@($config, $SessionHost, $Text, $From, $null, $null, $onProgress))
+    }
+    $fakeBroker::Reset('normal')
+    $sessionHost = New-SessionHost
+    $searchFound = Invoke-SessionFind $sessionHost 'Budget'
+    Assert-True ($searchFound.Succeeded -and $searchFound.FileSearch.Status -eq 'complete' -and $searchFound.FileSearch.Matches.Count -eq 1 -and
+        $searchFound.FileSearch.Matches[0].Path -eq '/C/Docs/Budget.txt' -and $fakeBroker::Launches -eq 1) ('a search in a session did not come back: ' + $searchFound.ErrorMessage)
+    $afterSearch = Invoke-SessionTree $sessionHost '/'
+    Assert-True ($afterSearch.Succeeded -and $fakeBroker::Launches -eq 1 -and ($fakeBroker::Requests -join '|') -eq 'find_files Budget|list_tree /') ('a search did not leave the session open for the next step: ' + ($fakeBroker::Requests -join '|'))
+    Invoke-Private $sessionHost 'Close' | Out-Null
+    $noSession = Invoke-SessionFind $null 'Budget'
+    Assert-True (-not $noSession.Succeeded -and $noSession.ErrorMessage -eq $searchUnavailable) 'a search was asked for without a session'
+    $fakeBroker::Reset('normal')
+    $sessionHost = New-SessionHost
+    foreach ($badText in @(' Budget', 'a', 'C:\Budget', ('x' * 201), '')) {
+        $badSearch = Invoke-SessionFind $sessionHost $badText
+        Assert-True (-not $badSearch.Succeeded -and $fakeBroker::Launches -eq 0) ('a search text the rules refuse was sent: ' + $badText)
+    }
+    Assert-True (-not (Invoke-SessionFind $sessionHost 'Budget' ('A' * 64)).Succeeded -and $fakeBroker::Launches -eq 0) 'a search from a backup that is not named exactly was sent'
+    Invoke-Private $sessionHost 'Close' | Out-Null
+    foreach ($case in @(
+        @{ Mode = 'findWrongHash'; Pattern = 'did not match what was asked for' },
+        @{ Mode = 'findForeignText'; Pattern = 'could not confirm the result of this step' },
+        @{ Mode = 'findRunLock'; Pattern = 'already holds the run lock' })) {
+        $fakeBroker::Reset($case.Mode)
+        $sessionHost = New-SessionHost
+        $refusedSearch = Invoke-SessionFind $sessionHost 'Budget'
+        Assert-True (-not $refusedSearch.Succeeded -and $null -eq $refusedSearch.FileSearch -and $refusedSearch.ErrorMessage -match $case.Pattern) ('a search answer (' + $case.Mode + ') was used: ' + $refusedSearch.ErrorMessage)
+        Invoke-Private $sessionHost 'Close' | Out-Null
+    }
+
     # The installed engine decides: a session needs the profile's broker and the engine's own capability document.
     $capabilityRoot = Join-Path $tempRoot 'capabilities'
     New-Item -ItemType Directory -Path $capabilityRoot -Force | Out-Null
@@ -1819,16 +1881,45 @@ namespace RewindleRegression {
     }
     [IO.File]::WriteAllText((Join-Path $junctionTarget 'engine-capabilities.json'), $repositoryCapabilities, (New-Object System.Text.UTF8Encoding($false)))
     Assert-True (-not (Test-SessionCapability $rewindleEngine $junction)) 'a capability document behind a link was accepted'
+    # Find a file: only an engine whose session names this edition's search, never the legacy personal edition.
+    function Test-FileSearchCapability([object]$EngineProfile, [string]$Root) { return [bool]$sessionCapabilityType.GetMethod('SupportsFileSearch', $flags).Invoke($null, [object[]]@($EngineProfile, $Root)) }
+    Assert-True ($null -eq $engineProfileType.GetProperty('FileSearchSchema', $flags).GetValue($legacyEngine) -and $engineProfileType.GetProperty('FileSearchSchema', $flags).GetValue($rewindleEngine) -eq 'ResticBackuper.FileSearch.v1') 'the editions do not name the file search they serve'
+    [IO.File]::WriteAllText($capabilityPath, $repositoryCapabilities, (New-Object System.Text.UTF8Encoding($false)))
+    Assert-True (Test-FileSearchCapability $rewindleEngine $capabilityRoot) 'the engine''s own capability document did not offer Find a file'
+    Assert-True (-not (Test-FileSearchCapability $legacyEngine $capabilityRoot)) 'the legacy personal edition was offered Find a file'
+    $withoutSearch = [regex]::Replace($repositoryCapabilities, ',\s*"find_files":\s*"[^"]*"', '')
+    Assert-True ($withoutSearch -ne $repositoryCapabilities) 'the capability fixture without a search was not made'
+    foreach ($older in @($withoutSearch, $repositoryCapabilities.Replace('FileSearch.v1', 'FileSearch.v2'), $repositoryCapabilities.Replace('"ResticBackuper.FileSearch.v1"', '1'))) {
+        [IO.File]::WriteAllText($capabilityPath, $older, (New-Object System.Text.UTF8Encoding($false)))
+        Assert-True ((Test-SessionCapability $rewindleEngine $capabilityRoot) -and -not (Test-FileSearchCapability $rewindleEngine $capabilityRoot)) 'an engine that does not serve this search was offered Find a file, or lost its session'
+    }
+    Assert-True (-not (Test-FileSearchCapability $rewindleEngine (Join-Path $tempRoot 'no-such-engine'))) 'an engine without a capability document was offered Find a file'
     # Opening Restore picks the session or the per-step approvals from that.
     [IO.File]::WriteAllText((Join-Path $installRoot 'engine-capabilities.json'), $repositoryCapabilities, (New-Object System.Text.UTF8Encoding($false)))
     Invoke-Private $dashboard 'ResetRestoreFlowSession' @($config, $configHash) | Out-Null
     $openedHost = Get-FieldValue $dashboard 'restoreFlowApprovalSession'
     Assert-True ($null -ne $openedHost -and (Invoke-Private $dashboard 'BuildWebRestoreFlowState')['approval']['session'] -eq $true) 'Restore did not use one session with an engine that serves them'
     Assert-True ((Invoke-Private $dashboard 'RestoreFlowApprovalNotice') -eq 'Windows will ask once for your permission to let Rewindle read and restore from your backup.') 'the page was not told Windows asks once'
+    $searchOpened = (Invoke-Private $dashboard 'BuildWebRestoreFlowState')['search']
+    Assert-True ($null -ne $searchOpened -and $searchOpened['status'] -eq 'idle' -and $searchOpened['results'].Count -eq 0) 'Restore with an engine that serves Find a file did not offer it'
+    # The legacy personal edition has no session, so no Find tab: the page is sent no search at all.
+    [void]$engineProfileType.GetMethod('Activate', $flags).Invoke($null, [object[]]@($legacyEngine))
+    try {
+        Invoke-Private $dashboard 'ResetRestoreFlowSession' @($config, $configHash) | Out-Null
+        $legacyFlow = Invoke-Private $dashboard 'BuildWebRestoreFlowState'
+        Assert-True ($null -eq (Get-FieldValue $dashboard 'restoreFlowApprovalSession') -and -not $legacyFlow.ContainsKey('search') -and
+            -not [bool](Get-FieldValue $dashboard 'restoreFlowSearchAvailable')) 'the legacy personal edition was sent a search'
+        $legacyFindArgs = [object[]]@('restoreFlowFindFiles', (New-Payload @{ text = 'Budget' }), $null)
+        Assert-True (-not [bool](Invoke-Private $dashboard 'ExecuteRestoreFlowCommand' $legacyFindArgs) -and [string]$legacyFindArgs[2] -match 'not available') 'the legacy personal edition accepted a search'
+    }
+    finally {
+        [void]$engineProfileType.GetMethod('Activate', $flags).Invoke($null, [object[]]@($rewindleEngine))
+    }
     Remove-Item -LiteralPath (Join-Path $installRoot 'engine-capabilities.json') -Force
     Invoke-Private $dashboard 'ResetRestoreFlowSession' @($config, $configHash) | Out-Null
     Assert-True ([bool](Get-HostValue $openedHost 'IsClosed')) 'reopening Restore kept the previous session'
     Assert-True ($null -eq (Get-FieldValue $dashboard 'restoreFlowApprovalSession') -and (Invoke-Private $dashboard 'BuildWebRestoreFlowState')['approval']['session'] -eq $false) 'an engine without sessions was not given one approval per step'
+    Assert-True (-not (Invoke-Private $dashboard 'BuildWebRestoreFlowState').ContainsKey('search')) 'an engine without sessions was sent a search'
     Assert-True ((Invoke-Private $dashboard 'RestoreFlowApprovalNotice') -match 'each time Rewindle opens your backup') 'the per-step approvals were described as one'
 
     # The flow's session ends with the flow, and with a plan that changed.
@@ -1857,6 +1948,359 @@ namespace RewindleRegression {
     $staleArgs = [object[]]@($null, $null)
     Assert-True (-not [bool](Invoke-Private $dashboard 'TryGetFreshRestoreFlowConfiguration' $staleArgs)) 'a changed plan was accepted'
     Assert-True ([bool](Get-HostValue $changedHost 'IsClosed') -and (Wait-Until { $fakeBroker::Closes -eq 1 }) -and $null -eq (Get-FieldValue $dashboard 'restoreFlowTreeCache')) 'a changed plan kept the session or the folder listings'
+    # ---- Find a file -------------------------------------------------------------------------------------------------------
+    # The flow's side of a search, on the fixture plan. Nothing is searched: the checks a command makes before it asks the session
+    # are called directly, and the pages a session would return are built here and handed to the step that takes the answer.
+    $searchTextType = $assembly.GetType('ResticBackuper.Dashboard.RestoreFileSearchText', $true)
+    $fileSearchType = $assembly.GetType('ResticBackuper.Dashboard.RestoreFileSearch', $true)
+    $managerResultType = $assembly.GetType('ResticBackuper.Dashboard.RestoreManagerResult', $true)
+    # The text rules every part shares, from the one fixture. The JSON reader turns an unpaired surrogate into U+FFFD, so each text is
+    # also read from the file as written.
+    $searchCasesJson = [IO.File]::ReadAllText([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..\tests\fixtures\file-search-text-cases.json')), [Text.Encoding]::UTF8)
+    $searchCases = @($jsonSerializer.DeserializeObject($searchCasesJson))
+    $searchCaseTexts = @([regex]::Matches($searchCasesJson, '"text": "((?:[^"\\]|\\.)*)"') | ForEach-Object { [regex]::Unescape($_.Groups[1].Value) })
+    Assert-True ($searchCases.Count -gt 30 -and $searchCaseTexts.Count -eq $searchCases.Count) 'the shared file-search text cases were not read'
+    for ($caseIndex = 0; $caseIndex -lt $searchCases.Count; $caseIndex++) {
+        $case = $searchCases[$caseIndex]
+        $caseText = [string]$searchCaseTexts[$caseIndex]
+        $expectedProblem = if ($case['valid']) { '' } else { [string]$case['error'] }
+        $actualProblem = [string](Invoke-Static $searchTextType 'Problem' @($caseText))
+        Assert-True ($actualProblem -ceq $expectedProblem) ('the dashboard read shared search text case ' + $caseIndex + ' as ' + $actualProblem + ' instead of ' + $expectedProblem)
+        if ($case['valid']) {
+            Assert-True ((Invoke-Static $searchTextType 'Normalize' @($caseText)) -ceq [string]$case['normalized']) ('shared search text case ' + $caseIndex + ' was not trimmed to its normal form')
+        }
+        else {
+            Assert-True ([string](Invoke-Static $dashboardType 'RestoreFlowSearchTextMessage' @($expectedProblem)) -ne '') ('a refused search text has no sentence: ' + $expectedProblem)
+        }
+    }
+
+    $findNewest = 'ab' * 32
+    $findMiddle = '2' * 64
+    $findOldest = '3' * 64
+    function New-FindSnapshot([string]$Id, [string]$Time, [string]$Binding) {
+        $made = [Runtime.Serialization.FormatterServices]::GetUninitializedObject($snapshotType)
+        foreach ($pair in @(@('Id', $Id), @('ShortId', $Id.Substring(0, 8)), @('Time', $Time), @('Hostname', 'regression'), @('SourceSummary', 'regression'), @('BindingState', $Binding))) {
+            $snapshotType.GetField('<' + $pair[0] + '>k__BackingField', $flags).SetValue($made, $pair[1])
+        }
+        return $made
+    }
+    # Listed out of order: the search starts from the newest by time, not from the first in the list.
+    $findSnapshots = New-GenericList $snapshotType
+    [void]$findSnapshots.Add((New-FindSnapshot $findMiddle '2026-09-13T02:00:00Z' 'plan'))
+    [void]$findSnapshots.Add((New-FindSnapshot $findNewest '2026-09-14T02:00:00Z' 'plan'))
+    [void]$findSnapshots.Add((New-FindSnapshot $findOldest '2026-09-12T02:00:00Z' 'legacy_unbound'))
+    $fakeBroker::Reset('decline')
+    $searchHost = New-SessionHost
+    function Set-SearchFlow {
+        Set-PrivateField $dashboard 'restoreFlowOpen' $true
+        Set-PrivateField $dashboard 'restoreFlowBusy' $false
+        Set-PrivateField $dashboard 'restoreFlowCancelRequested' $false
+        Set-PrivateField $dashboard 'restoreFlowDestinationChecking' $false
+        Set-PrivateField $dashboard 'restoreFlowConfiguration' $fixtureConfig
+        Set-PrivateField $dashboard 'restoreFlowConfigHash' $fixtureHash
+        Set-PrivateField $dashboard 'restoreFlowConfigGeneration' $fixtureConfig.ConfigGeneration
+        Set-PrivateField $dashboard 'restoreFlowPlanId' $fixtureConfig.PlanId
+        Set-PrivateField $dashboard 'restoreFlowFailedOperation' ''
+        Set-PrivateField $dashboard 'restoreFlowSnapshots' $findSnapshots
+        Set-PrivateField $dashboard 'restoreFlowSelectedSnapshotId' ''
+        Set-PrivateField $dashboard 'restoreFlowSelectedPaths' (New-StringList @())
+        Set-PrivateField $dashboard 'restoreFlowWholeSnapshotSelected' $false
+        Set-PrivateField $dashboard 'restoreFlowObservedPaths' (New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal))
+        Set-PrivateField $dashboard 'restoreFlowStep' 'backup'
+        Set-PrivateField $dashboard 'restoreFlowStatus' 'ready'
+        Set-PrivateField $dashboard 'restoreFlowSearchAvailable' $true
+        Set-PrivateField $dashboard 'restoreFlowApprovalSession' $searchHost
+        Set-PrivateField $dashboard 'currentTaskSchedule' $null
+        Set-PrivateField $dashboard 'lastSnapshot' $null
+        Set-PrivateField $dashboard 'sessionSignInUtc' $null
+        Set-PrivateField $dashboard 'backupStartInProgress' $false
+        Invoke-Private $dashboard 'ResetRestoreFlowSearch' | Out-Null
+    }
+    function Get-SearchValue([string]$Name) { $state = Get-FieldValue $dashboard 'restoreFlowSearch'; return $state.GetType().GetField($Name, $flags).GetValue($state) }
+    function Set-SearchValue([string]$Name, [object]$Value) { $state = Get-FieldValue $dashboard 'restoreFlowSearch'; $state.GetType().GetField($Name, $flags).SetValue($state, $Value) }
+    function Get-SearchWeb { return (Invoke-Private $dashboard 'BuildWebRestoreFlowState')['search'] }
+    function Invoke-FindCheck([string]$Text) {
+        $checkArgs = [object[]]@((New-Payload @{ text = $Text }), $null, $null, $null, $null)
+        $accepted = [bool](Invoke-Private $dashboard 'CheckRestoreFlowFind' $checkArgs)
+        return [pscustomobject]@{ Accepted = $accepted; Text = $checkArgs[1]; From = $checkArgs[2]; Error = [string]$checkArgs[4] }
+    }
+    function Invoke-FindCommand([string]$Command, [hashtable]$Values = @{}) {
+        $commandArgs = [object[]]@($Command, (New-Payload $Values), $null)
+        $accepted = [bool](Invoke-Private $dashboard 'ExecuteRestoreFlowCommand' $commandArgs)
+        return [pscustomobject]@{ Accepted = $accepted; Error = [string]$commandArgs[2] }
+    }
+    function Invoke-FindMoreCheck {
+        $moreArgs = [object[]]@($null, $null)
+        $accepted = [bool](Invoke-Private $dashboard 'CheckRestoreFlowFindMore' $moreArgs)
+        return [pscustomobject]@{ Accepted = $accepted; Error = [string]$moreArgs[1] }
+    }
+
+    # Before anything is asked: Restore open on Choose a backup, idle, a session that serves searches, a list, a text the rules
+    # accept, the same plan, nothing running and no backup about to start.
+    Set-SearchFlow
+    $accepted = Invoke-FindCheck '  Budget '
+    Assert-True ($accepted.Accepted -and $accepted.Text -ceq 'Budget' -and $accepted.From -eq $findNewest) ('a search was not started from the newest backup in the list with its trimmed text: ' + $accepted.Error)
+    Assert-True ([int](Get-FieldValue $dashboard 'restoreFlowOperationGeneration') -ge 0 -and -not (Get-FieldValue $dashboard 'restoreFlowBusy')) 'checking a search started it'
+    $searchUnavailableFlow = $searchUnavailable
+    $searchRefusals = @(
+        @{ Name = 'without a session that serves it'; Setup = { Set-PrivateField $dashboard 'restoreFlowSearchAvailable' $false }; Pattern = [regex]::Escape($searchUnavailableFlow) },
+        @{ Name = 'with no session at all'; Setup = { Set-PrivateField $dashboard 'restoreFlowApprovalSession' $null }; Pattern = 'not available' },
+        @{ Name = 'while Restore is busy'; Setup = { Set-PrivateField $dashboard 'restoreFlowBusy' $true }; Pattern = 'still working' },
+        @{ Name = 'away from Choose a backup'; Setup = { Set-PrivateField $dashboard 'restoreFlowStep' 'files' }; Pattern = 'Go back to Choose a backup' },
+        @{ Name = 'before the list is read'; Setup = { Set-PrivateField $dashboard 'restoreFlowSnapshots' (New-GenericList $snapshotType) }; Pattern = 'Wait for your list of backups' },
+        @{ Name = 'with no backups'; Setup = { Set-PrivateField $dashboard 'restoreFlowSnapshots' (New-GenericList $snapshotType); Set-PrivateField $dashboard 'restoreFlowStatus' 'failed' }; Pattern = 'no backups to search yet' },
+        @{ Name = 'while a backup runs'; Setup = { Set-PrivateField $dashboard 'backupStartInProgress' $true }; Pattern = 'Wait for the running backup' },
+        @{ Name = 'after the plan changed'; Setup = { Set-PrivateField $dashboard 'restoreFlowConfigHash' ('0' * 64) }; Pattern = 'settings changed' }
+    )
+    foreach ($refusal in $searchRefusals) {
+        Set-SearchFlow
+        & $refusal.Setup
+        $operationBefore = [int](Get-FieldValue $dashboard 'restoreFlowOperationGeneration')
+        $refused = Invoke-FindCommand 'restoreFlowFindFiles' @{ text = 'Budget' }
+        Assert-True (-not $refused.Accepted -and $refused.Error -match $refusal.Pattern) ('a search was not refused ' + $refusal.Name + ': ' + $refused.Error)
+        Assert-True ([int](Get-FieldValue $dashboard 'restoreFlowOperationGeneration') -eq $operationBefore -and (Get-SearchValue 'Status') -ne 'searching') ('a refused search (' + $refusal.Name + ') started')
+    }
+    foreach ($badText in @(@('', 'Type a file or folder name first.'), @('a', 'Type at least 2 characters'), @('Docs\Budget', 'Type just the name'), @(('x' * 201), 'too long for a name'), @(('a' + [char]1 + 'b'), 'characters a file name cannot have'))) {
+        Set-SearchFlow
+        $refused = Invoke-FindCommand 'restoreFlowFindFiles' @{ text = $badText[0] }
+        Assert-True (-not $refused.Accepted -and $refused.Error -match [regex]::Escape($badText[1])) ('a search text the rules refuse was not refused in their words: ' + $refused.Error)
+    }
+    # A backup about to start: the next run in under two minutes, or one Windows is catching up on after a sign-in. The page is told
+    # why before Find is pressed.
+    $searchTaskType = $assembly.GetType('ResticBackuper.Dashboard.TaskSchedule', $true)
+    function New-SearchSchedule([object]$NextRun, [TimeSpan]$TimeOfDay = [TimeSpan]::FromHours(2)) {
+        $values = New-Object 'System.Collections.Generic.List[object]'
+        [void]$values.Add([Enum]::Parse($assembly.GetType('ResticBackuper.Dashboard.BackupScheduleCadence', $true), 'Daily'))
+        [void]$values.Add($TimeOfDay)
+        [void]$values.Add([Array]::CreateInstance([DayOfWeek], 0))
+        foreach ($flag in @($true, $true, $false, $false, $true, $true)) { [void]$values.Add($flag) }
+        foreach ($text in 'ResticPersonalBackup', 'S-1-5-21-0-0-0-1000', 'launcher.exe', 'C:\fixture') { [void]$values.Add($text) }
+        [void]$values.Add([Enum]::Parse($assembly.GetType('ResticBackuper.Dashboard.BackupTaskState', $true), 'Ready'))
+        [void]$values.Add($NextRun)
+        [void]$values.Add('fingerprint')
+        return [Activator]::CreateInstance($searchTaskType, $constructorFlags, $null, $values.ToArray(), $null)
+    }
+    Set-SearchFlow
+    Set-PrivateField $dashboard 'currentTaskSchedule' (New-SearchSchedule ([Nullable[DateTime]][DateTime]::Now.AddSeconds(90)))
+    $dueSoon = Invoke-FindCommand 'restoreFlowFindFiles' @{ text = 'Budget' }
+    Assert-True (-not $dueSoon.Accepted -and $dueSoon.Error -match 'A backup is about to start') ('a search was started just before a scheduled backup: ' + $dueSoon.Error)
+    Assert-True ((Get-SearchWeb)['blocked'] -match 'A backup is about to start') 'the page was not told a backup is about to start'
+    Set-PrivateField $dashboard 'currentTaskSchedule' (New-SearchSchedule ([Nullable[DateTime]][DateTime]::Now.AddMinutes(10)))
+    Assert-True ((Invoke-FindCheck 'Budget').Accepted -and (Get-SearchWeb)['blocked'] -eq '') 'a search was refused ten minutes before a scheduled backup'
+    $slotAgo = [DateTime]::Now.AddHours(-3)
+    $searchSnapshotType = $assembly.GetType('ResticBackuper.Dashboard.TelemetrySnapshot', $true)
+    $searchTelemetry = [Activator]::CreateInstance($searchSnapshotType, $constructorFlags, $null, @(), $null)
+    $searchTelemetry.StateKey = 'success'
+    $searchTelemetry.IsSuccess = $true
+    $searchSnapshotType.GetProperty('LastVerifiedFinishedUtc').SetValue($searchTelemetry, [DateTime]::UtcNow.AddDays(-2))
+    Set-PrivateField $dashboard 'currentTaskSchedule' (New-SearchSchedule $null ([TimeSpan]::new($slotAgo.Hour, $slotAgo.Minute, 0)))
+    Set-PrivateField $dashboard 'lastSnapshot' $searchTelemetry
+    Set-PrivateField $dashboard 'sessionSignInUtc' ([Nullable[DateTime]][DateTime]::UtcNow.AddMinutes(-5))
+    $catchingUp = Invoke-FindCommand 'restoreFlowFindFiles' @{ text = 'Budget' }
+    Assert-True (-not $catchingUp.Accepted -and $catchingUp.Error -match 'A backup is about to start') ('a search was started while Windows catches up on a missed backup: ' + $catchingUp.Error)
+    Set-PrivateField $dashboard 'sessionSignInUtc' ([Nullable[DateTime]][DateTime]::UtcNow.AddMinutes(-240))
+    Assert-True ((Invoke-FindCheck 'Budget').Accepted) 'a search was refused for a backup that is overdue, not about to start'
+
+    # Pages. Each version names the backup it is in; the page is checked as the session checks it (RestoreFileSearch.Parse).
+    function New-FindVersion([string]$Snapshot, [string]$Time, [long]$Size = 10, [string]$Modified = '2026-09-01T08:00:00.0000000Z', [long]$Backups = 1, [string]$Binding = 'plan', [string]$FirstTime = '') {
+        return @{ size = $Size; mtime = $Modified; snapshot_id = $Snapshot; snapshot_time = $Time; first_snapshot_id = $Snapshot
+            first_snapshot_time = $(if ($FirstTime) { $FirstTime } else { $Time }); backups = $Backups; binding_state = $Binding }
+    }
+    function New-FindMatch([string]$Path, [string]$Type, [object[]]$Versions, [int]$Total = 0) {
+        return @{ path = $Path; name = $Path.Substring($Path.LastIndexOf('/') + 1); type = $Type
+            versions_total = $(if ($Total -gt 0) { $Total } else { $Versions.Count }); versions = $Versions }
+    }
+    function New-FindPage([string]$Status, [string]$From, [object]$Next, [int]$Searched, [object]$Newest, [object]$Oldest, [object[]]$Found, [string]$Text = 'Budget') {
+        $document = @{
+            schema = 'ResticBackuper.FileSearch.v1'; schema_version = 1; repository = 'C:\Fixture'
+            binding = @{ plan_id = $fixtureConfig.PlanId; legacy_match_policy = 'exact-host-scheduled-tags-and-sources' }
+            query = @{ text = $Text; from_snapshot_id = $From }
+            status = $Status; snapshots_total = 3; snapshots_searched = $Searched; searched_newest_time = $Newest; searched_oldest_time = $Oldest
+            next_from_snapshot_id = $Next; matches_total = $Found.Count; skipped = 0; elapsed_ms = 5; matches = $Found
+        }
+        $parsedDocument = $jsonSerializer.DeserializeObject($jsonSerializer.Serialize($document))
+        return $fileSearchType.GetMethod('Parse', $flags).Invoke($null, [object[]]@($parsedDocument, $fixtureConfig.PlanId, $Text, $From))
+    }
+    function Invoke-FindAnswer([object]$Result, [bool]$Append = $false) {
+        Set-PrivateField $dashboard 'restoreFlowBusy' $true
+        Set-PrivateField $dashboard 'restoreFlowStatus' 'searching'
+        Set-SearchValue 'Status' 'searching'
+        $operation = [int](Get-FieldValue $dashboard 'restoreFlowOperationGeneration') + 1
+        Set-PrivateField $dashboard 'restoreFlowOperationGeneration' $operation
+        Invoke-Private $dashboard 'FinishRestoreFlowFind' @($Result, $operation, $Append) | Out-Null
+    }
+    function New-FoundResult([object]$Page) { return Invoke-Static $managerResultType 'SuccessFileSearch' @($Page) }
+    $newestTime = '2026-09-14T02:00:00.0000000Z'
+    $middleTime = '2026-09-13T02:00:00.0000000Z'
+    $oldestTime = '2026-09-12T02:00:00.0000000Z'
+    $budgetFile = '/C/Users/Fixture/Documents/Budget.xlsx'
+    $budgetFolder = '/C/Users/Fixture/Documents/Budget [old]'
+
+    # The first page looked through the two newest backups: the file in both (one version), and a folder only in the older one.
+    Set-SearchFlow
+    Set-SearchValue 'Text' 'Budget'
+    $firstPage = New-FindPage 'more' $findNewest $findOldest 2 $newestTime $middleTime @(
+        (New-FindMatch $budgetFile 'file' @((New-FindVersion $findNewest $newestTime 10 '2026-09-01T08:00:00.1234567Z' 2 'plan' $middleTime))),
+        (New-FindMatch $budgetFolder 'dir' @((New-FindVersion $findMiddle $middleTime 0 '2026-08-30T08:00:00.0000000Z'))))
+    Invoke-FindAnswer (New-FoundResult $firstPage)
+    $web = Get-SearchWeb
+    Assert-True (-not (Get-FieldValue $dashboard 'restoreFlowBusy') -and (Get-FieldValue $dashboard 'restoreFlowStatus') -eq 'ready' -and $web['status'] -eq 'done' -and
+        $web['outcome'] -eq 'more' -and $web['searched'] -eq 2 -and $web['total'] -eq 3 -and $web['canContinue'] -eq $true -and $web['resultsTotal'] -eq 2) 'the first page of a search was not taken'
+    Assert-True ($web['results'][0]['path'] -eq $budgetFile -and $web['results'][0]['folderDisplay'] -eq 'C:\Users\Fixture\Documents' -and -not $web['results'][0]['missingFromNewer'] -and
+        $web['results'][1]['type'] -eq 'dir' -and $web['results'][1]['missingFromNewer'] -eq $true) 'the results were not the most recently seen first, or an item missing from newer backups was not marked'
+    Assert-True ($web['results'][0]['versions'][0]['sizeDisplay'] -ne '' -and $web['results'][1]['versions'][0]['sizeDisplay'] -eq '' -and $web['results'][0]['versions'][0]['backups'] -eq 2) 'a version row did not carry its size and backups'
+    Assert-True ($web['message'] -match '^Looked through the 2 newest of your 3 backups, back to .+ Choose Look further back to search older ones\.$' -and
+        (Get-FieldValue $dashboard 'restoreFlowMessageTitle') -eq 'Search finished') ('the summary of the first page was not the one expected: ' + $web['message'])
+    Assert-True ((Invoke-FindMoreCheck).Accepted) 'Look further back was refused after a page that did not reach the oldest backup'
+    # The next page looked through the oldest backup, an older-setup one: the same version there adds its backup and its older
+    # first time, and another size of the file is another version.
+    $secondPage = New-FindPage 'complete' $findOldest $null 1 $oldestTime $oldestTime @(
+        (New-FindMatch $budgetFile 'file' @(
+            (New-FindVersion $findOldest $oldestTime 10 '2026-09-01T08:00:00.1234567Z' 1 'legacy_unbound'),
+            (New-FindVersion $findOldest $oldestTime 8 '2026-08-01T08:00:00.0000000Z' 1 'legacy_unbound'))))
+    Invoke-FindAnswer (New-FoundResult $secondPage) $true
+    $web = Get-SearchWeb
+    $fileVersions = $web['results'][0]['versions']
+    Assert-True ($web['outcome'] -eq 'complete' -and $web['searched'] -eq 3 -and $web['canContinue'] -eq $false -and $web['message'] -eq 'Looked through all 3 backups.') ('the last page of a search was not merged: ' + $web['message'])
+    Assert-True ($fileVersions.Count -eq 2 -and $fileVersions[0]['snapshotId'] -eq $findNewest -and $fileVersions[0]['backups'] -eq 3 -and $fileVersions[0]['firstWhen'] -eq $oldestTime -and
+        -not $fileVersions[0]['isLegacyUnbound'] -and $fileVersions[1]['snapshotId'] -eq $findOldest -and $fileVersions[1]['isLegacyUnbound'] -eq $true) 'the versions of a file were not merged over the pages'
+    $more = Invoke-FindMoreCheck
+    Assert-True (-not $more.Accepted -and $more.Error -match 'no older backups left') 'Look further back was offered after the oldest backup was searched'
+    Set-PrivateField $dashboard 'restoreFlowStep' 'files'
+    Assert-True ((Get-SearchWeb)['results'].Count -eq 0 -and (Get-SearchWeb)['resultsTotal'] -eq 2) 'the results were sent away from Choose a backup'
+    Set-PrivateField $dashboard 'restoreFlowStep' 'backup'
+
+    # Restore this: that one path in that backup, then Choose a folder; the selection is the ordinary one. A name with brackets is
+    # selected exactly as found.
+    $pick = Invoke-FindCommand 'restoreFlowPickFound' @{ snapshotId = $findNewest; path = $budgetFile }
+    Assert-True ($pick.Accepted -and (Get-FieldValue $dashboard 'restoreFlowStep') -eq 'destination' -and (Get-FieldValue $dashboard 'restoreFlowSelectedSnapshotId') -eq $findNewest -and
+        (@(Get-FieldValue $dashboard 'restoreFlowSelectedPaths') -join '|') -eq $budgetFile -and -not (Get-FieldValue $dashboard 'restoreFlowWholeSnapshotSelected') -and
+        (Get-FieldValue $dashboard 'restoreFlowMessageDetail') -match 'Budget\.xlsx.+is selected') ('a found file could not be restored: ' + $pick.Error)
+    $reselect = [object[]]@((New-Payload @{ snapshotId = $findNewest; paths = $budgetFile; wholeSnapshot = $false }), $null)
+    Assert-True ([bool](Invoke-Private $dashboard 'SelectRestoreFlowPaths' $reselect)) ('a found file could not be chosen again on Choose files: ' + [string]$reselect[1])
+    Set-PrivateField $dashboard 'restoreFlowStep' 'backup'
+    $pickFolder = Invoke-FindCommand 'restoreFlowPickFound' @{ snapshotId = $findMiddle; path = $budgetFolder }
+    Assert-True ($pickFolder.Accepted -and (@(Get-FieldValue $dashboard 'restoreFlowSelectedPaths') -join '|') -eq $budgetFolder -and
+        (Get-FieldValue $dashboard 'restoreFlowSelectedSnapshotId') -eq $findMiddle) ('a found folder with brackets in its name could not be restored: ' + $pickFolder.Error)
+    foreach ($badPick in @(
+        @{ Name = 'a path that was not found'; Values = @{ snapshotId = $findNewest; path = '/C/Users/Fixture/Documents/Other.xlsx' }; Pattern = 'no longer in the search results' },
+        @{ Name = 'a backup that does not hold that version'; Values = @{ snapshotId = $findMiddle; path = $budgetFile }; Pattern = 'no longer in the search results' },
+        @{ Name = 'a backup named in capitals'; Values = @{ snapshotId = $findNewest.ToUpperInvariant(); path = $budgetFile }; Pattern = 'no longer in the search results' },
+        @{ Name = 'a path written another way'; Values = @{ snapshotId = $findNewest; path = ($budgetFile + '/') }; Pattern = 'no longer in the search results' },
+        @{ Name = 'the top of the backup'; Values = @{ snapshotId = $findNewest; path = '/' }; Pattern = 'no longer in the search results' })) {
+        Set-PrivateField $dashboard 'restoreFlowStep' 'backup'
+        $refusedPick = Invoke-FindCommand 'restoreFlowPickFound' $badPick.Values
+        Assert-True (-not $refusedPick.Accepted -and $refusedPick.Error -match $badPick.Pattern -and (Get-FieldValue $dashboard 'restoreFlowStep') -eq 'backup') ('a pick of ' + $badPick.Name + ' was not refused: ' + $refusedPick.Error)
+    }
+    $twoListed = New-GenericList $snapshotType
+    foreach ($kept in $findSnapshots) { if ($kept.Id -ne $findMiddle) { [void]$twoListed.Add($kept) } }
+    Set-PrivateField $dashboard 'restoreFlowSnapshots' $twoListed
+    $gonePick = Invoke-FindCommand 'restoreFlowPickFound' @{ snapshotId = $findMiddle; path = $budgetFolder }
+    Assert-True (-not $gonePick.Accepted -and $gonePick.Error -match 'no longer in your list') ('a version in a backup that left the list was picked: ' + $gonePick.Error)
+    Set-PrivateField $dashboard 'restoreFlowSnapshots' $findSnapshots
+    Assert-True ((Invoke-FindCommand 'restoreFlowFindClear').Accepted -and (Get-SearchWeb)['status'] -eq 'idle' -and (Get-SearchWeb)['resultsTotal'] -eq 0) 'Clear results did not clear the search'
+
+    # A page that names a backup the list does not have (or not as the list has it) changed under the search; nothing of it is used.
+    foreach ($changed in @(
+        @{ Name = 'a backup not in the list'; Version = (New-FindVersion ('4' * 64) $newestTime) },
+        @{ Name = 'an older-setup backup the list holds as a plan one'; Version = (New-FindVersion $findNewest $newestTime 10 '2026-09-01T08:00:00.0000000Z' 1 'legacy_unbound') })) {
+        Set-SearchFlow
+        Set-SearchValue 'Text' 'Budget'
+        Invoke-FindAnswer (New-FoundResult (New-FindPage 'complete' $findNewest $null 3 $newestTime $oldestTime @((New-FindMatch $budgetFile 'file' @($changed.Version)))))
+        $web = Get-SearchWeb
+        Assert-True ($web['status'] -eq 'failed' -and $web['listChanged'] -eq $true -and $web['resultsTotal'] -eq 0 -and $web['error'] -match 'list of backups changed') ('a page naming ' + $changed.Name + ' was used')
+    }
+    # Failures in the flow's words: each says nothing was changed and what to do.
+    foreach ($failure in @(
+        @{ Result = (Invoke-Static $managerResultType 'Cancelled'); Pattern = '^Windows permission was not given, so nothing was searched'; ListChanged = $false },
+        @{ Result = (Invoke-Static $managerResultType 'Failure' @('A backup or another protected operation already holds the run lock.', 1)); Pattern = '^A backup or another change started'; ListChanged = $false },
+        @{ Result = (Invoke-Static $managerResultType 'Failure' @('The backup to search from is no longer in the list.', 1)); Pattern = 'Choose Reload backups'; ListChanged = $true },
+        @{ Result = (Invoke-Static $managerResultType 'Failure' @('The search took too long and was stopped.', 1)); Pattern = 'Type more of the name and try again'; ListChanged = $false },
+        @{ Result = (Invoke-Static $managerResultType 'Failure' @('File search failed with exit code 3.', 1)); Pattern = 'could not search your backups this time'; ListChanged = $false },
+        @{ Result = (Invoke-Static $managerResultType 'Failure' @('Rewindle lost its connection to the restore step. Nothing was changed.', -1)); Pattern = '^Rewindle lost its connection'; ListChanged = $false })) {
+        Set-SearchFlow
+        Set-SearchValue 'Text' 'Budget'
+        Invoke-FindAnswer $failure.Result
+        $web = Get-SearchWeb
+        Assert-True ($web['status'] -eq 'failed' -and $web['error'] -match $failure.Pattern -and $web['listChanged'] -eq $failure.ListChanged -and
+            -not (Get-FieldValue $dashboard 'restoreFlowBusy') -and (Get-FieldValue $dashboard 'restoreFlowStep') -eq 'backup') ('a failed search was not put in the flow''s words: ' + $web['error'])
+    }
+    Set-SearchFlow
+    Set-PrivateField $dashboard 'restoreFlowCancelRequested' $true
+    Invoke-FindAnswer (New-FoundResult $firstPage)
+    Assert-True ((Get-SearchWeb)['status'] -eq 'failed' -and (Get-SearchWeb)['resultsTotal'] -eq 0 -and (Get-SearchWeb)['error'] -match 'search was stopped' -and
+        -not (Get-FieldValue $dashboard 'restoreFlowCancelRequested')) 'a search cancelled while it ran was used'
+    Set-SearchFlow
+    $staleOperation = [int](Get-FieldValue $dashboard 'restoreFlowOperationGeneration')
+    Set-PrivateField $dashboard 'restoreFlowBusy' $true
+    Set-PrivateField $dashboard 'restoreFlowOperationGeneration' ($staleOperation + 1)
+    Invoke-Private $dashboard 'FinishRestoreFlowFind' @((New-FoundResult $firstPage), $staleOperation, $false) | Out-Null
+    Assert-True ([bool](Get-FieldValue $dashboard 'restoreFlowBusy') -and (Get-SearchWeb)['resultsTotal'] -eq 0) 'the answer to a search the flow had moved on from was used'
+
+    # Outcomes that end a search: too many matches (also when the last batch reached the oldest backup), names so common that the
+    # search stopped, a backup too large to search in time, and a page whose time went on opening the list (Try again).
+    foreach ($ending in @(
+        @{ Status = 'too_many'; Next = $null; Searched = 3; Outcome = 'tooMany'; Pattern = '^More than 100 files and folders match'; Continue = $false },
+        @{ Status = 'too_broad'; Next = $findMiddle; Searched = 1; Outcome = 'tooBroad'; Pattern = '^So many files are in folders whose names contain'; Continue = $false },
+        @{ Status = 'too_slow'; Next = $findNewest; Searched = 0; Outcome = 'tooSlow'; Pattern = '^One of your backups is too large to search'; Continue = $false },
+        @{ Status = 'more'; Next = $findNewest; Searched = 0; Outcome = 'more'; Pattern = 'ran out of time before it could look through a backup.+Try again'; Continue = $true })) {
+        Set-SearchFlow
+        Set-SearchValue 'Text' 'Budget'
+        $endingNewest = if ($ending.Searched -gt 0) { $newestTime } else { $null }
+        Invoke-FindAnswer (New-FoundResult (New-FindPage $ending.Status $findNewest $ending.Next $ending.Searched $endingNewest $endingNewest @()))
+        $web = Get-SearchWeb
+        Assert-True ($web['status'] -eq 'done' -and $web['outcome'] -eq $ending.Outcome -and $web['message'] -match $ending.Pattern -and $web['canContinue'] -eq $ending.Continue -and
+            $web['nothingSearched'] -eq ($ending.Searched -eq 0)) ('a search that ended ' + $ending.Status + ' was not described as expected: ' + $web['message'])
+    }
+    $narrow = Invoke-FindMoreCheck
+    Assert-True ($narrow.Accepted) 'Try again was refused after a page that looked through nothing'
+    Set-SearchFlow
+    Set-SearchValue 'Text' 'Budget'
+    Invoke-FindAnswer (New-FoundResult (New-FindPage 'too_many' $findNewest $null 3 $newestTime $oldestTime @()))
+    $narrow = Invoke-FindMoreCheck
+    Assert-True (-not $narrow.Accepted -and $narrow.Error -match 'Type more of the name') 'Look further back was offered after too many matches'
+    Set-SearchFlow
+    Set-SearchValue 'Text' 'Budget'
+    Invoke-FindAnswer (New-FoundResult (New-FindPage 'complete' $findNewest $null 3 $newestTime $oldestTime @()))
+    Assert-True ((Get-SearchWeb)['message'] -ceq ('No file or folder with ' + [char]0x201C + 'Budget' + [char]0x201D + ' in its name is in any of your 3 backups. Check the spelling, or type a shorter part of the name.')) ('a search that found nothing did not say so: ' + (Get-SearchWeb)['message'])
+
+    # At most 100 results and 10 versions each are kept over the pages, the most recently seen first.
+    Set-SearchFlow
+    Set-SearchValue 'Text' 'Budget'
+    $hundred = @(for ($index = 1; $index -le 100; $index++) { New-FindMatch ('/C/Docs/Budget ' + $index + '.xlsx') 'file' @((New-FindVersion $findMiddle $middleTime)) })
+    Invoke-FindAnswer (New-FoundResult (New-FindPage 'more' $findNewest $findOldest 2 $newestTime $middleTime $hundred))
+    Assert-True ((Get-SearchWeb)['resultsTotal'] -eq 100 -and (Get-SearchWeb)['outcome'] -eq 'more') 'a full first page was not kept'
+    $tenVersions = @(for ($index = 1; $index -le 9; $index++) { New-FindVersion $findMiddle $middleTime $index })
+    $tenVersions += New-FindVersion $findNewest $newestTime 99
+    Invoke-FindAnswer (New-FoundResult (New-FindPage 'complete' $findOldest $null 1 $oldestTime $oldestTime @(
+        (New-FindMatch '/C/Docs/Budget 1.xlsx' 'file' @((New-FindVersion $findOldest $oldestTime 1001 '2026-09-01T08:00:00.0000000Z' 1 'legacy_unbound'), (New-FindVersion $findOldest $oldestTime 1002 '2026-09-01T08:00:00.0000000Z' 1 'legacy_unbound'))),
+        (New-FindMatch '/C/Docs/Budget new.xlsx' 'file' @((New-FindVersion $findOldest $oldestTime 5 '2026-09-01T08:00:00.0000000Z' 1 'legacy_unbound')))))) $true
+    $web = Get-SearchWeb
+    Assert-True ($web['resultsTotal'] -eq 100 -and $web['overflow'] -eq $true -and $web['outcome'] -eq 'tooMany' -and $web['canContinue'] -eq $false) 'more than 100 results were kept over the pages'
+    Set-SearchFlow
+    Set-SearchValue 'Text' 'Budget'
+    Invoke-FindAnswer (New-FoundResult (New-FindPage 'more' $findNewest $findOldest 2 $newestTime $middleTime @((New-FindMatch $budgetFile 'file' $tenVersions))))
+    Invoke-FindAnswer (New-FoundResult (New-FindPage 'complete' $findOldest $null 1 $oldestTime $oldestTime @((New-FindMatch $budgetFile 'file' @((New-FindVersion $findOldest $oldestTime 500 '2026-09-01T08:00:00.0000000Z' 1 'legacy_unbound'), (New-FindVersion $findOldest $oldestTime 501 '2026-09-01T08:00:00.0000000Z' 1 'legacy_unbound')))))) $true
+    $web = Get-SearchWeb
+    Assert-True ($web['results'][0]['versions'].Count -eq 10 -and $web['results'][0]['hasMoreVersions'] -eq $true -and $web['results'][0]['versions'][0]['snapshotId'] -eq $findNewest) 'more than ten versions of a file were kept, or the newest was not first'
+
+    # Reading the list again, a changed plan and closing Restore all drop the search.
+    Set-SearchFlow
+    Set-SearchValue 'Text' 'Budget'
+    Invoke-FindAnswer (New-FoundResult $firstPage)
+    Set-PrivateField $dashboard 'restoreFlowConfigHash' ('0' * 64)
+    $changedArgs = [object[]]@($null, $null)
+    Assert-True (-not [bool](Invoke-Private $dashboard 'TryGetFreshRestoreFlowConfiguration' $changedArgs) -and (Get-SearchValue 'Entries').Count -eq 0 -and (Get-SearchValue 'Status') -eq 'idle') 'a changed plan kept the search'
+    Set-SearchFlow
+    Set-SearchValue 'Text' 'Budget'
+    Invoke-FindAnswer (New-FoundResult $firstPage)
+    $closeArgs = [object[]]@($null)
+    Assert-True ([bool](Invoke-Private $dashboard 'CloseRestoreFlow' $closeArgs) -and (Get-SearchValue 'Entries').Count -eq 0 -and -not [bool](Get-FieldValue $dashboard 'restoreFlowSearchAvailable')) 'closing Restore kept the search'
+    Set-PrivateField $dashboard 'restoreFlowApprovalSession' $null
+    Set-PrivateField $dashboard 'currentTaskSchedule' $null
+    Set-PrivateField $dashboard 'lastSnapshot' $null
+    Set-PrivateField $dashboard 'sessionSignInUtc' $null
+
     Remove-Item -LiteralPath $fixturePlanPath -Force
     Set-PrivateField $dashboard 'restoreFlowConfiguration' $config
     Set-PrivateField $dashboard 'restoreFlowConfigHash' $configHash
@@ -3508,4 +3952,4 @@ finally {
 }
 
 foreach ($note in $skipped) { Write-Output $note }
-Write-Output 'Regressions passed: snapshot scope reset, explicit whole-snapshot validation, observed-path enforcement, review invalidation, reload, retry routing, inline folder-read failures, launch guards, the restore folder looked at again before Review and Restore now and acted on only while that look is current and passes, honest cancellation, UNC/reparse/no-overwrite/overlap destination guards and their plain-language refusals, diagnostics redaction of object keys, of whole paths (either slash, any root) and of account IDs, capped run history that is not rewritten for an evicted baseline, no live samples written and the old file removed, readable run-details timelines from long and odd logs, the restore approval wait, one Windows approval per restore session (every listing and one restore, a new session only after one ended, closed with the flow and a changed plan, a declined approval, a pipe served by another process, oversized and foreign frames), no folder read on choosing a backup or restoring all of it, folder listings kept per snapshot and bounded, the session-or-per-step choice from the installed engine, the published reason a restore cannot start, Open and Copy on a restore result acting only on the folder the restore reported once it has finished, an unreadable schedule and the outcome of a schedule change, schedule summaries for every day and lenient schedule times, capped automatic web view reloads, missing-runtime detection, a configuration check that could not complete ending the read it followed, cut-short folder listings and the published path limit, history lists bound again only when a run differs, one not-responding notice per stuck web view, backup freshness across a change of the clocks and of the run times, a missed backup Windows catches up on after a sign-in or a wake, an off-site check that is overdue, the tray balloon for a backup starting once per run, the not-started note for an accepted backup request that started nothing, timers on a clock that setting the time does not move, the window hiding to the tray again after a cancelled sign-out, the bounded crash log and its redacted copy in a diagnostic bundle, the installed plan read without keeping its writer out (and still refused when cut short, not an object or too large) with an install root that follows Program Files, the backup-location window''s done/current/failed steps and refused folders, the recovery-readiness window''s explained actions, the folder picker''s cloud-only walk (bounded by entries and time, skipping excluded folders and links), OneDrive paths and wording, the free-space warning for a whole snapshot that will not fit (a warning and never an error), the history limit the page is told, the schedule, location and readiness dialogs sharing the page tokens and the schedule wording, a status that cannot be read for a moment, a missing state folder, the retired legacy cloud file, a run history that is never written over while it is unreadable, the tray hover text and first-close hint, backup alerts (the tray mark, a failing streak told in place of the run balloon, the Settings switch), the setup state the page is told, diagnostics that say what they left out and read a log cut inside a character, the backup drive''s space (the size the engine records, the reserve, the forecast, the earlier edition without one, a running backup that keeps what the card said, and the Low space warning file), and clean-up of old backups (nothing offered or read for the legacy edition, nothing else run while the list is open, protected actions waiting while a step runs, a removal bound to the list on disk with the count seen and both confirmations, each ending shown on the list, and a launch result believed only when it matches the request, the exit code and the records, the backup drive forecast net of the space a clean-up freed, and how far back backups go left out after a clean-up removed some until they are counted again, with neither given before the clean-up records are read, from a window''s first state on).'
+Write-Output 'Regressions passed: snapshot scope reset, explicit whole-snapshot validation, observed-path enforcement, review invalidation, reload, retry routing, inline folder-read failures, launch guards, the restore folder looked at again before Review and Restore now and acted on only while that look is current and passes, honest cancellation, UNC/reparse/no-overwrite/overlap destination guards and their plain-language refusals, diagnostics redaction of object keys, of whole paths (either slash, any root) and of account IDs, capped run history that is not rewritten for an evicted baseline, no live samples written and the old file removed, readable run-details timelines from long and odd logs, the restore approval wait, one Windows approval per restore session (every listing and one restore, a new session only after one ended, closed with the flow and a changed plan, a declined approval, a pipe served by another process, oversized and foreign frames), no folder read on choosing a backup or restoring all of it, Find a file (only in a session whose engine serves it and never for the legacy edition, the shared text rules, its refusals and a backup about to start, pages merged and bounded, a list that changed under it, its failures in plain words, and Restore this selecting just the path found, brackets included), folder listings kept per snapshot and bounded, the session-or-per-step choice from the installed engine, the published reason a restore cannot start, Open and Copy on a restore result acting only on the folder the restore reported once it has finished, an unreadable schedule and the outcome of a schedule change, schedule summaries for every day and lenient schedule times, capped automatic web view reloads, missing-runtime detection, a configuration check that could not complete ending the read it followed, cut-short folder listings and the published path limit, history lists bound again only when a run differs, one not-responding notice per stuck web view, backup freshness across a change of the clocks and of the run times, a missed backup Windows catches up on after a sign-in or a wake, an off-site check that is overdue, the tray balloon for a backup starting once per run, the not-started note for an accepted backup request that started nothing, timers on a clock that setting the time does not move, the window hiding to the tray again after a cancelled sign-out, the bounded crash log and its redacted copy in a diagnostic bundle, the installed plan read without keeping its writer out (and still refused when cut short, not an object or too large) with an install root that follows Program Files, the backup-location window''s done/current/failed steps and refused folders, the recovery-readiness window''s explained actions, the folder picker''s cloud-only walk (bounded by entries and time, skipping excluded folders and links), OneDrive paths and wording, the free-space warning for a whole snapshot that will not fit (a warning and never an error), the history limit the page is told, the schedule, location and readiness dialogs sharing the page tokens and the schedule wording, a status that cannot be read for a moment, a missing state folder, the retired legacy cloud file, a run history that is never written over while it is unreadable, the tray hover text and first-close hint, backup alerts (the tray mark, a failing streak told in place of the run balloon, the Settings switch), the setup state the page is told, diagnostics that say what they left out and read a log cut inside a character, the backup drive''s space (the size the engine records, the reserve, the forecast, the earlier edition without one, a running backup that keeps what the card said, and the Low space warning file), and clean-up of old backups (nothing offered or read for the legacy edition, nothing else run while the list is open, protected actions waiting while a step runs, a removal bound to the list on disk with the count seen and both confirmations, each ending shown on the list, and a launch result believed only when it matches the request, the exit code and the records, the backup drive forecast net of the space a clean-up freed, and how far back backups go left out after a clean-up removed some until they are counted again, with neither given before the clean-up records are read, from a window''s first state on).'
