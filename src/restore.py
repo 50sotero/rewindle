@@ -1974,7 +1974,9 @@ def process_is_elevated() -> bool:
 
 def current_user_sid() -> str:
     native = _win32()
-    sid = ctypes.c_void_p.from_buffer(_process_token_information(_TOKEN_USER)).value
+    # The record's SID pointer leads into the record itself, so the record is kept until the SID is turned into text.
+    record = _process_token_information(_TOKEN_USER)
+    sid = ctypes.c_void_p.from_buffer(record).value
     text = ctypes.c_void_p()
     if not native.sid_to_string(sid, ctypes.byref(text)):
         raise _last_error()

@@ -1273,6 +1273,34 @@ class RestoreBackendTests(unittest.TestCase):
         if check_owner and elevated:
             self.assertEqual("BA", owner)
 
+    def test_the_account_is_read_before_its_token_record_is_released(self) -> None:
+        # The SID in a TOKEN_USER record lies inside that same record, so the record must still be held when the SID is
+        # turned into text. Here the record is wiped the moment it is released, as reused memory would be.
+        listed = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"], capture_output=True, text=True, check=True)
+        expected = listed.stdout.strip().rsplit(",", 1)[-1].strip('"')
+        self.assertRegex(expected, r"^S-1-\d+(-\d+)+$")
+        read = restore._process_token_information
+
+        def wiped_when_released(information_class: int) -> ctypes.Array:
+            original = read(information_class)
+            size = ctypes.sizeof(original)
+
+            class Wiped(ctypes.c_char * size):  # type: ignore[misc, valid-type]
+                def __del__(self) -> None:
+                    ctypes.memset(ctypes.addressof(self), 0, ctypes.sizeof(self))
+
+            record = Wiped()
+            ctypes.memmove(record, original, size)
+            start = ctypes.addressof(original)
+            pointer = ctypes.c_void_p.from_buffer(original).value or 0
+            if start <= pointer < start + size:
+                # The record's own SID pointer, moved along with it.
+                ctypes.c_void_p.from_buffer(record).value = ctypes.addressof(record) + (pointer - start)
+            return record
+
+        with mock.patch.object(restore, "_process_token_information", wiped_when_released):
+            self.assertEqual(expected, restore.current_user_sid())
+
     def test_restore_folder_is_admin_only_when_elevated(self) -> None:
         administrators_and_system = "(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
         self.assertEqual("O:BAD:PAI" + administrators_and_system, restore.restore_folder_sddl(True))
