@@ -76,6 +76,7 @@ def state(
     alerts: dict | None = None,
     run_id: str = "",
     run_details: bool = False,
+    space: dict | None = None,
 ) -> dict:
     # An older host sends no "alerts"; a state built without them is one.
     extra: dict = {} if alerts is None else {"alerts": alerts}
@@ -85,7 +86,10 @@ def state(
         **extra,
         "status": {"active": active, "success": success, "failure": failure, "cancelled": cancelled, "unavailable": unavailable, "runId": run_id},
         "recovery": {"repairNeeded": repair_needed, "repairBusy": repair_busy, **({} if move_running is None else {"moveRunning": move_running})},
-        "repository": {"path": repository, "volume": "", **({} if volume_ready is None else {"volumeReady": volume_ready})},
+        "repository": {
+            "path": repository, "volume": "", **({} if volume_ready is None else {"volumeReady": volume_ready}),
+            **({} if space is None else {"space": space}),
+        },
         "sources": [source()] if sources is None else sources,
         "freshness": {"state": freshness},
         "actions": {
@@ -114,6 +118,16 @@ COULD_NOT_START = "Windows tried to run the backup today at 02:00, but it stoppe
 REPORT_STEP = "If it happens again, save a problem report in Settings."
 PROGRAM_PROBLEM = "Windows couldn’t start the backup program today at 02:00 (code 66)."
 REINSTALL_STEP = "Open Rewindle Setup and choose Reinstall or repair."
+
+
+def drive_space(level: str = "ok", reason: str = "", *, kind: str = "drive", weeks: float | None = 57.33, stopped: bool = False) -> dict:
+    # Only the fields the hero reads (see protectionTone.ts spaceConcern); the card's own words are tested in test_dashboard_backup_space.py.
+    return {
+        "kind": kind, "reading": "ready", "drive": "G:" if kind == "googleDrive" else "D:", "freeDisplay": "6.20 GiB", "totalDisplay": "931 GiB",
+        "backupsBytes": -1, "backupsDisplay": "", "backupsEstimated": False, "reserveBytes": 10 * 1024**3, "reserveDisplay": "10.0 GiB",
+        "forecast": {"state": "growing", "weeksLeft": weeks, "weeksRounded": None if weeks is None else round(weeks), "weeklyBytes": 1, "weeklyDisplay": "1 B"},
+        "level": level, "reason": reason, "warnWeeks": 8, "runStoppedForSpace": stopped,
+    }
 
 
 def moment(at: tuple[int, ...], now: tuple[int, ...] = (2026, 9, 11, 18, 0)) -> dict:
@@ -185,6 +199,21 @@ class ProtectionUiTests(unittest.TestCase):
             "alert_paused": state(freshness="Paused", alerts=alerts(level="attention", reason="paused")),
             "alert_healthy_last_run": state(alerts=alerts(last_run={"at": "2026-07-21T02:00:05Z", "ok": True, "code": "code 0"})),
             "alert_never_ran": state(alerts=alerts()),
+            # The backup drive's space (Backup location card): too full for the next backup is red, full within the Low space warning
+            # is amber and comes last, and little room with no forecast stays on the card.
+            "space_ok": state(space=drive_space()),
+            "space_full": state(space=drive_space("full", "reserve", weeks=0.0)),
+            "space_full_google": state(space=drive_space("full", "reserve", kind="googleDrive"), repository="G:\\My Drive\\Rewindle"),
+            "space_low": state(space=drive_space("low", "forecast", weeks=6.0)),
+            "space_low_percent": state(space=drive_space("low", "percent", weeks=None)),
+            "space_low_running": state(active=True, success=False, space=drive_space("low", "forecast", weeks=6.0)),
+            "space_low_repair": state(repair_needed=True, space=drive_space("low", "forecast", weeks=6.0)),
+            "space_full_unplugged": state(volume_ready=False, space=drive_space("full", "reserve")),
+            "space_full_missing_folder": state(sources=[source(exists=False)], space=drive_space("full", "reserve")),
+            "space_low_missing_folder": state(sources=[source(exists=False)], space=drive_space("low", "forecast", weeks=6.0)),
+            "space_low_review": state(review=True, freshness="Overdue", space=drive_space("low", "forecast", weeks=6.0)),
+            "space_full_already_failed": state(failure=True, success=False, space=drive_space("full", "reserve", stopped=True)),
+            "google_not_running": state(volume_ready=False, space=drive_space(kind="googleDrive"), repository="G:\\My Drive\\Rewindle"),
         }
         offsite = {
             "waiting": {"kind": "Stale"},
@@ -452,6 +481,45 @@ class ProtectionUiTests(unittest.TestCase):
         self.assertEqual(self.plain(clocks["us"]), "Daily at 2:00 AM, and at 2:30 PM")
         self.assertEqual(clocks["gb"], "Daily at 02:00")
         self.assertEqual(clocks["none"], "Every 6 hours")
+
+    def test_a_backup_drive_too_full_for_the_next_backup_is_red_and_says_what_to_do(self) -> None:
+        concern = self.concern("space_full")
+        self.assertEqual("danger", concern["tone"])
+        self.assertTrue(concern["text"].startswith("The backup drive is too full for the next backup."))
+        self.assertIn("(never anything inside the backup folder)", concern["text"])
+        self.assertEqual("danger", self.tone("space_full"))
+        google = self.concern("space_full_google")
+        self.assertTrue(google["text"].startswith("Your Google storage is too full for the next backup."))
+        self.assertIn("(never anything inside the backup folder)", google["text"])
+        # It comes right after the drive itself, ahead of a missing folder.
+        self.assertIn("isn’t connected", self.concern("space_full_unplugged")["text"])
+        self.assertTrue(self.concern("space_full_missing_folder")["text"].startswith("The backup drive is too full"))
+        # A run that already failed for lack of space says so in the hero's own detail, so it is not said twice.
+        self.assertIsNone(self.concern("space_full_already_failed"))
+        self.assertEqual("danger", self.tone("space_full_already_failed"))
+
+    def test_a_backup_drive_running_low_is_amber_and_comes_last(self) -> None:
+        concern = self.concern("space_low")
+        self.assertEqual(
+            {"tone": "warning", "text": "The backup drive will be full in about 6 weeks at this rate. See Backup location below for what to do."},
+            concern,
+        )
+        self.assertEqual("warning", self.tone("space_low"))
+        self.assertTrue(self.concern("space_low_missing_folder")["text"].startswith("A protected folder can"))
+        self.assertIn("Confirm these changes", self.concern("space_low_review")["text"])
+        # Little room with no forecast stays on the card; a running backup or a repair says nothing more.
+        self.assertIsNone(self.concern("space_low_percent"))
+        self.assertEqual("success", self.tone("space_low_percent"))
+        self.assertIsNone(self.concern("space_low_running"))
+        self.assertIsNone(self.concern("space_low_repair"))
+        self.assertIsNone(self.concern("space_ok"))
+        self.assertEqual("success", self.tone("space_ok"))
+
+    def test_google_drive_for_desktop_that_is_not_running_is_not_unplugged(self) -> None:
+        concern = self.concern("google_not_running")
+        self.assertEqual("danger", concern["tone"])
+        self.assertEqual("Google Drive for desktop isn’t running, so the next backup can’t run. Start it and sign in.", concern["text"])
+        self.assertNotIn("Plug", concern["text"])
 
     def test_yesterday_is_a_calendar_day_not_twenty_four_hours(self) -> None:
         self.assertRegex(self.plain(self.report["moments"]["late_last_night"]["ago"]), r"^yesterday at 11:59 PM$")

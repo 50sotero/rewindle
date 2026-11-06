@@ -3,7 +3,7 @@
 // no real computer. Timestamps are computed from the current time so the charts and "last run" text
 // always look recent. This file is only reachable from the dev server and the `demo` build mode; the
 // build that ships inside the desktop app does not include it (see main.tsx).
-import type { DashboardState, RunDetailsState, RunState } from '../native-types';
+import type { BackupSpaceState, DashboardState, RunDetailsState, RunState } from '../native-types';
 
 const MINUTE = 60_000;
 const DAY = 86_400_000;
@@ -112,7 +112,7 @@ export function createSampleState(now = Date.now()): DashboardState {
       summary: 'Daily at 02:00', nextRun: formatWhen(next), nextRunAt: next.toISOString(),
       detail: 'Run missed backups • Wait for AC power',
     },
-    repository: { path: repositoryPath, volume: '412 GiB free of 931 GiB  •  NTFS' },
+    repository: { path: repositoryPath, volume: 'D:\\  •  Backup drive  •  96.0 GiB free', space: sampleSpace() },
     freshness: {
       title: 'Healthy', detail: `Last verified ${formatWhen(new Date(latest.started))}. Next scheduled ${formatWhen(next)}.`,
       state: 'Healthy', verifiedAt: new Date(Date.parse(latest.started) + latest.durationSeconds * 1000).toISOString(),
@@ -136,6 +136,63 @@ export function createSampleState(now = Date.now()): DashboardState {
     },
     runDetails: null, restoreFlow: null,
   };
+}
+
+// Backup drive space for the sample (`?space=` in the address picks a variant, see applySpaceScenario). Every figure is invented, and
+// worked out the way the host works it out: weeks left is the free space above the 10 GiB reserve divided by the weekly growth, rounded
+// once to 2 decimals, and the level is judged on that number in whole weeks.
+const GIB = 1024 ** 3;
+export const SPACE_SCENARIOS = ['low', 'full', 'google', 'checking'] as const;
+export type SpaceScenario = typeof SPACE_SCENARIOS[number];
+
+type SpaceFigures = { kind?: BackupSpaceState['kind']; drive?: string; free: number; total: number; backups: number; weekly: number; warnWeeks?: number; reading?: BackupSpaceState['reading'] };
+
+export function sampleSpace(figures: SpaceFigures = { free: 96 * GIB, total: 931 * GIB, backups: 212 * GIB, weekly: 1.5 * GIB }): BackupSpaceState {
+  const reserve = 10 * GIB, warnWeeks = figures.warnWeeks ?? 8;
+  const reading = figures.reading ?? 'ready';
+  const ready = reading === 'ready';
+  const display = (n: number) => n < 0 ? '' : formatBytes(n);
+  const growing = ready && figures.weekly > 0;
+  const weeksLeft = growing ? Math.round(Math.min(10000, Math.max(0, figures.free - reserve) / figures.weekly) * 100) / 100 : null;
+  const weeksRounded = weeksLeft == null ? null : Math.round(weeksLeft);
+  const level: BackupSpaceState['level'] = !ready ? 'unknown' : figures.free < reserve ? 'full' : weeksRounded != null && weeksRounded <= warnWeeks ? 'low' : 'ok';
+  return {
+    kind: figures.kind ?? 'drive', reading, drive: figures.drive ?? 'D:',
+    freeBytes: ready ? figures.free : -1, freeDisplay: ready ? display(figures.free) : '',
+    totalBytes: ready ? figures.total : -1, totalDisplay: ready ? display(figures.total) : '',
+    backupsBytes: figures.backups, backupsDisplay: display(figures.backups), backupsEstimated: false,
+    reserveBytes: reserve, reserveDisplay: display(reserve),
+    forecast: { state: !ready ? 'unknown' : growing ? 'growing' : 'learning', weeksLeft, weeksRounded, weeklyBytes: growing ? figures.weekly : -1, weeklyDisplay: growing ? display(figures.weekly) : '' },
+    level, reason: level === 'full' ? 'reserve' : level === 'low' ? 'forecast' : '', warnWeeks, runStoppedForSpace: false,
+  };
+}
+
+/** Switches the sample to one of the space variants: running low, too full, a Google Drive location, or the first reading. */
+export function applySpaceScenario(state: DashboardState, name: string | null): void {
+  if (!name || !(SPACE_SCENARIOS as readonly string[]).includes(name)) return;
+  const scenario = name as SpaceScenario;
+  if (scenario === 'low') state.repository.space = sampleSpace({ free: 22 * GIB, total: 931 * GIB, backups: 212 * GIB, weekly: 2 * GIB });
+  if (scenario === 'full') state.repository.space = sampleSpace({ free: 6.2 * GIB, total: 931 * GIB, backups: 212 * GIB, weekly: 1.5 * GIB });
+  if (scenario === 'checking') state.repository.space = sampleSpace({ free: -1, total: -1, backups: -1, weekly: 0, reading: 'checking' });
+  if (scenario === 'google') {
+    state.repository.path = 'G:\\My Drive\\Rewindle';
+    state.repository.space = sampleSpace({ kind: 'googleDrive', drive: 'G:', free: 1.62 * 1024 * GIB, total: 2048 * GIB, backups: 212 * GIB, weekly: 1.5 * GIB });
+  }
+  const space = state.repository.space;
+  if (space?.reading === 'ready') state.repository.volume = `${state.repository.path.slice(0, 3)}  •  ${space.kind === 'googleDrive' ? 'Google Drive' : 'Backup drive'}  •  ${space.freeDisplay} free`;
+}
+
+/** The Low space warning, as the host takes it: 4, 8 or 12 weeks, and the level judged again. Returns the host's answer, or null for a bad value. */
+export function setSampleSpaceWarning(state: DashboardState, weeks: string): string | null {
+  const space = state.repository.space;
+  if (!space || !['4', '8', '12'].includes(weeks)) return null;
+  space.warnWeeks = Number(weeks);
+  if (space.level !== 'full' && space.forecast.weeksRounded != null) {
+    const low = space.forecast.weeksRounded <= space.warnWeeks;
+    space.level = low ? 'low' : 'ok';
+    space.reason = low ? 'forecast' : '';
+  }
+  return `Rewindle will warn you ${weeks} weeks before ${space.kind === 'googleDrive' ? 'your Google storage is full' : 'the backup drive is full'}.`;
 }
 
 // What "Open details" shows for a sample run. The text only imitates the shape of a real run's record.

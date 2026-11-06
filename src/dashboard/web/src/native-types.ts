@@ -16,7 +16,9 @@ export type CommandName = 'ready' | 'refresh' | 'navigate' | 'setTheme' | 'toggl
   // Settings > About: opens the licenses folder beside the app. The host builds the path itself; the page sends none.
   | 'openLicensesFolder'
   // Settings > Backup alerts: notifications on or off ({ notify: 'on' | 'off' }). A per-user preference like the theme, not protected.
-  | 'setAlerts';
+  | 'setAlerts'
+  // Settings > Backup location > Low space warning: { weeks: '4' | '8' | '12' }. Only changes when the page warns, so it is not protected.
+  | 'setSpaceWarning';
 /**
  * The commands that change the backup plan, the schedule, the repository or a restore, or ask the host to read them.
  * They need a live link and readable backup status, and the animation preview pauses them. Everything else (moving
@@ -190,6 +192,43 @@ export interface SetupState {
   engineChosenBy?: 'install-root' | '--engine';
   searchedConfigs?: string[];
 }
+/**
+ * How full the backup location is and when it fills (Protection and Settings > Backup location). The host decides `level`; the page only
+ * words it (protectionTone.ts describeSpace). Every byte count is -1, and its display '', when unknown. Additive: an older host does not
+ * send it, and the card then shows `volume` as before.
+ */
+export interface BackupSpaceState {
+  /** 'drive': a drive on or plugged into this computer. 'googleDrive': Google Drive for desktop, so the figures are the Google account's storage. */
+  kind: 'drive' | 'googleDrive';
+  /** 'checking' until the first reading; 'unknown' when Windows would not say. A drive that said it is not ready is `volumeReady: false`. */
+  reading: 'checking' | 'ready' | 'unknown';
+  /** "D:", or '' when the path names no drive letter. */
+  drive: string;
+  freeBytes: number; freeDisplay: string;
+  totalBytes: number; totalDisplay: string;
+  /** What the backups take after the latest verified backup; -1 when nothing recorded it (the earlier personal edition on a drive, or no backup yet). */
+  backupsBytes: number; backupsDisplay: string;
+  /** True when worked out from Google Drive's count before that backup plus what it added, rather than measured after it. */
+  backupsEstimated: boolean;
+  /** The free space the backup service keeps; below it, a backup is refused. */
+  reserveBytes: number; reserveDisplay: string;
+  forecast: {
+    /** 'unavailable': the backup service in use (the earlier personal edition) records no size, so there is no forecast with it. */
+    state: 'unknown' | 'learning' | 'flat' | 'growing' | 'unavailable';
+    /** Weeks until free space reaches the reserve at the recent rate, rounded to 2 decimals; null unless growing and the free space is known. */
+    weeksLeft: number | null;
+    /** `weeksLeft` in whole weeks: the number the words use and the host judged `level` on, so the page never rounds it again. */
+    weeksRounded: number | null;
+    weeklyBytes: number; weeklyDisplay: string;
+  };
+  level: 'unknown' | 'ok' | 'low' | 'full';
+  /** 'percent': little room now (under 1.5 times the reserve, or, with no forecast, under a tenth of the drive above it). */
+  reason: '' | 'forecast' | 'percent' | 'reserve';
+  /** The person's Low space warning, in weeks: 4, 8 or 12. */
+  warnWeeks: number;
+  /** The latest run failed because there was too little space, so the Protection hero already says so. */
+  runStoppedForSpace?: boolean;
+}
 export interface DashboardState {
   page: DashboardPage; demo: boolean; preview: boolean; theme: ThemePreference; motion: MotionPreference;
   dark: boolean; reducedMotion: boolean; highContrast: boolean; updated: string; subtitle: string; dataError?: string;
@@ -222,7 +261,7 @@ export interface DashboardState {
   /** `error` is why the installed schedule could not be read (empty when it could); `summary` then reads "Schedule unavailable". `notice` is the short-lived outcome of a schedule change; null once it expires. */
   schedule: { summary: string; nextRun: string; /** The next run as an ISO 8601 timestamp, or empty/absent when there is none; the page formats it like every other time. */ nextRunAt?: string; detail: string; /** Set while Windows keeps the run at a fixed UTC time, so it moves an hour when the clocks change; says how to keep it fixed. Additive. */ clockChange?: string; error?: string; notice?: { text: string; tone: 'info' | 'success' | 'warning' | 'error' } | null };
   /** `volumeReady` is false only when the drive itself answered that it is not ready (unplugged, disconnected); true or absent means no such answer. */
-  repository: { path: string; volume: string; volumeReady?: boolean };
+  repository: { path: string; volume: string; volumeReady?: boolean; space?: BackupSpaceState | null };
   /** `CatchingUp`: a backup was missed while the PC was off, asleep or signed out, and Windows starts it by itself shortly (not a problem; an older host never sends it). */
   freshness: { title: string; detail: string; state: 'Unavailable' | 'Healthy' | 'NoVerifiedBackup' | 'Overdue' | 'Paused' | 'ClockAnomaly' | 'CatchingUp'; verifiedAt: string };
   /** Backup alerts (the Settings switch, the tray mark, what Windows last did with the backup). Additive: an older host does not send it. */

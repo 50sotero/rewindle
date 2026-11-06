@@ -386,6 +386,23 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 /* The storage line under the backup destination, once the drive says it is not ready. */
 .volume-line.is-unavailable { display: flex; align-items: center; gap: 6px; color: var(--orange-ink); }
 .volume-line.is-unavailable svg { flex-shrink: 0; }
+/* How full the backup location is (SpaceLine): used and free, then the forecast, or a problem drawn like the hero's concern line with its
+ * next step under it. Everything wraps; the card shares its row with another. */
+.space-line { min-width: 0; }
+.space-line > p, .setting-row .space-line > p { margin: 4px 0 0; overflow-wrap: anywhere; }
+.space-problem { display: flex; align-items: flex-start; gap: 8px; margin: 10px 0 0; padding: 10px 12px; border-radius: var(--r-control); font-size: var(--type-sm); line-height: 1.6; color: var(--ink); background: var(--orange-tint); }
+.space-problem svg { flex-shrink: 0; margin-top: 2px; color: var(--orange-ink); }
+.space-problem.danger { background: var(--red-tint); }
+.space-problem.danger svg { color: var(--red-ink); }
+.space-problem > div { min-width: 0; overflow-wrap: anywhere; }
+.space-problem p, .setting-row .space-problem p { margin: 0; }
+.space-problem .space-next, .setting-row .space-problem .space-next { margin-top: 4px; }
+.space-line .inline-details { margin-top: 6px; }
+/* Settings > Backup location > Low space warning. */
+.space-warning { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.space-warning-title { display: flex; align-items: center; gap: 6px; margin: 0; font-size: var(--type-sm); font-weight: 600; color: var(--ink); }
+.space-warning-picker { margin-top: 10px; }
+@media (forced-colors: active) { .space-problem { outline: 1px solid CanvasText; outline-offset: -1px; } }
 /* What the four figures describe (the run in progress, or the latest finished one and when it started), and the figure that
  * is a problem when it is not zero. The estimate's own line and the hint under it ("Likely around 14:35") are copy on the page. */
 .stat-bad .stat-number { color: var(--red-ink); }
