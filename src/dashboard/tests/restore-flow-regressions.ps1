@@ -2133,8 +2133,8 @@ namespace RewindleRegression {
     $newestTime = '2026-09-14T02:00:00.0000000Z'
     $middleTime = '2026-09-13T02:00:00.0000000Z'
     $oldestTime = '2026-09-12T02:00:00.0000000Z'
-    $budgetFile = '/C/Users/Fixture/Documents/Budget.xlsx'
-    $budgetFolder = '/C/Users/Fixture/Documents/Budget [old]'
+    $budgetFile = '/C/Users/you/Documents/Budget.xlsx'
+    $budgetFolder = '/C/Users/you/Documents/Budget [old]'
 
     # The first page looked through the two newest backups: the file in both (one version), and a folder only in the older one.
     Set-SearchFlow
@@ -2146,7 +2146,7 @@ namespace RewindleRegression {
     $web = Get-SearchWeb
     Assert-True (-not (Get-FieldValue $dashboard 'restoreFlowBusy') -and (Get-FieldValue $dashboard 'restoreFlowStatus') -eq 'ready' -and $web['status'] -eq 'done' -and
         $web['outcome'] -eq 'more' -and $web['searched'] -eq 2 -and $web['total'] -eq 3 -and $web['canContinue'] -eq $true -and $web['resultsTotal'] -eq 2) 'the first page of a search was not taken'
-    Assert-True ($web['results'][0]['path'] -eq $budgetFile -and $web['results'][0]['folderDisplay'] -eq 'C:\Users\Fixture\Documents' -and -not $web['results'][0]['missingFromNewer'] -and
+    Assert-True ($web['results'][0]['path'] -eq $budgetFile -and $web['results'][0]['folderDisplay'] -eq 'C:\Users\you\Documents' -and -not $web['results'][0]['missingFromNewer'] -and
         $web['results'][1]['type'] -eq 'dir' -and $web['results'][1]['missingFromNewer'] -eq $true) 'the results were not the most recently seen first, or an item missing from newer backups was not marked'
     Assert-True ($web['results'][0]['versions'][0]['sizeDisplay'] -ne '' -and $web['results'][1]['versions'][0]['sizeDisplay'] -eq '' -and $web['results'][0]['versions'][0]['backups'] -eq 2) 'a version row did not carry its size and backups'
     Assert-True ($web['message'] -match '^Looked through the 2 newest of your 3 backups, back to .+ Choose Look further back to search older ones\.$' -and
@@ -2183,7 +2183,7 @@ namespace RewindleRegression {
     Assert-True ($pickFolder.Accepted -and (@(Get-FieldValue $dashboard 'restoreFlowSelectedPaths') -join '|') -eq $budgetFolder -and
         (Get-FieldValue $dashboard 'restoreFlowSelectedSnapshotId') -eq $findMiddle) ('a found folder with brackets in its name could not be restored: ' + $pickFolder.Error)
     foreach ($badPick in @(
-        @{ Name = 'a path that was not found'; Values = @{ snapshotId = $findNewest; path = '/C/Users/Fixture/Documents/Other.xlsx' }; Pattern = 'no longer in the search results' },
+        @{ Name = 'a path that was not found'; Values = @{ snapshotId = $findNewest; path = '/C/Users/you/Documents/Other.xlsx' }; Pattern = 'no longer in the search results' },
         @{ Name = 'a backup that does not hold that version'; Values = @{ snapshotId = $findMiddle; path = $budgetFile }; Pattern = 'no longer in the search results' },
         @{ Name = 'a backup named in capitals'; Values = @{ snapshotId = $findNewest.ToUpperInvariant(); path = $budgetFile }; Pattern = 'no longer in the search results' },
         @{ Name = 'a path written another way'; Values = @{ snapshotId = $findNewest; path = ($budgetFile + '/') }; Pattern = 'no longer in the search results' },
