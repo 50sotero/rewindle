@@ -93,6 +93,15 @@ jobs:
         shell: powershell
         run: .\src\dashboard\tests\restore-flow-regressions.ps1 -SkipInstalledChecks
 
+      # Backup alerts (why a backup was missed, the failing count, when a notification is shown, alerts.json, the tray mark) and
+      # the Task Scheduler reader they depend on. Both compile the dashboard sources with a fixture harness: no task is queried,
+      # nothing is started, and every file they write is under a fresh folder in TEMP.
+      - name: Backup alert and task schedule checks
+        shell: powershell
+        run: |
+          .\tests\Test-BackupAlerts.ps1
+          .\tests\Test-TaskSchedule.ps1
+
       # Single protected restore requests and restore approval sessions in the disposable mode, including the dashboard
       # just built talking to the session broker. -SkipInstalledChecks keeps it from reading any installation. The manager
       # refuses its disposable mode under an elevated token, and hosted Windows runners execute every step as an

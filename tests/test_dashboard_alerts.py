@@ -195,6 +195,12 @@ class BackupAlertsSourceTests(unittest.TestCase):
                 with self.subTest(text=text[:60], word=word):
                     self.assertNotIn(word, text.lower())
 
+    def test_ci_runs_the_alert_and_task_schedule_suites(self) -> None:
+        # Most of the alert behaviour is checked by these two PowerShell suites, so a later change can't break it unseen.
+        ci = read(PROJECT / ".github" / "workflows" / "ci.yml")
+        self.assertIn(".\\tests\\Test-BackupAlerts.ps1", ci)
+        self.assertIn(".\\tests\\Test-TaskSchedule.ps1", ci)
+
     def test_a_pause_made_in_rewindle_is_kept_apart_from_the_told_problems(self) -> None:
         note = block(self.alerts, "internal void NoteUserPausedSchedule(")
         self.assertIn("store.SetUserPaused(true);", note)
