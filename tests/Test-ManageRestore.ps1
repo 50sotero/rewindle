@@ -149,7 +149,7 @@ public static class FakeRestic {
         File.WriteAllText(Path.Combine(target, "partial.txt"), "retained partial data"); return 23;
       }
       // Restic finishing with exit code 0 although it restored nothing, as it does when no pattern matches.
-      if (Environment.GetEnvironmentVariable("FAKE_RESTORE_NOTHING") == "1") return 0;
+      if (Control("FAKE_RESTORE_NOTHING") == "1") return 0;
       int includeCount = args.Count(value => value == "--include");
       if (includeCount > 0) {
         for (int i = 0; i < args.Length - 1; i++) if (args[i] == "--include") {
@@ -177,7 +177,7 @@ Add-Type -TypeDefinition $fakeResticSource -OutputAssembly $fakeRestic -OutputTy
 
 function Write-FakeResticControl {
     # Restic gets an allow-listed environment, so this process's FAKE_* settings reach the fake through a file.
-    $lines = @(foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_LEGACY_SNAPSHOT')) {
+    $lines = @(foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_RESTORE_NOTHING','FAKE_LEGACY_SNAPSHOT')) {
         $value = [Environment]::GetEnvironmentVariable($name, 'Process')
         if ($null -ne $value) { $name + '=' + $value }
     })
