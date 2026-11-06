@@ -13,9 +13,12 @@ $sourcePasswordHelper = Join-Path (
 $powershell = Join-Path (
     [System.IO.Directory]::GetParent([Environment]::SystemDirectory).FullName
 ) 'System32\WindowsPowerShell\v1.0\powershell.exe'
+# A non-ASCII letter (A with a ring) in every fixture path. It is written as a code, not typed: this file has no byte order
+# mark, so Windows PowerShell 5.1 would read a typed one in the ANSI code page as two other characters.
+$nonAscii = [string][char]0x00C5
 $fixtureRoot = Join-Path (
     [System.IO.Path]::GetTempPath()
-) ('restic-cloud-task-Å-' + [Guid]::NewGuid().ToString('N'))
+) ('restic-cloud-task-' + $nonAscii + '-' + [Guid]::NewGuid().ToString('N'))
 $taskName = 'ResticBackuperGoogleDriveSync-Test-' +
     [Guid]::NewGuid().ToString('N')
 $assertions = 0
@@ -382,7 +385,14 @@ try {
     Assert-True ($valid.ExitCode -eq 0) (
         "validation-only preflight failed: $($valid.Output)"
     )
+    # The output passes through the console's code page, which may have no letter for a character in a path.
+    Assert-True ($valid.Output -cmatch '^[\x00-\x7F]*$') (
+        'validation output is not ASCII only'
+    )
     $result = $valid.Output | ConvertFrom-Json
+    Assert-True (
+        ([string]$result.cloud_verification_root).Contains($nonAscii)
+    ) 'a non-ASCII path did not survive the validation output'
     Assert-True ([string]$result.state -ceq 'validated') 'validation state'
     Assert-True ($result.task_registration_performed -eq $false) (
         'validation registered a task'

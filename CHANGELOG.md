@@ -85,6 +85,18 @@ ones a home user reads without a glossary.
   changes. The review now accepts either, as long as nobody else can change the
   record or its folder.
 
+### Security
+
+- **Steps that run with administrator rights load PowerShell modules only from
+  Windows.** Windows PowerShell looks in your Documents folder first, where any
+  program you run could put a module that answers to the name of a built-in
+  command and so runs with those rights. Setup's elevated step, the nightly
+  Google Drive check, its password helper and its task installer now limit
+  PowerShell to Windows' own modules before they run any command, and the
+  backup service's other elevated steps now do it first too. The Google Drive
+  check's password helper changed, so registering that check again needs
+  `-ProvisionAssets`.
+
 ## [0.2.0-alpha.2] - 2026-10-08
 
 ### Added

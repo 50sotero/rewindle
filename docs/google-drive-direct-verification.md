@@ -153,7 +153,9 @@ $credentialHash = (
   Get-FileHash $credentialSource -Algorithm SHA256
 ).Hash.ToLowerInvariant()
 
-& (Join-Path $runtime 'install_google_drive_sync_task.ps1') `
+$powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+& $powershell -NoProfile -ExecutionPolicy Bypass `
+  -File (Join-Path $runtime 'install_google_drive_sync_task.ps1') `
   -ProvisionAssets `
   -RcloneExecutableSource $rcloneExe `
   -RcloneConfigSource $rcloneConfig `
@@ -163,10 +165,17 @@ $credentialHash = (
   -ExpectedRcloneCredentialSha256 $credentialHash
 ```
 
+The task installer runs in a new Windows PowerShell process, without your
+profile or the modules this session loaded, and loads modules only from
+Windows' own folder.
+
 The password helper is always copied from the manifest-authorized Program Files
 runtime; an arbitrary helper is rejected. Independently compare the rclone
 executable hash with the checksum published for the build you reviewed before
-running the command.
+running the command. When a release ships a changed helper, registering the
+task again needs `-ProvisionAssets` and the three sources above; without them
+the task installer stops with "Protected rclone assets do not contain the
+packaged password helper".
 
 For compatibility with installations that used the earlier mirror experiment,
 the default task name remains `ResticBackuperGoogleDriveSync`. Its installed

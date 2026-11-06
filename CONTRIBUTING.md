@@ -173,7 +173,11 @@ vulnerability) to discuss it first.
    through a manager or helper under the protected install root, started by
    fixed path with a UAC prompt and bound to the requesting user's SID.
    Program Files and ProgramData stay writable only by Administrators and
-   SYSTEM.
+   SYSTEM. Every script that runs elevated or from a Highest-level task,
+   including the bootstrap Setup builds, sets `$env:PSModulePath` to Windows'
+   own modules folder as its first statement after `param()`, so no module from
+   the user's Documents folder answers a command
+   (`tests/test_elevated_module_path.py`).
 2. **Nonce- and digest-bound requests.** Every manager request carries a fresh
    random nonce and a domain-separated SHA-256 digest of its fields. Results are
    created once in the protected results folder with the expected ACL, and the
