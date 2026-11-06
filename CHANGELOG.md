@@ -77,6 +77,13 @@ ones a home user reads without a glossary.
   shows them, and says how to keep it at the same time all year.
 - With the backups overdue or paused, a pending change review now says why the
   **Confirm these changes** button is there.
+- **Confirm these changes works.** After a backup that found far more changes
+  than usual, confirming them always failed with "ACL inheritance is not
+  protected". The review asked for one exact form of permissions on the
+  backup's record of that run, but the backup writes that record with the
+  permissions of its folder, where only Administrators and Windows can make
+  changes. The review now accepts either, as long as nobody else can change the
+  record or its folder.
 
 ## [0.2.0-alpha.2] - 2026-10-08
 
