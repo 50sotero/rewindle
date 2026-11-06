@@ -348,8 +348,12 @@ It does not start a backup. If anything fails, it removes what it created and
 keeps the repository, recovery key, recovery tools and ProgramData state.
 
 A default exclusion list skips reproducible folders such as `node_modules`,
-Python virtual environments and build-tool caches. Change the schedule later in
-**Settings > Edit schedule**, and add or remove folders on **Protection**.
+Python virtual environments, test coverage reports and build-tool caches. Its
+rules name what those tools write, not bare folder names, so a personal folder
+that shares a name with one (a `Coverage` folder of insurance papers, say) is
+still backed up. The list comes with Rewindle and changes only with an update.
+Change the schedule later in **Settings > Edit schedule**, and add or remove
+folders on **Protection**.
 
 <details>
 <summary><strong>Unattended install and options</strong></summary>

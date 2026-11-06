@@ -145,6 +145,17 @@ exclusion set. When configured, Restic asks Windows VSS for filesystem
 snapshots of local fixed NTFS sources so open files can be read from a
 consistent view.
 
+The exclusion set is the installed `excludes.txt`, read with
+`--iexclude-file` (so every rule ignores letter case), plus `--exclude-caches`
+for folders tagged with `CACHEDIR.TAG`; the dry run uses the same two. A rule
+that names a single folder, such as `**/node_modules`, matches that name
+anywhere, so such rules are kept to names only developer tools use. For names
+that people also give their own folders (`coverage`, `venv`, `.cache`), the
+rules name what the tools write inside them, such as `**/coverage/lcov.info`
+or `**/venv/Lib`. The file is part of the manifest-hashed payload: editing the
+installed copy makes the protected managers and repair helpers refuse to run,
+so it changes only with an update.
+
 ## Successful-run criteria
 
 A Restic process exit code alone does not mark a run successful. The wrapper
