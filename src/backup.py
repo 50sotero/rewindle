@@ -114,6 +114,68 @@ def select_snapshot(
     return max(matches, key=lambda item: item.get("time", ""))
 
 
+# The most backups the inventory record counts; a listing larger than this is
+# not described rather than described wrongly.
+MAX_INVENTORY_COUNT = 1_000_000
+
+
+def summarize_restorable_snapshots(
+    config: dict[str, Any], snapshots: Any, counted_utc: str
+) -> dict[str, Any] | None:
+    """How many backups the dashboard's Restore list would offer, and the oldest and newest.
+
+    Display-only evidence: nothing is allowed or refused because of it, and it never fails a
+    backup. It counts with restore.py's own browse rule (snapshot_binding_state: this plan, any
+    generation, plus earlier backups that match this configuration exactly), and, like that
+    list, describes nothing when any entry of the listing is not a snapshot with an exact ID.
+    """
+    try:
+        # Imported here, not at the top: a problem in restore.py costs this record, never a
+        # backup. backup.py puts its own folder first on sys.path, which the launcher's -I
+        # would otherwise leave out. restore.py imports nothing of Rewindle's (the recovery
+        # kit copies it alone), so this adds no new dependency to it.
+        from restore import snapshot_binding_state, validate_snapshot
+
+        if not isinstance(snapshots, list) or len(snapshots) > MAX_INVENTORY_COUNT:
+            return None
+        count = 0
+        times: list[datetime] = []
+        for snapshot in snapshots:
+            # The Restore list refuses a listing with an entry that is not a snapshot.
+            validate_snapshot(snapshot)
+            if snapshot_binding_state(snapshot, config) is None:
+                continue
+            count += 1
+            moment = _snapshot_time_utc(snapshot.get("time"))
+            if moment is not None:
+                times.append(moment)
+        if count < 1 or not times:
+            return None
+        return {
+            "schema_version": 1,
+            "count": count,
+            "oldest_utc": _utc_text(min(times).replace(microsecond=0)),
+            "newest_utc": _utc_text(max(times).replace(microsecond=0)),
+            "counted_utc": counted_utc,
+            "rule": "restore_browse",
+        }
+    except Exception:
+        return None
+
+
+def _snapshot_time_utc(value: Any) -> datetime | None:
+    if not isinstance(value, str) or len(value) > 64:
+        return None
+    try:
+        # Python 3.11 and later read Restic's nine fraction digits and a "Z".
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
 def parse_json_lines(line: str) -> dict[str, Any] | None:
     try:
         value = json.loads(line)
@@ -654,6 +716,9 @@ def _run_locked(
         "verification_complete": False,
         "progress": None,
         "summary": None,
+        # How many backups the Restore list offers after this run, and how far back
+        # they go (summarize_restorable_snapshots). Display only.
+        "snapshot_inventory": None,
         "change_anomaly": None,
         "maintenance_hold": False,
         "errors": [],
@@ -925,6 +990,11 @@ def _run_locked(
             status["snapshot_created"] = bool(
                 summary_snapshot_id
                 and snapshot_id not in prior_matching_snapshot_ids
+            )
+            # From the listing just read, which already holds this run's backup
+            # (or the unchanged one it kept): no extra Restic call.
+            status["snapshot_inventory"] = summarize_restorable_snapshots(
+                config, snapshots, utc_now()
             )
             cancellation_checkpoint(cancellation, on_cancellation)
 
