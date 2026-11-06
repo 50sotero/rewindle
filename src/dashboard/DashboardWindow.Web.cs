@@ -978,6 +978,10 @@ namespace ResticBackuper.Dashboard
                 // when somebody who needs it larger needs it most.
                 return ExecuteZoomCommand(payload, out error);
             }
+            if (RetentionBlocksCommand(command, out error))
+            {
+                return false;
+            }
             if (IsRunDetailsCommand(command))
             {
                 return ExecuteRunDetailsCommand(command, payload, out error);
@@ -1015,6 +1019,10 @@ namespace ResticBackuper.Dashboard
             {
                 error = "Finish or close the guided restore flow before using another dashboard control.";
                 return false;
+            }
+            if (IsRetentionCommand(command))
+            {
+                return ExecuteRetentionCommand(command, payload, out error);
             }
             if (string.Equals(command, "refresh", StringComparison.Ordinal))
             {
@@ -1818,6 +1826,7 @@ namespace ResticBackuper.Dashboard
             state["recovery"] = BuildWebRecoveryState();
             state["setup"] = BuildWebSetupState();
             state["restoreFlow"] = BuildWebRestoreFlowState();
+            state["retention"] = BuildWebRetentionState();
             state["actions"] = BuildWebActionStates();
             return state;
         }
@@ -2335,6 +2344,7 @@ namespace ResticBackuper.Dashboard
             actions["checkReadiness"] = BuildWebActionState(checkRecoveryReadinessButton);
             actions["viewRunDetails"] = BuildWebActionState(viewRunDetailsButton);
             actions["exportDiagnostics"] = BuildWebActionState(exportDiagnosticsButton);
+            ApplyRetentionBusyToActions(actions);
             return actions;
         }
 

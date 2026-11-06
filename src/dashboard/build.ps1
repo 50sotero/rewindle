@@ -112,6 +112,7 @@ $sources = @(
     (Join-Path $project 'RepositoryManager.cs'),
     (Join-Path $project 'RepositoryLocationWindow.cs'),
     (Join-Path $project 'RestoreManager.cs'),
+    (Join-Path $project 'RetentionManager.cs'),
     (Join-Path $project 'RestoreWindow.cs'),
     (Join-Path $project 'RecoveryHealthManager.cs'),
     (Join-Path $project 'RecoveryReadinessWindow.cs'),
@@ -137,7 +138,8 @@ $sources = @(
     (Join-Path $project 'DashboardWindow.RestoreFlow.cs'),
     (Join-Path $project 'DashboardWindow.BackupSpace.cs'),
     (Join-Path $project 'DashboardWindow.Web.cs'),
-    (Join-Path $project 'DashboardWindow.Alerts.cs')
+    (Join-Path $project 'DashboardWindow.Alerts.cs'),
+    (Join-Path $project 'DashboardWindow.Retention.cs')
 )
 foreach ($source in $sources) {
     if (-not (Test-Path -LiteralPath $source)) {
