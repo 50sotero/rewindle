@@ -89,6 +89,8 @@ export interface RestoreResult {
   target: string;
   verified: boolean;
   error: string | null;
+  /** An incomplete restore that brought back none of the chosen items, so the page does not say some files were copied. */
+  nothingRestored?: boolean;
   snapshotId: string;
   title?: string;
   message?: string;

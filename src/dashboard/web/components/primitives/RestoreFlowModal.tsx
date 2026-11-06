@@ -660,9 +660,11 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
   const detail = resultStep ? '' : current.message.detail || 'Choose a backup, choose what to restore, then choose an empty folder to restore into. Nothing is changed until the last step.';
   const spoken = resultStep || restoring || activeStep === 'destination' ? '' : [current.message.title, current.message.detail].filter(Boolean).join('. ');
   const resultTone = statusTone(resultStatus);
+  // An incomplete restore that brought back none of the chosen items: nothing was copied, so nothing on this screen says some files were.
+  const nothingRestored = resultStatus === 'partial' && !!result?.nothingRestored;
   // Files to look at: a verified restore, or a partial one that leaves what it restored in the destination. Open and Copy carry no
   // path: the host acts on the folder the manager reported, and only after a restore has ended (the host checks that again).
-  const resultFolder = (resultStatus === 'success' || resultStatus === 'partial') && result?.target ? result.target : '';
+  const resultFolder = (resultStatus === 'success' || (resultStatus === 'partial' && !nothingRestored)) && result?.target ? result.target : '';
   // These two only look at, or copy the name of, a folder the host already knows, so they work whenever the host answers.
   const hostReachable = availability !== 'offline';
   const canContinueFiles = selectionAccepted && (wholeSnapshot || paths.length > 0);
@@ -718,12 +720,13 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
   // backup and the check, and the latter only for a restore that ran.
   const resultTitle = resultStatus === 'success' ? 'Restore complete and verified' : resultStatus === 'partial' ? 'Restore incomplete' : result?.title || current.message.title || (resultStatus === 'cancelled' ? 'Windows permission was not given' : 'Restore did not finish');
   const resultMessage = result?.message || result?.error || (resultStatus === 'success' ? 'Your files were restored and checked against the backup.' : resultStatus === 'partial' ? 'Some files were restored. The rest were not.' : resultStatus === 'cancelled' ? 'Nothing was restored. Rewindle needs that permission to read your backup.' : 'Rewindle could not complete the restore.');
-  const showVerification = resultStatus === 'success' || resultStatus === 'partial';
+  const showVerification = resultStatus === 'success' || (resultStatus === 'partial' && !nothingRestored);
   // Where in the folder the files are: a restore keeps each file's whole original path, starting with the drive letter, in both backup
   // services (restore.py builds `restic restore <backup> --target <folder> --include <path>` without --source).
   const exampleInside = paths[0] ? displayPath(paths[0]).replace(':', '') : 'C\\Users\\you\\Documents';
   // The next step for anything that is not a success: what is safe, and what to do (the buttons carry the doing).
   const resultNext = resultStatus === 'success' ? []
+    : nothingRestored ? ['Nothing was copied to the folder you chose. Your current files were not changed.']
     : resultStatus === 'partial' ? ['Some files were copied to the folder below; the rest were not. To try again, choose a different empty folder. Rewindle never writes into a folder that already has files in it. Your current files were not changed.']
     : resultStatus === 'cancelled' ? ['Your current files and your backups were not changed.']
     : ['Your current files and your backups were not changed.', 'If this keeps happening, choose Save problem report in Settings and send the file when you ask for help.'];
@@ -741,7 +744,7 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
   const [hint] = ((): [string, boolean] => {
     if (restoring) return ['Restoring… this window unlocks when it finishes.', false];
     if (activeStep === 'success') return [resultFolder ? 'Done. Open the folder, then copy the files you need back.' : 'Your files were restored and checked.', false];
-    if (activeStep === 'partial') return ['Some files were not restored. Your current files were not changed.', false];
+    if (activeStep === 'partial') return [nothingRestored ? 'Nothing was restored. Your current files were not changed.' : 'Some files were not restored. Your current files were not changed.', false];
     if (activeStep === 'error') return ['Your current files and your backups were not changed.', false];
     if (availability !== 'ok') return [UNAVAILABLE_HINT[availability], true];
     if (activeStep === 'destination' && destinationChecking) return ['Checking the folder…', true];

@@ -990,6 +990,18 @@ try {
     Assert-True ($null -eq (Invoke-Private $dashboard 'BuildWebRestoreFlowState')['result']['title']) 'a missing host headline was replaced with a fixed one'
     # The protected manager reports no file counts, so none are published for the page to show as placeholders.
     Assert-True (-not (Invoke-Private $dashboard 'BuildWebRestoreFlowState')['result'].ContainsKey('restoredFiles')) 'the restore result carried a placeholder file count'
+    # The page is told when an incomplete restore brought back none of the chosen items, so it does not say that some files were copied;
+    # only for that result, and the flag goes with the result it belongs to.
+    $resultFields = 'restoreFlowResultStatus', 'restoreFlowResultTarget', 'restoreFlowResultVerified', 'restoreFlowResultError', 'restoreFlowResultSnapshotId', 'restoreFlowFailedOperation'
+    $resultBefore = @{}
+    foreach ($field in $resultFields) { $resultBefore[$field] = (Get-PrivateField $dashboard $field).GetValue($dashboard) }
+    Set-PrivateField $dashboard 'restoreFlowResultNothingRestored' $true
+    Assert-True (-not [bool](Invoke-Private $dashboard 'BuildWebRestoreFlowState')['result']['nothingRestored']) 'a result that is not an incomplete restore was said to have copied nothing'
+    Set-PrivateField $dashboard 'restoreFlowResultStatus' 'partial'
+    Assert-True ([bool](Invoke-Private $dashboard 'BuildWebRestoreFlowState')['result']['nothingRestored']) 'the page was not told that an incomplete restore copied nothing'
+    Invoke-Private $dashboard 'ClearRestoreFlowResult' | Out-Null
+    Assert-True (-not [bool](Get-FieldValue $dashboard 'restoreFlowResultNothingRestored')) 'a new restore kept the last one''s "nothing was copied"'
+    foreach ($field in $resultFields) { Set-PrivateField $dashboard $field $resultBefore[$field] }
 
     # What the destination check read about its drive reaches the page as words, with the warning the review step shows again; a drive
     # that would not say how much room it has publishes nothing. The fields the checks below rely on are put back afterwards.
@@ -1160,7 +1172,38 @@ try {
     # A restore that Restic finished without an error but that left a chosen item out (restore.py's own check) is put in plain
     # words with a next step, as the incomplete restore it reaches the dashboard as.
     $missingItems = [string](Invoke-Static $restoreLauncherType 'Sanitize' @('Restic finished without restoring every chosen item (2 of 3 missing); the alternate target was retained for inspection'))
-    Assert-True ($missingItems -match 'items you chose were not restored' -and $missingItems -match 'To try again' -and $missingItems -notmatch 'Restic|alternate target') ('a chosen item missing after the restore was not put in plain words: ' + $missingItems)
+    Assert-True ($missingItems -match 'Some of the items you chose were not restored' -and $missingItems -match 'To try again' -and $missingItems -notmatch 'Restic|alternate target') ('a chosen item missing after the restore was not put in plain words: ' + $missingItems)
+    # When none of the chosen items came back, the words say none, not some, and nothing that describes the result says files were copied.
+    $noneCame = 'Restic finished without restoring every chosen item (2 of 2 missing); the alternate target was retained for inspection'
+    $noneItems = [string](Invoke-Static $restoreLauncherType 'Sanitize' @($noneCame))
+    Assert-True ($noneItems -match '^None of the items you chose were restored' -and $noneItems -match 'To try again' -and $noneItems -notmatch 'Some|Restic|alternate target') ('a restore that brought back no chosen item was not said to have restored none: ' + $noneItems)
+    $reportType = $assembly.GetType('ResticBackuper.Dashboard.ProtectedRestoreReport', $true)
+    function New-PartialReport([string]$ErrorText, [int]$ResticExitCode) {
+        return [Activator]::CreateInstance($reportType, $constructorFlags, $null, [object[]]@('partial', 'snapshot', 'C:\Restored', $false, $true, $ResticExitCode, $ErrorText, 'plan'), $null)
+    }
+    Assert-True ([bool](Invoke-Static $restoreLauncherType 'NoChosenItemRestored' @((New-PartialReport $noneCame 0)))) 'a restore that brought back no chosen item was not recognised'
+    foreach ($someCame in @(
+        @{ Text = 'Restic finished without restoring every chosen item (1 of 2 missing); the alternate target was retained for inspection'; Code = 0 },
+        @{ Text = 'Restic restore failed with exit code 3; the alternate target was retained for inspection'; Code = 3 },
+        @{ Text = 'Some restored files could not be moved into the folder you chose; another program may have been using them. Besides those, the item you chose was not restored at all.'; Code = 0 },
+        @{ Text = $null; Code = 0 })) {
+        Assert-True (-not [bool](Invoke-Static $restoreLauncherType 'NoChosenItemRestored' @((New-PartialReport $someCame.Text $someCame.Code)))) ('a restore that may have copied files was taken for one that copied none: ' + $someCame.Text)
+    }
+    Assert-True (-not [bool](Invoke-Static $restoreLauncherType 'NoChosenItemRestored' @($null))) 'a missing report was taken for a restore that copied nothing'
+    $noneDetail = [string](Invoke-Static $dashboardType 'RestoreFlowPartialDetail' @($noneItems, $true))
+    Assert-True ($noneDetail.StartsWith($noneItems) -and $noneDetail -match 'Nothing was copied to the folder you chose' -and $noneDetail -notmatch 'Some files were copied') ('a restore that copied nothing was said to have copied some files: ' + $noneDetail)
+    $someDetail = [string](Invoke-Static $dashboardType 'RestoreFlowPartialDetail' @($missingItems, $false))
+    Assert-True ($someDetail.StartsWith($missingItems) -and $someDetail -match 'Some files were copied to the folder you chose' -and $someDetail -notmatch 'Nothing was copied') ('a partial restore was not said to have copied some files: ' + $someDetail)
+    # restore.py's refusal of an item that is not one path as the backup lists it, with or without --source, reaches a person (the
+    # older restore window takes typed paths) in plain words with a next step, never in the engine's.
+    foreach ($includeRefusal in @(
+        'an include must be one item''s path as Restic lists it, starting with / and the drive letter, for example /C/Users/you/Documents/report.docx',
+        'an include must be one item''s path inside the --source folder, starting with /, for example /Taxes/return.pdf for Taxes\return.pdf in that folder')) {
+        foreach ($answering in @('restore', $null)) {
+            $plainRefusal = [string](Invoke-Static $restoreLauncherType 'SanitizeAnswer' @($includeRefusal, $answering))
+            Assert-True ($plainRefusal -match 'nothing was restored' -and $plainRefusal -match 'Choose the items again' -and $plainRefusal -notmatch 'Restic|snapshot|--source|include|/C/') ('the restore step''s refusal of an item was not put plainly: ' + $plainRefusal)
+        }
+    }
     # Only a plan with the "strict" cloud placeholder policy (or none) refuses a folder for online-only files, as the backup does.
     Assert-True ([bool](Invoke-Static $dashboardType 'RefusesOnlineOnlyFiles' @('strict')) -and -not [bool](Invoke-Static $dashboardType 'RefusesOnlineOnlyFiles' @('allow'))) 'the folder check did not follow the plan''s cloud placeholder policy'
     $rewindleEngine = $engineProfileType.GetProperty('Rewindle', $flags).GetValue($null)

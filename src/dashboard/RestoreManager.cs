@@ -11,6 +11,7 @@ using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
@@ -1451,10 +1452,21 @@ namespace ResticBackuper.Dashboard
             {
                 return "Rewindle could not finish putting the restored files in place." + outcome;
             }
-            // Restic finished without an error, but restore.py did not find every chosen item in the folder afterwards.
+            // Restic finished without an error, but restore.py did not find every chosen item in the folder afterwards. Its count
+            // ("2 of 2 missing") tells a restore that brought back none of them from one that left some out.
             if (text.Contains("without restoring every chosen item"))
             {
-                return "Some of the items you chose were not restored, even though the restore finished without an error. To try again, choose the folder that holds them and a new empty folder to restore into.";
+                int missing;
+                int chosen;
+                bool none = TryReadMissingChosenItems(text, out missing, out chosen) && missing == chosen;
+                return (none ? "None of the items you chose were restored" : "Some of the items you chose were not restored") +
+                    ", even though the restore finished without an error. To try again, choose the folder that holds them and a new empty folder to restore into.";
+            }
+            // restore.py refuses an item that is not one path as the backup lists it, before anything is restored. The dashboard
+            // sends only items picked from the backup's own list, but the older restore window also takes typed paths.
+            if (text.Contains("an include must be one item's path"))
+            {
+                return "One of the items to restore is not written the way the backup lists it, so nothing was restored. Choose the items again from the list of what is in the backup, or choose the folder that holds them, then try again.";
             }
             if (text.Contains("restore target must not overlap"))
             {
@@ -1473,6 +1485,35 @@ namespace ResticBackuper.Dashboard
                 return "Choose a folder on the drive, not the top of the drive itself. A new folder named Rewindle restore works well.";
             }
             return message;
+        }
+
+        private static readonly Regex MissingChosenItemsCount = new Regex(
+            @"without restoring every chosen item \((\d{1,4}) of (\d{1,4}) missing\)",
+            RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+        // restore.py's count of the chosen items that were not in the folder after Restic finished, "(N of M missing)".
+        internal static bool TryReadMissingChosenItems(string message, out int missing, out int chosen)
+        {
+            missing = 0;
+            chosen = 0;
+            Match match = MissingChosenItemsCount.Match(message ?? string.Empty);
+            if (!match.Success)
+            {
+                return false;
+            }
+            missing = int.Parse(match.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture);
+            chosen = int.Parse(match.Groups[2].Value, NumberStyles.None, CultureInfo.InvariantCulture);
+            return missing > 0 && missing <= chosen;
+        }
+
+        // A restore that Restic finished without bringing back any of the chosen items: none of them is in the folder, so nothing
+        // that describes the result may say that some files were copied there.
+        internal static bool NoChosenItemRestored(ProtectedRestoreReport report)
+        {
+            int missing;
+            int chosen;
+            return report != null && report.ResticExitCode == 0 &&
+                TryReadMissingChosenItems(report.ErrorMessage, out missing, out chosen) && missing == chosen;
         }
 
         private static bool PathOrEmptyEquals(string left, string right)

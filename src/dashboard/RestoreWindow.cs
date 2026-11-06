@@ -750,6 +750,16 @@ namespace ResticBackuper.Dashboard
                 openTargetButton.Visibility = Directory.Exists(completedTarget)
                     ? Visibility.Visible
                     : Visibility.Collapsed;
+                // Restic brought back none of the chosen items, so there are no partial files to look at.
+                if (RestoreManagerLauncher.NoChosenItemRestored(result.Report))
+                {
+                    SetBusy(
+                        false,
+                        "Restore incomplete — nothing restored",
+                        result.ErrorMessage + " Nothing was copied to the alternate destination; live files were not changed.",
+                        false);
+                    return;
+                }
                 SetBusy(
                     false,
                     "Restore incomplete — partial files retained",

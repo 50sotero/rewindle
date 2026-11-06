@@ -110,6 +110,17 @@ contains an invalid folder name`, `Windows and program folders could not be iden
 could not be identified` (only when `restore.py` runs unelevated). The dashboard words all of them plainly and refuses
 the same system folders at the destination step for both profiles; the legacy engine's own `restore.py` does neither.
 
+**Chosen items (Rewindle `restore.py`).** Each `--include` is one item's path as Restic lists it (inside the source
+with `--source`), taken literally: `restore.py` writes every `[` as `[[]` for Restic, and refuses any other form with an
+error that starts `an include must be one item's path`, before anything is restored but after the report is bound to
+the snapshot, so the protected manager accepts the report and passes the refusal on. Restic ends a restore that matched
+nothing with exit code 0, so after it exits 0 every chosen item is looked for (by `lstat`) in the target, or in the
+restore folder for an item below a name the hand-over left there. When one is missing the report is `partial`, not
+verified, with `restic_exit_code` 0 and the error `Restic finished without restoring every chosen item (N of M
+missing); the alternate target was retained for inspection`; when the hand-over also left items, its plain message gets
+a plain sentence counting the missing ones instead. The dashboard words the refusal and the error plainly, and reads N
+and M to say whether none or only some of the chosen items came back.
+
 **Moving the repository (Rewindle `Manage-Repository.ps1`).** The stages `.restic-repository-<nonce>.staging` and
 `.restic-recovery-<nonce>.staging` are held open (list access, read and write sharing, no delete access, no delete
 sharing) from their creation until they have their final names, so neither a stage nor any folder above it can be

@@ -55,6 +55,8 @@ namespace ResticBackuper.Dashboard
         private string restoreFlowResultTarget;
         private bool restoreFlowResultVerified;
         private string restoreFlowResultError;
+        // An incomplete restore in which Restic brought back none of the chosen items, so nothing says some files were copied.
+        private bool restoreFlowResultNothingRestored;
         private string restoreFlowResultSnapshotId;
         private RestoreManagerResult restoreFlowLastResult;
         // The protected step that last failed: "snapshots", "tree", "restore" or "config". Retry uses it
@@ -1434,6 +1436,7 @@ namespace ResticBackuper.Dashboard
                 restoreFlowResultTarget = result.Report.Target;
                 restoreFlowResultVerified = true;
                 restoreFlowResultError = string.Empty;
+                restoreFlowResultNothingRestored = false;
                 SetRestoreFlowMessage(
                     "Restore complete and verified",
                     "Your files are in " + result.Report.Target + ".");
@@ -1449,9 +1452,10 @@ namespace ResticBackuper.Dashboard
                 restoreFlowResultTarget = result.Report.Target;
                 restoreFlowResultVerified = result.Report.Verified;
                 restoreFlowResultError = result.ErrorMessage ?? "The restore stopped before every file was checked.";
+                restoreFlowResultNothingRestored = RestoreManagerLauncher.NoChosenItemRestored(result.Report);
                 SetRestoreFlowMessage(
                     "Restore incomplete",
-                    restoreFlowResultError + " Some files were copied to the folder you chose; your current files were not changed.");
+                    RestoreFlowPartialDetail(restoreFlowResultError, restoreFlowResultNothingRestored));
                 PublishWebPresentationState();
                 return;
             }
@@ -2276,6 +2280,15 @@ namespace ResticBackuper.Dashboard
             restoreFlowMessageDetail = detail ?? string.Empty;
         }
 
+        // What an incomplete restore left in the folder, after why it stopped. When Restic brought back none of the chosen items,
+        // nothing of them was copied there, so the sentence does not say that some files were.
+        internal static string RestoreFlowPartialDetail(string error, bool nothingRestored)
+        {
+            return (error ?? string.Empty) + (nothingRestored
+                ? " Nothing was copied to the folder you chose; your current files were not changed."
+                : " Some files were copied to the folder you chose; your current files were not changed.");
+        }
+
         private void SetRestoreFlowFailure(string title, string detail, string resultStatus)
         {
             restoreFlowBusy = false;
@@ -2368,6 +2381,7 @@ namespace ResticBackuper.Dashboard
             restoreFlowResultTarget = null;
             restoreFlowResultVerified = false;
             restoreFlowResultError = null;
+            restoreFlowResultNothingRestored = false;
             restoreFlowFailedOperation = string.Empty;
             restoreFlowResultSnapshotId = string.IsNullOrWhiteSpace(restoreFlowSelectedSnapshotId)
                 ? null
@@ -2489,6 +2503,8 @@ namespace ResticBackuper.Dashboard
                 { "target", restoreFlowResultTarget },
                 { "verified", restoreFlowResultVerified },
                 { "error", restoreFlowResultError },
+                // An incomplete restore that brought back none of the chosen items: the page then says nothing was copied.
+                { "nothingRestored", restoreFlowResultStatus == "partial" && restoreFlowResultNothingRestored },
                 { "snapshotId", restoreFlowResultSnapshotId },
                 // A cancelled approval, an unreadable snapshot list or a changed plan is not a failed restore,
                 // so only a restore that ran gets a fixed headline; anything else says what actually happened,
