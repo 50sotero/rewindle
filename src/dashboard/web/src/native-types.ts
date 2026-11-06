@@ -18,7 +18,10 @@ export type CommandName = 'ready' | 'refresh' | 'navigate' | 'setTheme' | 'toggl
   // Settings > Backup alerts: notifications on or off ({ notify: 'on' | 'off' }). A per-user preference like the theme, not protected.
   | 'setAlerts'
   // Settings > Backup location > Low space warning: { weeks: '4' | '8' | '12' }. Only changes when the page warns, so it is not protected.
-  | 'setSpaceWarning';
+  | 'setSpaceWarning'
+  // Settings > Old backups (clean-up of old backups). Only the dialogs' own buttons send retentionConfigure and retentionApply.
+  | 'retentionConfigure' | 'retentionCheckNow' | 'retentionOpenReview' | 'retentionReviewPage' | 'retentionApply'
+  | 'retentionCloseReview';
 /**
  * The commands that change the backup plan, the schedule, the repository or a restore, or ask the host to read them.
  * They need a live link and readable backup status, and the animation preview pauses them. Everything else (moving
@@ -33,6 +36,7 @@ export const PROTECTED_COMMANDS: ReadonlySet<CommandName> = new Set<CommandName>
   'browseSourcePicker', 'validateSourcePath', 'confirmSourcePicker',
   'restoreFlowBrowseSnapshots', 'restoreFlowBrowseFiles', 'restoreFlowBrowseDestination', 'restoreFlowValidateDestination',
   'restoreFlowSelectPaths', 'restoreFlowReview', 'restoreFlowStart', 'restoreFlowCancel', 'restoreFlowRetry', 'restoreFlowNavigate',
+  'retentionConfigure', 'retentionCheckNow', 'retentionOpenReview', 'retentionApply',
 ]);
 /** Why protected controls are on or off: the link works and the status reads (`ok`), or one of the reasons it does not. */
 export type Availability = 'ok' | 'offline' | 'dataError' | 'preview';
@@ -300,6 +304,8 @@ export interface DashboardState {
   actions: Partial<Record<CommandName, ActionState>>;
   runDetails?: RunDetailsState | null;
   restoreFlow?: RestoreFlowState | null;
+  /** Clean-up of old backups (Settings > Old backups). Additive: an older host and the sample bridge may not send it; the card is then not drawn. */
+  retention?: RetentionState | null;
 }
 /** Why a scheduled backup did not happen, as the host's MissedRunExplainer names it; `unknown` when nothing more is known. */
 export type MissedRunKind = 'unknown' | 'driveMissing' | 'repairPending' | 'ranAndFailed' | 'cancelled' | 'busy' | 'programProblem'
@@ -357,3 +363,70 @@ export function usableLocale(value?: string): string | undefined {
  */
 export interface RestoreFlowApproval { waiting: boolean; session: boolean; notice: string }
 // ---- end of the restore approval session block -------------------------------------------------------------------------
+// ---- Clean-up of old backups ------------------------------------------------------------------------------------------
+/** Why clean-up has to wait, as the backup service reports it. The page words each one (retention.ts). */
+export type RetentionBlocked = '' | 'google_drive_not_supported' | 'pending_change' | 'no_verified_backup' | 'last_backup_not_verified'
+  | 'folders_changed' | 'change_review_open' | 'clock_problem' | 'future_dated_backup' | 'backup_location_unavailable' | 'policy_inactive';
+export type RetentionOutcome = 'removed' | 'nothing_to_remove' | 'partial' | 'space_pending' | 'check_failed' | 'failed';
+/** A hint only: the host checks again when the button is pressed. `help` is why it is off. */
+export interface RetentionAbility { enabled: boolean; help: string }
+export interface RetentionPreviewState {
+  /** `stale`: the list was made before the latest backup. `none`: there is no list yet. */
+  status: 'none' | 'ready' | 'blocked' | 'error' | 'stale';
+  blocked: RetentionBlocked;
+  errorCode: string;
+  checkedAt: string;
+  removeCount: number; keepCount: number;
+  /** ISO 8601 times of the oldest and newest backup that would go. */
+  oldestRemoveAt: string; newestRemoveAt: string;
+  /** The newest earlier backup with unusual changes nobody confirmed, or empty. */
+  earlierChangeAt: string;
+  earlierChangesUnknown: boolean;
+  futureDatedAt: string;
+  /** Backups were removed earlier and their space is not freed yet. */
+  prunePending: boolean;
+}
+export interface RetentionLastRun { finishedAt: string; outcome: RetentionOutcome; removedCount: number; confirmedCount: number; freedDisplay: string }
+export interface RetentionOperationState {
+  active: boolean;
+  action: '' | 'configure' | 'preview' | 'apply';
+  stage: '' | 'approval' | 'listing' | 'checking' | 'freeing' | 'verifying';
+  count: number;
+  percent: number | null;
+}
+/** One backup in the list: when it was made, how many files it had, and (staying list only) why it stays. */
+export interface RetentionReviewRow { key: string; when: string; files: number | null; reasons: string[] }
+export type RetentionResultStatus = 'removed' | 'nothing_to_remove' | 'declined' | 'preview_changed' | 'refused' | 'partial'
+  | 'space_pending' | 'check_failed' | 'failed' | 'unconfirmed';
+/**
+ * The list of old backups while it is open. Only counts, month totals and one page of rows are sent; the host keeps the whole list
+ * and is the one that binds the removal to it. `changed`: the list on disk is no longer the one shown, so nothing can be removed
+ * until it is shown again. `result` replaces the list once a removal was asked for.
+ */
+export interface RetentionReviewState {
+  removeCount: number; keepCount: number; newestKeptAt: string;
+  earlierChanges: string[]; earlierChangesUnknown: boolean; needsFilesConfirmed: boolean;
+  pruneOnly: boolean; changed: boolean; running: boolean;
+  /** Changes whenever a different list is shown, so ticked boxes are cleared. */
+  captureKey: string;
+  months: { month: string; count: number }[];
+  page: { list: 'remove' | 'keep'; offset: number; total: number; size: number; rows: RetentionReviewRow[] };
+  result: null | { status: RetentionResultStatus; removedCount: number; confirmedCount: number; freedDisplay: string; reason: string };
+}
+export interface RetentionState {
+  mode: 'unsupported' | 'unknown' | 'off' | 'on';
+  unsupportedReason: '' | 'legacy' | 'older_service' | 'google_drive';
+  /** The counts in force, or the ones the dialog suggests. */
+  keepDaily: number; keepWeekly: number; keepMonthly: number;
+  limits: { daily: [number, number]; weekly: [number, number]; monthly: [number, number] };
+  recommended: { daily: number; weekly: number; monthly: number };
+  /** It was on, and an update or reinstall turned it off. */
+  resetByReinstall: boolean;
+  problem: string;
+  preview: RetentionPreviewState | null;
+  lastRun: RetentionLastRun | null;
+  operation: RetentionOperationState;
+  notice: { text: string; tone: 'info' | 'success' | 'warning' | 'error' } | null;
+  canConfigure: RetentionAbility; canTurnOff: RetentionAbility; canReview: RetentionAbility; canCheckNow: RetentionAbility;
+  review: RetentionReviewState | null;
+}
