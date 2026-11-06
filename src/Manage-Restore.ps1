@@ -1210,10 +1210,13 @@ function Assert-FindPayload {
         -not (Test-FindPayloadTime -Value (Get-OptionalProperty -Object $Payload -Name 'searched_oldest_time'))) {
         throw $failure
     }
+    # A finished search has no next start, and too_many may have none when its last batch reached the oldest backup; every
+    # other answer names the exact backup the next page starts from.
     if ([string]$status -ceq 'complete') {
         if ($null -ne $next) { throw $failure }
     }
-    elseif ($next -isnot [string] -or [string]$next -cnotmatch '^[0-9a-f]{64}\z') { throw $failure }
+    elseif (-not ([string]$status -ceq 'too_many' -and $null -eq $next) -and
+        ($next -isnot [string] -or [string]$next -cnotmatch '^[0-9a-f]{64}\z')) { throw $failure }
     $found = Get-FindPayloadArray -Object $Payload -Name 'matches'
     if ($null -eq $found -or $found.Count -gt 100) { throw $failure }
     foreach ($match in $found) {

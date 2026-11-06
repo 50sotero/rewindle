@@ -195,6 +195,12 @@ namespace ResticBackuper.Dashboard
         public ProtectedRestoreReport Report { get; private set; }
         public bool? HistoryRecorded { get; private set; }
         public string HistoryError { get; private set; }
+        public RestoreFileSearchPage FileSearch { get; private set; }
+
+        internal static RestoreManagerResult SuccessFileSearch(RestoreFileSearchPage page)
+        {
+            return new RestoreManagerResult { Succeeded = true, ExitCode = 0, FileSearch = page };
+        }
 
         internal static RestoreManagerResult SuccessSnapshots(IList<RestoreSnapshot> snapshots)
         {
@@ -400,6 +406,37 @@ namespace ResticBackuper.Dashboard
                 onProgress);
         }
 
+        // Looks for a file or folder by name in every backup the list shows (see RestoreFileSearch.cs). Only an approved restore
+        // session serves a search, so without one (the earlier edition, or an engine that does not offer it) nothing is asked.
+        internal static RestoreManagerResult FindFiles(
+            SourceConfiguration configuration,
+            RestoreSessionHost session,
+            string text,
+            string fromSnapshotId,
+            Action onApprovalRequested,
+            Action onElevatedProcessStarted,
+            Action<RestoreManagerProgress> onProgress)
+        {
+            if (session == null)
+            {
+                return RestoreManagerResult.Failure(DashboardWindow.RestoreFlowSearchUnavailableMessage, -1);
+            }
+            return Run(
+                configuration,
+                "find_files",
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                new string[0],
+                false,
+                session,
+                onApprovalRequested,
+                onElevatedProcessStarted,
+                onProgress,
+                text,
+                fromSnapshotId);
+        }
+
         internal static RestoreManagerResult RunRecoveryDrill(
             SourceConfiguration configuration,
             Action onElevatedProcessStarted,
@@ -430,7 +467,9 @@ namespace ResticBackuper.Dashboard
             RestoreSessionHost session,
             Action onApprovalRequested,
             Action onElevatedProcessStarted,
-            Action<RestoreManagerProgress> onProgress)
+            Action<RestoreManagerProgress> onProgress,
+            string findText = null,
+            string findFromSnapshotId = null)
         {
             if (configuration == null)
             {
@@ -459,6 +498,11 @@ namespace ResticBackuper.Dashboard
             {
                 ValidateRequestFields(
                     action, snapshotId, treePath, target, includes, allowLegacyUnbound);
+                RestoreFileSearch.ValidateRequest(action, findText, findFromSnapshotId);
+                if (action == "find_files" && session == null)
+                {
+                    throw new ArgumentException("A file search is only served by a restore session.");
+                }
                 string configHash = ComputeFileSha256(configuration.ConfigurationPath);
                 string includesJson = new JavaScriptSerializer().Serialize(includes);
                 byte[] includeBytes = new UTF8Encoding(false).GetBytes(includesJson);
@@ -492,7 +536,9 @@ namespace ResticBackuper.Dashboard
                         allowLegacyUnbound,
                         onApprovalRequested,
                         onElevatedProcessStarted,
-                        onProgress);
+                        onProgress,
+                        findText,
+                        findFromSnapshotId);
                 }
                 string nonce = ElevatedRequestSecurity.CreateNonce();
                 if (action == "restore_drill")
@@ -662,7 +708,9 @@ namespace ResticBackuper.Dashboard
             bool allowLegacyUnbound,
             Action onApprovalRequested,
             Action onElevatedProcessStarted,
-            Action<RestoreManagerProgress> onProgress)
+            Action<RestoreManagerProgress> onProgress,
+            string findText,
+            string findFromSnapshotId)
         {
             for (int attempt = 0; attempt < 2; attempt++)
             {
@@ -679,7 +727,9 @@ namespace ResticBackuper.Dashboard
                     target,
                     includesBase64,
                     allowLegacyUnbound,
-                    onProgress);
+                    onProgress,
+                    findText,
+                    findFromSnapshotId);
                 if (exchange.EndedBeforeRequest)
                 {
                     continue;
@@ -702,7 +752,9 @@ namespace ResticBackuper.Dashboard
                     treePath,
                     target,
                     includesHash,
-                    exchange.ExitCode);
+                    exchange.ExitCode,
+                    findText,
+                    findFromSnapshotId);
             }
             return RestoreManagerResult.Failure(
                 "The connection used for restoring ended before this step finished. Try again.",
@@ -866,9 +918,12 @@ namespace ResticBackuper.Dashboard
             string treePath,
             string target,
             string includesHash,
-            int exitCode)
+            int exitCode,
+            string findText = null,
+            string findFromSnapshotId = null)
         {
-            if (document == null || ReadLong(document, "schema_version") != 1 ||
+            if (document == null || !FileSearchFieldsMatch(document, action, findText, findFromSnapshotId) ||
+                ReadLong(document, "schema_version") != 1 ||
                 !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_nonce"), nonce) ||
                 !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_digest"), digest) ||
                 !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_user_sid"), userSid) ||
@@ -901,6 +956,20 @@ namespace ResticBackuper.Dashboard
             {
                 return RestoreManagerResult.SuccessTree(
                     ParseTree(payload, snapshotId, planId, allowLegacyUnbound));
+            }
+            if (action == "find_files" && ok && exitCode == 0 && backendExitCode == 0)
+            {
+                try
+                {
+                    return RestoreManagerResult.SuccessFileSearch(
+                        RestoreFileSearch.Parse(payload, planId, findText, findFromSnapshotId));
+                }
+                catch (InvalidDataException)
+                {
+                    return RestoreManagerResult.Failure(
+                        UnusedResultMessage(action, "Rewindle could not confirm the result of this step, so it was not used."),
+                        exitCode);
+                }
             }
             if ((action == "restore" || action == "restore_drill") && payload != null)
             {
@@ -962,6 +1031,24 @@ namespace ResticBackuper.Dashboard
             return RestoreManagerResult.Failure(
                 "Rewindle could not confirm the result of this step. Try again.",
                 exitCode);
+        }
+
+        // A search's result also says which search it answers (a hash of the text, and where it started); no other result
+        // carries either field.
+        private static bool FileSearchFieldsMatch(
+            IDictionary<string, object> document,
+            string action,
+            string findText,
+            string findFromSnapshotId)
+        {
+            string textHash = ReadOptionalString(document, "find_text_sha256");
+            string from = ReadOptionalString(document, "find_from_snapshot_id");
+            if (action != "find_files")
+            {
+                return textHash == null && from == null;
+            }
+            return ElevatedRequestSecurity.FixedEquals(textHash, RestoreFileSearchText.Sha256(findText)) &&
+                ElevatedRequestSecurity.FixedEquals(from, findFromSnapshotId);
         }
 
         private static IList<RestoreSnapshot> ParseSnapshots(
@@ -1213,7 +1300,7 @@ namespace ResticBackuper.Dashboard
             bool allowLegacyUnbound)
         {
             if (action != "list_snapshots" && action != "list_tree" &&
-                action != "restore" && action != "restore_drill")
+                action != "restore" && action != "restore_drill" && action != "find_files")
             {
                 throw new ArgumentException("The protected restore action is invalid.");
             }
@@ -1221,11 +1308,16 @@ namespace ResticBackuper.Dashboard
             {
                 throw new ArgumentException("Choose one exact snapshot before continuing.");
             }
-            if ((action == "list_snapshots" || action == "restore_drill") && snapshotId.Length != 0)
+            // A file search names no backup or folder of its own: it starts from a backup it carries in its own fields.
+            if ((action == "list_snapshots" || action == "restore_drill" || action == "find_files") && snapshotId.Length != 0)
             {
                 throw new ArgumentException("Snapshot listing must not include a snapshot selector.");
             }
-            if ((action == "list_snapshots" || action == "restore_drill") && allowLegacyUnbound)
+            if (action == "find_files" && (treePath.Length != 0 || target.Length != 0))
+            {
+                throw new ArgumentException("A file search takes no folder or destination.");
+            }
+            if ((action == "list_snapshots" || action == "restore_drill" || action == "find_files") && allowLegacyUnbound)
             {
                 throw new ArgumentException(
                     "Legacy snapshot access is not valid for a snapshot-list request.");
@@ -1697,10 +1789,28 @@ namespace ResticBackuper.Dashboard
 
         internal static bool IsSupported(EngineProfile profile, string installRoot)
         {
+            return ReadSession(profile, installRoot) != null;
+        }
+
+        // Whether the session also serves file searches: the document's restore_session names the profile's file-search
+        // answer under find_files. An older engine has no such key; the legacy edition has no session at all.
+        internal static bool SupportsFileSearch(EngineProfile profile, string installRoot)
+        {
+            IDictionary<string, object> session = profile == null || string.IsNullOrEmpty(profile.FileSearchSchema)
+                ? null
+                : ReadSession(profile, installRoot);
+            object value;
+            return session != null && session.TryGetValue("find_files", out value) &&
+                string.Equals(value as string, profile.FileSearchSchema, StringComparison.Ordinal);
+        }
+
+        // The capability document's restore_session, when it names this profile's protocol, request domain and manager; else null.
+        private static IDictionary<string, object> ReadSession(EngineProfile profile, string installRoot)
+        {
             if (profile == null || string.IsNullOrEmpty(profile.RestoreSessionRequestDomain) ||
                 string.IsNullOrEmpty(profile.RestoreSessionProtocol) || string.IsNullOrWhiteSpace(installRoot))
             {
-                return false;
+                return null;
             }
             try
             {
@@ -1711,7 +1821,7 @@ namespace ResticBackuper.Dashboard
                     !file.Exists || (file.Attributes & FileAttributes.ReparsePoint) != 0 ||
                     file.Length <= 0 || file.Length > MaximumBytes)
                 {
-                    return false;
+                    return null;
                 }
                 byte[] bytes;
                 using (FileStream stream = new FileStream(
@@ -1722,7 +1832,7 @@ namespace ResticBackuper.Dashboard
                 {
                     if (stream.Length <= 0 || stream.Length > MaximumBytes)
                     {
-                        return false;
+                        return null;
                     }
                     bytes = new byte[(int)stream.Length];
                     int offset = 0;
@@ -1731,7 +1841,7 @@ namespace ResticBackuper.Dashboard
                         int read = stream.Read(bytes, offset, bytes.Length - offset);
                         if (read <= 0)
                         {
-                            return false;
+                            return null;
                         }
                         offset += read;
                     }
@@ -1750,11 +1860,13 @@ namespace ResticBackuper.Dashboard
                     session.ContainsKey("protocol") && session.ContainsKey("request_domain") && session.ContainsKey("manager") &&
                     string.Equals(session["protocol"] as string, profile.RestoreSessionProtocol, StringComparison.Ordinal) &&
                     string.Equals(session["request_domain"] as string, profile.RestoreSessionRequestDomain, StringComparison.Ordinal) &&
-                    string.Equals(session["manager"] as string, profile.RestoreManagerFileName, StringComparison.Ordinal);
+                    string.Equals(session["manager"] as string, profile.RestoreManagerFileName, StringComparison.Ordinal)
+                        ? session
+                        : null;
             }
             catch
             {
-                return false;
+                return null;
             }
         }
     }
@@ -2264,7 +2376,9 @@ namespace ResticBackuper.Dashboard
             string target,
             string includesBase64,
             bool allowLegacyUnbound,
-            Action<RestoreManagerProgress> onProgress)
+            Action<RestoreManagerProgress> onProgress,
+            string findText = null,
+            string findFromSnapshotId = null)
         {
             NamedPipeClientStream channel;
             long requestId;
@@ -2278,9 +2392,9 @@ namespace ResticBackuper.Dashboard
                 {
                     return new RestoreSessionExchange { EndedBeforeRequest = true };
                 }
-                if (action != "list_snapshots" && action != "list_tree" && action != "restore")
+                if (action != "list_snapshots" && action != "list_tree" && action != "restore" && action != "find_files")
                 {
-                    return new RestoreSessionExchange { Error = "A restore session serves only listings and one restore." };
+                    return new RestoreSessionExchange { Error = "A restore session serves only listings, file searches and one restore." };
                 }
                 serving = true;
                 channel = pipe;
@@ -2304,6 +2418,12 @@ namespace ResticBackuper.Dashboard
                     { "includes_base64", includesBase64 ?? string.Empty },
                     { "allow_legacy_unbound", allowLegacyUnbound ? "1" : "0" }
                 };
+                if (action == "find_files")
+                {
+                    // Only a search carries these two, and the broker refuses them on any other request.
+                    request["find_text"] = findText ?? string.Empty;
+                    request["find_from_snapshot_id"] = findFromSnapshotId ?? string.Empty;
+                }
                 try
                 {
                     RestoreSessionFraming.Write(
