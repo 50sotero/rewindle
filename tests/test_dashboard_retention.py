@@ -1214,6 +1214,18 @@ class RetentionStaticTests(unittest.TestCase):
             host,
         )
 
+    def test_the_backup_drive_forecast_is_given_what_clean_up_freed(self) -> None:
+        host = (DASHBOARD / "DashboardWindow.Retention.cs").read_text(encoding="utf-8")
+        manager = (DASHBOARD / "RetentionManager.cs").read_text(encoding="utf-8")
+        method = host[host.index("private bool TryGetRetentionSpaceChanges("):]
+        method = method[:method.index("\n        }\n")]
+        # A backup service without clean-up has freed nothing; records not read, or not trusted, leave it unknown.
+        self.assertIn("if (!RetentionSupportedByProfile() || !retentionCapabilityKnown || !retentionCapabilitySupported)", method)
+        self.assertIn("if (view == null || !view.HistoryKnown)", method)
+        self.assertIn("cleanUps.Add(new BackupSpaceCleanUp(change.FinishedUtc, change.FreedBytes));", method)
+        # This harness compiles RetentionManager.cs without BackupSpace.cs, so it never names that file's types.
+        self.assertIsNone(re.search(r"(?<![A-Za-z])BackupSpace[A-Z]", manager))
+
     def test_how_far_back_backups_go_is_unknown_after_a_clean_up_until_counted_again(self) -> None:
         host = (DASHBOARD / "DashboardWindow.Retention.cs").read_text(encoding="utf-8")
         web = (DASHBOARD / "DashboardWindow.Web.cs").read_text(encoding="utf-8")

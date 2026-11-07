@@ -1014,20 +1014,12 @@ class BackupSpaceWiringTests(unittest.TestCase):
         self.assertIn("space.forecast.state === 'unavailable'", self.app)
 
     def test_the_forecast_is_given_what_clean_up_of_old_backups_freed(self) -> None:
-        retention = (DASHBOARD / "DashboardWindow.Retention.cs").read_text(encoding="utf-8")
-        manager = (DASHBOARD / "RetentionManager.cs").read_text(encoding="utf-8")
+        # How the clean-up records reach it is checked with them, in test_dashboard_retention.py.
         self.assertIn("bool cleanUpsKnown = TryGetRetentionSpaceChanges(out cleanUps);", self.window_space)
         self.assertIn("facts.HistoryReadable = readable && cleanUpsKnown;", self.window_space)
         self.assertIn("facts.CleanUps = cleanUps;", self.window_space)
         self.assertIn('forecast["cleanUp"] = CleanUpEffectName(judged.CleanUp);', self.window_space)
         self.assertIn("cleanUp?: '' | 'counted' | 'unmeasured';", self.types)
-        # A backup service without clean-up has freed nothing; records not read, or not trusted, leave it unknown.
-        method = retention[retention.index("private bool TryGetRetentionSpaceChanges("):]
-        method = method[:method.index("\n        }\n")]
-        self.assertIn("if (!RetentionSupportedByProfile() || !retentionCapabilityKnown || !retentionCapabilitySupported)", method)
-        self.assertIn("if (view == null || !view.HistoryKnown)", method)
-        # The retention harness compiles RetentionManager.cs without BackupSpace.cs.
-        self.assertIsNone(re.search(r"(?<![A-Za-z])BackupSpace[A-Z]", manager))
 
     def test_the_sample_data_has_space(self) -> None:
         self.assertIn("space: sampleSpace()", self.demo)
