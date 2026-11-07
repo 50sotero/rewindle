@@ -202,9 +202,12 @@ class Fixture:
                                                        "verification_complete": True, "snapshot_id": snapshot_id(5),
                                                        "repository_id": REPO, "plan_id": PLAN, "config_generation": 7})
 
-    def manifest(self, version: str = "0.3.0", restic_hash: str = "1" * 64) -> None:
+    def manifest(self, version: str = "0.3.0", restic_hash: str = "1" * 64, installation: str | None = "5" * 64) -> None:
+        document: dict = {"schema_version": 1, "version": version}
+        if installation is not None:
+            document["installation_id"] = installation
         write_json(self.install / "runtime-manifest.json", {
-            "schema_version": 1, "version": version, "files": [
+            **document, "files": [
                 {"relative_path": "backup-config.json", "bytes": 1, "sha256": "2" * 64},
                 {"relative_path": "restic.exe", "bytes": 1, "sha256": restic_hash},
                 {"relative_path": "Python/python.exe", "bytes": 1, "sha256": "4" * 64},
@@ -344,14 +347,19 @@ class DashboardRetentionHarnessTests(unittest.TestCase):
     def test_install_identity_policy_and_request_digests_match_the_engine(self) -> None:
         fixture = self.fixture("digests")
         ids = [snapshot_id(3), snapshot_id(1), snapshot_id(2)]
-        install, policy, removal, request = self.run_cases([
+        unnamed = self.fixture("digests-unnamed")
+        unnamed.manifest(installation=None)
+        install, unnamed_install, policy, removal, request = self.run_cases([
             {"op": "install", "path": str(fixture.install / "runtime-manifest.json")},
+            {"op": "install", "path": str(unnamed.install / "runtime-manifest.json")},
             {"op": "policy_digest", "plan": PLAN, "repo": REPO, "install": "a" * 64, "d": 14, "w": 8, "m": 24},
             {"op": "set_digest", "domain": retention.REMOVE_SET_DOMAIN, "ids": ids},
             {"op": "request_digest", "action": "apply", "user": USER, "config": "a" * 64, "plan": PLAN, "generation": 7,
              "preview": "b" * 64, "remove_set": "c" * 64, "remove_count": "2", "confirm": "1", "nonce": "d" * 64},
         ])
         self.assertEqual(install, retention.install_identity(fixture.install))
+        # A manifest the installer wrote names its installation; one that does not cannot bind a setting.
+        self.assertIsNone(unnamed_install)
         self.assertEqual(policy, "84a15a61186356399ad62e0fd1c3c688841a2724a8082ca7ea5879b1da72f7ab")
         self.assertEqual(policy, retention.policy_digest(PLAN, REPO, "a" * 64, 14, 8, 24))
         self.assertEqual(removal, retention.set_digest(retention.REMOVE_SET_DOMAIN, ids))
@@ -423,6 +431,23 @@ class DashboardRetentionHarnessTests(unittest.TestCase):
         updated.policy()
         updated.preview()
         updated.manifest(version="0.4.0")
+        # The same release installed again (after an uninstall, or as a repair): the installer wrote a new installation_id.
+        reinstalled = self.fixture("reinstalled")
+        reinstalled.policy()
+        reinstalled.preview()
+        reinstalled.manifest(installation="6" * 64)
+        # A folder change or a move of the backup location rewrites the manifest but keeps the installation.
+        moved = self.fixture("moved")
+        moved.policy()
+        moved.preview()
+        manifest = json.loads((moved.install / "runtime-manifest.json").read_text(encoding="utf-8"))
+        manifest["files"][0]["sha256"] = "9" * 64
+        manifest["created_utc"] = "2026-09-20T00:00:00Z"
+        manifest["last_update_reason"] = "Protected repository relocated"
+        write_json(moved.install / "runtime-manifest.json", manifest)
+        unnamed = self.fixture("unnamed")
+        unnamed.policy()
+        unnamed.manifest(installation=None)
         disabled = self.fixture("disabled")
         disabled.policy(enabled=False, counts=(30, 10, 12))
         other_plan = self.fixture("other-plan")
@@ -434,14 +459,19 @@ class DashboardRetentionHarnessTests(unittest.TestCase):
         tampered.preview(remove_set_sha256="f" * 64)
         forged = self.fixture("forged")
         forged.policy(counts=(7, 4, 6), keep_daily=8)
-        views = self.run_cases([x.read() for x in (off, on, stale, updated, disabled, other_plan, drive, tampered, forged)])
-        off_view, on_view, stale_view, updated_view, disabled_view, other_view, drive_view, tampered_view, forged_view = views
+        views = self.run_cases([x.read() for x in (off, on, stale, updated, disabled, other_plan, drive, tampered, forged,
+                                                   reinstalled, moved, unnamed)])
+        (off_view, on_view, stale_view, updated_view, disabled_view, other_view, drive_view, tampered_view, forged_view,
+         reinstalled_view, moved_view, unnamed_view) = views
         self.assertEqual((off_view["mode"], off_view["daily"], off_view["weekly"], off_view["monthly"]), ("off", 14, 8, 24))
         self.assertEqual((on_view["mode"], on_view["preview"], on_view["remove"], on_view["keep"]), ("on", "ready", 2, 3))
         self.assertTrue(on_view["needs_files"])
         self.assertEqual(on_view["preview_sha"], sha(on.state / retention.PREVIEW_NAME))
         self.assertEqual((stale_view["mode"], stale_view["preview"]), ("on", "stale"))
         self.assertEqual((updated_view["mode"], updated_view["reset"]), ("off", True))
+        self.assertEqual((reinstalled_view["mode"], reinstalled_view["reset"]), ("off", True))
+        self.assertEqual((moved_view["mode"], moved_view["preview"], moved_view["reset"]), ("on", "ready", False))
+        self.assertEqual((unnamed_view["mode"], unnamed_view["problem"]), ("unknown", "install_unreadable"))
         self.assertEqual((disabled_view["mode"], disabled_view["daily"], disabled_view["weekly"]), ("off", 30, 10))
         self.assertEqual((other_view["mode"], other_view["reset"]), ("off", False))
         self.assertTrue(drive_view["google_drive"])

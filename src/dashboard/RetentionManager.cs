@@ -438,15 +438,17 @@ namespace ResticBackuper.Dashboard
             return true;
         }
 
-        // retention.install_identity: every file the installer placed, by name and SHA-256, and the version, except the
-        // backup configuration. Null when the manifest cannot be read.
+        // retention.install_identity: the random installation_id the installer writes on every install (the managers that
+        // rewrite the manifest for a folder or location change keep it), the version and every file the installer placed,
+        // by name and SHA-256, except the backup configuration. Null when the manifest cannot be read or names no installation.
         internal static string InstallIdentity(byte[] manifestBytes)
         {
             try
             {
                 IDictionary<string, object> manifest = RetentionJson.ParseObject(manifestBytes, RetentionNames.MaximumManifestBytes);
                 object[] files = RetentionJson.Array(manifest, "files");
-                if (files == null)
+                string installation = RetentionJson.String(manifest, "installation_id");
+                if (files == null || !IsLowerHex64(installation))
                 {
                     return null;
                 }
@@ -475,6 +477,7 @@ namespace ResticBackuper.Dashboard
                 });
                 List<string> lines = new List<string>();
                 lines.Add(RetentionNames.InstallDomain);
+                lines.Add(installation);
                 lines.Add(RetentionJson.String(manifest, "version") ?? string.Empty);
                 foreach (KeyValuePair<string, string> entry in entries)
                 {
@@ -583,7 +586,7 @@ namespace ResticBackuper.Dashboard
         internal int KeepDaily = RetentionNames.DefaultDaily;
         internal int KeepWeekly = RetentionNames.DefaultWeekly;
         internal int KeepMonthly = RetentionNames.DefaultMonthly;
-        // A setting that was on and no longer belongs to the installed program files: an update or reinstall turned it off.
+        // A setting that was on and no longer belongs to this installation: an install or update since turned it off.
         internal bool ResetByReinstall;
         internal string PolicySha256;
         internal string EvidenceSha256;

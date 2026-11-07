@@ -273,11 +273,14 @@ def validate_counts(daily: Any, weekly: Any, monthly: Any) -> tuple[int, int, in
 
 
 def install_identity(install_root: Path) -> str:
-    """This installation of the program files, as the installer's runtime manifest records them.
+    """This installation, as the installer recorded it in the runtime manifest.
 
-    Every file the installer placed, by name and SHA-256, and the version, except the backup configuration, which folder
-    and location changes rewrite. An update or a reinstall with other program files gives another identity, and a saved
-    clean-up setting then no longer counts (it is "off" until the person turns it on again).
+    The installer writes a new random installation_id into runtime-manifest.json on every install, a reinstall of the same
+    release included; Manage-Sources.ps1 and Manage-Repository.ps1, which rewrite the manifest for a folder change or a
+    move of the backup location, keep it. The identity is that value, the version and every installed file by name and
+    SHA-256 except the backup configuration (which those managers rewrite). Any install or update therefore gives another
+    identity, and a saved clean-up setting then no longer counts (it is "off" until the person turns it on again); a
+    change of folders or of the backup location does not.
     """
     data = _read_regular_bytes(install_root / "runtime-manifest.json", MAX_MANIFEST_BYTES)
     if data is None:
@@ -286,6 +289,9 @@ def install_identity(install_root: Path) -> str:
     files = manifest.get("files")
     if not isinstance(files, list):
         raise RetentionError("install_unreadable", "the runtime manifest lists no files")
+    installation = manifest.get("installation_id")
+    if not _is_hex64(installation):
+        raise RetentionError("install_unreadable", "the runtime manifest names no installation")
     version = manifest.get("version")
     entries: list[tuple[str, str]] = []
     for record in files:
@@ -301,7 +307,7 @@ def install_identity(install_root: Path) -> str:
         entries.append((relative, digest.lower()))
     entries.sort()
     return _sha256_text(
-        [INSTALL_DOMAIN, version if isinstance(version, str) else ""]
+        [INSTALL_DOMAIN, installation, version if isinstance(version, str) else ""]
         + [f"{relative}\t{digest}" for relative, digest in entries]
     )
 

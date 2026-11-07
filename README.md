@@ -145,7 +145,8 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
   suggested), shows exactly which backups would go and which stay, and
   removes them only after you confirm the list and Windows asks for your
   permission. It works with a local backup location; the earlier personal
-  edition and Google Drive locations keep every backup.
+  edition and Google Drive locations keep every backup. Reinstalling or
+  updating Rewindle turns it off until you turn it on again.
 - Under **Help and about**: **Save problem report** (a redacted support bundle) and
   **About Rewindle**: version, backup service, MIT License, **Open licenses folder** and the keyboard shortcuts.
 

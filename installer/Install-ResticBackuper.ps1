@@ -1700,10 +1700,17 @@ function New-RuntimeManifest {
             ) |
             Sort-Object FullName
     )
+    # A new random value on every install, a reinstall of the same release included. Clean-up of old backups is bound to
+    # it, so every install starts with clean-up off; the managers that rewrite this file for a folder change or a move of
+    # the backup location keep it.
+    $installationBytes = [byte[]]::new(32)
+    $random = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $random.GetBytes($installationBytes) } finally { $random.Dispose() }
     $manifest = [ordered]@{
         schema_version = 1
         product = $productName
         version = $Version
+        installation_id = ([BitConverter]::ToString($installationBytes)).Replace('-', '').ToLowerInvariant()
         created_utc = [DateTime]::UtcNow.ToString('o')
         file_count = $files.Count
         files = @(

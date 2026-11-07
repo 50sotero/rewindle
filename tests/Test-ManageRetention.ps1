@@ -271,7 +271,7 @@ function Write-Manifest {
         Where-Object Name -notin @('runtime-manifest.json', 'scheduled-task.xml', 'google-drive-verification-task.xml') |
         Sort-Object FullName)
     Write-Json -Path (Join-Path $Install 'runtime-manifest.json') -Value ([ordered]@{
-        schema_version = 1; version = '0.3.0'; file_count = $manifestFiles.Count
+        schema_version = 1; version = '0.3.0'; installation_id = ('5' * 64); file_count = $manifestFiles.Count
         files = @($manifestFiles | ForEach-Object {
             [ordered]@{
                 relative_path = $_.FullName.Substring($Install.Length + 1); bytes = $_.Length; sha256 = (Get-Hash -Path $_.FullName)

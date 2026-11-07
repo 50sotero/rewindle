@@ -155,9 +155,9 @@ class Harness:
         if path.name in self.acl_failures:
             raise retention.RetentionError("records_unprotected", f"{path.name} is writable by the user")
 
-    def write_manifest(self, version: str = "0.3.0", restic_hash: str = "1" * 64) -> None:
+    def write_manifest(self, version: str = "0.3.0", restic_hash: str = "1" * 64, installation: str = "5" * 64) -> None:
         write_json(self.install / "runtime-manifest.json", {
-            "schema_version": 1, "version": version, "created_utc": "2026-09-01T00:00:00Z",
+            "schema_version": 1, "version": version, "installation_id": installation, "created_utc": "2026-09-01T00:00:00Z",
             "files": [
                 {"relative_path": "backup-config.json", "bytes": 1, "sha256": "2" * 64},
                 {"relative_path": "restic.exe", "bytes": 1, "sha256": restic_hash},
@@ -278,16 +278,54 @@ class OffByDefaultTests(RetentionTestCase):
         self.assertEqual(retention.policy_problem({**policy, "keep_daily": 8}, self.h.config, REPO, install_id), "digest")
         self.assertEqual(retention.policy_problem({**policy, "enabled": "yes"}, self.h.config, REPO, install_id), "off")
 
-    def test_an_update_turns_it_off_but_a_folder_or_location_change_does_not(self) -> None:
+    def test_every_install_turns_it_off_but_a_folder_or_location_change_does_not(self) -> None:
         before = retention.install_identity(self.h.install)
+        # Manage-Sources.ps1 and Manage-Repository.ps1 rewrite the backup configuration's record, created_utc and
+        # last_update_reason, and keep everything else, the installer's installation_id included.
         manifest = json.loads((self.h.install / "runtime-manifest.json").read_text(encoding="utf-8"))
         manifest["files"][0]["sha256"] = "9" * 64
         manifest["created_utc"] = "2026-09-20T00:00:00Z"
         manifest["last_update_reason"] = "Protected repository relocated"
         write_json(self.h.install / "runtime-manifest.json", manifest)
         self.assertEqual(retention.install_identity(self.h.install), before)
+        # An update.
         self.h.write_manifest(restic_hash="4" * 64)
         self.assertNotEqual(retention.install_identity(self.h.install), before)
+        # A reinstall of the same release, after an uninstall or as a repair: the same version and files, a new install.
+        self.h.write_manifest(installation="6" * 64)
+        self.assertNotEqual(retention.install_identity(self.h.install), before)
+        self.h.write_manifest()
+        self.assertEqual(retention.install_identity(self.h.install), before)
+
+    def test_a_reinstall_of_the_same_release_turns_it_off(self) -> None:
+        standard_history(self.h)
+        self.h.policy()
+        self.assertEqual(retention.compute_preview(self.h.ctx)[0]["state"], "ready")
+        self.h.write_manifest(installation="6" * 64)
+        document, _sha = retention.compute_preview(self.h.ctx)
+        self.assertEqual(document["blocked_reason"], "policy_inactive")
+        with self.assertRaises(retention.Refusal) as refused:
+            self.h.apply()
+        self.assertEqual(refused.exception.code, "policy_inactive")
+
+    def test_a_manifest_that_names_no_installation_is_unreadable(self) -> None:
+        manifest = json.loads((self.h.install / "runtime-manifest.json").read_text(encoding="utf-8"))
+        for value in (None, "", "5" * 63, "A" * 64, 5):
+            with self.subTest(installation=value):
+                broken = dict(manifest)
+                if value is None:
+                    broken.pop("installation_id")
+                else:
+                    broken["installation_id"] = value
+                write_json(self.h.install / "runtime-manifest.json", broken)
+                with self.assertRaises(retention.RetentionError) as failed:
+                    retention.install_identity(self.h.install)
+                self.assertEqual(failed.exception.code, "install_unreadable")
+
+    def test_the_install_identity_vector(self) -> None:
+        # The same manifest gives the same identity in the dashboard (tests/test_dashboard_retention.py).
+        lines = ["ResticBackuper.RetentionInstall.v1", "5" * 64, "0.3.0", "restic.exe\t" + "1" * 64, "retention.py\t" + "3" * 64]
+        self.assertEqual(retention.install_identity(self.h.install), hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest())
 
     def test_a_policy_anyone_but_administrators_can_change_does_not_count(self) -> None:
         standard_history(self.h)

@@ -630,12 +630,13 @@ section 9, and [`SECURITY.md`](../SECURITY.md).
 Nothing is forgotten or pruned automatically; clean-up removes only a list the
 person confirmed. It is off until the person saves a setting in **Settings >
 Old backups**, and the setting counts only for the plan, repository and
-installed program files it was saved for, so an update or a reinstall with
-other program files turns it off. Every step runs in `Manage-Retention.ps1`
-after a UAC prompt, with the run lock held and no pending journal: turning it
-on or choosing Check now lists, with `forget --dry-run --no-lock`, which
-snapshots of this plan and computer the setting would remove; Rewindle then
-keeps more than Restic would (the latest verified snapshot, the only checked
+installation it was saved for: every install, update or reinstall turns it
+off, while a change of folders or of the backup location does not. Every
+step runs in `Manage-Retention.ps1` after a UAC prompt, with the run lock
+held and no pending journal: turning it on or choosing Check now lists, with
+`forget --dry-run --no-lock`, which snapshots of this plan and computer the
+setting would remove; Rewindle then keeps more than Restic would (the latest
+verified snapshot, the only checked
 snapshot of each kept period, and the last snapshot before an unusual change
 the person has not confirmed). A removal needs a verified last backup, no open
 change review, the exact list the person saw and an identical fresh listing;

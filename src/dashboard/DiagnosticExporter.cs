@@ -1111,6 +1111,7 @@ namespace ResticBackuper.Dashboard
                 value == "username" || value == "user" ||
                 value == "account" || value == "owner" ||
                 value == "plan_id" || value == "repository_id" ||
+                value == "installation_id" ||
                 value == "local_repository_id" ||
                 value == "cloud_repository_id" ||
                 value == "run_id" || value == "snapshot_id" ||

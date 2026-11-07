@@ -1552,6 +1552,16 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
     $savedDirectory = [Environment]::CurrentDirectory
     Push-Location -LiteralPath $workspace
     try {
+        # --- every install names itself: clean-up of old backups is bound to it, so a reinstall of the same release
+        # starts with clean-up off (retention.install_identity) ---
+        New-RollbackFixture
+        $firstInstallation = [string](Read-RollbackManifest).installation_id
+        [void](New-RuntimeManifest -Root $installRoot -Version $version)
+        $secondInstallation = [string](Read-RollbackManifest).installation_id
+        Assert-True ($firstInstallation -cmatch '^[0-9a-f]{64}$' -and $secondInstallation -cmatch '^[0-9a-f]{64}$') 'runtime-manifest.json names its installation'
+        Assert-True ($firstInstallation -cne $secondInstallation) 'each install of the same release writes a new installation_id'
+        Assert-True ($null -eq (Remove-InstalledRuntime -Root $installRoot)) 'the installation fixture is removed'
+
         # --- the dashboard the install started still runs from the program folder ---
         New-RollbackFixture
         $originalManifest = [IO.File]::ReadAllText($rollbackManifest)

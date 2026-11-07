@@ -92,10 +92,11 @@ or backup repository.
   identical fresh listing. The latest verified backup, the only checked
   backup of each kept period and the last backup before an unconfirmed change
   are always kept. The setting is bound to the plan, the repository and the
-  installed program files, so an update or a reinstall with other program
-  files turns it off, and the dashboard and the clean-up helper trust the
-  clean-up records only when only Administrators and SYSTEM can change them
-  and the state folder that holds them.
+  installation (a random value the installer writes on every install), so
+  every install, update or reinstall turns it off, while a change of folders
+  or of the backup location does not. The dashboard and the clean-up helper
+  trust the clean-up records only when only Administrators and SYSTEM can
+  change them and the state folder that holds them.
 - The guided restore asks Windows once per restore session instead of once per
   step. The elevated `Manage-Restore.ps1 -Operation session` serves any number
   of snapshot and folder listings and at most one restore, then ends; it also
