@@ -686,7 +686,24 @@ function Write-RestoreHistory {
         sample_bytes = if ($requestAction -eq 'restore_drill') { [long]$Payload.sample_bytes } else { $null }
         sample_paths_sha256 = if ($requestAction -eq 'restore_drill') { [string]$Payload.sample_paths_sha256 } else { $null }
     }
-    $newEntries = @($entries | Select-Object -Last 49) + @($entry)
+    # The history holds 50 entries, all that recovery_health.py reads. When it is full, the oldest manual restore's entry makes
+    # room, whatever its result (a selection restore.py refused included); a recovery drill's entry goes only when no manual
+    # restore's is left. So restores, however many, never push out the drill entries that readiness relies on.
+    $kept = [Collections.Generic.List[object]]::new()
+    foreach ($earlier in $entries) { $kept.Add($earlier) }
+    while ($kept.Count -gt 49) {
+        $oldest = 0
+        for ($index = 0; $index -lt $kept.Count; $index++) {
+            $candidate = $kept[$index]
+            if ($candidate -isnot [Management.Automation.PSCustomObject] -or
+                [string](Get-OptionalProperty -Object $candidate -Name 'kind') -cne 'recovery_key_representative_drill') {
+                $oldest = $index
+                break
+            }
+        }
+        $kept.RemoveAt($oldest)
+    }
+    $newEntries = @($kept) + @($entry)
     $document = [ordered]@{
         schema_version = 2
         plan_id = $ExpectedPlanId

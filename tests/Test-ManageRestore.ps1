@@ -466,11 +466,22 @@ try {
     # Names with square brackets come back as themselves: the fake, like Restic, reads "[" as the start of a character class.
     $bracketFixture = New-Fixture
     $bracketTarget = Join-Path $bracketFixture.Root 'Restored\Brackets'
+    # Its history is full of recovery drills' entries, so this restore's entry takes the place of the oldest of them.
+    $drillEntries = [Collections.Generic.List[object]]::new()
+    foreach ($number in 1..50) {
+        $drillEntries.Add([ordered]@{ finished_utc = '2026-03-01T00:00:00.0000000Z'; kind = 'recovery_key_representative_drill'; result = 'verified'; verified = $true; target = ('drill-' + $number) })
+    }
+    Write-Json -Path (Join-Path $bracketFixture.State 'restore-history.json') -Value ([ordered]@{
+        schema_version = 2; plan_id = $planId; updated_utc = '2026-03-01T00:00:00.0000000Z'; entries = $drillEntries.ToArray()
+    })
     $bracketRestore = Invoke-Manager -Fixture $bracketFixture -Action restore -Snapshot $snapshotId -Target $bracketTarget -Includes @('/Photos [2020]/a.txt', '/Notes[1].txt')
     Assert-True ($bracketRestore.ExitCode -eq 0 -and $bracketRestore.Result.ok -eq $true -and [string]$bracketRestore.Result.payload.result -ceq 'verified') 'a restore of names with square brackets was not verified'
     Assert-True ((Test-Path -LiteralPath (Join-Path $bracketTarget 'Photos [2020]\a.txt') -PathType Leaf) -and
         (Test-Path -LiteralPath (Join-Path $bracketTarget 'Notes[1].txt') -PathType Leaf)) 'names with square brackets were not restored'
     Assert-True ((Get-Content -LiteralPath $bracketFixture.Log -Raw).Contains("--include`t/Photos [[]2020]/a.txt")) 'a chosen name with "[" reached Restic as a pattern instead of literally'
+    $bracketEntries = @((Get-Content -LiteralPath (Join-Path $bracketFixture.State 'restore-history.json') -Raw | ConvertFrom-Json).entries)
+    Assert-True ($bracketEntries.Count -eq 50 -and [string]$bracketEntries[0].target -ceq 'drill-2' -and
+        [string]$bracketEntries[49].kind -ceq 'manual_restore' -and $bracketEntries[49].verified -eq $true) 'a history of only drill entries did not make room by its oldest one'
 
     # Restic can finish with exit code 0 having restored nothing; a chosen item that is not there ends as an incomplete restore.
     $nothingFixture = New-Fixture
@@ -489,12 +500,26 @@ try {
     # snapshot, so the manager accepts the report and the refusal reaches the dashboard in restore.py's words, which it puts plainly.
     $refusedFixture = New-Fixture
     $refusedTarget = Join-Path $refusedFixture.Root 'Restored\Refused'
+    # The history is already full (50 entries, all that recovery_health.py reads), and its oldest entry is a recovery drill's.
+    $seededEntries = [Collections.Generic.List[object]]::new()
+    $seededEntries.Add([ordered]@{ finished_utc = '2026-01-01T00:00:00.0000000Z'; kind = 'recovery_key_representative_drill'; result = 'verified'; verified = $true })
+    foreach ($number in 1..49) {
+        $seededEntries.Add([ordered]@{ finished_utc = ('2026-02-{0:D2}T00:00:00.0000000Z' -f [Math]::Min($number, 28)); kind = 'manual_restore'; result = 'verified'; verified = $true; target = ('seeded-' + $number) })
+    }
+    Write-Json -Path (Join-Path $refusedFixture.State 'restore-history.json') -Value ([ordered]@{
+        schema_version = 2; plan_id = $planId; updated_utc = '2026-02-28T00:00:00.0000000Z'; entries = $seededEntries.ToArray()
+    })
     $refused = Invoke-Manager -Fixture $refusedFixture -Action restore -Snapshot $snapshotId -Target $refusedTarget -Includes @('C:\notes.txt')
     Assert-True ($refused.ExitCode -ne 0 -and $refused.Result.ok -eq $false -and
         [string]$refused.Result.error -match "^an include must be one item's path as Restic lists it") ('a refused item did not reach the dashboard in restore.py''s words: ' + [string]$refused.Result.error)
     Assert-True ([string]$refused.Result.payload.result -ceq 'error' -and $refused.Result.payload.verified -eq $false) 'a refused item was not reported as a restore that did not run'
     Assert-True (-not (Test-Path -LiteralPath $refusedTarget) -or @(Get-ChildItem -LiteralPath $refusedTarget -Force).Count -eq 0) 'a refused item still restored something'
     Assert-True (-not (@(Get-Content -LiteralPath $refusedFixture.Log) | Where-Object { ($_ -split "`t") -contains 'restore' })) 'Restic was asked to restore a refused item'
+    # The refused restore is recorded, in the place of the oldest manual restore's entry, never the drill's.
+    $refusedEntries = @((Get-Content -LiteralPath (Join-Path $refusedFixture.State 'restore-history.json') -Raw | ConvertFrom-Json).entries)
+    Assert-True ($refusedEntries.Count -eq 50 -and [string]$refusedEntries[49].kind -ceq 'manual_restore' -and [string]$refusedEntries[49].result -ceq 'error') 'a refused restore was not recorded at the end of a history of 50 entries'
+    Assert-True ([string]$refusedEntries[0].kind -ceq 'recovery_key_representative_drill' -and [string]$refusedEntries[1].target -ceq 'seeded-2' -and
+        @($refusedEntries | Where-Object { [string]$_.kind -ceq 'recovery_key_representative_drill' }).Count -eq 1) 'a refused restore pushed the recovery drill out of the history that readiness reads'
 
     $drillFixture = New-Fixture
     $drill = Invoke-Manager -Fixture $drillFixture -Action restore_drill

@@ -1197,8 +1197,8 @@ try {
     # restore.py's refusal of an item that is not one path as the backup lists it, with or without --source, reaches a person (the
     # older restore window takes typed paths) in plain words with a next step, never in the engine's.
     foreach ($includeRefusal in @(
-        'an include must be one item''s path as Restic lists it, starting with / and the drive letter, for example /C/Users/you/Documents/report.docx',
-        'an include must be one item''s path inside the --source folder, starting with /, for example /Taxes/return.pdf for Taxes\return.pdf in that folder')) {
+        'an include must be one item''s path as Restic lists it, starting with / and with / between names, for example /C/Users/you/Documents/report.docx',
+        'an include must be one item''s path inside the --source folder, starting with / and with / between names, for example /Taxes/return.pdf for Taxes\return.pdf in that folder')) {
         foreach ($answering in @('restore', $null)) {
             $plainRefusal = [string](Invoke-Static $restoreLauncherType 'SanitizeAnswer' @($includeRefusal, $answering))
             Assert-True ($plainRefusal -match 'nothing was restored' -and $plainRefusal -match 'Choose the items again' -and $plainRefusal -notmatch 'Restic|snapshot|--source|include|/C/') ('the restore step''s refusal of an item was not put plainly: ' + $plainRefusal)
@@ -2339,6 +2339,39 @@ namespace RewindleRegression {
     Assert-True ((Get-RelocationField 'stageBadge').Text -eq 'SELECTING' -and (Get-RelocationField 'detail').Text -eq 'This is already the active repository.' -and (Get-BrushColor (Get-RelocationField 'detail').Foreground) -eq (Get-BrushColor $dialogPalette.Danger)) 'a folder that cannot be used was reported as a failure of the relocation, or without saying why in red'
     [void]$relocationType.GetMethod('ShowCloseNotice', $flags).Invoke($relocation, @())
     Assert-True ((Get-RelocationField 'closeNotice').Visibility -eq 'Visible' -and (Get-RelocationField 'closeNotice').Text -like 'Copying cannot be cancelled safely*') 'closing the window during the copy did not say why it stayed open'
+
+    # The older restore window offers Open restored folder only when the folder holds restored files: after a verified restore or an
+    # incomplete one that copied some, never after one that brought back none of the chosen items (the restore page then shows no
+    # folder either), also when an earlier result showed the button. The window is built but never shown, and no manager is started.
+    $olderRestore = [Activator]::CreateInstance($restoreWindowType, $flags, $null, [object[]]@($config, $dialogPalette), $null)
+    $olderResultType = $assembly.GetType('ResticBackuper.Dashboard.RestoreManagerResult', $true)
+    $olderReportType = $assembly.GetType('ResticBackuper.Dashboard.ProtectedRestoreReport', $true)
+    $olderFolder = [string](Join-Path $tempRoot 'older-window-restored')
+    New-Item -ItemType Directory -Path $olderFolder -Force | Out-Null
+    function New-OlderWindowResult([string]$Outcome, [string]$ErrorText) {
+        $verified = $Outcome -eq 'verified'
+        $report = [Activator]::CreateInstance($olderReportType, $constructorFlags, $null, [object[]]@($Outcome, 'snapshot', $olderFolder, $verified, (-not $verified), 0, $ErrorText, 'plan'), $null)
+        if ($verified) { return Invoke-Static $olderResultType 'SuccessRestore' @($report, $true, $null) }
+        return Invoke-Static $olderResultType 'PartialRestore' @($report, [string](Invoke-Static $restoreLauncherType 'Sanitize' @($ErrorText)), 1, $true, $null)
+    }
+    function Show-OlderWindowResult([object]$Result) {
+        Invoke-Private $olderRestore 'ShowRestoreResult' @($Result) | Out-Null
+        return [pscustomobject]@{
+            Open = [string]$restoreWindowType.GetField('openTargetButton', $flags).GetValue($olderRestore).Visibility
+            Folder = [string]$restoreWindowType.GetField('completedTarget', $flags).GetValue($olderRestore)
+            Title = [string]$restoreWindowType.GetField('statusTitle', $flags).GetValue($olderRestore).Text
+        }
+    }
+    $olderNone = 'Restic finished without restoring every chosen item (2 of 2 missing); the alternate target was retained for inspection'
+    $olderSome = 'Restic finished without restoring every chosen item (1 of 2 missing); the alternate target was retained for inspection'
+    $shown = Show-OlderWindowResult (New-OlderWindowResult 'verified' $null)
+    Assert-True ($shown.Open -eq 'Visible' -and $shown.Folder -eq $olderFolder) 'the older restore window did not offer the folder of a verified restore'
+    $shown = Show-OlderWindowResult (New-OlderWindowResult 'partial' $olderNone)
+    Assert-True ($shown.Open -eq 'Collapsed' -and $shown.Folder -eq '' -and $shown.Title -match 'nothing restored$') ('the older restore window offered to open a folder that nothing was restored to: ' + $shown.Open + ', ' + $shown.Title)
+    $shown = Show-OlderWindowResult (New-OlderWindowResult 'partial' $olderSome)
+    Assert-True ($shown.Open -eq 'Visible' -and $shown.Folder -eq $olderFolder -and $shown.Title -match 'partial files retained$') 'the older restore window did not offer the folder of a restore that copied some files'
+    $shown = Show-OlderWindowResult (New-OlderWindowResult 'partial' $olderNone)
+    Assert-True ($shown.Open -eq 'Collapsed' -and $shown.Folder -eq '') 'a restore that copied nothing kept the earlier restore''s Open restored folder'
 
     # A control takes the animations that dialogs, buttons and bars ask for. AnimateDouble used to hand an animation only to a freezable (the transforms), so a
     # control's opacity, height and progress value jumped to their end values and only the transforms moved. The motion preference is Full for the check and is

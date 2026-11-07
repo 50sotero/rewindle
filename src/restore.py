@@ -2355,10 +2355,12 @@ class RestoreFolder:
 def validate_includes(includes: list[str], inside_source: bool = False) -> list[str]:
     """The chosen items: each one item's path, as Restic lists it, taken literally.
 
-    Without --source that is the whole snapshot path (/C/Users/you/...); with --source the snapshot
-    folder is the source, so it is the item's path inside that source. A path names one item, so the
-    restore can check afterwards that every chosen item came back. "*" and "?" cannot occur in a
-    Windows name, so they could only be wildcards and are refused.
+    That is "/" and then each name, with "/" between names. Without --source it is the path in the
+    snapshot (/C/Users/you/... for a whole snapshot, or the path inside the folder that --snapshot
+    names, so no drive letter is required); with --source the snapshot folder is the source, so it
+    is the item's path inside that source. A path names one item, so the restore can check
+    afterwards that every chosen item came back. "*" and "?" cannot occur in a Windows name, so they
+    could only be wildcards and are refused.
     """
     if len(includes) > MAX_REPORT_INCLUDES:
         raise ValueError(f"at most {MAX_REPORT_INCLUDES} include patterns are allowed")
@@ -2377,11 +2379,11 @@ def validate_includes(includes: list[str], inside_source: bool = False) -> list[
         ):
             # The dashboard looks for "an include must be one item's path" to put this in plain words.
             raise ValueError(
-                "an include must be one item's path inside the --source folder, starting with /, "
-                "for example /Taxes/return.pdf for Taxes\\return.pdf in that folder"
+                "an include must be one item's path inside the --source folder, starting with / and "
+                "with / between names, for example /Taxes/return.pdf for Taxes\\return.pdf in that folder"
                 if inside_source
                 else "an include must be one item's path as Restic lists it, starting with / and "
-                "the drive letter, for example /C/Users/you/Documents/report.docx"
+                "with / between names, for example /C/Users/you/Documents/report.docx"
             )
         result.append(pattern)
     return result
@@ -2602,6 +2604,21 @@ def main(argv: list[str] | None = None) -> int:
             or path_is_reparse(args.cache_dir)
         ):
             raise ValueError("--cache-dir must name an existing local directory")
+    # The chosen items are checked before anything else. Run on its own (RECOVERY.md), with no report
+    # to bind, restore.py refuses one here, before the configuration is read or Restic is started, so
+    # nobody types the repository password only to be told an item is written wrong. A report
+    # (--report, which the protected manager passes) is accepted only once it is bound to the
+    # snapshot, so a refusal then waits until it is, below, and still comes before anything is
+    # restored; the manager gives Restic the stored password, so nobody is asked for it meanwhile.
+    includes: list[str] = []
+    include_refusal: ValueError | None = None
+    if args.target is not None:
+        try:
+            includes = validate_includes(args.include, inside_source=args.source is not None)
+        except ValueError as error:
+            if args.report is None:
+                raise
+            include_refusal = error
     report = base_report(args) if args.report is not None else None
     report_path: Path | None = None
     restore_started = False
@@ -2793,9 +2810,11 @@ def main(argv: list[str] | None = None) -> int:
                 report["plan_id"] = metadata[0]
                 report["snapshot_generation"] = metadata[1]
             _, report["snapshot_subfolder"] = split_snapshot_selector(requested_snapshot)
-        # Checked before anything is restored, and once the report is bound to the snapshot, so the protected
-        # manager accepts the report and passes a refusal on in these words, which the dashboard puts plainly.
-        includes = validate_includes(args.include, inside_source=args.source is not None)
+        # A refused item, held until the report is bound to the snapshot (see above), so the protected
+        # manager accepts the report and passes the refusal on in these words, which the dashboard puts
+        # plainly. Nothing has been restored yet.
+        if include_refusal is not None:
+            raise include_refusal
         if args.recovery_drill:
             canary_file = Path(str(config.get("canary_file", "")))
             canary_snapshot_path = windows_snapshot_path(canary_file)

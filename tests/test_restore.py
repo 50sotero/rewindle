@@ -1838,12 +1838,26 @@ class RestoreBackendTests(unittest.TestCase):
         ):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(
-                    ValueError, "one item's path as Restic lists it, starting with / and the drive letter"
+                    ValueError, "one item's path as Restic lists it, starting with / and with / between names,"
                 ):
                     restore.validate_includes([value])
                 # With --source the same rules hold, and the refusal says what the path is then relative to.
-                with self.assertRaisesRegex(ValueError, "one item's path inside the --source folder, starting with /,"):
+                with self.assertRaisesRegex(
+                    ValueError, "one item's path inside the --source folder, starting with / and with / between names,"
+                ):
                     restore.validate_includes([value], inside_source=True)
+        # The refusal says only what is checked: a path inside the folder that --snapshot names has no
+        # drive letter, so none is asked for.
+        self.assertEqual(["/Users/you/file.txt"], restore.validate_includes(["/Users/you/file.txt"]))
+        for inside_source in (False, True):
+            with self.subTest(inside_source=inside_source):
+                with self.assertRaises(ValueError) as refused:
+                    restore.validate_includes(["Users/you/file.txt"], inside_source=inside_source)
+                self.assertNotIn("drive letter", str(refused.exception))
+                # The words the dashboard looks for to put the refusal plainly.
+                self.assertTrue(str(refused.exception).startswith("an include must be one item's path"))
+        dashboard = (SOURCE_ROOT / "dashboard" / "RestoreManager.cs").read_text(encoding="utf-8")
+        self.assertIn('text.Contains("an include must be one item\'s path")', dashboard)
         with self.assertRaisesRegex(ValueError, r"as Restic lists it, .*for example /C/Users/you/Documents/report\.docx"):
             self.invoke(["--target", str(self.root / "refused"), "--include", "/C/Users/*.docx"])
         with self.assertRaisesRegex(ValueError, r"inside the --source folder, .*for example /Taxes/return\.pdf"):
@@ -1864,6 +1878,65 @@ class RestoreBackendTests(unittest.TestCase):
             "or with --source its path inside that source (for example /report.docx)",
         ):
             self.assertIn("".join(expected.split()), squeezed)
+
+    def test_an_item_inside_the_folder_the_snapshot_selector_names_needs_no_drive_letter(self) -> None:
+        result, stderr, payload, target = self.restore_selection(
+            "selector-folder", ["/Photos [2020]"], "--snapshot", "latest:/C/Users"
+        )
+        self.assertEqual((0, ""), (result, stderr))
+        self.assertEqual("verified", payload["result"])
+        self.assertEqual(["Photos [2020]/a.txt"], self.restored_files(target))
+
+    def test_without_a_report_an_item_is_refused_before_restic_is_started(self) -> None:
+        # Run on its own, with no stored credential, Restic asks for the repository password; a wrong
+        # item is refused before that, and before the configuration is read.
+        target = self.root / "refused-early"
+        with mock.patch.object(
+            restore.subprocess, "Popen", side_effect=AssertionError("Restic was started")
+        ), mock.patch.object(
+            restore, "load_restore_config", side_effect=AssertionError("the configuration was read")
+        ):
+            for extra in ([], ["--source", str(self.source)]):
+                with self.subTest(extra=extra), self.assertRaisesRegex(
+                    ValueError, "^an include must be one item's path"
+                ):
+                    restore.main(
+                        [
+                            *self.base_arguments(recovery_key=False),
+                            *extra,
+                            "--target",
+                            str(target),
+                            "--include",
+                            "C:\\Users\\you\\file.txt",
+                        ]
+                    )
+        self.assertEqual([], self.read_log())
+        self.assertFalse(target.exists())
+
+    def test_with_a_report_an_item_is_refused_once_the_report_is_bound(self) -> None:
+        # The protected manager accepts only a report bound to the snapshot, so the refusal waits for
+        # that, and still comes before anything is restored.
+        target = self.root / "refused-bound"
+        report_path = self.state / "refused-bound-report.json"
+        with self.assertRaisesRegex(ValueError, "^an include must be one item's path as Restic lists it"):
+            self.invoke(
+                [
+                    "--snapshot",
+                    "latest",
+                    "--target",
+                    str(target),
+                    "--report",
+                    str(report_path),
+                    "--include",
+                    "C:\\Users\\you\\file.txt",
+                ]
+            )
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(("error", False), (payload["result"], payload["verified"]))
+        self.assertEqual((NEW_ID, REPOSITORY_ID), (payload["snapshot_id"], payload["repository_id"]))
+        self.assertTrue(payload["error"].startswith("an include must be one item's path as Restic lists it"))
+        self.assertFalse(any("restore" in args for args in self.read_log()))
+        self.assertFalse(target.exists())
 
 
 class ExtendedLengthPathTests(unittest.TestCase):

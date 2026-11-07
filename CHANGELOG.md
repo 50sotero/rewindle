@@ -171,7 +171,8 @@ ones a home user reads without a glossary.
   chosen name exactly as it is written. After the restore it also looks for
   each item you chose in the folder you restored to; if one is not there, the
   restore ends as incomplete and says what to try next, instead of reporting
-  success.
+  success. However many restores you run, **Check recovery readiness** still
+  finds your last restore drill.
 
 ### Security
 
