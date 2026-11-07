@@ -150,8 +150,112 @@ def snapshot(
 SYSTEM_FOLDER_REFUSAL = "restore target must not be inside a Windows or program folder"
 
 
+def sid_text(trustee: str) -> str:
+    """The SID a trustee names, in its canonical S-1-... form.
+
+    In SDDL Windows writes some accounts by a two-letter alias instead of their SID: SY and BA, but also LA for the
+    built-in Administrator account (RID 500, the account a hosted CI runner runs as). ConvertStringSidToSidW reads both
+    spellings and ConvertSidToStringSidW writes the SID back, so the tests compare the principals an entry names, not
+    how Windows chose to spell them. Anything that names no principal raises.
+    """
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32.ConvertStringSidToSidW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
+    advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    sid = ctypes.c_void_p()
+    if not advapi32.ConvertStringSidToSidW(trustee, ctypes.byref(sid)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        text = ctypes.c_void_p()
+        if not advapi32.ConvertSidToStringSidW(sid, ctypes.byref(text)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return ctypes.wstring_at(text.value)
+        finally:
+            kernel32.LocalFree(text)
+    finally:
+        kernel32.LocalFree(sid)
+
+
+def by_principal(entry: tuple[str, ...]) -> tuple[str, ...]:
+    """An SDDL access entry (type, flags, rights, object type, inherited object type, trustee), its trustee as a SID."""
+
+    return entry[:5] + (sid_text(entry[5]),) + entry[6:]
+
+
+def local_account_domain_sid() -> str:
+    """The SID of this computer's own account domain, which its local accounts' SIDs extend, as the local security
+    authority reports it."""
+
+    class ObjectAttributes(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.ULONG),
+            ("RootDirectory", wintypes.HANDLE),
+            ("ObjectName", ctypes.c_void_p),
+            ("Attributes", wintypes.ULONG),
+            ("SecurityDescriptor", ctypes.c_void_p),
+            ("SecurityQualityOfService", ctypes.c_void_p),
+        ]
+
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [("Length", wintypes.USHORT), ("MaximumLength", wintypes.USHORT), ("Buffer", ctypes.c_void_p)]
+
+    class AccountDomainInfo(ctypes.Structure):
+        _fields_ = [("DomainName", UnicodeString), ("DomainSid", ctypes.c_void_p)]
+
+    policy_view_local_information = 0x1
+    policy_account_domain_information = 5
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32.LsaOpenPolicy.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ObjectAttributes), wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)
+    ]
+    advapi32.LsaOpenPolicy.restype = wintypes.ULONG
+    advapi32.LsaQueryInformationPolicy.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
+    advapi32.LsaQueryInformationPolicy.restype = wintypes.ULONG
+    advapi32.LsaFreeMemory.argtypes = [ctypes.c_void_p]
+    advapi32.LsaFreeMemory.restype = wintypes.ULONG
+    advapi32.LsaClose.argtypes = [wintypes.HANDLE]
+    advapi32.LsaClose.restype = wintypes.ULONG
+    advapi32.LsaNtStatusToWinError.argtypes = [wintypes.ULONG]
+    advapi32.LsaNtStatusToWinError.restype = wintypes.ULONG
+    advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    attributes = ObjectAttributes()
+    attributes.Length = ctypes.sizeof(attributes)
+    policy = wintypes.HANDLE()
+    status = advapi32.LsaOpenPolicy(None, ctypes.byref(attributes), policy_view_local_information, ctypes.byref(policy))
+    if status:
+        raise ctypes.WinError(advapi32.LsaNtStatusToWinError(status))
+    try:
+        information = ctypes.c_void_p()
+        status = advapi32.LsaQueryInformationPolicy(
+            policy, policy_account_domain_information, ctypes.byref(information)
+        )
+        if status:
+            raise ctypes.WinError(advapi32.LsaNtStatusToWinError(status))
+        try:
+            domain = AccountDomainInfo.from_address(information.value).DomainSid
+            if not domain:
+                raise RuntimeError("the local security authority named no account domain")
+            text = ctypes.c_void_p()
+            if not advapi32.ConvertSidToStringSidW(domain, ctypes.byref(text)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                return ctypes.wstring_at(text.value)
+            finally:
+                kernel32.LocalFree(text)
+        finally:
+            advapi32.LsaFreeMemory(information)
+    finally:
+        advapi32.LsaClose(policy)
+
+
 def dacl_entries(path: Path) -> list[tuple[str, ...]]:
-    """The access entries of a file or folder as Windows stores them, without the inherited marks."""
+    """The access entries of a file or folder as Windows stores them, without the inherited marks and with each trustee
+    as a SID."""
 
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -178,7 +282,7 @@ def dacl_entries(path: Path) -> list[tuple[str, ...]]:
     for ace in re.findall(r"\(([^)]*)\)", sddl):
         parts = ace.split(";")
         parts[1] = parts[1].replace("ID", "")
-        entries.append(tuple(parts))
+        entries.append(by_principal(tuple(parts)))
     return entries
 
 
@@ -198,6 +302,27 @@ def tree_fingerprint(path: Path) -> dict[str, str]:
     for item in sorted((entry for entry in path.rglob("*") if entry.is_file())):
         result[str(item.relative_to(path))] = hashlib.sha256(item.read_bytes()).hexdigest()
     return result
+
+
+class TrusteeSpellingTests(unittest.TestCase):
+    def test_an_alias_and_its_sid_name_the_same_principal(self) -> None:
+        # The built-in Administrator account is this computer's account domain with RID 500, built here at run time from
+        # what the local security authority reports; Windows writes it in SDDL as LA.
+        domain = local_account_domain_sid()
+        self.assertRegex(domain, r"^S-1-5-21(-\d+){3}$")
+        administrator = domain + "-500"
+        for alias, sid in (("LA", administrator), ("BA", "S-1-5-32-544"), ("SY", "S-1-5-18")):
+            with self.subTest(alias=alias):
+                self.assertEqual(sid, sid_text(alias))
+                self.assertEqual(sid_text(alias), sid_text(sid))
+                self.assertEqual(("A", "OICI", "FA", "", "", sid), by_principal(("A", "OICI", "FA", "", "", alias)))
+        # Different principals stay apart, and a SID is kept as it is.
+        self.assertEqual(3, len({sid_text("LA"), sid_text("BA"), sid_text("SY")}))
+        self.assertEqual(restore.current_user_sid(), sid_text(restore.current_user_sid()))
+        # Something that names no principal is never taken for one.
+        for garbled in ("", "XX", "S-1-", "BA)(A;OICI;FA;;;WD"):
+            with self.subTest(garbled=garbled), self.assertRaises(OSError):
+                sid_text(garbled)
 
 
 class RestoreBackendTests(unittest.TestCase):
@@ -1254,13 +1379,18 @@ class RestoreBackendTests(unittest.TestCase):
                 restore.program_data_folder(r"C:\Windows")
 
     def restore_folder_security(self) -> tuple[str, str, set[tuple[str, ...]]]:
-        """The owner, DACL flags and entries of the folder Restic was given, as the fake Restic read them."""
+        """The owner, DACL flags and entries of the folder Restic was given, as the fake Restic read them, with the
+        owner and each trustee as a SID."""
 
         text = self.fake_log.with_suffix(".target-security.txt").read_text(encoding="utf-8")
         match = re.fullmatch(r"O:(.+?)D:([A-Z]*)((?:\([^)]*\))*)", text)
         self.assertIsNotNone(match, text)
         owner, flags, entries = match.groups()
-        return owner, flags, {tuple(entry.split(";")) for entry in re.findall(r"\(([^)]*)\)", entries)}
+        return (
+            sid_text(owner),
+            flags,
+            {by_principal(tuple(entry.split(";"))) for entry in re.findall(r"\(([^)]*)\)", entries)},
+        )
 
     def assert_restore_folder_security(self, elevated: bool, *, check_owner: bool) -> None:
         owner, flags, entries = self.restore_folder_security()
@@ -1269,9 +1399,11 @@ class RestoreBackendTests(unittest.TestCase):
         expected = {("A", "OICI", "FA", "", "", "SY"), ("A", "OICI", "FA", "", "", "BA")}
         if not elevated:
             expected.add(("A", "OICI", "FA", "", "", restore.current_user_sid()))
-        self.assertEqual(expected, entries)
+        # Compared by the principals they name: Windows writes the built-in Administrator account, the one a hosted CI
+        # runner runs as, as LA rather than by its SID.
+        self.assertEqual({by_principal(entry) for entry in expected}, entries)
         if check_owner and elevated:
-            self.assertEqual("BA", owner)
+            self.assertEqual(sid_text("BA"), owner)
 
     def test_the_account_is_read_before_its_token_record_is_released(self) -> None:
         # The SID in a TOKEN_USER record lies inside that same record, so the record must still be held when the SID is
