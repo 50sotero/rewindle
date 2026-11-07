@@ -1551,6 +1551,33 @@ namespace ResticBackuper.Dashboard
             {
                 return "That folder already has files in it. Choose a new or empty folder; Rewindle never overwrites files.";
             }
+            if (text.Contains("restore target must not be inside a windows or program folder"))
+            {
+                return DashboardWindow.RestoreFlowSystemFolderMessage;
+            }
+            if (text.Contains("restore target must be on a drive that keeps folder permissions"))
+            {
+                return "That drive cannot keep restored files private while Rewindle restores them. Choose a folder on another drive.";
+            }
+            if (text.Contains("restore target changed while it was being prepared"))
+            {
+                return "That folder changed while Rewindle was getting it ready, so nothing was restored. Choose the folder again and try once more.";
+            }
+            if (text.Contains("restore target path is too long"))
+            {
+                return "The path to that folder is too long, so nothing was restored. Choose a folder closer to the top of a drive, for example a new folder named Rewindle restore.";
+            }
+            // Rare refusals from getting the folder ready, all before anything is restored.
+            if (text.Contains("restore target contains an invalid folder name") ||
+                text.Contains("windows and program folders could not be identified") ||
+                text.Contains("the current windows account could not be identified"))
+            {
+                return "Rewindle could not get that folder ready safely, so nothing was restored. Try again or choose a different folder; if it keeps happening, restart Rewindle.";
+            }
+            if (text.Contains("the restore folder changed during the restore"))
+            {
+                return "Rewindle could not finish putting the restored files in place." + outcome;
+            }
             if (text.Contains("restore target must not overlap"))
             {
                 return "That folder is part of what Rewindle backs up or where its backups are kept. Choose a different folder, for example a new folder on another drive.";

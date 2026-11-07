@@ -101,7 +101,7 @@ flowchart LR
     X -->|"set protected per-run event"| B
     B -->|"targeted Ctrl-Break"| R
     D -->|"immutable snapshot + one UAC per restore session (pipe)"| E["Protected restore manager"]
-    E --> Z["New or empty restore target"]
+    E --> Z["New or empty restore target, held open"]
     D -->|"copy, verify, activate + UAC"| P["Protected repository manager"]
     P --> Q2["Reviewed repository backend/location"]
     D -->|"readiness and guided repair"| Y["Recovery health helpers"]
@@ -179,8 +179,8 @@ branded Rewindle release.
 | `Manage-Sources.ps1` | Validates and transactionally adds/removes future backup sources while holding the run lock; a durable undo journal coordinates atomic per-file replacements | Protected configuration, protected journal, and recovery-tools metadata |
 | `Manage-Schedule.ps1` | Applies a reviewed daily or selected-day trigger and supported task settings with fingerprint binding, verification, and rollback | Exact backup task definition only |
 | `Manage-Backup.ps1` | Revalidates the exact active run and protected task, then signals only that run's protected cancellation event | Per-run event signal and bound result file only |
-| `Manage-Repository.ps1` | Copies, manifest-checks, and atomically activates a reviewed local or explicit DriveFS repository destination; resumes or rolls back interrupted relocation | New repository, separate protected-NTFS recovery-tools destination, protected configuration, and journal |
-| `Manage-Restore.ps1` and `restore.py` | Bind browsing and restore requests to the current plan, generation, repository, and immutable snapshot ID; restore to a non-overlapping new or empty target | Explicit restore target and protected restore report only |
+| `Manage-Repository.ps1` | Copies Restic's own files into held stages, manifest-checks, and atomically activates a reviewed local or explicit DriveFS repository destination; resumes or rolls back interrupted relocation | New repository, separate protected-NTFS recovery-tools destination, protected configuration, and journal |
+| `Manage-Restore.ps1` and `restore.py` | Bind browsing and restore requests to the current plan, generation, repository, and immutable snapshot ID; restore to a non-overlapping new or empty target outside Windows and program folders, held open while an administrator-only folder inside it receives the files | Explicit restore target and protected restore report only |
 | Recovery helpers | Inspect independent recovery paths and perform explicitly approved credential repair, stale-lock cleanup, key rotation, and anomaly acknowledgement | Narrow protected records or Restic credential/lock commands for the selected action |
 | `DiagnosticExporter.cs` | Builds a bounded support ZIP after removing secrets, identities, host names, command lines, and personal paths | User-selected diagnostic ZIP only |
 | Google Drive verifier | Holds the protected run lock, compares the sole DriveFS repository with a read-only API inventory, and restores the canary through a direct cloud backend | Protected verification runs/evidence only; no repository writes |
@@ -216,14 +216,16 @@ provider process, fixed FAT32 mount and remote-storage capability, at least
 10 GiB of cache headroom, an atomic provider transaction, and repository
 objects strictly smaller than 4 GiB.
 
-The repository must not overlap a source. Relocation copies into a nonce-bound
-sibling stage and records an exact path/byte/SHA-256 commit-manifest digest in
-the protected journal. It verifies that inventory before and after copy,
-verifies repository ID, snapshot history, and structure, and only then
-same-parent-renames the stage and switches protected metadata atomically. A
-DriveFS destination must be absent, not merely empty, so rollback never depends
-on synthetic FAT32 ACL restoration. The old repository is retained. No
-automatic `forget`, `prune`, or repository deletion occurs.
+The repository must not overlap a source. Relocation copies only Restic's own
+files (`config` and the 64-hex files in `keys`, `index`, `snapshots` and
+`data\<two hex>`; never `locks` or anything else) into a nonce-bound sibling
+stage and records an exact path/byte/SHA-256 commit-manifest digest in the
+protected journal. It verifies that inventory before and after copy, verifies
+repository ID, snapshot history, and structure, and only then renames the stage
+within its parent, through its own handle, and switches protected metadata
+atomically. A DriveFS destination must be absent, not merely empty, so rollback
+never depends on synthetic FAT32 ACL restoration. The old repository is
+retained. No automatic `forget`, `prune`, or repository deletion occurs.
 
 ### Recovery material
 
@@ -416,6 +418,18 @@ independent read before reporting success.
 
 Repository relocation uses the same global byte-range lock and plan binding.
 Local repository and recovery stages retain the protected NTFS ACL policy.
+Every stage is held open, with list access and without delete sharing, from
+its creation until it has its final name, so neither it nor any folder above
+it can be renamed or swapped for a junction while the manager copies into it
+by path or resets its ACL. A new stage must still be owned by Administrators
+once held. Promotion closes the hold, reopens the stage with delete access,
+proves by its file ID that it is the same folder, renames it through that
+handle without replacing anything, and holds the promoted folder again until
+the move is committed. Anything outside Restic's layout is refused in a local
+stage or destination and left alone in a DriveFS folder. Before the journal of
+a move to DriveFS is written, the same hold, rename by handle and file-ID check
+run on a throwaway folder there, and the move is refused if any of them fails,
+because rollback and recovery would need them too.
 DriveFS repository stages instead use an exact nonce path, ownership marker,
 and commit-manifest digest because its synthetic FAT32 ACL cannot carry that
 policy; the recovery stage still uses protected NTFS. The manager copies
@@ -436,9 +450,22 @@ full immutable ID and a separately digest-bound opt-in; `latest` and ID prefixes
 cannot opt in. Snapshot metadata is never rewritten or retagged. The final
 request carries an exact immutable snapshot ID and the current configuration
 fingerprint. The destination must be absent or empty, local, and outside all
-sources, repository, runtime, and state paths. Restic receives `--overwrite
+sources, repository, runtime, and state paths, and outside Windows, both
+Program Files folders and ProgramData. Restic receives `--overwrite
 never` and verification is required. A partial target is retained and labelled
 if the operation fails so potentially useful recovered data is not destroyed.
+
+There is no gap between that check and Restic's writes. `restore.py` opens the
+destination one folder at a time from the drive root without following links
+and holds it open, without delete sharing, for the whole restore, so neither it
+nor any folder above it can be renamed or swapped for a junction. Restic writes
+into a new hidden folder inside it that only Administrators and SYSTEM can
+change, so nothing can be planted below it meanwhile. Afterwards each restored
+item gets the permissions it would inherit in the destination (a folder's own
+last, once everything inside it has them) and is moved into it by handle,
+never replacing a name that appeared there in the meantime. Windows, both
+Program Files folders and ProgramData are never taken from environment
+variables, which the requesting user can set for the elevated process.
 
 Recovery Readiness authenticates the active DPAPI credential and separately
 parses and authenticates the configured recovery key. It also checks the
@@ -520,8 +547,13 @@ section 9, and [`SECURITY.md`](../SECURITY.md).
   silently hard-killing it.
 - Installer rollback removes newly created application objects while
   preserving repository and recovery data.
-- Restore operations reject overlapping or non-empty targets and never need to
-  modify the repository.
+- Restore operations reject overlapping or non-empty targets and targets inside
+  Windows, Program Files or ProgramData, hold the target open while Restic
+  writes into an administrator-only folder inside it, and never need to modify
+  the repository.
+- Repository relocation copies only Restic's own files into stages it holds
+  open from creation to promotion, so a stage cannot be swapped for a junction
+  while files are written into it.
 
 ## Boundaries and non-goals for the alpha
 

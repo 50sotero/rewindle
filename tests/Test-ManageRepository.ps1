@@ -1,3 +1,9 @@
+param(
+    # Never look at the installed configuration or the installed task, even to prove they were left alone. Every check below
+    # runs in disposable folders either way; this only drops the two before/after comparisons with the real installation.
+    [switch]$SkipInstalledChecks
+)
+
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
@@ -8,6 +14,7 @@ $powershell = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $encoding = [Text.UTF8Encoding]::new($false)
 $fixtureRoots = [Collections.Generic.List[string]]::new()
+$plantedLinks = [Collections.Generic.List[string]]::new()
 $assertions = 0
 
 function Assert-True {
@@ -49,6 +56,55 @@ namespace RepositoryManagerTests {
 '@
     }
     return [RepositoryManagerTests.Volume]::Serial([IO.Path]::GetPathRoot($Path))
+}
+
+function Get-TextSha256 {
+    param([string]$Text)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash($encoding.GetBytes($Text)))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
+function Get-RelativeFiles {
+    param([string]$Root)
+    if (-not (Test-Path -LiteralPath $Root)) { return @() }
+    return @(Get-ChildItem -LiteralPath $Root -Recurse -File -Force |
+        ForEach-Object { $_.FullName.Substring($Root.Length + 1) } | Sort-Object)
+}
+
+function ConvertTo-ProcessArgument {
+    # Quotes one argument the way CommandLineToArgvW reads it back.
+    param([string]$Value)
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') { return $Value }
+    $escaped = [regex]::Replace($Value, '(\\*)"', '$1$1\"')
+    $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
+    return '"' + $escaped + '"'
+}
+
+function Add-UnrelatedFiles {
+    # Things that are not Restic's own files, as a program running as the user could leave them in a backup folder it
+    # can write to (a Google Drive folder keeps no permissions): other names, and Restic-like names in the wrong place.
+    param([string]$Repository)
+    $pack = @(Get-ChildItem -LiteralPath (Join-Path $Repository 'data') -Recurse -File -Force)[0]
+    $packFolder = Split-Path -Leaf (Split-Path -Parent $pack.FullName)
+    $otherPrefix = if ($packFolder -ne 'cd') { 'cd' } else { 'ef' }
+    $relative = @(
+        'evil.dll',
+        'Thumbs.db',
+        'notes\readme.txt',
+        "data\$packFolder\notes.txt",
+        "data\$packFolder\$otherPrefix$('0' * 62)",
+        "data\zz\$('a' * 64)",
+        'keys\desktop.ini',
+        'snapshots\sub\x.bin',
+        "index\$(Get-TextSha256 'stray index')-tmp-1"
+    )
+    foreach ($item in $relative) {
+        $full = Join-Path $Repository $item
+        [void][IO.Directory]::CreateDirectory((Split-Path -Parent $full))
+        [IO.File]::WriteAllText($full, "unrelated $item`n", $encoding)
+    }
+    return $relative
 }
 
 function New-FileRecord {
@@ -109,18 +165,24 @@ public static class FakeRestic {
     string log = Environment.GetEnvironmentVariable("FAKE_RESTIC_LOG");
     if (!String.IsNullOrEmpty(log)) File.AppendAllText(log, String.Join("\t", args) + Environment.NewLine);
     string repo = ValueAfter(args, "--repo");
+    // The fixture repository has Restic's layout: the ID is the text of config, and each snapshot is a file in snapshots.
     if (args.Contains("cat") && args.Contains("config")) {
-      string id = File.ReadAllText(Path.Combine(repo, "repo-id.txt")).Trim();
+      string id = File.ReadAllText(Path.Combine(repo, "config")).Trim();
       Console.WriteLine("{\"id\":\"" + id + "\"}");
       return 0;
     }
     if (args.Contains("snapshots")) {
-      Console.WriteLine(File.ReadAllText(Path.Combine(repo, "snapshot-ids.json")));
+      List<string> rows = new List<string>();
+      foreach (string file in Directory.GetFiles(Path.Combine(repo, "snapshots"))) {
+        rows.Add("{\"id\":\"" + Path.GetFileName(file) + "\"}");
+      }
+      Console.WriteLine("[" + String.Join(",", rows.ToArray()) + "]");
       return 0;
     }
     if (args.Contains("check")) {
       if (Environment.GetEnvironmentVariable("FAKE_RESTIC_FAIL_CHECK") == "1") return 17;
-      if (!File.Exists(Path.Combine(repo, "config")) || !File.Exists(Path.Combine(repo, "data", "pack-01"))) return 18;
+      if (!File.Exists(Path.Combine(repo, "config")) ||
+          Directory.GetFiles(Path.Combine(repo, "data"), "*", SearchOption.AllDirectories).Length == 0) return 18;
       Console.WriteLine("repository check passed");
       return 0;
     }
@@ -143,10 +205,12 @@ function New-Fixture {
     $newRepository = Join-Path $newParent 'Personal'
     $source = Join-Path $root 'Source'
     $diagnostics = Join-Path $root 'Diagnostics'
+    $packId = Get-TextSha256 'fixture pack'
     foreach ($directory in @(
         $installRoot, (Join-Path $installRoot 'Python'), $stateRoot, $oldRepository,
-        (Join-Path $oldRepository 'data'), (Join-Path $oldRepository 'locks'),
-        $oldRecovery, $newParent, $source, $diagnostics
+        (Join-Path $oldRepository "data\$($packId.Substring(0, 2))"), (Join-Path $oldRepository 'data\ff'),
+        (Join-Path $oldRepository 'keys'), (Join-Path $oldRepository 'index'), (Join-Path $oldRepository 'snapshots'),
+        (Join-Path $oldRepository 'locks'), $oldRecovery, $newParent, $source, $diagnostics
     )) { [void][IO.Directory]::CreateDirectory($directory) }
 
     Copy-Item -LiteralPath $managerSource -Destination (Join-Path $installRoot 'Manage-Repository.ps1')
@@ -159,11 +223,15 @@ function New-Fixture {
     [IO.File]::WriteAllBytes((Join-Path $stateRoot 'run.lock'), [byte[]](0))
     [IO.File]::WriteAllText((Join-Path $source 'document.txt'), "source data`n", $encoding)
 
-    [IO.File]::WriteAllText((Join-Path $oldRepository 'config'), "encrypted repository config`n", $encoding)
-    [IO.File]::WriteAllText((Join-Path $oldRepository 'repo-id.txt'), "fixture-repository-id`n", $encoding)
-    [IO.File]::WriteAllText((Join-Path $oldRepository 'snapshot-ids.json'), '[{"id":"snap-b"},{"id":"snap-a"}]', $encoding)
-    [IO.File]::WriteAllBytes((Join-Path $oldRepository 'data\pack-01'), [byte[]](1..127))
-    [IO.File]::WriteAllText((Join-Path $oldRepository 'locks\ephemeral'), "must not copy`n", $encoding)
+    # Restic's own layout. The fake Restic reads the repository ID from config and the snapshot IDs from the file names.
+    [IO.File]::WriteAllText((Join-Path $oldRepository 'config'), "fixture-repository-id`n", $encoding)
+    [IO.File]::WriteAllText((Join-Path $oldRepository "keys\$(Get-TextSha256 'fixture key')"), "fixture key`n", $encoding)
+    [IO.File]::WriteAllText((Join-Path $oldRepository "index\$(Get-TextSha256 'fixture index')"), "fixture index`n", $encoding)
+    foreach ($snapshot in @('fixture snapshot b', 'fixture snapshot a')) {
+        [IO.File]::WriteAllText((Join-Path $oldRepository "snapshots\$(Get-TextSha256 $snapshot)"), "$snapshot`n", $encoding)
+    }
+    [IO.File]::WriteAllBytes((Join-Path $oldRepository "data\$($packId.Substring(0, 2))\$packId"), [byte[]](1..127))
+    [IO.File]::WriteAllText((Join-Path $oldRepository "locks\$(Get-TextSha256 'fixture lock')"), "must not copy`n", $encoding)
 
     $serial = Get-VolumeSerial -Path $oldRepository
     $sourceSerial = Get-VolumeSerial -Path $source
@@ -278,12 +346,20 @@ function Invoke-Relocation {
         [int]$CrashAfterStageCreation = 0,
         [int]$CrashAfterEmptyDestinationRemoval = 0,
         [long]$AvailableBytes = -1,
-        [string]$DigestOverride = ''
+        [string]$DigestOverride = '',
+        # The backup folder the configuration names now, when an earlier move in the same fixture changed it.
+        [string]$CurrentRepository = '',
+        # Pauses the copy after this many files and runs -WhilePaused (given the request nonce) before it goes on.
+        [int]$PauseDuringCopyAfterFiles = 0,
+        [scriptblock]$WhilePaused = $null,
+        # Makes the Google Drive hold check fail, as if a folder's file ID did not survive a rename there.
+        [switch]$FailFolderHoldProbe
     )
+    $current = if ($CurrentRepository) { $CurrentRepository } else { $Fixture.OldRepository }
     $nonce = ([Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')).ToLowerInvariant()
     $configHash = Get-Hash -Path $Fixture.ConfigPath
     $digest = if ($DigestOverride) { $DigestOverride } else {
-        Get-RequestDigest -Current $Fixture.OldRepository -New ([IO.Path]::GetFullPath($Destination).TrimEnd('\')) `
+        Get-RequestDigest -Current $current -New ([IO.Path]::GetFullPath($Destination).TrimEnd('\')) `
             -ConfigHash $configHash -Nonce $nonce
     }
     $resultPath = Join-Path $Fixture.StateRoot "RepositoryManagerResults\$nonce.json"
@@ -292,7 +368,7 @@ function Invoke-Relocation {
         '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
         (Join-Path $Fixture.InstallRoot 'Manage-Repository.ps1'), '-Relocate',
         '-NewRepository', $Destination, '-ExpectedUserSid', $sid,
-        '-ExpectedCurrentRepository', $Fixture.OldRepository, '-ExpectedConfigSha256', $configHash,
+        '-ExpectedCurrentRepository', $current, '-ExpectedConfigSha256', $configHash,
         '-ResultPath', $resultPath, '-RequestNonce', $nonce, '-RequestDigest', $digest,
         '-TestRoot', $Fixture.Root, '-TestFailAfterPublish', $FailurePoint,
         '-TestCrashAfterPublish', $CrashPoint,
@@ -301,19 +377,54 @@ function Invoke-Relocation {
         '-TestCrashAfterEmptyDestinationRemoval', $CrashAfterEmptyDestinationRemoval,
         '-TestAvailableBytes', $AvailableBytes
     )
-    $priorPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = 'Continue'
-        $output = @(& $powershell @arguments 2>&1 | ForEach-Object { [string]$_ })
-        $exitCode = $LASTEXITCODE
+    if ($PauseDuringCopyAfterFiles -gt 0) { $arguments += @('-TestPauseDuringCopyAfterFiles', $PauseDuringCopyAfterFiles) }
+    if ($FailFolderHoldProbe) { $arguments += '-TestFailFolderHoldProbe' }
+    $paused = $false
+    $whilePausedResult = $null
+    if ($PauseDuringCopyAfterFiles -le 0) {
+        $priorPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $output = @(& $powershell @arguments 2>&1 | ForEach-Object { [string]$_ })
+            $exitCode = $LASTEXITCODE
+        }
+        finally { $ErrorActionPreference = $priorPreference }
     }
-    finally { $ErrorActionPreference = $priorPreference }
+    else {
+        # Started without waiting, so the test can act while the manager copies, as another program could.
+        $standardOutput = Join-Path $Fixture.Root "manager-$nonce.out.txt"
+        $standardError = Join-Path $Fixture.Root "manager-$nonce.err.txt"
+        $commandLine = (@($arguments | ForEach-Object { ConvertTo-ProcessArgument -Value ([string]$_) })) -join ' '
+        $process = Start-Process -FilePath $powershell -ArgumentList $commandLine -NoNewWindow -PassThru `
+            -RedirectStandardOutput $standardOutput -RedirectStandardError $standardError
+        $null = $process.Handle
+        $pausedSignal = Join-Path $Fixture.Root 'copy-paused.signal'
+        $deadline = [DateTime]::UtcNow.AddSeconds(90)
+        while (-not [IO.File]::Exists($pausedSignal) -and -not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 50
+        }
+        $paused = [IO.File]::Exists($pausedSignal)
+        try {
+            if ($paused -and $null -ne $WhilePaused) { $whilePausedResult = & $WhilePaused $nonce }
+        }
+        finally { [IO.File]::WriteAllText((Join-Path $Fixture.Root 'copy-resume.signal'), "resume`n", $encoding) }
+        if (-not $process.WaitForExit(180000)) {
+            $process.Kill()
+            throw 'The paused repository manager did not finish.'
+        }
+        $exitCode = $process.ExitCode
+        $output = @(@(Get-Content -LiteralPath $standardOutput) + @(Get-Content -LiteralPath $standardError) |
+            ForEach-Object { [string]$_ })
+        foreach ($signal in @($pausedSignal, (Join-Path $Fixture.Root 'copy-resume.signal'))) {
+            if ([IO.File]::Exists($signal)) { [IO.File]::Delete($signal) }
+        }
+    }
     $result = if (Test-Path -LiteralPath $resultPath) { Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json } else { $null }
     $progressPath = $resultPath + '.progress.json'
     $progress = if (Test-Path -LiteralPath $progressPath) { Get-Content -LiteralPath $progressPath -Raw | ConvertFrom-Json } else { $null }
     return [pscustomobject]@{
         ExitCode=$exitCode; Output=$output; Result=$result; Progress=$progress; ResultPath=$resultPath;
-        Nonce=$nonce; Digest=$digest; ConfigHash=$configHash
+        Nonce=$nonce; Digest=$digest; ConfigHash=$configHash; Paused=$paused; WhilePaused=$whilePausedResult
     }
 }
 
@@ -343,8 +454,12 @@ function Invoke-Recovery {
 }
 
 $productionConfig = Join-Path $env:ProgramFiles 'ResticBackuper\backup-config.json'
-$productionHashBefore = if (Test-Path -LiteralPath $productionConfig) { Get-Hash -Path $productionConfig } else { $null }
-$taskXmlBefore = try { (Export-ScheduledTask -TaskName 'ResticBackuper' -ErrorAction Stop).Replace("`r`n", "`n") } catch { $null }
+$productionHashBefore = $null
+$taskXmlBefore = $null
+if (-not $SkipInstalledChecks) {
+    $productionHashBefore = if (Test-Path -LiteralPath $productionConfig) { Get-Hash -Path $productionConfig } else { $null }
+    $taskXmlBefore = try { (Export-ScheduledTask -TaskName 'ResticBackuper' -ErrorAction Stop).Replace("`r`n", "`n") } catch { $null }
+}
 
 try {
     # Successful copy-only relocation with full identity/history/check verification.
@@ -377,7 +492,9 @@ try {
         Assert-True ($null -ne $run.Progress.PSObject.Properties[$name]) "progress field $name"
     }
     Assert-True (Test-Path -LiteralPath (Join-Path $fixture.NewRepository 'config') -PathType Leaf) 'destination repository exists'
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixture.NewRepository 'locks\ephemeral'))) 'repository locks excluded'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixture.NewRepository 'locks'))) 'repository locks excluded'
+    $expectedResticFiles = @(Get-RelativeFiles -Root $fixture.OldRepository | Where-Object { -not $_.StartsWith('locks\') })
+    Assert-True (((Get-RelativeFiles -Root $fixture.NewRepository) -join '|') -ceq ($expectedResticFiles -join '|')) 'destination holds exactly the backup files'
     Assert-True ((Get-TreeDigest -Root $fixture.OldRepository -ExcludeLocks) -eq $oldRepositoryDigest) 'old repository retained byte-for-byte excluding locks'
     Assert-True ((Get-TreeDigest -Root $fixture.OldRecovery) -eq $oldRecoveryDigest) 'old RecoveryTools untouched'
     $publishedConfig = Get-Content -LiteralPath $fixture.ConfigPath -Raw | ConvertFrom-Json
@@ -437,6 +554,107 @@ try {
         Where-Object Name -like '.restic-repository-*.staging').Count -eq 0) 'DriveFS staging removed after verified promotion'
     Assert-True (@(Get-ChildItem -LiteralPath $driveFsParent -Force |
         Where-Object Name -like '.resticbackuper-provider-*').Count -eq 0) 'DriveFS provider probes cleaned'
+    Assert-True (@(Get-ChildItem -LiteralPath $driveFsParent -Force |
+        Where-Object Name -like '.resticbackuper-hold-*').Count -eq 0) 'Google Drive hold checks cleaned'
+
+    # Held folders, file IDs and renames through a handle have not been tried on Google Drive's own file system, and
+    # rollback and recovery need them as much as the move does. When they fail on a throwaway folder there, the move is
+    # refused in plain words before the journal is written: no copy starts, so nothing needs rolling back.
+    $holdFixture = New-Fixture
+    $holdRoot = Join-Path $holdFixture.Root 'DriveFs\My Drive'
+    $holdParent = Join-Path $holdRoot 'ResticBackups'
+    foreach ($directory in @($holdRoot, $holdParent, (Join-Path $holdFixture.Root 'LocalAppData\Google\DriveFS'))) {
+        [void][IO.Directory]::CreateDirectory($directory)
+    }
+    $holdConfigBefore = Get-Hash -Path $holdFixture.ConfigPath
+    $holdRun = Invoke-Relocation -Fixture $holdFixture -Destination (Join-Path $holdParent 'Personal') -FailFolderHoldProbe
+    Assert-True ($holdRun.ExitCode -ne 0 -and $null -ne $holdRun.Result -and
+        [string]$holdRun.Result.error -match 'Google Drive could not keep a folder in place') ('a failed Google Drive hold check refuses the move in plain words: ' + ($holdRun.Output -join ' | '))
+    Assert-True (-not (Test-Path -LiteralPath $holdFixture.Log)) 'a failed Google Drive hold check stops the move before its first Restic step'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $holdFixture.StateRoot 'repository-relocation.journal.json'))) 'a failed Google Drive hold check leaves no journal'
+    Assert-True ((Get-Hash -Path $holdFixture.ConfigPath) -eq $holdConfigBefore) 'a failed Google Drive hold check keeps the configuration'
+    Assert-True (@(Get-ChildItem -LiteralPath $holdParent -Force).Count -eq 0) 'a failed Google Drive hold check leaves nothing in Google Drive'
+
+    # Only Restic's own files are copied, and anything else beside them stays where it is, from a local folder ...
+    $extrasFixture = New-Fixture
+    $extrasExpected = @(Get-RelativeFiles -Root $extrasFixture.OldRepository | Where-Object { -not $_.StartsWith('locks\') })
+    $extras = @(Add-UnrelatedFiles -Repository $extrasFixture.OldRepository)
+    $extrasRun = Invoke-Relocation -Fixture $extrasFixture -Destination $extrasFixture.NewRepository
+    if ($extrasRun.ExitCode -ne 0) { Write-Output ("unrelated-files output: " + ($extrasRun.Output -join ' | ')) }
+    Assert-True ($extrasRun.ExitCode -eq 0 -and $extrasRun.Result.ok -eq $true) 'move succeeds with unrelated files beside the backup'
+    foreach ($extra in $extras) {
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $extrasFixture.NewRepository $extra))) "unrelated file not copied: $extra"
+        Assert-True (Test-Path -LiteralPath (Join-Path $extrasFixture.OldRepository $extra) -PathType Leaf) "unrelated file left in place: $extra"
+    }
+    Assert-True (((Get-RelativeFiles -Root $extrasFixture.NewRepository) -join '|') -ceq ($extrasExpected -join '|')) 'only the backup files were copied'
+
+    # ... and from a Google Drive folder, which keeps no permissions, back to a local folder.
+    $driveFsExtras = @(Add-UnrelatedFiles -Repository $driveFsRepository)
+    $backParent = Join-Path $driveFsFixture.Root 'BackStore'
+    [void][IO.Directory]::CreateDirectory($backParent)
+    $backRepository = Join-Path $backParent 'Personal'
+    $backRun = Invoke-Relocation -Fixture $driveFsFixture -Destination $backRepository -CurrentRepository $driveFsRepository
+    if ($backRun.ExitCode -ne 0) { Write-Output ("DriveFS-source output: " + ($backRun.Output -join ' | ')) }
+    Assert-True ($backRun.ExitCode -eq 0 -and $backRun.Result.ok -eq $true) 'move from Google Drive succeeds with unrelated files there'
+    foreach ($extra in $driveFsExtras) {
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $backRepository $extra))) "unrelated Google Drive file not copied: $extra"
+        Assert-True (Test-Path -LiteralPath (Join-Path $driveFsRepository $extra) -PathType Leaf) "unrelated Google Drive file left in place: $extra"
+    }
+    Assert-True (((Get-RelativeFiles -Root $backRepository) -join '|') -ceq ($expectedResticFiles -join '|')) 'only the backup files came back from Google Drive'
+
+    # A local stage is administrator-only, so something else turning up in it is refused rather than copied along.
+    $strayFixture = New-Fixture
+    $strayRun = Invoke-Relocation -Fixture $strayFixture -Destination $strayFixture.NewRepository `
+        -PauseDuringCopyAfterFiles 1 -WhilePaused {
+            param([string]$Nonce)
+            $stage = Join-Path $strayFixture.NewParent ".restic-repository-$Nonce.staging"
+            [IO.File]::WriteAllText((Join-Path $stage 'evil.dll'), "planted`n", $encoding)
+            return 'planted'
+        }
+    Assert-True ($strayRun.Paused -and $strayRun.WhilePaused -eq 'planted') 'stray-file case paused during the copy'
+    Assert-True ($strayRun.ExitCode -ne 0 -and [string]$strayRun.Result.error -match 'not part of the backup: evil\.dll') 'a file planted in the stage is refused by name'
+    Assert-True (-not (Test-Path -LiteralPath $strayFixture.NewRepository)) 'a refused copy never becomes the backup location'
+    Assert-True (@(Get-ChildItem -LiteralPath $strayFixture.NewParent -Force |
+        Where-Object Name -like '.restic-*.staging').Count -eq 0) 'a refused copy leaves no stage behind'
+
+    # While the copy runs, a program running as the user tries to rename the stages, or the folder holding them, to
+    # swap in a junction to a folder of its choosing. Each stage is held open without delete sharing, so every rename
+    # is refused and nothing is ever written through a junction.
+    $raceFixture = New-Fixture
+    $raceDigest = Get-TreeDigest -Root $raceFixture.OldRepository -ExcludeLocks
+    $decoy = Join-Path $raceFixture.Root 'Decoy'
+    $race = Invoke-Relocation -Fixture $raceFixture -Destination $raceFixture.NewRepository `
+        -PauseDuringCopyAfterFiles 1 -WhilePaused {
+            param([string]$Nonce)
+            $outcome = [ordered]@{}
+            foreach ($target in @(
+                [pscustomobject]@{ Name = 'parent'; Path = $raceFixture.NewParent },
+                [pscustomobject]@{ Name = 'recovery stage'; Path = (Join-Path $raceFixture.NewParent ".restic-recovery-$Nonce.staging") },
+                [pscustomobject]@{ Name = 'repository stage'; Path = (Join-Path $raceFixture.NewParent ".restic-repository-$Nonce.staging") }
+            )) {
+                $moved = $target.Path + '.moved'
+                try { [IO.Directory]::Move($target.Path, $moved) }
+                catch { $outcome[$target.Name] = 'refused'; continue }
+                $outcome[$target.Name] = 'renamed'
+                if ($target.Name -ne 'repository stage') { [IO.Directory]::Move($moved, $target.Path); continue }
+                # What an attacker would do next: the same folders somewhere of its choosing, and a junction to them.
+                [void][IO.Directory]::CreateDirectory($decoy)
+                foreach ($folder in @(Get-ChildItem -LiteralPath $moved -Recurse -Directory -Force)) {
+                    [void][IO.Directory]::CreateDirectory((Join-Path $decoy $folder.FullName.Substring($moved.Length + 1)))
+                }
+                & cmd.exe /d /c mklink /J "$($target.Path)" "$decoy" | Out-Null
+                $plantedLinks.Add($target.Path)
+            }
+            return $outcome
+        }
+    if ($race.ExitCode -ne 0) { Write-Output ("swap-case output: " + ($race.Output -join ' | ')) }
+    Assert-True ($race.Paused -and $null -ne $race.WhilePaused) 'swap case paused during the copy'
+    Assert-True ($race.WhilePaused['parent'] -eq 'refused') 'the folder holding the stages cannot be renamed during the copy'
+    Assert-True ($race.WhilePaused['recovery stage'] -eq 'refused') 'the recovery-tools stage cannot be renamed during the copy'
+    Assert-True ($race.WhilePaused['repository stage'] -eq 'refused') 'the backup stage cannot be renamed during the copy'
+    Assert-True (@(Get-RelativeFiles -Root $decoy).Count -eq 0) 'nothing is written through a swapped stage'
+    Assert-True ($race.ExitCode -eq 0 -and $race.Result.ok -eq $true) 'the move completes after the swap attempts'
+    Assert-True ((Get-TreeDigest -Root $raceFixture.NewRepository -ExcludeLocks) -eq $raceDigest) 'the new location holds exactly the backup'
 
     $driveFsCrashFixture = New-Fixture
     $driveFsCrashRoot = Join-Path $driveFsCrashFixture.Root 'DriveFs\My Drive'
@@ -619,6 +837,25 @@ try {
     Assert-True ($managerText -match 'GoogleDriveFS' -and $managerText -match 'drivefs_cache_directory') 'DriveFS provider and cache gates present'
     Assert-True ($managerText -match 'MaximumBytes -ge \$driveFsObjectLimitBytes') 'DriveFS 4 GiB object gate present'
     Assert-True ($managerText -match 'repository_manifest_sha256' -and $managerText -match 'Assert-TreeMatchesInventory') 'repository commit manifest verification present'
+    Assert-True ($managerText -notmatch 'Move-Item[^\n]*\$(repositoryStage|recoveryStage)') 'stages are never renamed by path'
+    Assert-True ($managerText -match 'Move-PinnedDirectory -Pin \$repositoryStagePin -Destination \$canonicalNew' -and
+        $managerText -match 'Move-PinnedDirectory -Pin \$recoveryStagePin -Destination \$newRecovery') 'stages renamed through their held handle'
+    $pinAccess = [regex]::Match($managerText, '(?m)^\$stagePinAccess = 0x([0-9A-Fa-f]+)')
+    $pinShare = [regex]::Match($managerText, '(?m)^\$stagePinShare = 0x([0-9A-Fa-f]+)')
+    Assert-True ($pinAccess.Success -and ([Convert]::ToInt64($pinAccess.Groups[1].Value, 16) -band 0x10000) -eq 0 -and
+        ([Convert]::ToInt64($pinAccess.Groups[1].Value, 16) -band 0x1) -ne 0) 'the hold lists the folder and never asks for delete access'
+    Assert-True ($pinShare.Success -and ([Convert]::ToInt64($pinShare.Groups[1].Value, 16) -band 0x4) -eq 0) 'the hold never shares delete'
+    Assert-True ($managerText -match 'Get-TreeInventory -Root \$validated\.Repository -ResticLayout Skip') 'only Restic files are read from the current backup folder'
+    # Once a stage has its final name nothing that can fail runs before the caller marks it promoted, so a failure there
+    # can never leave a promoted copy that rollback does not know about.
+    $moveBody = [regex]::Match($managerText, '(?s)\nfunction Move-PinnedDirectory \{(.+?)\n\}').Groups[1].Value
+    $renameAt = $moveBody.IndexOf('SetFileInformationByHandle(')
+    $afterRename = if ($renameAt -lt 0) { '' } else {
+        @($moveBody.Substring($renameAt).Split("`n") | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+    }
+    Assert-True ($renameAt -ge 0 -and $afterRename -notmatch 'Get-DirectoryHandleIdentity|Assert-|Open-' -and
+        $afterRename -match 'return \$identity') 'a renamed stage is returned without another check that could fail'
+    Assert-True ($managerText -match '(?s)\nfunction Assert-ReadyDriveFsDestination \{(?:(?!\nfunction ).)+?\n    Assert-DriveFsFolderHold -Directory') 'Google Drive moves check held folders before they start'
     $builderText = Get-Content -LiteralPath (Join-Path $projectRoot 'build\Build-Release.ps1') -Raw
     $installerText = Get-Content -LiteralPath (Join-Path $projectRoot 'installer\Install-ResticBackuper.ps1') -Raw
     $commonText = Get-Content -LiteralPath (Join-Path $projectRoot 'src\restic_common.py') -Raw
@@ -739,10 +976,14 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
     Assert-True (@(3, 15) -contains $nativeResult.unused_drive_error) "an unused drive letter fails with Windows' own error, so SetLastError is set (got: $($nativeResult.unused_drive_error))"
     Assert-True ($nativeResult.set_last_error -eq $true) 'the emitted call imports kernel32 by its exact name with SetLastError'
 
-    $productionHashAfter = if (Test-Path -LiteralPath $productionConfig) { Get-Hash -Path $productionConfig } else { $null }
-    $taskXmlAfter = try { (Export-ScheduledTask -TaskName 'ResticBackuper' -ErrorAction Stop).Replace("`r`n", "`n") } catch { $null }
-    Assert-True ($productionHashAfter -eq $productionHashBefore) 'production protected config untouched'
-    Assert-True ($taskXmlAfter -ceq $taskXmlBefore) 'production scheduled task untouched'
+    $productionCheck = 'skipped'
+    if (-not $SkipInstalledChecks) {
+        $productionHashAfter = if (Test-Path -LiteralPath $productionConfig) { Get-Hash -Path $productionConfig } else { $null }
+        $taskXmlAfter = try { (Export-ScheduledTask -TaskName 'ResticBackuper' -ErrorAction Stop).Replace("`r`n", "`n") } catch { $null }
+        Assert-True ($productionHashAfter -eq $productionHashBefore) 'production protected config untouched'
+        Assert-True ($taskXmlAfter -ceq $taskXmlBefore) 'production scheduled task untouched'
+        $productionCheck = 'passed'
+    }
 
     [ordered]@{
         test = 'Manage-Repository'
@@ -763,13 +1004,21 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
         native_call_compiles_nothing = 'passed'
         fake_restic_no_backup_or_init = 'passed'
         old_repository_retention = 'passed'
-        production_config_untouched = 'passed'
-        production_task_untouched = 'passed'
+        only_restic_files_copied = 'passed'
+        stages_held_during_copy = 'passed'
+        production_config_untouched = $productionCheck
+        production_task_untouched = $productionCheck
     } | ConvertTo-Json -Compress
 }
 finally {
     Remove-Item Env:FAKE_RESTIC_LOG -ErrorAction SilentlyContinue
     Remove-Item Env:FAKE_RESTIC_FAIL_CHECK -ErrorAction SilentlyContinue
+    # A junction the swap test planted goes first, on its own, so removing the fixture never reaches through it.
+    foreach ($link in $plantedLinks) {
+        if ([IO.Directory]::Exists($link) -and ([IO.File]::GetAttributes($link) -band [IO.FileAttributes]::ReparsePoint)) {
+            [IO.Directory]::Delete($link, $false)
+        }
+    }
     foreach ($root in $fixtureRoots) {
         if (Test-Path -LiteralPath $root) {
             $full = [IO.Path]::GetFullPath($root)
