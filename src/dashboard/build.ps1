@@ -121,6 +121,8 @@ $sources = @(
     (Join-Path $project 'TaskSchedule.cs'),
     (Join-Path $project 'BackupFreshness.cs'),
     (Join-Path $project 'BackupAlerts.cs'),
+    (Join-Path $project 'BackupSpace.cs'),
+    (Join-Path $project 'SpaceWarningStore.cs'),
     (Join-Path $project 'ScheduleManagerLauncher.cs'),
     (Join-Path $project 'ScheduleEditorWindow.cs'),
     (Join-Path $project 'BackupTaskController.cs'),
@@ -133,6 +135,7 @@ $sources = @(
     (Join-Path $project 'DashboardWindow.cs'),
     (Join-Path $project 'DashboardWindow.SourcePicker.cs'),
     (Join-Path $project 'DashboardWindow.RestoreFlow.cs'),
+    (Join-Path $project 'DashboardWindow.BackupSpace.cs'),
     (Join-Path $project 'DashboardWindow.Web.cs'),
     (Join-Path $project 'DashboardWindow.Alerts.cs')
 )

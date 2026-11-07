@@ -46,6 +46,7 @@ ELEVATED = {
 NOT_ELEVATED = {
     "src/sync_repository_to_google_drive.ps1": "retired: not in the release payload, and refused as a task action",
     "src/dashboard/tests/restore-flow-regressions.ps1": "a test, run by a developer or CI",
+    "src/dashboard/tests/backup-space-regressions.ps1": "a test, dot-sourced by restore-flow-regressions.ps1",
     "src/dashboard/build.ps1": "a developer's build script",
     "src/task_launcher/build.ps1": "a developer's build script",
     "installer/setup/build.ps1": "a developer's build script",

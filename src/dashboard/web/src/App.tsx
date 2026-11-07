@@ -26,7 +26,7 @@ import {
   typeLabel, unresolvedRuns, usualSeconds, type Verified,
 } from './runProblems';
 import { formatClock, formatWhen, formatWhenAgo, formatWhenAgoInSentence, localClocks } from './when';
-import { canOpenRunDetails, driveOf, heroConcern, heroOffersRunDetails, heroTone, lastStartedAt, verifiedTimeKnown } from './protectionTone';
+import { canOpenRunDetails, describeSpace, driveOf, heroConcern, heroOffersRunDetails, heroTone, lastStartedAt, verifiedTimeKnown } from './protectionTone';
 import { createInFlight, sendOnceAtATime } from './oneShot';
 import { PendingCommands, usePendingCommand } from './pendingCommands';
 import { effectiveFrom, presetStart, rangeMenuValue, type ActivityDateFilter, type RangePreset } from './activityRange';
@@ -317,6 +317,38 @@ function VolumeLine({ repository }: { repository: DashboardState['repository'] }
   return <div className={`muted-copy volume-line${missing ? ' is-unavailable' : ''}`} title={missing ? repository.volume : undefined}>{missing && <><TriangleAlert size={13} aria-hidden="true" /><span className="sr-only">Needs attention: </span></>}{missing ? `The backup drive${drive ? ` (${drive})` : ''} isn’t connected` : repository.volume}</div>;
 }
 
+// How full the backup location is (describeSpace in protectionTone.ts): what the backups use and what is free, then the forecast or a
+// problem with what to do. Without the host's `space` it is the volume line above. The usage line is never announced (it moves every
+// minute). A problem is announced only where `live` (Settings): on Protection the hero above already says it.
+function SpaceLine({ repository, live = false }: { repository: DashboardState['repository']; live?: boolean }) {
+  if (!repository.space) return <VolumeLine repository={repository} />;
+  const view = describeSpace(repository);
+  const problem = view.tone !== 'muted' && !!view.status;
+  const block = problem ? <div className={`space-problem ${view.tone}`}>{view.tone === 'danger' ? <OctagonAlert size={14} aria-hidden="true" /> : <TriangleAlert size={14} aria-hidden="true" />}
+    <div><p><span className="sr-only">Needs attention: </span>{view.status}</p>{view.nextStep && <p className="space-next">{view.nextStep}</p>}</div></div> : null;
+  return <div className="space-line">
+    {view.usage && <p className="muted-copy space-usage">{view.usage}</p>}
+    {live ? <div role="status">{block}</div> : block}
+    {!problem && view.status && <p className="muted-copy space-status">{view.status}</p>}
+    {view.how && <details className="inline-details"><summary>How this is worked out</summary><p className="muted-copy">{view.how}</p></details>}
+  </div>;
+}
+
+// Settings > Backup location > Low space warning: how many weeks before the drive is full the card (and the Protection hero) turn amber.
+// Like the theme it changes only what the page says, so it is not a protected action. Not offered where there is no forecast to warn from.
+const SPACE_WARNING_WEEKS = ['4', '8', '12'] as const;
+function SpaceWarningSetting({ state, send }: { state: DashboardState; send: Send }) {
+  const space = state.repository.space;
+  if (!space || space.forecast.state === 'unavailable') return null;
+  const where = space.kind === 'googleDrive' ? 'your Google storage' : 'the backup drive';
+  return <div className="space-warning">
+    <h4 className="space-warning-title"><Gauge size={13} aria-hidden="true" />Low space warning</h4>
+    <p className="muted-copy">Rewindle warns you when, at the rate your backups grow, {where} will be full within:</p>
+    <div className="motion-picker space-warning-picker" role="group" aria-label="Warn when full within">{SPACE_WARNING_WEEKS.map(weeks => <button key={weeks} className="motion-choice" aria-pressed={String(space.warnWeeks) === weeks} onClick={() => send('setSpaceWarning', { weeks })}>{String(space.warnWeeks) === weeks && <motion.div className="motion-highlight" layoutId="space-warning-thumb" transition={{ type: 'spring', stiffness: 440, damping: 34 }} />}<span>{weeks} weeks</span></button>)}</div>
+    <p className="muted-copy">Rewindle always tells you when there’s too little space for the next backup.</p>
+  </div>;
+}
+
 // `stale` is a page that has lost the host (see App's `connected`): what it shows is the last thing the host said, so it stops moving and
 // is dimmed, and the banner above it says why.
 function Protection({ state, send, folders, setFolders, stale, openRunDetails }: { state: DashboardState; send: Send; folders: FolderView; setFolders: (value: FolderView) => void; stale: boolean; openRunDetails: (runId: string) => void }) {
@@ -443,7 +475,7 @@ function Protection({ state, send, folders, setFolders, stale, openRunDetails }:
         <ScheduleNotice notice={state.schedule.notice} className="schedule-notice-slot" />
         <div className="info-action"><Action state={state} send={send} command="editSchedule" icon={<ArrowUpRight size={12} />} quiet={quiet} /></div></section>
       <section className="surface surface-pad"><div className="info-heading"><HardDrive size={15} className="text-ink-3" />Backup location</div>
-        <div className="info-main">{state.repository.path || 'Location unavailable'}</div><VolumeLine repository={state.repository} />
+        <div className="info-main">{state.repository.path || 'Location unavailable'}</div><SpaceLine repository={state.repository} />
         <div className="info-action"><Action state={state} send={send} command="changeRepository" icon={<ArrowUpRight size={12} />} quiet={quiet} /></div></section>
     </div>
     <ProtectionHealth state={state} send={send} quiet={quiet} />
@@ -890,7 +922,7 @@ function SettingsPage({ state, send, stale = false }: { state: DashboardState; s
         pickers in a row of cards line up whatever the length of the text above them. */}
     {missing ? <SetupNotice state={state} send={send} /> :
     <section className="settings-section"><h2 className="section-title">Backup plan</h2><div className="settings-grid">
-      <section className="surface setting-row"><div className="setting-copy"><h3 className="info-heading"><HardDrive size={15} />Backup location</h3><p className="muted-copy path-copy">{state.repository.path}</p><VolumeLine repository={state.repository} /></div><div className="setting-controls"><Action state={state} send={send} command="changeRepository" quiet={quiet} /></div></section>
+      <section className="surface setting-row"><div className="setting-copy"><h3 className="info-heading"><HardDrive size={15} />Backup location</h3><p className="muted-copy path-copy">{state.repository.path}</p><SpaceLine repository={state.repository} live /><SpaceWarningSetting state={state} send={send} /></div><div className="setting-controls"><Action state={state} send={send} command="changeRepository" quiet={quiet} /></div></section>
       <section className="surface setting-row"><div className="setting-copy"><h3 className="info-heading"><Clock3 size={15} />Automatic backups</h3><p className="info-main">{localClocks(state.schedule.summary, usableLocale(state.locale))}</p>
         {/* An unreadable schedule is a problem to explain, not a summary: the reason the host reports goes under Details. */}
         {state.schedule.error ? <div className="attention-note schedule-problem" role="alert">

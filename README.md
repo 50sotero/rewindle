@@ -82,6 +82,14 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
   replaced by one quiet line: **Off-site copy · Not set up (optional)**. An
   off-site copy that waits for its nightly check is calm until no check has
   worked for two days; then the card warns and says what to do.
+- The **Backup location** card shows how much space your backups use and how
+  much is free on the backup drive (or in your Google storage), and says when
+  it will be full at the rate your backups grow ("Full in about 13 months at
+  this rate"). It turns amber within the Low space warning you choose in
+  Settings, and red when there is too little room for the next backup, each
+  time with what to do, and never by deleting anything inside the backup
+  folder. With the earlier personal edition it shows the free space and says
+  that the forecast isn't available with that backup program.
 - **Back up now**, live progress (throughput, elapsed time, estimate), and
   **Cancel backup**, which asks Restic to stop cooperatively. Existing
   snapshots are never touched.
@@ -120,7 +128,9 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
 - Appearance (theme System, Light or Dark; Windows High Contrast is respected),
   animations (Follow Windows, Always on or Reduced) and text size (Smaller, Normal size, Larger; kept for the next launch).
 - **Change location** moves the repository: it copies to an empty folder,
-  verifies the copy and then switches, keeping the old repository.
+  verifies the copy and then switches, keeping the old repository. The same
+  card has the **Low space warning**: warn when the backup drive will be full
+  within 4, 8 (the default) or 12 weeks.
   **Edit schedule** sets daily or selected-day backups and their run conditions.
 - **Backup alerts** (under Backup plan) turns the Windows notifications on or
   off. The mark on the icon in the notification area stays either way.

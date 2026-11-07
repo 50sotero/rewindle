@@ -437,7 +437,7 @@ namespace ResticBackuper.Dashboard
                 case "volume_identity_mismatch":
                     return "Reconnect the original drive. Rewindle stopped because the drive using this letter looks like a different one; don't carry on until you're sure it's the right drive.";
                 case "repository_low_space":
-                    return "The backup drive is almost full. Free up space on it, or choose Change location to move your backups to a bigger drive.";
+                    return "The backup drive is almost full. Free up space on it by removing other files (never anything inside the backup folder), or choose Change location to move your backups to a bigger drive.";
                 case "repository_storage_unavailable":
                     return "Reconnect the backup drive (if your backups are in Google Drive, make sure Google Drive for desktop is running and signed in), then choose Back up now.";
                 case "repository_authentication_failed":

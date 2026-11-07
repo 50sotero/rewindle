@@ -1018,6 +1018,7 @@ namespace ResticBackuper.Dashboard
             }
             if (string.Equals(command, "refresh", StringComparison.Ordinal))
             {
+                ProbeRepositorySpaceSooner();
                 RefreshDashboard();
                 return true;
             }
@@ -1055,6 +1056,10 @@ namespace ResticBackuper.Dashboard
                 }
                 OnThemeSegmentClick(themeButtons[preference], new RoutedEventArgs());
                 return true;
+            }
+            if (string.Equals(command, "setSpaceWarning", StringComparison.Ordinal))
+            {
+                return ExecuteSpaceWarningCommand(payload, out error);
             }
             if (string.Equals(command, "setMotion", StringComparison.Ordinal))
             {
@@ -2187,6 +2192,8 @@ namespace ResticBackuper.Dashboard
             // False only when the drive itself said it is not ready, so the page can warn about a missing backup drive
             // without reading it out of the volume text.
             repository["volumeReady"] = repositoryVolumeReady;
+            // How full the backup location is and when it fills (DashboardWindow.BackupSpace.cs).
+            repository["space"] = BuildWebSpaceState();
             return repository;
         }
 

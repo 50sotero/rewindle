@@ -1339,6 +1339,122 @@ def _scan_drivefs_repository_objects(repository: Path) -> dict[str, int]:
     }
 
 
+# How long a verified backup may spend adding up the size of the backup folder.
+# A local folder of tens of thousands of pack files takes well under a second
+# (the size comes from the folder listing), and on Google Drive the readiness
+# check walked the same folder minutes earlier.
+REPOSITORY_SIZE_TIME_LIMIT_SECONDS = 15.0
+
+
+def _repository_entry_kind(metadata: Any) -> str:
+    """How the backup-size walk treats one entry, from its own metadata.
+
+    "file": a regular file, counted by the size its folder listing records, also
+    when it carries the reparse attribute (cloud placeholders and deduplicated
+    files do), because reading that size never follows anything. "folder": a
+    plain folder to walk into. "linked_folder": a folder that is a symbolic
+    link, junction or other reparse point, which the walk never enters.
+    "other": anything else, such as a link to a file, which is skipped.
+    """
+    mode = metadata.st_mode
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    if stat.S_ISDIR(mode) or attributes & FILE_ATTRIBUTE_DIRECTORY:
+        if stat.S_ISLNK(mode) or attributes & FILE_ATTRIBUTE_REPARSE_POINT:
+            return "linked_folder"
+        return "folder"
+    if stat.S_ISLNK(mode):
+        return "other"
+    if stat.S_ISREG(mode):
+        return "file"
+    return "other"
+
+
+def _walk_repository_bytes(
+    repository: Path,
+    deadline: float,
+    clock: Callable[[], float],
+    abandoned: threading.Event,
+) -> int | None:
+    """The walk itself (see measure_repository_bytes), on its own thread.
+
+    Between folders it stops once its time is up or the caller has stopped
+    waiting for it, so a walk left behind ends as soon as the listing it was
+    stuck in returns.
+    """
+    try:
+        if _repository_entry_kind(os.stat(repository, follow_symlinks=False)) != "folder":
+            return None
+        total = 0
+        pending = [os.fspath(repository)]
+        while pending:
+            if abandoned.is_set() or clock() > deadline:
+                return None
+            folder = pending.pop()
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    metadata = entry.stat(follow_symlinks=False)
+                    kind = _repository_entry_kind(metadata)
+                    if kind == "file":
+                        total += metadata.st_size
+                    elif kind == "folder":
+                        pending.append(entry.path)
+                    elif kind == "linked_folder":
+                        return None
+        return total
+    except (OSError, ValueError):
+        return None
+
+
+def measure_repository_bytes(
+    repository: Path,
+    *,
+    time_limit_seconds: float = REPOSITORY_SIZE_TIME_LIMIT_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
+) -> int | None:
+    """Total size of the regular files under the backup location, for the dashboard.
+
+    Read-only and best effort: nothing is opened, written or followed, and no
+    name or path is recorded. It returns None, and never raises for these, when
+    the location is not a plain folder, when any folder inside it is a link,
+    junction or other reparse point (the total would leave out what is behind
+    it, and Restic never makes one), on any OSError or ValueError, or once the
+    walk passes the time limit. A verified backup must never fail because its
+    size could not be measured, so the caller guards the call as well.
+
+    The time limit holds even when one folder listing never returns (a Google
+    Drive for desktop that hangs): the walk runs on a daemon thread, and once
+    the limit passes the caller stops waiting, gives no size and leaves that
+    thread behind. The thread holds no lock and writes nothing, and it ends by
+    itself when the listing returns, or with the process.
+    """
+    outcome: list[int | None] = []
+    abandoned = threading.Event()
+
+    def walk() -> None:
+        try:
+            outcome.append(
+                _walk_repository_bytes(
+                    repository, clock() + time_limit_seconds, clock, abandoned
+                )
+            )
+        except Exception:
+            outcome.append(None)
+
+    try:
+        worker = threading.Thread(
+            target=walk, name="repository-size-walk", daemon=True
+        )
+        worker.start()
+        worker.join(max(0.0, time_limit_seconds))
+    except Exception:
+        abandoned.set()
+        return None
+    if worker.is_alive() or not outcome:
+        abandoned.set()
+        return None
+    return outcome[0]
+
+
 def _validate_drivefs_provider(
     config: dict[str, Any],
     *,

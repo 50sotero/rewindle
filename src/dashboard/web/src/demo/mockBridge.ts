@@ -7,7 +7,7 @@
 // through the guarded dynamic import in main.tsx, so the build that ships inside the desktop app does
 // not contain it.
 import type { CommandName, DashboardState, NativeCommand, NativeMessage, NativeWebView } from '../native-types';
-import { createSampleRunDetails, createSampleState, formatBytes, formatDuration } from './demoState';
+import { applySpaceScenario, createSampleRunDetails, createSampleState, formatBytes, formatDuration, setSampleSpaceWarning } from './demoState';
 import { createRestoreDemo } from './restoreDemo';
 import { applyAlertsScenario, setSampleAlerts } from './alertsDemo';
 
@@ -30,6 +30,10 @@ const prefers = (query: string) => typeof window.matchMedia === 'function' && wi
 export function installSampleBridge(): void {
   let state: DashboardState = createSampleState();
   applyAlertsScenario(state);
+  // `?space=low|full|google|checking` shows the Backup location card in that state (see demoState.ts).
+  applySpaceScenario(state, new URLSearchParams(window.location.search).get('space'));
+  // What the host would answer to the command being handled when it says something on success.
+  let answer = '';
   const idleStatus = JSON.stringify(state.status);
   const listeners = new Set<Listener>();
   let previewStartedAt = 0;
@@ -125,14 +129,22 @@ export function installSampleBridge(): void {
       case 'togglePreview':
         togglePreview();
         return null;
+      case 'setSpaceWarning': {
+        const said = setSampleSpaceWarning(state, String(payload?.weeks ?? ''));
+        if (said === null) return 'Choose 4, 8 or 12 weeks.';
+        answer = said;
+        return null;
+      }
       default:
         return restore.handles(command) ? restore.handle(command, payload) : READ_ONLY;
     }
   };
 
   const receive = (command: NativeCommand) => {
+    answer = '';
     const refusal = handle(command.command, command.payload);
-    post({ type: 'result', id: command.id, ok: refusal === null, ...(refusal === null ? {} : { message: refusal }) });
+    const message = refusal ?? answer;
+    post({ type: 'result', id: command.id, ok: refusal === null, ...(message ? { message } : {}) });
     publish();
   };
 

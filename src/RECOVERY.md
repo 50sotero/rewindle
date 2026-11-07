@@ -54,6 +54,15 @@ folder's administrator-only permissions, because its other name might be
 outside the restore. An administrator can give it the target's usual
 permissions with `icacls "<file>" /reset`.
 
+## A backup drive that is full
+
+Backups stop while the drive that holds the repository has less free space
+than `minimum_free_gib` in the configuration. Make room by removing other
+files from that drive, or move the repository to a bigger drive with Change
+location in the dashboard. Never delete, move or edit anything inside the
+repository folder to make room: every file in it can be part of every
+backup. The next scheduled backup runs once there is room.
+
 ## Recovery-key restore
 
 When only this bundle, the repository, and the offline recovery key remain:

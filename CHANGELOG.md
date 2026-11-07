@@ -17,6 +17,15 @@ labels. Releases before 0.2.0 were published under the name ResticBackuper.
   start it, with its error code) and what to do next, and the schedule card
   says when Windows last started the backup. Settings > Backup plan > Backup
   alerts turns the notifications off; the mark on the icon stays.
+- **Backup drive space.** Protection and Settings show how much space your
+  backups use (measured after each backup), how much is free on the backup
+  drive (or in your Google storage) and about when it will be full at the rate
+  your backups grow. The line turns amber within the Low space warning you
+  choose in Settings (4, 8 or 12 weeks; 8 by default) and red when there is
+  too little space for the next backup, each time with what to do, and never
+  by deleting anything inside the backup folder. With the earlier personal
+  edition the card shows the free space and says that the forecast isn't
+  available with that backup program.
 
 ### Changed
 

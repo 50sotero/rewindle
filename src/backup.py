@@ -30,6 +30,7 @@ from restic_common import (
     cancellation_checkpoint,
     ensure_free_space,
     load_config_under_lock,
+    measure_repository_bytes,
     preflight_sources,
     process_start_filetime,
     read_pinned_restic_version,
@@ -1047,6 +1048,17 @@ def _run_locked(
                     )
                     + "\n"
                 )
+            # How much space the backups now take, for the dashboard's Backup
+            # location card. Measured before the finish time is taken, so the
+            # recorded run includes it. The walk is read-only and time-boxed (also
+            # when a folder listing hangs), and whatever happens in it, a verified
+            # backup stays verified.
+            try:
+                repository_bytes_after = measure_repository_bytes(
+                    Path(config["repository"])
+                )
+            except Exception:
+                repository_bytes_after = None
             status["state"] = (
                 "success_unchanged"
                 if not summary_snapshot_id
@@ -1059,6 +1071,7 @@ def _run_locked(
             status["free_bytes_after"] = shutil.disk_usage(
                 Path(config["repository"]).anchor
             ).free
+            status["repository_bytes_after"] = repository_bytes_after
             atomic_write_json(status_path, status)
             atomic_write_json(last_success_path, status)
             log_handle.write(

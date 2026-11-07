@@ -144,6 +144,13 @@ namespace ResticBackuper.Dashboard
         public long ConfigGeneration { get; private set; }
         public string CloudPlaceholderPolicy { get; private set; }
         public IList<BackupSourceView> Sources { get; private set; }
+        // For the Backup location card only (how full the backup drive is). Never required: a configuration without them, or with a value
+        // that cannot be used, still loads, so the plan is never refused over a figure the card can do without. "google_drivefs_stream"
+        // when the backups are kept in Google Drive for desktop, otherwise "local_ntfs".
+        public string RepositoryStorageMode { get; private set; }
+        // minimum_free_gib in bytes, the free space below which the backup service refuses to start a backup; -1 when it is missing or not
+        // a usable number.
+        public long MinimumFreeBytes { get; private set; }
 
         private SourceConfiguration()
         {
@@ -346,6 +353,10 @@ namespace ResticBackuper.Dashboard
                 sources.Add(new BackupSourceView(sourcePath, protectedCanary));
             }
 
+            string storageMode;
+            long minimumFreeBytes;
+            ReadSpaceSettings(document, out storageMode, out minimumFreeBytes);
+
             return new SourceConfiguration
             {
                 InstallRoot = installRoot,
@@ -356,8 +367,66 @@ namespace ResticBackuper.Dashboard
                 PlanId = planId,
                 ConfigGeneration = configGeneration,
                 CloudPlaceholderPolicy = cloudPolicy,
-                Sources = sources
+                Sources = sources,
+                RepositoryStorageMode = storageMode,
+                MinimumFreeBytes = minimumFreeBytes
             };
+        }
+
+        // Reads the storage mode and the reserve, both engines' way. Never throws for them. The reserve is a number of GiB, fractions
+        // allowed, 0 or more (true, false, text and anything else are not), converted the way the engine converts it: whole bytes,
+        // the fraction cut off.
+        internal static void ReadSpaceSettings(
+            IDictionary<string, object> document,
+            out string storageMode,
+            out long minimumFreeBytes)
+        {
+            storageMode = "local_ntfs";
+            minimumFreeBytes = -1;
+            if (document == null)
+            {
+                return;
+            }
+            object modeValue;
+            if (document.TryGetValue("repository_storage_mode", out modeValue) &&
+                string.Equals(modeValue as string, "google_drivefs_stream", StringComparison.Ordinal))
+            {
+                storageMode = "google_drivefs_stream";
+            }
+            object reserveValue;
+            if (!document.TryGetValue("minimum_free_gib", out reserveValue) || reserveValue == null)
+            {
+                return;
+            }
+            decimal gibibytes;
+            if (reserveValue is int)
+            {
+                gibibytes = (int)reserveValue;
+            }
+            else if (reserveValue is long)
+            {
+                gibibytes = (long)reserveValue;
+            }
+            else if (reserveValue is decimal)
+            {
+                gibibytes = (decimal)reserveValue;
+            }
+            else
+            {
+                return;
+            }
+            if (gibibytes < 0)
+            {
+                return;
+            }
+            try
+            {
+                minimumFreeBytes = (long)decimal.Truncate(gibibytes * 1073741824m);
+            }
+            catch (OverflowException)
+            {
+                minimumFreeBytes = -1;
+            }
         }
 
         public bool ContainsUserSource(string sourcePath)

@@ -195,7 +195,10 @@ class BackupAlertsSourceTests(unittest.TestCase):
     def test_alert_words_are_plain(self) -> None:
         texts = string_literals(self.alerts) + string_literals(self.glue)
         texts.append(function_source(self.app, "AlertsSetting"))
-        texts.append(self.tone[self.tone.index("export function alertConcern("):])
+        # From alertConcern up to the backup drive space section: that section's comments and types name the repository, and its
+        # words have their own test (test_dashboard_backup_space.py).
+        tone = self.tone[self.tone.index("export function alertConcern("):]
+        texts.append(tone.split("// ---- Backup drive space")[0])
         for text in texts:
             for word in INTERNAL_WORDS:
                 with self.subTest(text=text[:60], word=word):

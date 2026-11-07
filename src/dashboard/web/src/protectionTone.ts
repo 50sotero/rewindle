@@ -24,9 +24,14 @@ export function heroConcern(state: DashboardState): HeroConcern | null {
   if (state.status.active || state.recovery.repairNeeded || state.recovery.moveRunning) return null;
   const { repository, sources, freshness } = state;
   if (repository.volumeReady === false) {
+    // Google Drive for desktop's drive is not unplugged: it answers "not ready" when the app is not running or not signed in.
+    if (repository.space?.kind === 'googleDrive') return { tone: 'danger', text: 'Google Drive for desktop isn’t running, so the next backup can’t run. Start it and sign in.' };
     const drive = driveOf(repository.path);
     return { tone: 'danger', text: `The backup drive${drive ? ` (${drive})` : ''} isn’t connected, so the next backup can’t run. Plug it back in.` };
   }
+  // Too little space for the next backup comes right after the drive itself; space that is running low comes last.
+  const space = spaceConcern(repository);
+  if (space?.tone === 'danger') return space;
   const missing = sources.filter(source => !source.exists);
   // The folder that holds the restore test file can't be taken out of the backup, so reconnecting or removing it is no remedy.
   if (missing.some(source => source.isCanary)) return { tone: 'danger', text: `The restore test file is missing, so backups can’t be checked. ${reinstallAdvice(state)}` };
@@ -42,7 +47,7 @@ export function heroConcern(state: DashboardState): HeroConcern | null {
   if (state.actions.reviewChanges?.visible && freshness.state !== 'Healthy') {
     return { tone: 'warning', text: 'Your last backup also found far more changes than usual. Look them over, then choose Confirm these changes.' };
   }
-  return alertConcern(state);
+  return alertConcern(state) ?? space;
 }
 
 // Missed-run explanations the page already says elsewhere: the hero's own overdue words ('unknown'), its failed run with its button
@@ -145,3 +150,135 @@ export function heroOffersRunDetails(state: Pick<DashboardState, 'status' | 'his
  */
 export const canOpenRunDetails = (state: Pick<DashboardState, 'history' | 'actions'>, runId: string | undefined, connected: boolean): boolean =>
   connected && !!state.actions.viewRunDetails && state.actions.viewRunDetails.visible !== false && runInHistory(state, runId);
+
+// ---- Backup drive space ---------------------------------------------------------------------------------------------------------------
+// How full the backup location is, worded for the Backup location card (Protection and Settings) and the Protection hero. The host decides
+// the level (BackupSpace.cs); these only word it. Every sentence that asks the person to free space also says never to delete anything
+// inside the backup folder: on a full drive (and in Google storage, whose own page lists the backup folder first) that is the one thing
+// that would lose backups. The words never say repository, snapshot, engine or volume.
+
+export type SpaceTone = 'muted' | 'warning' | 'danger';
+/**
+ * The card's lines. `usage`: used and free space (muted, never announced: it moves every minute). `status`: the forecast (muted) or the
+ * problem (amber or red, with `nextStep`). `how`: how the forecast is worked out, only when there is one. Empty strings are not shown.
+ */
+export type SpaceView = { usage: string; status: string; tone: SpaceTone; nextStep: string; how: string };
+type SpaceRepository = Pick<DashboardState['repository'], 'path' | 'volume' | 'volumeReady' | 'space'>;
+
+/** "about 3 weeks", "about 13 months"... for weeks until the drive is full. `rounded` is the host's whole number of weeks, which the level was judged on. */
+export function forecastWords(weeks: number, rounded?: number | null): string {
+  if (!Number.isFinite(weeks) || weeks < 0) return '';
+  if (weeks < 1) {
+    const days = Math.max(1, Math.round(weeks * 7));
+    return days === 1 ? 'about 1 day' : `about ${days} days`;
+  }
+  if (weeks < 26) {
+    const whole = Math.max(1, rounded ?? Math.round(weeks));
+    return whole === 1 ? 'about 1 week' : `about ${whole} weeks`;
+  }
+  if (weeks < 78) return `about ${Math.round(weeks * 7 / 30.44)} months`;
+  if (weeks < 104) return 'about 2 years';
+  return 'more than 2 years';
+}
+
+const NEVER_INSIDE = '(never anything inside the backup folder)';
+const ONCE_THERES_ROOM = 'Once there’s room, the next scheduled backup runs, or choose Back up now.';
+
+function freeUpStep(google: boolean, onDrive: string): string {
+  return google
+    ? `Free up Google storage by removing other files ${NEVER_INSIDE}, get more storage from Google, or choose Change location to move your backups to a drive.`
+    : `Free up space on ${onDrive} by removing other files ${NEVER_INSIDE}, or choose Change location to move your backups to a bigger drive.`;
+}
+
+/** Every line the Backup location card shows about space. Without `space` (an older host) it is today's volume text. */
+export function describeSpace(repository: SpaceRepository): SpaceView {
+  const quiet: SpaceView = { usage: '', status: '', tone: 'muted', nextStep: '', how: '' };
+  const space = repository.space;
+  if (!space) return { ...quiet, usage: repository.volume };
+  const google = space.kind === 'googleDrive';
+  const onDrive = space.drive || 'the backup drive';
+  if (repository.volumeReady === false) {
+    return google
+      ? { ...quiet, status: 'Google Drive for desktop isn’t running.', tone: 'danger', nextStep: 'Start Google Drive for desktop and sign in.' }
+      : { ...quiet, status: `The backup drive${space.drive ? ` (${space.drive})` : ''} isn’t connected.`, tone: 'danger', nextStep: 'Plug it back in.' };
+  }
+  if (space.reading === 'checking') return { ...quiet, status: google ? 'Checking your Google storage…' : 'Checking the backup drive…' };
+  if (space.reading !== 'ready') {
+    return { ...quiet, status: google
+      ? 'Rewindle can’t read your Google storage right now. It tries again in a minute.'
+      : 'Rewindle can’t read the free space on the backup drive right now. It tries again in a minute.' };
+  }
+  const free = `${space.freeDisplay} free of ${space.totalDisplay}`;
+  const backups = space.backupsBytes >= 0 && space.backupsDisplay ? `Backups use ${space.backupsEstimated ? 'about ' : ''}${space.backupsDisplay} • ` : '';
+  const usage = `${backups}${google ? 'Google storage: ' : ''}${free}`;
+  const reserve = space.reserveBytes > 0 && space.reserveDisplay ? space.reserveDisplay : '';
+  const forecast = space.forecast;
+  const weeks = forecast.weeksLeft;
+  const when = weeks == null ? '' : forecastWords(weeks, forecast.weeksRounded);
+
+  if (space.level === 'full') {
+    const status = google
+      ? reserve ? `Your Google storage is too full to back up. Rewindle needs at least ${reserve} of it free, and ${space.freeDisplay} is free.` : 'Your Google storage is full, so backups can’t run.'
+      : reserve ? `The backup drive is too full to back up. Rewindle needs at least ${reserve} free on ${onDrive}, and ${space.freeDisplay} is free.` : 'The backup drive is full, so backups can’t run.';
+    return { ...quiet, usage, status, tone: 'danger', nextStep: `${freeUpStep(google, onDrive)} ${ONCE_THERES_ROOM}` };
+  }
+  if (space.level === 'low') {
+    const status = space.reason === 'forecast' && when
+      ? `Space is running low: ${google ? 'your Google storage' : 'the backup drive'} will be full in ${when} at this rate.`
+      : `Space is running low: only ${space.freeDisplay} is free ${google ? 'in your Google storage' : `on ${onDrive}`}${reserve ? `, and backups stop below ${reserve}` : ''}.`;
+    return { ...quiet, usage, status, tone: 'warning', nextStep: freeUpStep(google, onDrive), how: spaceHow(space) };
+  }
+  if (space.level !== 'ok') return { ...quiet, usage };
+  const fills = google ? 'your Google storage will be full' : 'the drive will be full';
+  let status = '';
+  switch (forecast.state) {
+    case 'growing':
+      if (weeks == null) break;
+      status = weeks >= 104
+        ? `Enough ${google ? 'Google storage' : 'space'} for more than 2 years at this rate.`
+        : google ? `Your Google storage will be full in ${when} at this rate.` : `Full in ${when} at this rate.`;
+      break;
+    case 'flat': status = `Your backups haven’t grown lately, so they aren’t filling ${google ? 'your Google storage' : 'the drive'}.`; break;
+    case 'learning': status = `After a few more backups, Rewindle can tell when ${fills}.`; break;
+    case 'unavailable': status = `With this backup program, Rewindle can’t forecast when ${fills}.`; break;
+  }
+  return { ...quiet, usage, status, how: spaceHow(space) };
+}
+
+/** "How this is worked out", only for a forecast that was worked out (growing or flat). */
+function spaceHow(space: NonNullable<SpaceRepository['space']>): string {
+  const state = space.forecast.state;
+  if (state !== 'growing' && state !== 'flat') return '';
+  const google = space.kind === 'googleDrive';
+  const reserve = space.reserveBytes > 0 && space.reserveDisplay ? space.reserveDisplay : '';
+  const lately = state === 'growing' && space.forecast.weeklyDisplay ? `Lately that is about ${space.forecast.weeklyDisplay} a week.` : 'Lately they have added almost nothing.';
+  const others = google
+    ? 'Google storage is shared with Gmail and Google Photos, so they can fill it sooner.'
+    : 'It counts only your backups, so other files on the drive can fill it sooner.';
+  const full = !reserve ? ''
+    : google ? ` “Full” means less than ${reserve} of it free: below that Rewindle stops backing up.`
+    : ` “Full” means less than ${reserve} free: below that Rewindle stops backing up, so Windows and your other programs keep some room.`;
+  return `Rewindle looks at what each backup added over the last 8 weeks, leaves out the single biggest one (such as a folder added once), and assumes backups keep running as often as they have. ${lately} ${others}${full}`;
+}
+
+/**
+ * The Protection hero's sentence about space, or null. Too full for the next backup is red (unless the latest run already failed for that
+ * reason, which the hero's own detail says); full within the Low space warning is amber. Little room with no forecast stays on the card.
+ */
+export function spaceConcern(repository: SpaceRepository): HeroConcern | null {
+  const space = repository.space;
+  if (!space || repository.volumeReady === false || space.reading !== 'ready') return null;
+  const google = space.kind === 'googleDrive';
+  if (space.level === 'full') {
+    if (space.runStoppedForSpace) return null;
+    return { tone: 'danger', text: google
+      ? `Your Google storage is too full for the next backup. Free some up by removing other files ${NEVER_INSIDE}, or get more storage from Google (see Backup location below).`
+      : `The backup drive is too full for the next backup. Free up space on ${space.drive || 'it'} by removing other files ${NEVER_INSIDE}, or move your backups to a bigger drive (see Backup location below).` };
+  }
+  const weeks = space.forecast.weeksLeft;
+  if (space.level === 'low' && space.reason === 'forecast' && weeks != null) {
+    const when = forecastWords(weeks, space.forecast.weeksRounded);
+    return { tone: 'warning', text: `${google ? 'Your Google storage' : 'The backup drive'} will be full in ${when} at this rate. See Backup location below for what to do.` };
+  }
+  return null;
+}
