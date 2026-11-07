@@ -865,7 +865,8 @@ namespace ResticBackuper.Dashboard
     {
         // Someone is at the PC: the session is not locked and there was keyboard or mouse input lately.
         public bool UserActive { get; set; }
-        // Rewindle's window is open and in front, so the person is already looking at it.
+        // Rewindle's window is open and in front, so the person is already looking at it (when someone is at the PC: a locked
+        // session can keep it as the active window).
         public bool WindowInFront { get; set; }
         // The animation preview is on (a screenshot mode): nothing is told.
         public bool Quiet { get; set; }
@@ -1010,14 +1011,16 @@ namespace ResticBackuper.Dashboard
             {
                 return null;
             }
+            if (!presence.UserActive)
+            {
+                // Nobody at the PC: it waits for them. Checked before the window, which can still be the active one on a locked
+                // session, where nobody sees it.
+                return null;
+            }
             if (presence.WindowInFront || !store.Notify)
             {
                 // Looking at Rewindle already, or notifications are off: told, so it does not come up later.
                 RememberTold(current.EpisodeKey);
-                return null;
-            }
-            if (!presence.UserActive)
-            {
                 return null;
             }
             RememberTold(current.EpisodeKey);

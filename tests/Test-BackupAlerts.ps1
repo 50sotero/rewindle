@@ -525,8 +525,8 @@ namespace ResticBackuper.Dashboard
             utc = utc.AddMinutes(minutes);
         }
 
-        // presence: present, away (no input lately or locked), front (Rewindle in front), quiet (preview), none (unknown).
-        // Returns "" or the notification's "title|text".
+        // presence: present, away (no input lately or locked), front (Rewindle in front), front-locked (Rewindle still the
+        // active window of a locked session), quiet (preview), none (unknown). Returns "" or the notification's "title|text".
         public string Update(string spec, string presence)
         {
             BackupAlertPresence seen = null;
@@ -534,7 +534,7 @@ namespace ResticBackuper.Dashboard
             {
                 seen = new BackupAlertPresence();
                 seen.UserActive = presence == "present" || presence == "front";
-                seen.WindowInFront = presence == "front";
+                seen.WindowInFront = presence == "front" || presence == "front-locked";
                 seen.Quiet = presence == "quiet";
             }
             BackupAlertNotification notification = monitor.Update(
@@ -1096,6 +1096,19 @@ try {
     Assert-Equal '' ($d.Update($failing, 'front')) 'Nothing is shown over Rewindle itself.'
     Assert-Equal '' ($d.Update($failing, 'present')) 'A problem seen in Rewindle is not told later.'
     Assert-Equal 'failing|failing' $d.Mark 'The mark still shows.'
+
+    # Rewindle still the active window of a locked session: nobody sees it, so nothing counts as told. An amber problem that
+    # reaches its 15 minutes overnight waits for the person, and is told when they are back with Rewindle behind other windows.
+    $d = New-Driver 'front-locked'
+    Assert-Equal '' ($d.Update($overdue, 'front-locked'))
+    $d.Advance(16)
+    Assert-Equal '' ($d.Update($overdue, 'front-locked')) 'Nothing is shown to a locked PC.'
+    Assert-True (-not $d.WasTold("overdue|$key")) 'A problem nobody saw is not counted as told because Rewindle was in front.'
+    Assert-True ($d.Update($overdue, 'present').StartsWith('Backup overdue|')) 'It is told when someone is back.'
+    $d = New-Driver 'front-locked-then-front'
+    Assert-Equal '' ($d.Update($failing, 'front-locked'))
+    Assert-Equal '' ($d.Update($failing, 'front')) 'Back at the PC with Rewindle in front: seen there, not shown.'
+    Assert-True ($d.WasTold("failing|$key")) 'Seen in Rewindle by someone at the PC counts as told.'
 
     # Notifications off: remembered, not shown; turning them on later shows nothing for it.
     $d = New-Driver 'off'
