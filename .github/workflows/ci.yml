@@ -133,16 +133,19 @@ jobs:
           Start-Service -Name seclogon
           $script = Join-Path $env:GITHUB_WORKSPACE 'tests\Test-ManageRestore.ps1'
           $retentionScript = Join-Path $env:GITHUB_WORKSPACE 'tests\Test-ManageRetention.ps1'
+          # The commands go in a script file in the temp folder. A process started with -Credential (CreateProcessWithLogonW)
+          # gets at most 1,024 characters of command line, and an -EncodedCommand naming both suites is longer.
+          $runner = Join-Path $tempRoot 'run-suites.ps1'
           $command = @"
           `$env:TEMP = '$tempRoot'; `$env:TMP = '$tempRoot'; `$env:PATH = '$pythonDirectory;' + `$env:PATH
           try { & '$script' -SkipInstalledChecks; & '$retentionScript' -SkipInstalledChecks; exit 0 } catch { Write-Output (`$_ | Out-String); exit 1 }
           "@
-          $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+          [IO.File]::WriteAllText($runner, $command, [Text.UTF8Encoding]::new($true))
           $credential = New-Object System.Management.Automation.PSCredential($user, $password)
           $stdout = Join-Path $tempRoot 'suite.stdout.log'
           $stderr = Join-Path $tempRoot 'suite.stderr.log'
           $process = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') `
-            -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded `
+            -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runner `
             -Credential $credential -LoadUserProfile -WorkingDirectory $env:GITHUB_WORKSPACE `
             -RedirectStandardOutput $stdout -RedirectStandardError $stderr -Wait -PassThru
           Get-Content -LiteralPath $stdout, $stderr -ErrorAction SilentlyContinue

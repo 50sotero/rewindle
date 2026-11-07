@@ -1096,6 +1096,25 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertIn(b"\n", result.stdout)
         self.assertEqual(0, result.stdout.count(b"\r"), "Manage-Retention.ps1 is stored with a carriage return")
 
+    def test_ci_starts_the_standard_user_suites_from_a_script_file(self) -> None:
+        # CI runs the restore and clean-up suites as a temporary standard user, started with Start-Process -Credential.
+        # Windows gives a process started that way at most 1,024 characters of command line (CreateProcessWithLogonW). An
+        # -EncodedCommand naming both suites came to about 1,080 on GitHub's paths, and the step stopped with "The parameter
+        # is incorrect" before either suite ran. The step writes the commands to a script file and passes only its path.
+        ci = (PROJECT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        start = ci.index("- name: Exercise protected restore requests, restore sessions and clean-up")
+        step = ci[start:ci.index("\n      - name:", start)]
+        # Only the step's code counts: a line kept as a comment must not satisfy a check.
+        code = "\n".join(line for line in step.splitlines() if not line.lstrip().startswith("#"))
+        self.assertIn("'tests\\Test-ManageRestore.ps1'", code)
+        self.assertIn("'tests\\Test-ManageRetention.ps1'", code)
+        self.assertIn("try { & '$script' -SkipInstalledChecks; & '$retentionScript' -SkipInstalledChecks; exit 0 }", code)
+        self.assertIn("[IO.File]::WriteAllText($runner, $command", code)
+        launch = code[code.index("$process = Start-Process"):]
+        self.assertIn("-ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runner `", launch)
+        self.assertIn("-Credential $credential", launch)
+        self.assertNotIn("-EncodedCommand", code)
+
 
 class AdminOnlyAclTests(unittest.TestCase):
     SID = "S-1-5-21-1000-1000-1000-1001"
