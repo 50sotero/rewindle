@@ -184,9 +184,15 @@ export function lastRunSentence(run: RetentionLastRun, locale?: string): string 
       ? `Last clean-up ${when}: removed ${plural(run.removedCount, 'backup', 'backups')} and freed ${run.freedDisplay}.`
       : `Last clean-up ${when}: removed ${plural(run.removedCount, 'backup', 'backups')}.`;
     case 'nothing_to_remove': return `Last clean-up ${when}: nothing needed removing.`;
-    case 'space_pending': return `Last clean-up ${when} removed ${plural(run.removedCount, 'backup', 'backups')}, but the space wasn’t freed yet. The next clean-up frees it.`;
-    case 'partial': return `Last clean-up ${when} stopped after removing ${run.removedCount.toLocaleString('en-US')} of ${plural(run.confirmedCount, 'backup', 'backups')}. The rest are still there. Choose Review and remove to try again.`;
-    case 'check_failed': return `Last clean-up ${when} removed ${plural(run.removedCount, 'backup', 'backups')}, but the check afterwards found a problem with your backups. On Protection, choose Check recovery readiness.`;
+    case 'space_pending': return run.removedCount > 0
+      ? `Last clean-up ${when} removed ${plural(run.removedCount, 'backup', 'backups')}, but freeing their space didn’t finish. The next clean-up frees it.`
+      : `Last clean-up ${when} didn’t finish freeing the space of the backups removed earlier. The next clean-up frees it.`;
+    case 'partial': return run.unverified
+      ? `Last clean-up ${when} stopped before Rewindle could confirm which backups on the list were removed. Nothing outside that list was removed. The next clean-up finishes it.`
+      : `Last clean-up ${when} stopped after removing ${run.removedCount.toLocaleString('en-US')} of ${plural(run.confirmedCount, 'backup', 'backups')}. The rest are still there. Choose Review and remove to try again.`;
+    case 'check_failed': return run.checkUnfinished
+      ? `Last clean-up ${when} ${run.removedCount > 0 ? `removed ${plural(run.removedCount, 'backup', 'backups')} and freed the space` : 'freed the space of the backups removed earlier'}, but the check of your remaining backups didn’t finish. On Protection, choose Check recovery readiness.`
+      : `Last clean-up ${when} removed ${plural(run.removedCount, 'backup', 'backups')}, but the check afterwards found a problem with your backups. On Protection, choose Check recovery readiness.`;
     default: return `Last clean-up ${when} didn’t finish. Nothing outside the list you confirmed was removed. Choose Review and remove to try again.`;
   }
 }
@@ -317,7 +323,10 @@ export function resultScreen(review: RetentionReviewState): { title: string; tex
       title: 'Nothing was removed', tone: 'info',
       text: 'You didn’t allow it in the Windows permission prompt, so nothing was removed.',
     };
-    case 'preview_changed': return {
+    case 'preview_changed': return result.reason === 'closed' ? {
+      title: 'Your backups changed', tone: 'info',
+      text: 'Your backups changed since this list was made, so nothing was removed. Close this to see what can be removed now.',
+    } : {
       title: 'Your backups changed', tone: 'info',
       text: 'Your backups changed since this list was made, so nothing was removed. Here is the new list.',
     };
@@ -327,16 +336,27 @@ export function resultScreen(review: RetentionReviewState): { title: string; tex
     };
     case 'partial': return result.reason === 'unverified' ? {
       title: 'Clean-up stopped', tone: 'warning',
-      text: 'Some backups on the list may have been removed, then Rewindle couldn’t read back what is left on your backup location. Nothing outside the list you confirmed was removed. Choose Check now later to see what’s there.',
+      text: 'Some backups on the list may have been removed, but Rewindle couldn’t confirm which. Nothing outside the list you confirmed was removed. Close this: Settings shows what’s there now and offers to finish the clean-up.',
     } : {
       title: 'Clean-up stopped', tone: 'warning',
       text: `Removed ${removed.toLocaleString('en-US')} of ${plural(confirmed, 'backup', 'backups')}, then stopped. The other ${(confirmed - removed).toLocaleString('en-US')} are still there, and nothing else was touched. Choose Review and remove later to try again.`,
     };
-    case 'space_pending': return {
-      title: 'Backups removed, space not freed yet', tone: 'warning',
-      text: `Removed ${plural(removed, 'old backup', 'old backups')}, but the space wasn’t freed yet. Choose Finish freeing space in Settings to try again.`,
+    case 'space_pending': {
+      // The backups were removed (this time or earlier); only freeing their space didn't finish.
+      const next = result.reason === 'unrecorded' ? 'Their space is freed the next time old backups are removed.' : 'Choose Finish freeing space in Settings to try again.';
+      return removed > 0 ? {
+        title: 'Backups removed, space not freed yet', tone: 'warning',
+        text: `Removed ${plural(removed, 'old backup', 'old backups')}, but freeing their space didn’t finish. ${next}`,
+      } : {
+        title: 'Space not freed yet', tone: 'warning',
+        text: `Freeing the space of the backups removed earlier didn’t finish. ${next}`,
+      };
+    }
+    case 'check_failed': if (result.reason === 'unfinished') return {
+      title: 'Backups removed, check didn’t finish', tone: 'warning',
+      text: `${removed > 0 ? `Removed ${plural(removed, 'old backup', 'old backups')} and freed the space` : 'Freed the space of the backups removed earlier'}, but the check of your remaining backups didn’t finish. On Protection, choose Check recovery readiness to check them.`,
     };
-    case 'check_failed': return {
+    return {
       title: 'Backups removed, check found a problem', tone: 'error',
       text: `Removed ${plural(removed, 'old backup', 'old backups')}, but the check of your remaining backups found a problem. On Protection, choose Check recovery readiness to see what to do.`,
     };

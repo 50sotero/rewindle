@@ -3155,12 +3155,28 @@ namespace RewindleRegression {
             $answer = Invoke-RetentionCommand $retention 'BeginRetentionApply' (New-RetentionPayload $case[0])
             Assert-True (-not $answer.Accepted -and $answer.Error -eq $case[1]) ('a removal was accepted without what it needs: ' + $case[1] + ' got: ' + $answer.Error)
         }
+        # A backup finished while the list was open: the dialog ends before Windows asks for permission, in the same words as
+        # the protected step's refusal (close this list and choose Check now), and nothing more can be asked of this list.
+        $freshView = [Activator]::CreateInstance($retentionViewType, $true)
+        Set-ObjectField $freshView 'Mode' 'on'
+        Set-ObjectField $freshView 'PreviewStatus' 'ready'
+        Assert-True (-not [bool](Invoke-Private $retention 'EndRetentionReviewIfOutOfDate' @($capture, $freshView)) -and $null -eq (Get-FieldValue $retention 'retentionReviewResult')) 'a current list was treated as out of date'
+        Set-ObjectField $freshView 'PreviewStatus' 'stale'
+        Assert-True ([bool](Invoke-Private $retention 'EndRetentionReviewIfOutOfDate' @($capture, $freshView))) 'a list made before the latest backup was not treated as out of date'
+        $outOfDate = Get-FieldValue $retention 'retentionReviewResult'
+        Assert-True ([string]$outOfDate['status'] -eq 'refused' -and [string]$outOfDate['reason'] -eq 'preview_mismatch' -and [long]$outOfDate['removedCount'] -eq 0 -and -not [bool](Get-FieldValue $retention 'retentionReviewChanged') -and -not [bool](Get-FieldValue $retention 'retentionOperationInProgress')) 'an out-of-date list did not end as nothing removed'
+        $answer = Invoke-RetentionCommand $retention 'BeginRetentionApply' (New-RetentionPayload $goodApply)
+        Assert-True (-not $answer.Accepted -and $answer.Error -eq 'Open the list of old backups first.') 'an out-of-date list could still be removed'
+        Set-PrivateField $retention 'retentionReviewResult' $null
+        Set-PrivateField $retention 'retentionView' $null
+
         # Every check passed: the request stops only because this fixture dashboard has no backup plan, and nothing started.
         $answer = Invoke-RetentionCommand $retention 'BeginRetentionApply' (New-RetentionPayload $goodApply)
         Assert-True (-not $answer.Accepted -and $answer.Error -like 'Rewindle couldn''t read the backup plan.*' -and -not [bool](Get-FieldValue $retention 'retentionOperationInProgress')) ('a confirmed removal did not reach the request step: ' + $answer.Error)
 
         # How each ending of a removal reaches the list dialog.
-        function Complete-RetentionApply([string]$Kind, [string]$State = '', [string]$Refusal = '', [long]$Removed = 0, [bool]$Unverified = $false) {
+        function Complete-RetentionApply([string]$Kind, [string]$State = '', [string]$Refusal = '', [long]$Removed = 0, [bool]$Unverified = $false,
+            [bool]$Recorded = $true, [bool]$CheckUnfinished = $false) {
             $request = [Activator]::CreateInstance($retentionRequestType, $true)
             Set-ObjectField $request 'Action' 'apply'
             Set-ObjectField $request 'RemoveCount' '5'
@@ -3170,6 +3186,8 @@ namespace RewindleRegression {
             Set-ObjectField $result 'RefusalCode' $Refusal
             Set-ObjectField $result 'RemovedCount' $Removed
             Set-ObjectField $result 'RemovalUnverified' $Unverified
+            Set-ObjectField $result 'HistoryRecorded' $Recorded
+            Set-ObjectField $result 'CheckUnfinished' $CheckUnfinished
             Set-PrivateField $retention 'retentionOperationInProgress' $true
             Set-PrivateField $retention 'retentionReviewChanged' $false
             [void](Invoke-Private $retention 'FinishRetentionRequest' @($request, $result))
@@ -3182,8 +3200,24 @@ namespace RewindleRegression {
         Assert-True ([string]$outcome['status'] -eq 'removed' -and [long]$outcome['removedCount'] -eq 5 -and [long]$outcome['confirmedCount'] -eq 5) 'a complete removal was not shown with its count'
         $outcome = Complete-RetentionApply 'Finished' 'partial' '' 2 $true
         Assert-True ([string]$outcome['status'] -eq 'partial' -and [string]$outcome['reason'] -eq 'unverified' -and [long]$outcome['removedCount'] -eq 2) 'a removal that could not be read back was not shown as stopped'
+        # An out-of-date list ends with its result (close this list and choose Check now). It is not marked as updated: that
+        # would offer a new list there is none of until Check now makes one.
         $outcome = Complete-RetentionApply 'Finished' 'refused' 'preview_mismatch'
-        Assert-True ([string]$outcome['status'] -eq 'refused' -and [string]$outcome['reason'] -eq 'preview_mismatch' -and [bool](Get-FieldValue $retention 'retentionReviewChanged')) 'a refusal for an out-of-date list did not mark the list as updated'
+        Assert-True ([string]$outcome['status'] -eq 'refused' -and [string]$outcome['reason'] -eq 'preview_mismatch' -and -not [bool](Get-FieldValue $retention 'retentionReviewChanged')) 'a refusal for an out-of-date list offered a new list that does not exist'
+        # After the backups were removed, a later step that didn't finish is said as such.
+        $outcome = Complete-RetentionApply 'Finished' 'space_pending' '' 2
+        Assert-True ([string]$outcome['status'] -eq 'space_pending' -and [string]$outcome['reason'] -eq '' -and [long]$outcome['removedCount'] -eq 2) 'a removal whose space was not freed was not shown with its count'
+        $outcome = Complete-RetentionApply 'Finished' 'space_pending' '' 2 $false $false
+        Assert-True ([string]$outcome['reason'] -eq 'unrecorded') 'a removal that could not be recorded still offered to finish freeing space'
+        $outcome = Complete-RetentionApply 'Finished' 'space_pending' '' 0 $false $false
+        Assert-True ([string]$outcome['reason'] -eq '') 'freeing earlier space that did not finish was shown as an unrecorded removal'
+        $outcome = Complete-RetentionApply 'Finished' 'check_failed' '' 2 $false $true $true
+        Assert-True ([string]$outcome['status'] -eq 'check_failed' -and [string]$outcome['reason'] -eq 'unfinished') 'a check that did not finish was shown as a check that found a problem'
+        $outcome = Complete-RetentionApply 'Finished' 'check_failed' '' 2
+        Assert-True ([string]$outcome['reason'] -eq '') 'a check that found a problem was shown as one that did not finish'
+        # Backups changed and the new list has nothing to offer (or isn't ready): the dialog ends with what to do.
+        $outcome = Complete-RetentionApply 'Finished' 'preview_changed'
+        Assert-True ([string]$outcome['status'] -eq 'preview_changed' -and [string]$outcome['reason'] -eq 'closed' -and -not [bool](Get-FieldValue $retention 'retentionReviewChanged')) 'a changed list with nothing new to show offered a new list'
         $outcome = Complete-RetentionApply 'Unconfirmed'
         Assert-True ([string]$outcome['status'] -eq 'unconfirmed') 'a result that could not be confirmed was shown as an outcome'
         Set-PrivateField $retention 'retentionReviewOpen' $false

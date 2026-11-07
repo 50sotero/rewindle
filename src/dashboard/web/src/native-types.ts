@@ -393,7 +393,15 @@ export interface RetentionPreviewState {
  * unusual changes.
  */
 export interface RetentionEarlierChange { at: string; kind: 'hold' | 'not_compared' | 'unknown' }
-export interface RetentionLastRun { finishedAt: string; outcome: RetentionOutcome; removedCount: number; confirmedCount: number; freedDisplay: string }
+/**
+ * The newest recorded clean-up. `unverified`: it stopped before anyone could confirm which backups on the list were removed, so
+ * `removedCount` is only what is certain. `checkUnfinished`: the space was freed, then the check of the remaining backups didn't
+ * finish (it found no problem).
+ */
+export interface RetentionLastRun {
+  finishedAt: string; outcome: RetentionOutcome; removedCount: number; confirmedCount: number; freedDisplay: string;
+  unverified: boolean; checkUnfinished: boolean;
+}
 export interface RetentionOperationState {
   active: boolean;
   action: '' | 'configure' | 'preview' | 'apply';
@@ -408,7 +416,10 @@ export type RetentionResultStatus = 'removed' | 'nothing_to_remove' | 'declined'
 /**
  * The list of old backups while it is open. Only counts, month totals and one page of rows are sent; the host keeps the whole list
  * and is the one that binds the removal to it. `changed`: the list on disk is no longer the one shown, so nothing can be removed
- * until it is shown again. `result` replaces the list once a removal was asked for.
+ * until it is shown again. `result` replaces the list once a removal was asked for. Its `reason` is the refusal code for
+ * `refused`, and otherwise says more about how it ended: `unverified` (partial: nobody knows which backups on the list went),
+ * `unrecorded` (space_pending: the removal couldn't be recorded), `unfinished` (check_failed: the check didn't finish) or `closed`
+ * (preview_changed: the new list has nothing to offer, so the dialog ends there).
  */
 export interface RetentionReviewState {
   removeCount: number; keepCount: number; newestKeptAt: string;

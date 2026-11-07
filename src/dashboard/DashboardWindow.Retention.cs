@@ -202,6 +202,18 @@ namespace ResticBackuper.Dashboard
             retentionNextReadAt = MonotonicAfter(RetentionReadInterval);
         }
 
+        // Try again on a clean-up setting that couldn't be read reads it again at once, even when none of its files changed
+        // since (a read that failed for a moment would otherwise be kept until one does).
+        internal void ForgetUnreadableRetentionView()
+        {
+            RetentionView view = retentionView;
+            if (view != null && view.Mode == "unknown")
+            {
+                retentionView = null;
+                retentionNextReadAt = 0;
+            }
+        }
+
         private async void RefreshRetentionStateAsync()
         {
             if (retentionReadInFlight || Dispatcher == null || !RetentionSupportedByProfile() ||
@@ -429,6 +441,10 @@ namespace ResticBackuper.Dashboard
                 error = "This list was updated. Nothing was removed.";
                 return false;
             }
+            if (EndRetentionReviewIfOutOfDate(capture, ReadRetentionViewNow()))
+            {
+                return true;
+            }
             // The list on screen must still be the engine's current list, byte for byte.
             RetentionFileRead current = RetentionFiles.ReadProtected(
                 Path.Combine(EngineProfile.Current.StateDirectory(), RetentionNames.PreviewFileName),
@@ -468,6 +484,30 @@ namespace ResticBackuper.Dashboard
             fields.ConfirmEarlierChanges = confirmFiles ? "1" : "0";
             retentionReviewResult = null;
             return BeginRetentionRequest("apply", fields, out error);
+        }
+
+        // A backup that finished while the list was open makes it out of date. That is said before Windows asks for
+        // permission, in the same words as when the protected step refuses it: the dialog ends with "close this list and
+        // choose Check now". Returns whether it ended.
+        private bool EndRetentionReviewIfOutOfDate(RetentionView capture, RetentionView fresh)
+        {
+            if (fresh != null)
+            {
+                retentionView = fresh;
+            }
+            if (fresh == null || fresh.Mode != "on" || fresh.PreviewStatus != "stale")
+            {
+                return false;
+            }
+            Dictionary<string, object> outOfDate = new Dictionary<string, object>();
+            outOfDate["status"] = "refused";
+            outOfDate["reason"] = "preview_mismatch";
+            outOfDate["removedCount"] = 0L;
+            outOfDate["confirmedCount"] = (long)capture.RemoveCount;
+            outOfDate["freedDisplay"] = string.Empty;
+            retentionReviewResult = outOfDate;
+            PublishWebPresentationState();
+            return true;
         }
 
         private bool IsRetryableReviewResult()
@@ -730,15 +770,22 @@ namespace ResticBackuper.Dashboard
             }
             if (status == "refused")
             {
+                // An out-of-date list (a backup finished while it was open) ends here too: the result says to close it and
+                // choose Check now. It is not marked as updated, since there is no new list to show until Check now makes one.
                 outcome["reason"] = result.RefusalCode ?? string.Empty;
-                if (result.RefusalCode == "preview_mismatch")
-                {
-                    retentionReviewChanged = true;
-                }
             }
             if (status == "partial" && result.RemovalUnverified)
             {
                 outcome["reason"] = "unverified";
+            }
+            if (status == "space_pending" && !result.HistoryRecorded && result.RemovedCount > 0)
+            {
+                // The removal wasn't recorded, so the next list can't offer to finish freeing the space: the next removal does.
+                outcome["reason"] = "unrecorded";
+            }
+            if (status == "check_failed" && result.CheckUnfinished)
+            {
+                outcome["reason"] = "unfinished";
             }
             outcome["status"] = status;
             retentionReviewResult = outcome;
@@ -756,7 +803,8 @@ namespace ResticBackuper.Dashboard
                 }
                 else if (status == "preview_changed")
                 {
-                    retentionReviewChanged = true;
+                    // The new list offers nothing to remove, or isn't ready: the result says so and the dialog ends there.
+                    outcome["reason"] = "closed";
                 }
             }
             retentionReviewOpen = true;
@@ -1001,6 +1049,8 @@ namespace ResticBackuper.Dashboard
             lastRun["outcome"] = entry.Outcome;
             lastRun["removedCount"] = entry.RemovedCount;
             lastRun["confirmedCount"] = entry.ConfirmedCount;
+            lastRun["unverified"] = entry.RemovalUnverified;
+            lastRun["checkUnfinished"] = entry.CheckUnfinished;
             lastRun["freedDisplay"] = entry.FreeBytesBefore.HasValue && entry.FreeBytesAfter.HasValue &&
                 entry.FreeBytesAfter.Value > entry.FreeBytesBefore.Value
                     ? FormatStorageBytes(entry.FreeBytesAfter.Value - entry.FreeBytesBefore.Value)

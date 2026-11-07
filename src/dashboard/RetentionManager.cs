@@ -571,6 +571,10 @@ namespace ResticBackuper.Dashboard
         internal long RemovedCount;
         internal bool PruneCompleted;
         internal bool CheckCompleted;
+        // The space was freed, then the check of the remaining backups did not finish (it found no problem).
+        internal bool CheckUnfinished;
+        // Some backups on the list may have been removed, but nobody knows which: RemovedCount is only what is certain.
+        internal bool RemovalUnverified;
         internal long? FreeBytesBefore;
         internal long? FreeBytesAfter;
     }
@@ -1057,6 +1061,8 @@ namespace ResticBackuper.Dashboard
             view.RemovedCount = RetentionJson.Integer(entry, "removed_count") ?? 0;
             view.PruneCompleted = RetentionJson.Boolean(entry, "prune_completed") == true;
             view.CheckCompleted = RetentionJson.Boolean(entry, "check_completed") == true;
+            view.CheckUnfinished = RetentionJson.Boolean(entry, "check_unfinished") == true;
+            view.RemovalUnverified = RetentionJson.Boolean(entry, "removal_unverified") == true;
             view.FreeBytesBefore = RetentionJson.Integer(entry, "free_bytes_before");
             view.FreeBytesAfter = RetentionJson.Integer(entry, "free_bytes_after");
             return view;
@@ -1118,7 +1124,9 @@ namespace ResticBackuper.Dashboard
         internal long RemovedCount;
         internal bool PruneCompleted;
         internal bool CheckCompleted;
+        internal bool CheckUnfinished;
         internal bool RemovalUnverified;
+        internal bool HistoryRecorded;
         internal string PreviewSha256;
         internal string Error = string.Empty;
     }
@@ -1269,8 +1277,10 @@ namespace ResticBackuper.Dashboard
                                 catch { }
                             }
                         }
-                        // Listing what would go has a time limit; removing never does, since stopping it half-way is worse
-                        // than waiting. Nothing is stopped either way: the page says it finishes on its own.
+                        // The page stops waiting for a listing after ten minutes; the manager itself stops a listing step
+                        // after eight, so this is only a fallback. A removal is waited for to the end: the manager stops each
+                        // of its steps at a far longer limit and says how far it got. Nothing is stopped from here either
+                        // way: the page says it finishes on its own.
                         if (request.Action != "apply" && waited.ElapsedMilliseconds > ListingTimeoutMilliseconds)
                         {
                             result.Kind = RetentionLaunchKind.StillRunning;
@@ -1408,7 +1418,9 @@ namespace ResticBackuper.Dashboard
             result.RemovedCount = document.RemovedCount;
             result.PruneCompleted = document.PruneCompleted;
             result.CheckCompleted = document.CheckCompleted;
+            result.CheckUnfinished = document.CheckUnfinished;
             result.RemovalUnverified = document.RemovalUnverified;
+            result.HistoryRecorded = document.HistoryRecorded;
             result.PreviewSha256 = document.PreviewSha256;
             if (!ConfirmIndependently(profile, request, document))
             {
@@ -1571,6 +1583,12 @@ namespace ResticBackuper.Dashboard
                 parsed.CheckCompleted = RetentionJson.Boolean(document, "check_completed") == true;
                 parsed.RemovalUnverified = RetentionJson.Boolean(document, "removal_unverified") == true;
                 parsed.HistoryRecorded = RetentionJson.Boolean(document, "history_recorded") == true;
+                parsed.CheckUnfinished = RetentionJson.Boolean(document, "check_unfinished") == true;
+                // A check that did not finish comes only after the space was freed, and ends as check_failed.
+                if (parsed.CheckUnfinished && (state != "check_failed" || !parsed.PruneCompleted))
+                {
+                    throw new InvalidDataException("The result disagrees with how the step ended.");
+                }
                 string previewSha = RetentionJson.String(document, "preview_sha256");
                 if (previewSha != null && !RetentionDigests.IsLowerHex64(previewSha))
                 {
@@ -1617,6 +1635,7 @@ namespace ResticBackuper.Dashboard
         internal long RemovedCount;
         internal bool PruneCompleted;
         internal bool CheckCompleted;
+        internal bool CheckUnfinished;
         internal bool RemovalUnverified;
         internal bool HistoryRecorded;
         internal string PreviewSha256;

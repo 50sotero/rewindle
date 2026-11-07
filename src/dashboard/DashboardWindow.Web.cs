@@ -1027,6 +1027,7 @@ namespace ResticBackuper.Dashboard
             if (string.Equals(command, "refresh", StringComparison.Ordinal))
             {
                 ProbeRepositorySpaceSooner();
+                ForgetUnreadableRetentionView();
                 RefreshDashboard();
                 return true;
             }

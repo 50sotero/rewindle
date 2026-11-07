@@ -148,7 +148,8 @@ export function RetentionReviewDialog({ retention, send, locale }: { retention: 
   if (!review) return <dialog ref={modal.ref} className="old-backups-dialog app-dialog" aria-labelledby={titleId} onCancel={modal.onCancel} />;
 
   const screen = resultScreen(review);
-  const showList = !screen || review.result?.status === 'preview_changed' || review.result?.status === 'declined';
+  // A changed list is shown again only when there is a new one to offer; otherwise the result ends the dialog.
+  const showList = !screen || (review.result?.status === 'preview_changed' && review.result.reason !== 'closed') || review.result?.status === 'declined';
   const count = review.removeCount;
   const title = review.pruneOnly ? 'Finish freeing space?' : `Remove ${count.toLocaleString('en-US')} old ${count === 1 ? 'backup' : 'backups'}?`;
   const ready = listChecked && (!review.needsFilesConfirmed || filesChecked) && !review.changed && !running && !pending('retentionApply');

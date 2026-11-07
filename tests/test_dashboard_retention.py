@@ -72,6 +72,8 @@ namespace {namespace}
             result["prune_pending"] = view.PrunePending;
             result["preview_sha"] = view.PreviewSha256;
             result["last_outcome"] = view.LastRun == null ? null : view.LastRun.Outcome;
+            result["last_unverified"] = view.LastRun != null && view.LastRun.RemovalUnverified;
+            result["last_check_unfinished"] = view.LastRun != null && view.LastRun.CheckUnfinished;
             List<object> earlier = new List<object>();
             foreach (RetentionEarlierChange change in view.EarlierChanges)
             {{
@@ -153,6 +155,8 @@ namespace {namespace}
                     Dictionary<string, object> r = new Dictionary<string, object>();
                     r["ok"] = ok;
                     r["state"] = document == null ? null : document.State;
+                    r["check_unfinished"] = document != null && document.CheckUnfinished;
+                    r["history_recorded"] = document != null && document.HistoryRecorded;
                     result = r;
                 }}
                 else if (op == "arguments")
@@ -480,6 +484,55 @@ class DashboardRetentionHarnessTests(unittest.TestCase):
         # A setting whose digest does not match its counts is not on.
         self.assertEqual(forged_view["mode"], "off")
 
+    def test_only_an_explicit_no_skips_checking_files(self) -> None:
+        # The engine writes needs_files_confirmed: false only for a list whose backups the person already looked over. A list
+        # without the field (an older or damaged one), with null, or with anything but false asks for the tick.
+        cases = {"no": False, "yes": True, "null": None, "text": "false", "number": 0, "missing": ...}
+        fixtures = []
+        for name, value in cases.items():
+            fixture = self.fixture(f"files-{name}")
+            fixture.policy()
+            fixture.preview(first_cleanup=False, needs_files_confirmed=None if value is ... else value)
+            if value is ...:
+                path = fixture.state / retention.PREVIEW_NAME
+                document = json.loads(path.read_text(encoding="utf-8"))
+                del document["needs_files_confirmed"]
+                write_json(path, document)
+            fixtures.append(fixture)
+        views = self.run_cases([fixture.read() for fixture in fixtures])
+        answers = {name: view["needs_files"] for name, view in zip(cases, views)}
+        self.assertEqual(answers, {"no": False, "yes": True, "null": True, "text": True, "number": True, "missing": True})
+        for name, view in zip(cases, views):
+            with self.subTest(name=name):
+                self.assertEqual((view["mode"], view["preview"]), ("on", "ready"))
+
+    def test_the_last_clean_up_says_when_nobody_could_confirm_the_removal_or_the_check_did_not_finish(self) -> None:
+        entry = {"request_nonce": "1" * 64, "started_utc": "2026-09-30T10:00:00Z", "finished_utc": "2026-09-30T10:05:00Z",
+                 "confirmed_count": 2, "removed_set_sha256": "2" * 64, "prune_mode": "none", "files_confirmed": True,
+                 "keep_daily": 7, "keep_weekly": 4, "keep_monthly": 6, "free_bytes_before": None, "free_bytes_after": 1}
+        runs = {
+            "unverified": {**entry, "outcome": "partial", "removed_count": 0, "prune_completed": False, "check_completed": False,
+                           "check_unfinished": False, "removal_unverified": True},
+            "unfinished": {**entry, "outcome": "check_failed", "removed_count": 2, "prune_completed": True, "check_completed": False,
+                           "check_unfinished": True, "removal_unverified": False},
+            # An entry from before these fields existed.
+            "older": {**entry, "outcome": "check_failed", "removed_count": 2, "prune_completed": True, "check_completed": False},
+        }
+        fixtures = []
+        for name, run in runs.items():
+            fixture = self.fixture(f"last-{name}")
+            fixture.policy()
+            fixture.preview()
+            write_json(fixture.state / retention.HISTORY_NAME, {"schema": retention.HISTORY_SCHEMA, "schema_version": 1,
+                                                                "plan_id": PLAN, "updated_utc": "2026-09-30T10:05:00Z", "entries": [run]})
+            fixtures.append(fixture)
+        unverified, unfinished, older = self.run_cases([fixture.read() for fixture in fixtures])
+        self.assertEqual((unverified["last_outcome"], unverified["last_unverified"], unverified["last_check_unfinished"]),
+                         ("partial", True, False))
+        self.assertEqual((unfinished["last_outcome"], unfinished["last_unverified"], unfinished["last_check_unfinished"]),
+                         ("check_failed", False, True))
+        self.assertEqual((older["last_outcome"], older["last_unverified"], older["last_check_unfinished"]), ("check_failed", False, False))
+
     def test_each_earlier_backup_is_read_with_its_kind(self) -> None:
         fixture = self.fixture("earlier-kinds")
         fixture.policy()
@@ -567,6 +620,16 @@ class DashboardRetentionHarnessTests(unittest.TestCase):
             "refused_unknown_reason": ({**good, "ok": False, "state": "refused", "refusal_code": "because"}, 2, False),
             "configure_state_for_apply": ({**good, "state": "configured"}, 0, False),
             "preview_changed": ({**good, "ok": False, "state": "preview_changed", "removed_count": None}, 3, True),
+            # The space was freed, then the check of the rest did not finish: only ever as check_failed, after freeing.
+            "check_unfinished": ({**good, "ok": False, "state": "check_failed", "check_completed": False, "check_unfinished": True}, 6, True),
+            "check_unfinished_before_freeing": ({**good, "ok": False, "state": "check_failed", "prune_completed": False,
+                                                 "check_completed": False, "check_unfinished": True}, 6, False),
+            "check_unfinished_on_space_pending": ({**good, "ok": False, "state": "space_pending", "prune_completed": False,
+                                                   "check_completed": False, "check_unfinished": True}, 5, False),
+            "space_pending_unrecorded": ({**good, "ok": False, "state": "space_pending", "prune_completed": False,
+                                          "check_completed": False, "history_recorded": False}, 5, True),
+            "unverified_without_a_count": ({**good, "ok": False, "state": "partial", "removed_count": 0, "removal_unverified": True,
+                                            "prune_completed": False, "check_completed": False}, 4, True),
         }
         cases = [{"op": "validate", "request": request, "exit": exit_code, "json": json.dumps(document)}
                  for document, exit_code, _expected in variants.values()]
@@ -574,6 +637,10 @@ class DashboardRetentionHarnessTests(unittest.TestCase):
         for (name, (_document, _exit, expected)), answer in zip(variants.items(), answers):
             with self.subTest(name=name):
                 self.assertEqual(answer["ok"], expected)
+        named = dict(zip(variants, answers))
+        self.assertTrue(named["check_unfinished"]["check_unfinished"])
+        self.assertFalse(named["exact"]["check_unfinished"])
+        self.assertFalse(named["space_pending_unrecorded"]["history_recorded"])
 
     def test_a_configure_result_names_the_requested_setting(self) -> None:
         request = {"action": "configure", "user": USER, "config": "a" * 64, "plan": PLAN, "generation": 7, "nonce": "d" * 64,
@@ -689,11 +756,20 @@ class RetentionWordingTests(unittest.TestCase):
         reviews = {status: review_state(status) for status in
                    ["removed", "nothing_to_remove", "declined", "preview_changed", "partial", "space_pending", "check_failed", "failed", "unconfirmed"]}
         reviews["partial_unverified"] = review_state("partial", "unverified")
+        reviews["space_pending_unrecorded"] = review_state("space_pending", "unrecorded")
+        reviews["space_pending_earlier"] = review_state("space_pending", removed=0, confirmed=0)
+        reviews["check_unfinished"] = review_state("check_failed", "unfinished")
+        reviews["check_unfinished_earlier"] = review_state("check_failed", "unfinished", removed=0, confirmed=0)
+        reviews["preview_changed_closed"] = review_state("preview_changed", "closed")
         for code in REFUSALS:
             reviews[f"refused_{code}"] = review_state("refused", code)
-        last_runs = {outcome: {"finishedAt": "2026-09-01T03:00:00Z", "outcome": outcome, "removedCount": 3, "confirmedCount": 5, "freedDisplay": ""}
+        last_runs = {outcome: {"finishedAt": "2026-09-01T03:00:00Z", "outcome": outcome, "removedCount": 3, "confirmedCount": 5, "freedDisplay": "",
+                               "unverified": False, "checkUnfinished": False}
                      for outcome in ["removed", "nothing_to_remove", "partial", "space_pending", "check_failed", "failed"]}
         last_runs["removed_freed"] = {**last_runs["removed"], "freedDisplay": "4.1 GiB"}
+        last_runs["partial_unverified"] = {**last_runs["partial"], "removedCount": 0, "unverified": True}
+        last_runs["check_unfinished"] = {**last_runs["check_failed"], "checkUnfinished": True}
+        last_runs["space_pending_earlier"] = {**last_runs["space_pending"], "removedCount": 0, "confirmedCount": 0}
         files_checks = {
             "hold": [[{"at": "2026-09-20T00:30:00Z", "kind": "hold"}], False],
             "hold_no_date": [[{"at": "", "kind": "hold"}], False],
@@ -857,6 +933,28 @@ class RetentionWordingTests(unittest.TestCase):
         self.assertIn("can only remove backups on the list you saw", results["unconfirmed"]["text"])
         # When the list could not be read back, nobody knows how many went: it never says that some did.
         self.assertIn("Some backups on the list may have been removed", results["partial_unverified"]["text"])
+        self.assertIn("Settings shows what’s there now", results["partial_unverified"]["text"])
+        # After the backups were removed, a later step that didn't finish says the backups went and what is left to do.
+        self.assertEqual(results["space_pending"]["title"], "Backups removed, space not freed yet")
+        self.assertIn("Removed 2 old backups, but freeing their space didn’t finish", results["space_pending"]["text"])
+        self.assertIn("Choose Finish freeing space in Settings", results["space_pending"]["text"])
+        self.assertIn("freed the next time old backups are removed", results["space_pending_unrecorded"]["text"])
+        self.assertNotIn("Finish freeing space", results["space_pending_unrecorded"]["text"])
+        self.assertNotIn("Removed 0", results["space_pending_earlier"]["text"])
+        self.assertIn("backups removed earlier didn’t finish", results["space_pending_earlier"]["text"])
+        self.assertEqual(results["check_unfinished"]["title"], "Backups removed, check didn’t finish")
+        self.assertIn("Removed 2 old backups and freed the space", results["check_unfinished"]["text"])
+        self.assertIn("Check recovery readiness", results["check_unfinished"]["text"])
+        self.assertNotIn("found a problem", results["check_unfinished"]["text"])
+        self.assertNotIn("Removed 0", results["check_unfinished_earlier"]["text"])
+        self.assertIn("found a problem", results["check_failed"]["text"])
+        # A changed list with nothing new to offer ends the dialog with a next step instead of a list that can't be shown.
+        self.assertIn("Here is the new list", results["preview_changed"]["text"])
+        self.assertNotIn("Here is the new list", results["preview_changed_closed"]["text"])
+        self.assertIn("Close this", results["preview_changed_closed"]["text"])
+        # A backup that finished while the list was open: plain words and a next step.
+        self.assertEqual(results["refused_preview_mismatch"]["text"],
+                         "Nothing was removed because the list is out of date. Close this list and choose Check now.")
         for code in REFUSALS:
             with self.subTest(code=code):
                 self.assertTrue(results[f"refused_{code}"]["text"].startswith("Nothing was removed because "))
@@ -887,6 +985,17 @@ class RetentionWordingTests(unittest.TestCase):
         self.assertIn("Choose Review and remove to try again", runs["partial"])
         self.assertIn("Choose Review and remove to try again", runs["failed"])
         self.assertIn("Check recovery readiness", runs["check_failed"])
+        self.assertIn("freeing their space didn’t finish", runs["space_pending"])
+        self.assertNotIn("removed 0", runs["space_pending_earlier"])
+        self.assertIn("The next clean-up frees it", runs["space_pending_earlier"])
+        # Nobody knows how many went: it never claims a count, and never that the rest are all still there.
+        self.assertNotIn("removing 0", runs["partial_unverified"])
+        self.assertNotIn("The rest are still there", runs["partial_unverified"])
+        self.assertIn("stopped before Rewindle could confirm which backups on the list were removed", runs["partial_unverified"])
+        self.assertIn("The next clean-up finishes it", runs["partial_unverified"])
+        self.assertIn("didn’t finish", runs["check_unfinished"])
+        self.assertNotIn("found a problem", runs["check_unfinished"])
+        self.assertIn("Check recovery readiness", runs["check_unfinished"])
 
 
 class RetentionStaticTests(unittest.TestCase):

@@ -34,7 +34,7 @@ export function createSampleRetention(now = Date.now()): RetentionState {
       oldestRemoveAt: rows.remove[rows.remove.length - 1].when, newestRemoveAt: rows.remove[0].when,
       earlierChanges: [], earlierChangesUnknown: false, futureDatedAt: '', prunePending: false,
     },
-    lastRun: { finishedAt: new Date(now - 32 * 86_400_000).toISOString(), outcome: 'removed', removedCount: 9, confirmedCount: 9, freedDisplay: '3.4 GiB' },
+    lastRun: { finishedAt: new Date(now - 32 * 86_400_000).toISOString(), outcome: 'removed', removedCount: 9, confirmedCount: 9, freedDisplay: '3.4 GiB', unverified: false, checkUnfinished: false },
     operation: { active: false, action: '', stage: '', count: 0, percent: null },
     notice: null,
     canConfigure: { enabled: true, help: '' }, canTurnOff: { enabled: true, help: '' },
@@ -87,7 +87,7 @@ export function createRetentionDemo(getState: () => DashboardState, publish: () 
           if (!state.review) return 'Open the list of old backups first.';
           const removed = rows.remove.length;
           state.review.result = { status: 'removed', removedCount: removed, confirmedCount: removed, freedDisplay: '12.6 GiB', reason: '' };
-          state.lastRun = { finishedAt: new Date().toISOString(), outcome: 'removed', removedCount: removed, confirmedCount: removed, freedDisplay: '12.6 GiB' };
+          state.lastRun = { finishedAt: new Date().toISOString(), outcome: 'removed', removedCount: removed, confirmedCount: removed, freedDisplay: '12.6 GiB', unverified: false, checkUnfinished: false };
           rows = { remove: [], keep: rows.keep };
           if (state.preview) { state.preview.removeCount = 0; state.preview.oldestRemoveAt = ''; state.preview.newestRemoveAt = ''; }
           publish();
