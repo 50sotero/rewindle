@@ -322,6 +322,15 @@ The backup task uses an interactive logon token so CurrentUser DPAPI and the
 user profile are available. Scheduled runs therefore require the installing
 user to be signed in.
 
+Every PowerShell script that runs elevated or from a Highest-level task (the
+installer and uninstaller, the managers, the Google Drive check, its rclone
+password helper and its task installer), and the bootstrap Setup builds, sets
+`$env:PSModulePath` to Windows' own modules folder before it runs any command.
+Windows PowerShell 5.1 otherwise looks in the user's Documents folder first,
+where any program the user runs could put a module that answers to the name of
+a built-in command. `tests/test_elevated_module_path.py` holds every script to
+this rule.
+
 The limited dashboard cannot write Program Files. Add/remove actions start the
 protected source manager through UAC with the requesting user's SID. The
 manager takes the same byte-range lock used by the backup wrapper, rejects

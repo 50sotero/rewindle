@@ -220,6 +220,8 @@ namespace Rewindle.Setup.Tests
                 List<string> wrapped = wrap("one");
                 Check(wrapped.Count == 6 && wrapped[4] == "-EncodedCommand" && !wrapped.Contains("-File"), "the elevated arguments carry only the encoded bootstrap");
                 string script = Encoding.Unicode.GetString(Convert.FromBase64String(wrapped[5]));
+                Check(script.StartsWith("$trustedModuleRoot = [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell', 'v1.0', 'Modules')\n$env:PSModulePath = $trustedModuleRoot\n", StringComparison.Ordinal),
+                    "the bootstrap limits the module path to Windows' own folder before any command");
                 string argumentFile = Path.Combine(folder, "one", ElevatedBootstrap.ArgumentFileName);
                 byte[] argumentBytes = File.ReadAllBytes(argumentFile);
                 Equal(CommandLine.Join(new string[] { "-ProgressPath", Path.Combine(folder, "one", "progress.jsonl"), "-Name", "a b;E:\\" }),

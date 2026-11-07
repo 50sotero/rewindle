@@ -6,10 +6,11 @@ param(
     [string]$ProgressPath
 )
 
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
+# First, before any command: modules load only from Windows' own folder, never from the person's Documents folder.
 $trustedModuleRoot = [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell', 'v1.0', 'Modules')
 $env:PSModulePath = $trustedModuleRoot
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 $invocationParameters = @{} + $PSBoundParameters
 
 if (-not [Environment]::Is64BitOperatingSystem -or -not [Environment]::Is64BitProcess) {

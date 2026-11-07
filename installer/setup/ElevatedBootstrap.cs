@@ -26,7 +26,8 @@ namespace Rewindle.Setup
     }
 
     // Wraps "powershell.exe -File <bundle script> <arguments>" into a short elevated bootstrap passed as -EncodedCommand, which
-    // a program running as the person cannot change once Windows has started the process. The bootstrap:
+    // a program running as the person cannot change once Windows has started the process. The bootstrap first limits the module
+    // path to Windows' own modules folder, before it runs any command; then it:
     //   1. creates a new folder under ProgramData that only Administrators and SYSTEM can change (protected access list, set as
     //      the folder is created, so there is no moment when it is open);
     //   2. copies the staged items into it, refusing links;
@@ -90,6 +91,10 @@ namespace Rewindle.Setup
                 items.Add(Literal(item));
             }
             StringBuilder script = new StringBuilder();
+            // First, before any command: modules load only from Windows' own folder, never from the person's Documents folder,
+            // where any program they run can put a module that answers to the name of a built-in command.
+            script.Append("$trustedModuleRoot = [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell', 'v1.0', 'Modules')\n");
+            script.Append("$env:PSModulePath = $trustedModuleRoot\n");
             script.Append("$ErrorActionPreference = 'Stop'\n");
             script.Append("$source = ").Append(Literal(launch.SourceRoot)).Append("\n");
             script.Append("$items = @(").Append(string.Join(", ", items.ToArray())).Append(")\n");

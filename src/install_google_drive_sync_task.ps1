@@ -35,6 +35,9 @@ param(
     [switch]$ValidateOnly
 )
 
+# First, before any command: modules load only from Windows' own folder, never from the person's Documents folder.
+$trustedModuleRoot = [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell', 'v1.0', 'Modules')
+$env:PSModulePath = $trustedModuleRoot
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -1036,7 +1039,13 @@ $validation = [ordered]@{
     local_mirror_destination = $null
 }
 if ($ValidateOnly) {
-    $validation | ConvertTo-Json -Depth 5
+    # ASCII only, with any other character as a JSON \u escape: this text passes through the console's code page, which may
+    # have no letter for a character in a path.
+    [regex]::Replace(
+        ($validation | ConvertTo-Json -Depth 5),
+        '[^\x00-\x7F]',
+        { param($match) '\u{0:x4}' -f [int][char]$match.Value }
+    )
     return
 }
 
