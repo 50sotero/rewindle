@@ -1043,6 +1043,21 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertIn('"change_anomaly_status": status["change_anomaly"]["status"]', verified[:2500])
         self.assertNotIn("retention", text.replace("retention_", ""))
 
+    def test_the_manager_is_published_with_lf_line_endings(self) -> None:
+        # Read from the copy git stores. A checkout with core.autocrlf=true, like the CI runner's, writes CR LF to the
+        # working copy. Test-ManageRetention.ps1 checks the manager's other static rules, but it runs in CI as a temporary
+        # standard user and does not call git.
+        result = subprocess.run(
+            ["git", "cat-file", "blob", ":src/Manage-Retention.ps1"],
+            cwd=PROJECT,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr.decode("utf-8", "replace").strip())
+        self.assertIn(b"\n", result.stdout)
+        self.assertEqual(0, result.stdout.count(b"\r"), "Manage-Retention.ps1 is stored with a carriage return")
+
 
 class AdminOnlyAclTests(unittest.TestCase):
     SID = "S-1-5-21-1000-1000-1000-1001"

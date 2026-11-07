@@ -522,7 +522,8 @@ try {
     $managerText = [IO.File]::ReadAllText($managerSource)
     Assert-True (-not ($managerText -match '(?m)^\s*Add-Type\b')) 'the manager never compiles code'
     Assert-True ([Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($managerSource)) -ceq $managerText) 'the manager is plain ASCII'
-    Assert-True (-not $managerText.Contains("`r")) 'the manager has LF line endings'
+    # Its LF line endings are checked by tests\test_retention.py in the copy git stores: a checkout with core.autocrlf=true
+    # (the CI runner's) writes CR LF here, and this suite runs in CI as a temporary standard user, so it does not call git.
     foreach ($command in @('Get-Acl', 'ConvertFrom-Json', 'ConvertTo-Json')) {
         $bare = [regex]::Matches($managerText, '(?<![\\\w-])' + [regex]::Escape($command) + '\b').Count
         Assert-True ($bare -eq 0) "$command is always module-qualified in the manager"
