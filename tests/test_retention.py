@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from contextlib import redirect_stdout
+import ctypes
 from datetime import datetime, timezone
 import hashlib
 import io
 import json
+import ntpath
 from pathlib import Path
 import re
 import subprocess
@@ -28,6 +30,18 @@ OTHER_PLAN = "87654321-4321-4cba-8fed-ba0987654321"
 REPO = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 NOW = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
 SOURCE_PATH = r"C:\Users\you\Documents"
+
+
+def short_windows_path(path: Path) -> str:
+    """The short (8.3) alias Windows gives an existing path; the path as it is when its volume makes no short names."""
+    get_short_path = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+    get_short_path.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+    get_short_path.restype = ctypes.c_uint32
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = get_short_path(str(path), buffer, len(buffer))
+    if not 0 < length < len(buffer):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return buffer.value
 
 
 def snapshot_id(index: int) -> str:
@@ -985,6 +999,30 @@ class CommandLineTests(RetentionTestCase):
             retention._validate_test_root(self.h.root, config)
             with self.assertRaises(retention.RetentionError):
                 retention._validate_test_root(PROJECT, config)
+
+    def test_a_test_root_and_configuration_named_by_their_short_names_are_accepted(self) -> None:
+        # GitHub's runners give the temporary folder a short (8.3) name, so the same folder and file can arrive in either
+        # form. The check compares the temporary folder, the test root and the configuration as resolved long paths.
+        config = self.h.root / "backup-config.json"
+        config.write_text("{}", encoding="utf-8")
+        short_root = Path(short_windows_path(self.h.root))
+        short_config = Path(short_windows_path(config))
+        if ntpath.basename(str(short_config)).casefold() == config.name.casefold():
+            self.skipTest("this volume makes no short (8.3) names, so there is no short alias to pass")
+        with mock.patch.object(retention, "is_administrator", lambda: False):
+            for root, configuration in ((short_root, short_config), (self.h.root, short_config), (short_root, config)):
+                with self.subTest(root=str(root), configuration=str(configuration)):
+                    retention._validate_test_root(root, configuration)
+            # A test root or configuration that is not there is refused as a bad request, never as a raw error.
+            for root, configuration in (
+                (self.h.root, self.h.root / "missing.json"),
+                (short_root, short_root / "missing.json"),
+                (self.h.root / "missing", config),
+            ):
+                with self.subTest(root=str(root), configuration=str(configuration)):
+                    with self.assertRaises(retention.RetentionError) as caught:
+                        retention._validate_test_root(root, configuration)
+                    self.assertEqual(caught.exception.code, "invalid_request")
 
     def test_turning_it_off_does_not_need_the_backup_location(self) -> None:
         seen: list[bool] = []

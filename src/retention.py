@@ -1501,9 +1501,15 @@ def _test_mode_acl_check(_path: Path) -> None:
 def _validate_test_root(test_root: Path, config_path: Path) -> None:
     if is_administrator():
         raise RetentionError("invalid_request", "--test-root is refused for an administrator")
+    # All three are compared in their resolved long form: a temporary folder with a short (8.3) name, as on GitHub's
+    # runners, must not make a folder inside it look like one outside it.
     temporary = Path(tempfile.gettempdir()).resolve()
-    root = test_root.resolve(strict=True)
-    if not _strictly_within(root, temporary) or not _strictly_within(config_path, root):
+    try:
+        root = test_root.resolve(strict=True)
+        config = config_path.resolve(strict=True)
+    except OSError as error:
+        raise RetentionError("invalid_request", "--test-root must be a disposable folder in the temporary folder") from error
+    if not _strictly_within(root, temporary) or not _strictly_within(config, root):
         raise RetentionError("invalid_request", "--test-root must be a disposable folder in the temporary folder")
 
 
