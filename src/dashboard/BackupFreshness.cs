@@ -12,7 +12,10 @@ namespace ResticBackuper.Dashboard
         NoVerifiedBackup = 2,
         Overdue = 3,
         Paused = 4,
-        ClockAnomaly = 5
+        ClockAnomaly = 5,
+        // A slot passed while the PC was off, asleep or signed out, and Windows has yet to start the run it misses for it
+        // (the task's "run as soon as possible after a missed start"). Nothing is asked of the person while it waits.
+        CatchingUp = 6
     }
 
     internal sealed class BackupFreshnessResult
@@ -61,6 +64,9 @@ namespace ResticBackuper.Dashboard
     internal static class BackupFreshnessEvaluator
     {
         internal static readonly TimeSpan DefaultGracePeriod = TimeSpan.FromHours(2);
+        // How long after the PC is back (sign-in or wake) Windows is given to start a backup it missed before the page calls
+        // it overdue. Windows starts such a run within minutes; one that has not started by now is not going to on its own.
+        internal static readonly TimeSpan DefaultCatchUpWindow = TimeSpan.FromMinutes(45);
         internal static readonly TimeSpan ClockTolerance = TimeSpan.FromMinutes(5);
         private const int MaximumCalendarLookbackDays = 15;
         private const int MaximumCalendarLookaheadDays = 15;
@@ -89,11 +95,13 @@ namespace ResticBackuper.Dashboard
         // times in the old zone while the Task Scheduler's own next-run time is already in the new one. The cached zone is
         // dropped (at most every 30 seconds) before the local and UTC clocks are read, so both come from the same zone data.
         // coveredThroughUtc is a moment up to which the last verified backup is taken to have been current (see
-        // DashboardWindow.NoteScheduleReplaced); null when there is none.
+        // DashboardWindow.NoteScheduleReplaced); null when there is none. availableSinceUtc is when this PC was last back
+        // from being off, asleep or signed out (the later of the sign-in and the last wake), or null when that is not known.
         public static BackupFreshnessResult EvaluateNow(
             TaskSchedule schedule,
             DateTime? lastVerifiedFinishedUtc,
-            DateTime? coveredThroughUtc)
+            DateTime? coveredThroughUtc,
+            DateTime? availableSinceUtc)
         {
             RefreshLocalTimeZone();
             DateTime nowUtc = DateTime.UtcNow;
@@ -105,7 +113,9 @@ namespace ResticBackuper.Dashboard
                 nowUtc,
                 TimeZoneInfo.Local,
                 DefaultGracePeriod,
-                coveredThroughUtc);
+                coveredThroughUtc,
+                availableSinceUtc,
+                DefaultCatchUpWindow);
         }
 
         // Whether two schedules run on the same days at the same time of day. A change to anything else about the task (power
@@ -145,6 +155,29 @@ namespace ResticBackuper.Dashboard
             TimeSpan gracePeriod,
             DateTime? coveredThroughUtc)
         {
+            return Evaluate(
+                schedule,
+                lastVerifiedFinishedUtc,
+                nowLocal,
+                nowUtc,
+                localTimeZone,
+                gracePeriod,
+                coveredThroughUtc,
+                null,
+                DefaultCatchUpWindow);
+        }
+
+        internal static BackupFreshnessResult Evaluate(
+            TaskSchedule schedule,
+            DateTime? lastVerifiedFinishedUtc,
+            DateTime nowLocal,
+            DateTime nowUtc,
+            TimeZoneInfo localTimeZone,
+            TimeSpan gracePeriod,
+            DateTime? coveredThroughUtc,
+            DateTime? availableSinceUtc,
+            TimeSpan catchUpWindow)
+        {
             if (localTimeZone == null)
             {
                 throw new ArgumentNullException("localTimeZone");
@@ -152,6 +185,10 @@ namespace ResticBackuper.Dashboard
             if (gracePeriod < TimeSpan.Zero || gracePeriod > TimeSpan.FromDays(7))
             {
                 throw new ArgumentOutOfRangeException("gracePeriod");
+            }
+            if (catchUpWindow < TimeSpan.Zero || catchUpWindow > TimeSpan.FromDays(1))
+            {
+                throw new ArgumentOutOfRangeException("catchUpWindow");
             }
 
             DateTime localNow = DateTime.SpecifyKind(nowLocal, DateTimeKind.Unspecified);
@@ -265,6 +302,26 @@ namespace ResticBackuper.Dashboard
             if (latestDueUtc.HasValue &&
                 verifiedForDue.Add(ClockTolerance) < latestDueUtc.Value)
             {
+                if (IsCatchingUp(
+                    schedule,
+                    latestDueUtc.Value,
+                    utcNow,
+                    localTimeZone,
+                    availableSinceUtc,
+                    catchUpWindow))
+                {
+                    return Result(
+                        BackupFreshnessState.CatchingUp,
+                        verifiedUtc,
+                        verifiedLocal,
+                        latestDueLocal,
+                        latestDueUtc,
+                        nextScheduledLocal,
+                        "Catching up",
+                        "The backup due on " + FormatLocal(latestDueLocal.Value) +
+                            " was missed while this PC was off, asleep or signed out. Windows will start it shortly. " +
+                            "Your last good backup was " + FormatLocal(verifiedLocal.Value) + ".");
+                }
                 return Result(
                     BackupFreshnessState.Overdue,
                     verifiedUtc,
@@ -292,6 +349,49 @@ namespace ResticBackuper.Dashboard
                 nextScheduledLocal,
                 "Healthy",
                 healthyDetail);
+        }
+
+        // Whether a missed slot is one Windows is about to make up for, rather than one that is overdue: the task runs as soon as
+        // possible after a missed start, the PC came back (a sign-in or a wake) after the slot, nothing has run since the slot,
+        // and Windows has had less than catchUpWindow since then to start the run. Anything that is not known (no sign-in or
+        // wake time, a last run that cannot be placed) leaves the slot overdue, and so does a run that started and did not
+        // make a verified backup. The moments are wall-clock ones because the slots are; a clock that moved is reported as a
+        // clock anomaly before this is reached.
+        private static bool IsCatchingUp(
+            TaskSchedule schedule,
+            DateTime latestDueUtc,
+            DateTime utcNow,
+            TimeZoneInfo localTimeZone,
+            DateTime? availableSinceUtc,
+            TimeSpan catchUpWindow)
+        {
+            if (!schedule.StartWhenAvailable || !availableSinceUtc.HasValue)
+            {
+                return false;
+            }
+            DateTime available = NormalizeSuppliedUtc(availableSinceUtc.Value);
+            if (available <= latestDueUtc || available > utcNow || utcNow - available >= catchUpWindow)
+            {
+                return false;
+            }
+            if (!schedule.LastRunTime.HasValue)
+            {
+                return true;
+            }
+            // The last run is a local time. In the hour that repeats when the clocks go back it is taken as the later of its
+            // two moments, so a run that may have been after the slot counts as one.
+            DateTime lastRunUtc;
+            DateTime ignoredLocal;
+            if (!TryResolveLocalToUtc(
+                DateTime.SpecifyKind(schedule.LastRunTime.Value, DateTimeKind.Unspecified),
+                localTimeZone,
+                true,
+                out lastRunUtc,
+                out ignoredLocal))
+            {
+                return false;
+            }
+            return lastRunUtc < latestDueUtc;
         }
 
         private static BackupFreshnessResult Result(

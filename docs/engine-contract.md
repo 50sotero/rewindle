@@ -130,12 +130,14 @@ the backup: <relative path>`) and ignored in a DriveFS folder. The result docume
 ## 4. Task Scheduler contract
 
 Read with `schtasks.exe /Query /TN "<backup task>" /XML` (as the user, 15 s, 256 K characters) and the
-`Schedule.Service` COM object for state and next run. The XML must have exactly one `Exec` action whose command is the
-launcher, no arguments, working directory `<install>`; exactly one principal that resolves to the current user, with
-`InteractiveToken` and `HighestAvailable`; `URI` = `\<backup task>`; `IgnoreNew`, `ExecutionTimeLimit` `PT0S`, priority 7,
-no idle or network conditions, hard terminate and on-demand start allowed; exactly one daily or weekly calendar trigger.
-The fingerprint is SHA-256 of `<TaskXml domain>` + LF + the canonical document element. The Rewindle installer registers
-exactly this shape.
+`Schedule.Service` COM object for state, next run and last run (a last run that cannot be read is left unknown). The XML
+must have exactly one `Exec` action whose command is the launcher, no arguments, working directory `<install>`; exactly
+one principal that resolves to the current user, with `InteractiveToken` and `HighestAvailable`; `URI` = `\<backup task>`;
+`IgnoreNew`, `ExecutionTimeLimit` `PT0S`, priority 7, no idle or network conditions, hard terminate and on-demand start
+allowed; exactly one daily or weekly calendar trigger. The fingerprint is SHA-256 of `<TaskXml domain>` + LF + the
+canonical document element. The Rewindle installer registers exactly this shape. Both engines' tasks set
+`StartWhenAvailable`; with it, a slot that passed while the PC was off, asleep or signed out is shown as catching up rather
+than overdue until the task has run since the slot, or for at most 45 minutes after the sign-in or wake.
 
 ## 5. State the dashboard reads (read-only, never written)
 
@@ -154,6 +156,13 @@ exactly this shape.
 | `<state>\google-drive-sync-status.json` | Only a proof-shaped document is interpreted; anything else reads "direct cloud verification required" | Not written | Not written |
 | Retired per-user mirror status (section 2) | Presence only; never parsed | Written by the optional sync script | Written by that edition's sync script |
 | `<state>\recovery-health-latest.json` | Diagnostics only | Not written | Not written |
+
+An active `status.json` (a running state) is believed only while its writer is alive: the process
+`wrapper_pid`, opened as the user with `PROCESS_QUERY_LIMITED_INFORMATION`, must have exactly the creation time
+`wrapper_start_filetime` (a canonical decimal FILETIME string) and must not have exited, or the file must have been written
+in the last two minutes. Otherwise the run is shown as interrupted. A status without a valid `wrapper_start_filetime` (an
+older engine build) falls back to the process ID and a start time within five minutes of `started_utc`. Both engines write
+both fields, and must keep doing so.
 
 The read-only readiness check runs `<install>\Python\python.exe -E -S -B <install>\recovery_health.py --config …` as the
 user (60 s, 4 MiB stdout) and binds `schema` `<P>.RecoveryHealth.v1`, plan, generation, repository, and the check IDs

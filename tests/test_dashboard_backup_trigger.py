@@ -32,7 +32,7 @@ class DashboardBackupTriggerTests(unittest.TestCase):
             "previewEnabled",
             "sourceOperationInProgress",
             "snapshot.IsActive",
-            "backupRequestPendingUntilUtc",
+            "BackupRequestPending()",
             "backupRequestBaselineRunId",
         ):
             self.assertIn(marker, self.window)

@@ -8,6 +8,7 @@ $engineProfileSource = Get-Content -LiteralPath (Join-Path $project 'src\dashboa
 $atomicFileSource = Get-Content -LiteralPath (Join-Path $project 'src\dashboard\AtomicFile.cs') -Raw -Encoding UTF8
 $sourceConfigurationSource = Get-Content -LiteralPath (Join-Path $project 'src\dashboard\SourceConfiguration.cs') -Raw -Encoding UTF8
 $elevatedRequestSecuritySource = Get-Content -LiteralPath (Join-Path $project 'src\dashboard\ElevatedRequestSecurity.cs') -Raw -Encoding UTF8
+$processLivenessSource = Get-Content -LiteralPath (Join-Path $project 'src\dashboard\ProcessLiveness.cs') -Raw -Encoding UTF8
 $harness = @'
 namespace ResticBackuper.Dashboard
 {
@@ -146,6 +147,76 @@ namespace ResticBackuper.Dashboard
                 (schedule.ClockChangeNote.Length > 0 ? "note" : "no-note");
         }
 
+        // A daily schedule evaluated with the moment the PC came back (sign-in or wake) and the task's last run, as the dashboard
+        // passes them. offsetMinutes below zero is a start in local time; otherwise the start was written with that UTC offset.
+        // Empty strings are unknown. lastRunLocal is a local time, as Task Scheduler reports it.
+        public static string EvaluateCatchUp(
+            string time,
+            int offsetMinutes,
+            bool enabled,
+            bool startWhenAvailable,
+            string lastVerifiedUtc,
+            string lastRunLocal,
+            string availableSinceUtc,
+            string nowUtc,
+            string nowLocalOverride,
+            TimeZoneInfo timeZone)
+        {
+            TimeSpan parsedTime = TimeSpan.ParseExact(time, @"hh\:mm", CultureInfo.InvariantCulture);
+            DateTime? verified = ParseUtc(lastVerifiedUtc);
+            DateTime? available = ParseUtc(availableSinceUtc);
+            DateTime? lastRun = string.IsNullOrEmpty(lastRunLocal)
+                ? (DateTime?)null
+                : DateTime.SpecifyKind(DateTime.Parse(lastRunLocal, CultureInfo.InvariantCulture), DateTimeKind.Unspecified);
+            DateTime utc = ParseUtc(nowUtc).Value;
+            DateTime local = string.IsNullOrEmpty(nowLocalOverride)
+                ? DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(utc, timeZone), DateTimeKind.Unspecified)
+                : DateTime.SpecifyKind(DateTime.Parse(nowLocalOverride, CultureInfo.InvariantCulture), DateTimeKind.Unspecified);
+            TaskSchedule schedule = new TaskSchedule(
+                BackupScheduleCadence.Daily,
+                parsedTime,
+                offsetMinutes < 0 ? (TimeSpan?)null : TimeSpan.FromMinutes(offsetMinutes),
+                new DayOfWeek[0],
+                enabled,
+                startWhenAvailable,
+                true,
+                true,
+                false,
+                true,
+                "ResticBackuper",
+                "S-1-5-21-test",
+                "launcher.exe",
+                "C:\\Program Files\\ResticBackuper",
+                enabled ? BackupTaskState.Ready : BackupTaskState.Disabled,
+                null,
+                lastRun,
+                "fixture");
+            BackupFreshnessResult result = BackupFreshnessEvaluator.Evaluate(
+                schedule,
+                verified,
+                local,
+                utc,
+                timeZone,
+                BackupFreshnessEvaluator.DefaultGracePeriod,
+                null,
+                available,
+                BackupFreshnessEvaluator.DefaultCatchUpWindow);
+            return result.State.ToString() + "|" +
+                (result.NeedsAttention ? "attention" : "calm") + "|" +
+                Format(result.LatestDueLocal) + "|" +
+                result.StatusLabel + "|" + result.Detail;
+        }
+
+        private static DateTime? ParseUtc(string value)
+        {
+            return string.IsNullOrEmpty(value)
+                ? (DateTime?)null
+                : DateTime.Parse(
+                    value,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
+        }
+
         // Moves every Windows folder an engine path is built from (the installed plan, the cloud proof, the dashboard's own
         // folder) under the fixture, so the telemetry reader below never looks at a real installation.
         public static void UseFixtureFolderRoots(string root)
@@ -163,7 +234,7 @@ namespace ResticBackuper.Dashboard
 }
 '@
 
-$sourceParts = @($engineProfileSource, $atomicFileSource, $elevatedRequestSecuritySource, $sourceConfigurationSource, $telemetrySource, $scheduleSource, $freshnessSource)
+$sourceParts = @($engineProfileSource, $atomicFileSource, $elevatedRequestSecuritySource, $sourceConfigurationSource, $processLivenessSource, $telemetrySource, $scheduleSource, $freshnessSource)
 $usingPattern = '(?m)^using\s+[^;]+;\s*\r?\n'
 $allUsings = @($sourceParts | ForEach-Object {
     [regex]::Matches($_, $usingPattern) | ForEach-Object { $_.Value.Trim() }
@@ -373,6 +444,52 @@ $mismatchedClocks = Evaluate-Freshness `
     -NowLocal '2026-07-21T05:00:00' `
     -NowUtc '2026-07-21T08:00:00Z'
 Assert-Match '^ClockAnomaly\|' $mismatchedClocks 'Inconsistent supplied local and UTC clocks must be detected.'
+
+# A slot that passed while the PC was off, asleep or signed out is one Windows starts by itself soon after the PC is back (the task
+# runs as soon as possible after a missed start). Until then it is "Catching up", which asks for nothing; once the PC has been back
+# for the catch-up window (45 minutes) without that run starting, it is overdue as before. Daily at 02:00, last verified yesterday.
+function Evaluate-CatchUp {
+    param(
+        [string]$Time = '02:00',
+        [int]$OffsetMinutes = -1,
+        [bool]$Enabled = $true,
+        [bool]$StartWhenAvailable = $true,
+        [string]$LastVerifiedUtc = '2026-07-20T02:20:00Z',
+        [string]$LastRunLocal = '2026-07-20T02:00:00',
+        [string]$AvailableSinceUtc = '2026-07-21T08:00:00Z',
+        [string]$NowUtc = '2026-07-21T08:03:00Z',
+        [string]$NowLocal = '',
+        [TimeZoneInfo]$TimeZone = [TimeZoneInfo]::Utc
+    )
+    return [ResticBackuper.Dashboard.BackupFreshnessFixtureHarness]::EvaluateCatchUp(
+        $Time, $OffsetMinutes, $Enabled, $StartWhenAvailable, $LastVerifiedUtc, $LastRunLocal, $AvailableSinceUtc, $NowUtc, $NowLocal, $TimeZone)
+}
+$catchingUp = Evaluate-CatchUp
+Assert-Match '^CatchingUp\|calm\|2026-07-21T02:00:00\|Catching up\|' $catchingUp 'A slot missed before sign-in must be caught up on, calmly, before it is called overdue.'
+Assert-Match 'Windows will start it shortly' $catchingUp 'Catching up must say that Windows starts the missed backup.'
+Assert-True ($catchingUp -notmatch 'Back up now') 'Catching up must not ask for Back up now.'
+Assert-Match '^CatchingUp\|calm\|' (Evaluate-CatchUp -LastRunLocal '') 'A task with no recorded run is still caught up on.'
+Assert-Match '^CatchingUp\|calm\|' (Evaluate-CatchUp -NowUtc '2026-07-21T08:44:00Z') 'Catching up must last for the whole catch-up window.'
+$catchUpLate = Evaluate-CatchUp -NowUtc '2026-07-21T08:50:00Z'
+Assert-Match '^Overdue\|attention\|' $catchUpLate 'A catch-up run that has not started 45 minutes after sign-in must be overdue.'
+Assert-Match 'Back up now' $catchUpLate 'Overdue after the catch-up window must keep its next step.'
+Assert-Match '^Overdue\|attention\|' (Evaluate-CatchUp -StartWhenAvailable $false) 'A task that does not run missed starts must be overdue at once.'
+Assert-Match '^Overdue\|attention\|' (Evaluate-CatchUp -AvailableSinceUtc '2026-07-21T01:00:00Z') 'A PC that was on at the slot has no run to catch up on.'
+Assert-Match '^Overdue\|attention\|' (Evaluate-CatchUp -LastRunLocal '2026-07-21T08:01:00') 'A run since the slot that made no verified backup must be overdue.'
+Assert-Match '^Overdue\|attention\|' (Evaluate-CatchUp -AvailableSinceUtc '') 'An unknown sign-in or wake time must leave a missed slot overdue.'
+Assert-Match '^Overdue\|attention\|' (Evaluate-CatchUp -AvailableSinceUtc '2026-07-21T08:10:00Z') 'A sign-in time ahead of the clock must not be believed.'
+Assert-Match '^Healthy\|calm\|' (Evaluate-CatchUp -LastVerifiedUtc '2026-07-21T02:20:00Z') 'A backup that ran at the slot stays healthy.'
+Assert-Match '^Paused\|' (Evaluate-CatchUp -Enabled $false) 'Paused keeps its precedence over catching up.'
+Assert-Match '^ClockAnomaly\|' (Evaluate-CatchUp -NowLocal '2026-07-21T11:03:00') 'A clock anomaly keeps its precedence over catching up.'
+# A start pinned to a UTC moment (see EvaluatePinned) is caught up on in the same way, at its real slot (00:00 UTC, 01:00 in winter).
+Assert-Match '^CatchingUp\|calm\|2026-11-06T01:00:00\|' (Evaluate-CatchUp -Time '01:00' -OffsetMinutes 60 -TimeZone $westEurope `
+    -LastVerifiedUtc '2026-11-05T00:22:00Z' -LastRunLocal '2026-11-05T01:00:00' `
+    -AvailableSinceUtc '2026-11-06T08:00:00Z' -NowUtc '2026-11-06T08:03:00Z') 'A UTC-pinned slot missed before sign-in must be caught up on.'
+# A last run in the hour that repeats when the clocks go back is taken at its later moment: 02:20 is 00:20 UTC (before the 02:30
+# slot's first pass at 00:30 UTC) or 01:20 UTC (after it), so it may have been a run since the slot, and the slot is overdue.
+Assert-Match '^Overdue\|attention\|2026-10-25T02:30:00\|' (Evaluate-CatchUp -Time '02:30' -TimeZone $dstZone `
+    -LastVerifiedUtc '2026-10-24T00:40:00Z' -LastRunLocal '2026-10-25T02:20:00' `
+    -AvailableSinceUtc '2026-10-25T05:00:00Z' -NowUtc '2026-10-25T05:10:00Z') 'An ambiguous last run that may follow the slot must not count as no run.'
 
 $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('restic-freshness-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $fixtureRoot | Out-Null

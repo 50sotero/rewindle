@@ -69,16 +69,18 @@ namespace ResticBackuper.Dashboard
         // control can recover.
         private bool webPresentationBrowserLost;
         private int webPresentationPublishFailures;
-        private readonly List<DateTime> webPresentationRecoveryUtc = new List<DateTime>();
-        private DateTime webPresentationUnresponsiveSinceUtc = DateTime.MinValue;
-        private DateTime webPresentationUnresponsiveLastUtc = DateTime.MinValue;
-        private DateTime webPresentationUnresponsiveNoticeUtc = DateTime.MinValue;
+        // When each recent automatic reload began, and the not-responding episode: when it began (0 while the page
+        // answers), its latest report and when the notice is due. All on the Stopwatch clock (see MonotonicNow).
+        private readonly List<long> webPresentationRecoveryStarts = new List<long>();
+        private long webPresentationUnresponsiveSince;
+        private long webPresentationUnresponsiveLast;
+        private long webPresentationUnresponsiveNoticeAt;
         private bool webPresentationUnresponsiveNoticeShown;
         // PublishWebPresentationState asks for a state; the page is sent one per dispatcher turn, and not again
         // while it would be identical to the last one it was sent.
         private bool webPresentationPublishQueued;
         private string webPresentationLastPostedState;
-        private DateTime webPresentationLastPostUtc = DateTime.MinValue;
+        private long webPresentationNextHeartbeatAt;
         private string webTelemetryError;
         private RunDetails webRunDetails;
         private RunMetricView webRunDetailsRun;
@@ -90,7 +92,7 @@ namespace ResticBackuper.Dashboard
         private static readonly TimeSpan WebSourceExistenceRefreshInterval = TimeSpan.FromSeconds(10);
         private Dictionary<string, bool> webSourceExistence =
             new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-        private DateTime webSourceExistenceCheckedUtc = DateTime.MinValue;
+        private long webSourceExistenceNextProbeAt;
         private bool webSourceExistenceProbeInFlight;
 
         private void MountWebPresentation(Grid shell, FrameworkElement nativeRoot)
@@ -668,7 +670,7 @@ namespace ResticBackuper.Dashboard
             webPresentationHandshakeReady = false;
             webPresentationLastPostedState = null;
             // A page that exited is no longer stuck.
-            webPresentationUnresponsiveSinceUtc = DateTime.MinValue;
+            webPresentationUnresponsiveSince = 0;
             webPresentationBrowserLost = webPresentationBrowserLost || browserLost;
             string cause = kind.ToString();
             Dispatcher.BeginInvoke(new Action(delegate { RecoverWebPresentation(cause); }));
@@ -679,7 +681,7 @@ namespace ResticBackuper.Dashboard
         // that was only slow, so the report is noted and the person is asked only once it has gone on for a while.
         private void NoteWebPresentationUnresponsive()
         {
-            if (!NoteWebPresentationUnresponsiveReport(DateTime.UtcNow))
+            if (!NoteWebPresentationUnresponsiveReport(MonotonicNow()))
             {
                 return;
             }
@@ -695,18 +697,18 @@ namespace ResticBackuper.Dashboard
 
         // Records one report. True when it is the one that should raise the notice: the page has been stuck for the
         // whole grace period and the person has not been told yet.
-        private bool NoteWebPresentationUnresponsiveReport(DateTime nowUtc)
+        private bool NoteWebPresentationUnresponsiveReport(long now)
         {
-            if (webPresentationUnresponsiveSinceUtc == DateTime.MinValue ||
-                nowUtc - webPresentationUnresponsiveLastUtc > WebPresentationUnresponsiveGap)
+            if (webPresentationUnresponsiveSince == 0 ||
+                now - webPresentationUnresponsiveLast > MonotonicSpan(WebPresentationUnresponsiveGap))
             {
                 // The reports had stopped, so the page had recovered in between: this is a new episode.
-                webPresentationUnresponsiveSinceUtc = nowUtc;
-                webPresentationUnresponsiveNoticeUtc = nowUtc + WebPresentationUnresponsiveGrace;
+                webPresentationUnresponsiveSince = now;
+                webPresentationUnresponsiveNoticeAt = now + MonotonicSpan(WebPresentationUnresponsiveGrace);
                 webPresentationUnresponsiveNoticeShown = false;
             }
-            webPresentationUnresponsiveLastUtc = nowUtc;
-            if (webPresentationUnresponsiveNoticeShown || nowUtc < webPresentationUnresponsiveNoticeUtc)
+            webPresentationUnresponsiveLast = now;
+            if (webPresentationUnresponsiveNoticeShown || now < webPresentationUnresponsiveNoticeAt)
             {
                 return false;
             }
@@ -718,12 +720,12 @@ namespace ResticBackuper.Dashboard
         // itself: the notice has no reason to stay, and the page is sent the state it missed.
         private void CheckWebPresentationResponsive()
         {
-            if (webPresentationUnresponsiveSinceUtc == DateTime.MinValue ||
-                DateTime.UtcNow - webPresentationUnresponsiveLastUtc <= WebPresentationUnresponsiveGap)
+            if (webPresentationUnresponsiveSince == 0 ||
+                MonotonicNow() - webPresentationUnresponsiveLast <= MonotonicSpan(WebPresentationUnresponsiveGap))
             {
                 return;
             }
-            webPresentationUnresponsiveSinceUtc = DateTime.MinValue;
+            webPresentationUnresponsiveSince = 0;
             if (webPresentationUnresponsiveNoticeShown)
             {
                 // Only the not-responding notice goes; any other failure on screen is not about this.
@@ -736,10 +738,10 @@ namespace ResticBackuper.Dashboard
         {
             // The page is not reloaded; it is given more time before the person is asked again.
             HideWebPresentationFailure();
-            DateTime now = DateTime.UtcNow;
-            webPresentationUnresponsiveSinceUtc = now;
-            webPresentationUnresponsiveLastUtc = now;
-            webPresentationUnresponsiveNoticeUtc = now + WebPresentationUnresponsiveRepeat;
+            long now = MonotonicNow();
+            webPresentationUnresponsiveSince = now;
+            webPresentationUnresponsiveLast = now;
+            webPresentationUnresponsiveNoticeAt = now + MonotonicSpan(WebPresentationUnresponsiveRepeat);
         }
 
         // The page or its browser stopped. Reload on our own a few times, then hand the decision to the user.
@@ -765,20 +767,21 @@ namespace ResticBackuper.Dashboard
 
         private bool TryBeginWebPresentationRecovery()
         {
-            DateTime now = DateTime.UtcNow;
-            webPresentationRecoveryUtc.RemoveAll(item => now - item > WebPresentationRecoveryWindow);
-            if (webPresentationRecoveryUtc.Count >= WebPresentationRecoveryLimit)
+            long now = MonotonicNow();
+            long window = MonotonicSpan(WebPresentationRecoveryWindow);
+            webPresentationRecoveryStarts.RemoveAll(item => now - item > window);
+            if (webPresentationRecoveryStarts.Count >= WebPresentationRecoveryLimit)
             {
                 return false;
             }
-            webPresentationRecoveryUtc.Add(now);
+            webPresentationRecoveryStarts.Add(now);
             return true;
         }
 
         private void OnWebPresentationReloadClick(object sender, RoutedEventArgs args)
         {
             // An explicit request always runs, and starts the automatic allowance over.
-            webPresentationRecoveryUtc.Clear();
+            webPresentationRecoveryStarts.Clear();
             webPresentationPublishFailures = 0;
             ReloadWebPresentation();
         }
@@ -1701,7 +1704,7 @@ namespace ResticBackuper.Dashboard
                     // The page asks for its first state itself, once it has loaded.
                     return;
                 }
-                bool unresponsive = webPresentationUnresponsiveSinceUtc != DateTime.MinValue;
+                bool unresponsive = webPresentationUnresponsiveSince != 0;
                 if (!force && (unresponsive || !IsVisible || WindowState == WindowState.Minimized))
                 {
                     // A stuck page cannot read what is posted, and a browser keeps every message it is sent, so it is
@@ -1722,7 +1725,7 @@ namespace ResticBackuper.Dashboard
                 {
                     core.PostWebMessageAsJson(state);
                     webPresentationLastPostedState = state;
-                    webPresentationLastPostUtc = DateTime.UtcNow;
+                    webPresentationNextHeartbeatAt = MonotonicAfter(WebPresentationHeartbeatInterval);
                 }
                 if (webPresentationPublishFailures >= WebPresentationPublishFailureLimit)
                 {
@@ -1752,13 +1755,12 @@ namespace ResticBackuper.Dashboard
         // of the silence that an unchanged state, or a window nobody can see, leaves.
         private void PostWebHeartbeat(CoreWebView2 core)
         {
-            DateTime now = DateTime.UtcNow;
-            if (now - webPresentationLastPostUtc < WebPresentationHeartbeatInterval)
+            if (!MonotonicReached(webPresentationNextHeartbeatAt))
             {
                 return;
             }
             core.PostWebMessageAsJson("{\"type\":\"heartbeat\"}");
-            webPresentationLastPostUtc = now;
+            webPresentationNextHeartbeatAt = MonotonicAfter(WebPresentationHeartbeatInterval);
         }
 
         private Dictionary<string, object> BuildWebPresentationState()
@@ -1988,7 +1990,7 @@ namespace ResticBackuper.Dashboard
                 }
             }
             if (!unknownFolder &&
-                DateTime.UtcNow - webSourceExistenceCheckedUtc < WebSourceExistenceRefreshInterval)
+                !MonotonicReached(webSourceExistenceNextProbeAt))
             {
                 return;
             }
@@ -2036,7 +2038,7 @@ namespace ResticBackuper.Dashboard
             {
                 return;
             }
-            webSourceExistenceCheckedUtc = DateTime.UtcNow;
+            webSourceExistenceNextProbeAt = MonotonicAfter(WebSourceExistenceRefreshInterval);
             bool changed = false;
             foreach (KeyValuePair<string, bool> item in probed)
             {
@@ -2057,7 +2059,7 @@ namespace ResticBackuper.Dashboard
         // decides when the native status line falls back to its default text.
         private Dictionary<string, object> BuildWebSourceNoticeState()
         {
-            if (DateTime.UtcNow >= sourceNoticeExpiresUtc || string.IsNullOrWhiteSpace(sourceNoticeText))
+            if (MonotonicReached(sourceNoticeExpiresAt) || string.IsNullOrWhiteSpace(sourceNoticeText))
             {
                 return null;
             }
@@ -2158,7 +2160,7 @@ namespace ResticBackuper.Dashboard
             {
                 return null;
             }
-            if (!scheduleOperationInProgress && DateTime.UtcNow >= scheduleNoticeExpiresUtc)
+            if (!scheduleOperationInProgress && MonotonicReached(scheduleNoticeExpiresAt))
             {
                 return null;
             }
@@ -2189,7 +2191,8 @@ namespace ResticBackuper.Dashboard
             BackupFreshnessResult result = BackupFreshnessEvaluator.EvaluateNow(
                 readable ? currentTaskSchedule : null,
                 readable ? snapshot.LastVerifiedFinishedUtc : null,
-                scheduleCoveredThroughUtc);
+                scheduleCoveredThroughUtc,
+                AvailableSinceUtc());
             Dictionary<string, object> freshness = new Dictionary<string, object>();
             freshness["title"] = result.StatusLabel;
             freshness["detail"] = result.Detail;
@@ -2218,6 +2221,8 @@ namespace ResticBackuper.Dashboard
             offsite["checkedAt"] = status != null && status.LastUpdatedLocal.HasValue
                 ? status.LastUpdatedLocal.Value.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture)
                 : string.Empty;
+            // A check that is waiting or running, but none has worked for about two days (see OffsiteStatusView.CheckOverdue).
+            offsite["checkOverdue"] = status != null && status.CheckOverdue;
             offsite["providerConfirmed"] = status != null && status.ProviderUploadConfirmed;
             offsite["restoreVerified"] = status != null && status.RestoreVerified;
             // The provider is named only when the evidence names one (a direct My Drive proof is Google Drive's); the page
@@ -2383,7 +2388,7 @@ namespace ResticBackuper.Dashboard
             {
                 // A page that loads, announces itself or reloads is no longer the stuck one (OnWebPresentationKeepWaitingClick
                 // starts the wait over after this).
-                webPresentationUnresponsiveSinceUtc = DateTime.MinValue;
+                webPresentationUnresponsiveSince = 0;
                 webPresentationUnresponsiveNoticeShown = false;
                 if (webPresentationErrorSurface == null ||
                     webPresentationErrorSurface.Visibility != Visibility.Visible)

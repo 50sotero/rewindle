@@ -27,7 +27,7 @@ class DashboardSourceAnimationTests(unittest.TestCase):
         ):
             self.assertIn(stage, self.window)
         self.assertIn("sourceOperationGeneration", self.window)
-        self.assertIn("sourceOperationExpiresUtc", self.window)
+        self.assertIn("sourceOperationExpiresAt", self.window)
         self.assertIn("animateNextResolvedSourceRow", self.window)
 
     def test_add_flow_uses_elevated_launch_callback_before_wait(self) -> None:

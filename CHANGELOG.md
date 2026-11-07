@@ -132,6 +132,22 @@ ones a home user reads without a glossary.
   that doesn't answer now each get their own explanation and next step. Before,
   the first two said to reconnect the backup drive and the third blamed the
   backup drive.
+- **Protection is neither too calm nor too loud.** A backup missed while the
+  PC was off, asleep or signed out no longer turns the page red the moment
+  you sign in: Windows starts such a backup by itself, so Protection says
+  **Catching up** in a neutral color and asks for nothing. If the backup has
+  not started 45 minutes after you sign in or wake the PC, it is **Backup
+  overdue** again, with **Back up now**. An off-site copy whose nightly
+  check has not worked for two days (or that has shown a check as running for
+  that long) no longer says there is nothing to do: the card warns, says to
+  leave the PC on and signed in overnight, and what to do if that does not
+  help. A backup cut short by a sign-out or shutdown is shown as interrupted;
+  before, it could show as still running for up to a day, with **Back up
+  now**, folder changes and restores turned off. Setting the PC's clock back
+  no longer pauses the status checks, the notices or the wait after **Back up
+  now** for as long as the clock went back. And when a sign-out or shutdown is
+  cancelled, Rewindle is still running in the notification area; before, it
+  had already quit.
 
 ### Security
 

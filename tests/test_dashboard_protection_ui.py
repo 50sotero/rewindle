@@ -18,12 +18,16 @@ WHEN = WEB / "src" / "when.ts"
 RUNNER = """
 const tone = await import(process.argv[1]);
 const when = await import(process.argv[2]);
-const { states, moments } = JSON.parse(process.argv[3]);
+const { states, moments, offsite } = JSON.parse(process.argv[3]);
 // A moment is given as local wall-clock parts [year, month0, day, hour, minute], so no result depends on the machine's time zone.
 const local = parts => new Date(parts[0], parts[1], parts[2], parts[3], parts[4]);
 const report = { states: {}, moments: {} };
 for (const [name, state] of Object.entries(states)) {
   report.states[name] = { tone: tone.heroTone(state), concern: tone.heroConcern(state) };
+}
+report.offsite = {};
+for (const [name, copy] of Object.entries(offsite)) {
+  report.offsite[name] = { tone: tone.offsiteTone(copy), overdue: tone.offsiteCheckOverdue(copy), words: tone.offsiteOverdueWords(copy) };
 }
 for (const [name, moment] of Object.entries(moments)) {
   const iso = local(moment.at).toISOString();
@@ -125,6 +129,23 @@ class ProtectionUiTests(unittest.TestCase):
             "stopped_unplugged": state(cancelled=True, success=False, volume_ready=False),
             "stopped_review": state(cancelled=True, success=False, review=True),
             "no_run_yet": state(success=False, freshness="NoVerifiedBackup"),
+            "catching_up": state(freshness="CatchingUp"),
+            "catching_up_review": state(freshness="CatchingUp", review=True),
+            "catching_up_unplugged": state(freshness="CatchingUp", volume_ready=False),
+            "catching_up_after_a_stop": state(freshness="CatchingUp", cancelled=True, success=False),
+        }
+        offsite = {
+            "waiting": {"kind": "Stale"},
+            "waiting_overdue": {"kind": "Stale", "checkOverdue": True, "provider": "Google Drive"},
+            "waiting_overdue_unnamed": {"kind": "Stale", "checkOverdue": True},
+            "checking": {"kind": "InProgress", "provider": "Google Drive"},
+            "checking_overdue": {"kind": "InProgress", "checkOverdue": True, "provider": "Google Drive"},
+            "verified": {"kind": "RestoreVerified", "checkOverdue": False},
+            # Only a waiting or running check can be overdue: anything else keeps its own colour whatever the flag says.
+            "failed_flagged": {"kind": "Failed", "checkOverdue": True},
+            "verified_flagged": {"kind": "RestoreVerified", "checkOverdue": True},
+            "not_set_up": {"kind": "NotConfigured"},
+            "unconfirmed": {"kind": "StatusUnavailable"},
         }
         moments = {
             "today": moment((2026, 9, 11, 14, 5)),
@@ -138,7 +159,7 @@ class ProtectionUiTests(unittest.TestCase):
         }
         completed = subprocess.run(
             [node, "--no-warnings", "--experimental-strip-types", "--input-type=module", "-e", RUNNER,
-             TONE.as_uri(), WHEN.as_uri(), json.dumps({"states": states, "moments": moments})],
+             TONE.as_uri(), WHEN.as_uri(), json.dumps({"states": states, "moments": moments, "offsite": offsite})],
             capture_output=True, encoding="utf-8", timeout=60, check=False,
         )
         if completed.returncode != 0 and "ERR_UNKNOWN_FILE_EXTENSION" in completed.stderr:
@@ -240,6 +261,57 @@ class ProtectionUiTests(unittest.TestCase):
         self.assertEqual(self.tone("stopped_review"), "warning")
         self.assertEqual(self.tone("stopped_unplugged"), "danger")
 
+    def test_a_backup_windows_is_catching_up_on_asks_for_nothing(self) -> None:
+        # Missed while the PC was off or asleep, and Windows is about to start it: not green (it is not done) and not a warning.
+        self.assertEqual(self.tone("catching_up"), "neutral")
+        self.assertIsNone(self.concern("catching_up"))
+        # Anything else that is wrong still shows, in its own colour.
+        self.assertEqual(self.tone("catching_up_review"), "warning")
+        self.assertIn("Confirm these changes", self.concern("catching_up_review")["text"])
+        self.assertEqual(self.tone("catching_up_unplugged"), "danger")
+        self.assertEqual(self.tone("catching_up_after_a_stop"), "neutral")
+
+    def offsite(self, name: str) -> dict:
+        return self.report["offsite"][name]
+
+    def test_an_off_site_check_is_calm_until_it_is_overdue(self) -> None:
+        self.assertEqual(self.offsite("waiting")["tone"], "neutral")
+        self.assertIsNone(self.offsite("waiting")["words"])
+        self.assertEqual(self.offsite("checking")["tone"], "active")
+        self.assertIsNone(self.offsite("checking")["words"])
+        self.assertEqual(self.offsite("waiting_overdue")["tone"], "warning")
+        self.assertEqual(self.offsite("checking_overdue")["tone"], "warning")
+        self.assertEqual(self.offsite("verified")["tone"], "success")
+        self.assertEqual(self.offsite("not_set_up")["tone"], "neutral")
+        self.assertEqual(self.offsite("unconfirmed")["tone"], "warning")
+
+    def test_only_a_waiting_or_running_check_is_ever_overdue(self) -> None:
+        self.assertEqual(self.offsite("failed_flagged")["tone"], "danger")
+        self.assertFalse(self.offsite("failed_flagged")["overdue"])
+        self.assertEqual(self.offsite("verified_flagged")["tone"], "success")
+        self.assertIsNone(self.offsite("verified_flagged")["words"])
+
+    def test_an_overdue_off_site_check_says_why_and_what_to_do(self) -> None:
+        waiting = self.offsite("waiting_overdue")["words"]
+        self.assertEqual(waiting["title"], "Not checked lately")
+        self.assertIn("the copy in Google Drive", waiting["detail"])
+        self.assertIn("more than two days", waiting["detail"])
+        self.assertIn("Leave this PC on and signed in overnight, with Google Drive running.", waiting["nextStep"])
+        self.assertIn("Save problem report", waiting["nextStep"])
+        checking = self.offsite("checking_overdue")["words"]
+        self.assertIn("finish", checking["title"])
+        self.assertIn("never finished", checking["detail"])
+        self.assertEqual(checking["nextStep"], waiting["nextStep"])
+        # A provider is named only when the evidence names one.
+        unnamed = self.offsite("waiting_overdue_unnamed")["words"]
+        self.assertIn("the off-site copy", unnamed["detail"])
+        self.assertNotIn("Google", unnamed["detail"] + unnamed["nextStep"])
+        for words in (waiting, checking, unnamed):
+            text = " ".join(words.values())
+            self.assertNotIn("nothing to do", text)
+            for word in ("repository", "snapshot", "Restic", "engine"):
+                self.assertNotIn(word, text)
+
     def test_drives_are_read_from_a_path(self) -> None:
         drives = self.report["drives"]
         self.assertEqual(drives["letter"], "D:")
@@ -268,6 +340,31 @@ class ProtectionUiTests(unittest.TestCase):
 
     def test_yesterday_is_a_calendar_day_not_twenty_four_hours(self) -> None:
         self.assertRegex(self.plain(self.report["moments"]["late_last_night"]["ago"]), r"^yesterday at 11:59 PM$")
+
+
+class ProtectionCardSourceTests(unittest.TestCase):
+    """ProtectionHealth.tsx imports React, so Node cannot run it as it is; these check that its cards use the tone rules tested above."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.cards = (WEB / "components" / "primitives" / "ProtectionHealth.tsx").read_text(encoding="utf-8")
+
+    def test_the_off_site_card_takes_its_colour_and_overdue_words_from_protection_tone(self) -> None:
+        self.assertIn("const cloudTone: Tone = unavailable ? 'warning' : offsiteTone(cloud);", self.cards)
+        self.assertIn("const cloudOverdue = unavailable ? null : offsiteOverdueWords(cloud);", self.cards)
+        # The overdue words come first, so "nothing to do" is never said of a check that is overdue.
+        self.assertIn("cloudOverdue?.title || cloudTitles[cloud.kind]", self.cards)
+        self.assertIn("cloudOverdue?.detail || cloudDetails[cloud.kind]", self.cards)
+        self.assertIn("nextStep: cloudOverdue ? cloudOverdue.nextStep", self.cards)
+        self.assertNotIn("cloudWaiting", self.cards)
+
+    def test_the_local_card_is_neutral_while_windows_catches_up(self) -> None:
+        self.assertIn("CatchingUp: 'Catching up'", self.cards)
+        self.assertIn("freshness.state === 'CatchingUp' ? 'neutral'", self.cards)
+        cause = self.cards[self.cards.index("const FRESHNESS_CAUSE"):self.cards.index("const FRESHNESS_TITLE")]
+        self.assertIn("CatchingUp: 'Windows will start the missed backup shortly.", cause)
+        # Catching up asks for no backup: Back up now is for a backup that is overdue or never made.
+        self.assertIn("const needsBackup = freshness.state === 'Overdue' || freshness.state === 'NoVerifiedBackup';", self.cards)
 
 
 class FailureWordingTests(unittest.TestCase):

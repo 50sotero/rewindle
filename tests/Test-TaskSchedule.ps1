@@ -79,6 +79,37 @@ namespace ResticBackuper.Dashboard
                 (schedule.ClockChangeNote.Length > 0 ? "note" : "no-note");
         }
 
+        // The last run Task Scheduler reported, as the parsed schedule carries it ("none" when it carries none).
+        public static string ParseLastRun(
+            string xml,
+            string launcher,
+            string root,
+            string sid,
+            string lastRun)
+        {
+            TaskSchedule schedule;
+            string error;
+            if (!TaskScheduleReader.TryParseTaskXml(
+                xml,
+                launcher,
+                root,
+                sid,
+                new TaskScheduleRuntimeInfo(
+                    BackupTaskState.Ready,
+                    null,
+                    string.IsNullOrEmpty(lastRun)
+                        ? (System.DateTime?)null
+                        : System.DateTime.Parse(lastRun, System.Globalization.CultureInfo.InvariantCulture)),
+                out schedule,
+                out error))
+            {
+                return "ERROR|" + error;
+            }
+            return schedule.LastRunTime.HasValue
+                ? schedule.LastRunTime.Value.ToString("yyyy-MM-ddTHH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)
+                : "none";
+        }
+
         public static string Request(
             string cadence,
             string time,
@@ -181,6 +212,14 @@ Assert-Match '^01:00\|01:00\|note$' $pinnedStart 'A start with an offset must ke
 $utcStart = Parse-Start ($daily.Replace('2026-07-21T02:05:00', '2026-07-20T00:00:00Z'))
 Assert-Match '^00:00\|00:00\|note$' $utcStart 'A start in UTC (Z) must be read as offset zero.'
 Assert-Match '^02:05\|local\|no-note$' (Parse-Start $daily) 'A local start must stay local with no clock-change note.'
+
+# The task's last run reaches the schedule, so freshness can tell a missed backup Windows has yet to start from one it tried.
+# Task Scheduler reports a task that never ran as 30 Dec 1899 (some builds as 1999), which is no run at all.
+function Parse-LastRun { param([string]$LastRun) return [ResticBackuper.Dashboard.TaskScheduleFixtureHarness]::ParseLastRun((New-Xml -Trigger $daily), $launcher, $root, $sid, $LastRun) }
+Assert-Equal '2026-07-21T08:01:00' (Parse-LastRun '2026-07-21T08:01:00') 'The last run must be carried to the schedule.'
+Assert-Equal 'none' (Parse-LastRun '1899-12-30T00:00:00') 'A never-run marker from 1899 must not be a last run.'
+Assert-Equal 'none' (Parse-LastRun '1999-11-30T00:00:00') 'A never-run marker from 1999 must not be a last run.'
+Assert-Equal 'none' (Parse-LastRun '') 'An unknown last run must stay unknown.'
 
 $defaultEnabledSettings = '<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><AllowHardTerminate>true</AllowHardTerminate><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Hidden>false</Hidden><RunOnlyIfIdle>false</RunOnlyIfIdle><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><WakeToRun>true</WakeToRun><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>7</Priority>'
 Assert-Match '^OK\|Daily\|02:05\|\|1\|' (Parse (New-Xml -Trigger $daily -Settings $defaultEnabledSettings)) 'An omitted task Enabled setting must use the Windows schema default of true.'

@@ -37,6 +37,7 @@ class DiagnosticRedactionTests(unittest.TestCase):
             DASHBOARD / "CrashLog.cs",
             DASHBOARD / "ElevatedRequestSecurity.cs",
             DASHBOARD / "SourceConfiguration.cs",
+            DASHBOARD / "ProcessLiveness.cs",
             DASHBOARD / "Telemetry.cs",
             DASHBOARD / "TaskSchedule.cs",
             DASHBOARD / "DiagnosticExporter.cs",

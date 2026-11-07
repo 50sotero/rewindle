@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,11 @@ PLAN_ID = "10000000-0000-4000-8000-000000000042"
 REPOSITORY_ID = "8" * 64
 SNAPSHOT_ID = "4" * 64
 REPOSITORY_PATH = r"G:\My Drive\ResticBackups\Personal"
+
+
+def ago(**delta) -> str:
+    """A moment this long before now, as the engine writes times (UTC, ISO 8601 with Z)."""
+    return (datetime.now(timezone.utc) - timedelta(**delta)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 HARNESS_SOURCE = """
@@ -58,6 +64,7 @@ namespace {namespace}
             result["restore_verified"] = status.RestoreVerified;
             result["has_updated"] = status.LastUpdatedLocal.HasValue;
             result["provider"] = status.ProviderLabel;
+            result["check_overdue"] = status.CheckOverdue;
             Console.WriteLine(new JavaScriptSerializer().Serialize(result));
             return 0;
         }}
@@ -109,6 +116,7 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
                 str(DASHBOARD / "AtomicFile.cs"),
                 str(DASHBOARD / "ElevatedRequestSecurity.cs"),
                 str(DASHBOARD / "SourceConfiguration.cs"),
+                str(DASHBOARD / "ProcessLiveness.cs"),
                 str(TELEMETRY_SOURCE),
                 str(harness),
             ],
@@ -543,17 +551,100 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
     def test_fixture_stale_snapshot_is_refused(self) -> None:
         plan = r"G:\My Drive\Backups\Desktop PC"
         newer = self.backup_evidence(repository=plan, snapshot_id="9" * 64)
+        # Checked an hour ago: a wait for the next check, said calmly.
         result = self.invoke(
             proof=self.direct_proof(
                 local_repository=plan,
                 my_drive_root=r"G:\My Drive",
                 cloud_repository_path="Backups/Desktop PC",
+                verified_utc=ago(hours=1),
             ),
             last_success=newer,
             configured_repository=plan,
         )
         self.assertEqual("Stale", result["kind"])
         self.assertEqual("The Google Drive copy is waiting for its next check", result["label"])
+        self.assertFalse(result["check_overdue"])
+
+    # The off-site check runs every night. A check that fails never writes a result, so a last check that worked long ago is the
+    # only sign of one that keeps failing: past two days, waiting is no longer calm, and the words say so with what to do.
+    def test_a_check_that_has_not_worked_for_two_days_is_overdue(self) -> None:
+        cases = {
+            # The latest backup is newer than the check: Stale on the timestamp comparison.
+            "newer_backup": (
+                {"verified_utc": ago(days=3)},
+                self.backup_evidence(started_utc=ago(hours=3), finished_utc=ago(hours=2)),
+                "newer than the last check",
+            ),
+            # The latest backup is another snapshot than the one checked: Stale on the binding.
+            "other_snapshot": (
+                {"verified_utc": ago(days=3)},
+                self.backup_evidence(snapshot_id="9" * 64),
+                "does not cover your latest backup",
+            ),
+        }
+        for label, (proof, evidence, reason) in cases.items():
+            with self.subTest(label=label):
+                result = self.invoke(proof=self.direct_proof(**proof), last_success=evidence)
+                self.assertEqual("Stale", result["kind"])
+                self.assertTrue(result["check_overdue"])
+                # The console the harness writes to may not carry the apostrophe, so the label is matched around it.
+                self.assertTrue(result["label"].startswith("The Google Drive copy hasn"), result["label"])
+                self.assertTrue(result["label"].endswith("t been checked lately"), result["label"])
+                self.assertIn(reason, result["detail"])
+                self.assertIn("No check has worked since.", result["detail"])
+                self.assertIn("Leave this PC on and signed in overnight", result["detail"])
+                self.assertNotIn("The next check will", result["detail"])
+                self.assertFalse(result["restore_verified"])
+
+    def test_a_check_less_than_two_days_old_is_still_a_calm_wait(self) -> None:
+        result = self.invoke(
+            proof=self.direct_proof(verified_utc=ago(hours=20)),
+            last_success=self.backup_evidence(started_utc=ago(hours=3), finished_utc=ago(hours=2)),
+        )
+        self.assertEqual("Stale", result["kind"])
+        self.assertFalse(result["check_overdue"])
+        self.assertIn("The next check will include it.", result["detail"])
+
+    def test_a_check_shown_as_running_for_two_days_is_overdue(self) -> None:
+        stuck = self.invoke(proof=self.direct_proof(state="verifying", verified_utc=ago(days=3)))
+        self.assertEqual("InProgress", stuck["kind"])
+        self.assertTrue(stuck["check_overdue"])
+        self.assertTrue(stuck["label"].startswith("The check of the Google Drive copy didn"), stuck["label"])
+        self.assertTrue(stuck["label"].endswith("t finish"), stuck["label"])
+        self.assertIn("never finished", stuck["detail"])
+        self.assertIn("Leave this PC on and signed in overnight", stuck["detail"])
+        running = self.invoke(proof=self.direct_proof(state="verifying", verified_utc=ago(hours=1)))
+        self.assertEqual("InProgress", running["kind"])
+        self.assertFalse(running["check_overdue"])
+        self.assertEqual("Checking the Google Drive copy", running["label"])
+        # A time ahead of the clock (a clock that was put back) is never overdue.
+        ahead = self.invoke(proof=self.direct_proof(state="verifying", verified_utc=ago(hours=-30)))
+        self.assertFalse(ahead["check_overdue"])
+
+    def test_only_a_waiting_or_running_check_can_be_overdue(self) -> None:
+        verified = self.invoke(proof=self.direct_proof(verified_utc=ago(days=3)), last_success=self.backup_evidence(finished_utc=ago(days=4)))
+        self.assertEqual("RestoreVerified", verified["kind"])
+        self.assertFalse(verified["check_overdue"])
+        failed = self.invoke(proof=self.direct_proof(state="failed", verified_utc=ago(days=3)))
+        self.assertEqual("Failed", failed["kind"])
+        self.assertFalse(failed["check_overdue"])
+
+    def test_the_legacy_profile_overdue_check_is_reported_the_same_way(self) -> None:
+        legacy_proof = self.direct_proof(verified_utc=ago(days=3))
+        for field in (
+            "immutable_proof_sha256",
+            "cloud_verification_assets_manifest_sha256",
+            "native_capture_mode",
+        ):
+            legacy_proof.pop(field)
+        result = self.invoke(
+            proof=legacy_proof,
+            last_success=self.backup_evidence(started_utc=ago(hours=3), finished_utc=ago(hours=2)),
+            engine="legacy",
+        )
+        self.assertEqual("Stale", result["kind"])
+        self.assertTrue(result["check_overdue"])
 
     def test_fixture_proof_for_another_repository_than_the_plan_is_refused(self) -> None:
         # Consistent with itself and with the backup telemetry, but not with the installed plan: refused.

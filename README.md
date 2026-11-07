@@ -63,9 +63,14 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
 
 - One status line says when the last backup was verified and calls out a
   protected folder or backup drive that cannot be found.
+- A backup missed while the PC was off, asleep or signed out shows as
+  **Catching up** while Windows starts it, and becomes **Backup overdue** only
+  if it has not started 45 minutes after you sign in or wake the PC.
 - Separate **Local backup**, **Off-site copy** and **Restore test** cards, each
   with its own evidence and time. With no off-site copy set up, the card is
-  replaced by one quiet line: **Off-site copy · Not set up (optional)**.
+  replaced by one quiet line: **Off-site copy · Not set up (optional)**. An
+  off-site copy that waits for its nightly check is calm until no check has
+  worked for two days; then the card warns and says what to do.
 - **Back up now**, live progress (throughput, elapsed time, estimate), and
   **Cancel backup**, which asks Restic to stop cooperatively. Existing
   snapshots are never touched.
@@ -109,7 +114,8 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
   **About Rewindle**: version, backup service, MIT License, **Open licenses folder** and the keyboard shortcuts.
 
 Rewindle lives in the notification area. Closing the window never stops a
-running backup. `Ctrl+1` to `Ctrl+4` switch pages, `F5` refreshes, and
+running backup, and a sign-out or shutdown that is cancelled leaves Rewindle
+running there. `Ctrl+1` to `Ctrl+4` switch pages, `F5` refreshes, and
 `Ctrl+=` / `Ctrl+-` / `Ctrl+0` change the text size between 80% and 200% (Settings has buttons for it, and Rewindle remembers the size). Status is never shown
 by color alone, and a screen reader is told when a backup starts, finishes,
 fails or is cancelled.

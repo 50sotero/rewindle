@@ -215,7 +215,8 @@ namespace ResticBackuper.Dashboard
         NotConfigured,
         StatusUnavailable,
         // The last check is of an earlier backup than the latest one (or from before a settings change). Nothing is wrong and
-        // nothing is asked of the person: the next check covers the latest backup.
+        // nothing is asked of the person: the next check covers the latest backup. Unless that check is long overdue
+        // (OffsiteStatusView.CheckOverdue).
         Stale,
         Failed,
         InProgress,
@@ -240,6 +241,10 @@ namespace ResticBackuper.Dashboard
         public DateTime? LastUpdatedLocal { get; internal set; }
         public bool ProviderUploadConfirmed { get; internal set; }
         public bool RestoreVerified { get; internal set; }
+        // True for a check that is waiting (Stale) or shown as running (InProgress) when the last check that worked, or the
+        // running one, is more than TelemetryReader.OffsiteCheckOverdueAfter old. The check runs every night, so this is no
+        // longer a wait: a check that fails never writes a result, and this is how it shows. The kind stays the same.
+        public bool CheckOverdue { get; internal set; }
         // The provider the off-site evidence comes from ("Google Drive" for a direct My Drive proof), or empty when no
         // evidence names one. The page names a provider only when this does.
         public string ProviderLabel { get; internal set; }
@@ -292,6 +297,9 @@ namespace ResticBackuper.Dashboard
         private const string BinaryStreamCaptureMode = "binary_stream_copy";
         // The provider a direct My Drive proof is evidence from: the DriveFS stream is Google Drive for desktop.
         private const string DriveFsProviderLabel = "Google Drive";
+        // How old the last off-site check that worked may get before a waiting or running check is overdue. The check runs
+        // every night at 03:00, so two days is a missed night and then some.
+        internal static readonly TimeSpan OffsiteCheckOverdueAfter = TimeSpan.FromHours(48);
         // How long the last good reading of status.json may stand in for a read that cannot be used (see KeepStatusThroughGlitch).
         private const double StatusGlitchGraceSeconds = 10.0;
         // How many refreshes a run history that exists but cannot be read is given before it is set aside (see
@@ -999,6 +1007,18 @@ namespace ResticBackuper.Dashboard
                 result.StatusDetail = string.IsNullOrEmpty(progressDetail)
                     ? "Rewindle is comparing the Google Drive copy with your backups."
                     : progressDetail;
+                // A check is never that long. One that still says it is running two days on was stopped part way (the
+                // PC was turned off, or the check was ended) and never wrote a result.
+                if (result.LastUpdatedLocal.HasValue &&
+                    IsOffsiteCheckOverdue(result.LastUpdatedLocal.Value.ToUniversalTime()))
+                {
+                    result.CheckOverdue = true;
+                    result.StatusLabel = "The check of the Google Drive copy didn\u2019t finish";
+                    result.StatusDetail =
+                        "A check has been shown as running since " +
+                        FormatOffsiteTime(result.LastUpdatedLocal.Value.ToUniversalTime()) +
+                        " and never finished.\n" + OffsiteCheckOverdueNextStep;
+                }
                 return result;
             }
 
@@ -1203,11 +1223,11 @@ namespace ResticBackuper.Dashboard
                     snapshotId,
                     true))
             {
-                result.Kind = OffsiteStatusKind.Stale;
-                result.StatusLabel = "The Google Drive copy is waiting for its next check";
-                result.StatusDetail =
-                    "The last check does not cover your latest backup yet. The next check will.";
-                return result;
+                return StaleOffsiteStatus(
+                    result,
+                    verifiedUtc,
+                    "The last check does not cover your latest backup yet. The next check will.",
+                    "The last check that worked, on {0}, does not cover your latest backup.");
             }
 
             if (currentStatus != null
@@ -1220,11 +1240,11 @@ namespace ResticBackuper.Dashboard
                     snapshotId,
                     false))
             {
-                result.Kind = OffsiteStatusKind.Stale;
-                result.StatusLabel = "The Google Drive copy is waiting for its next check";
-                result.StatusDetail =
-                    "The last check was made before your backup settings changed. The next check will use the new settings.";
-                return result;
+                return StaleOffsiteStatus(
+                    result,
+                    verifiedUtc,
+                    "The last check was made before your backup settings changed. The next check will use the new settings.",
+                    "The last check that worked, on {0}, was made before your backup settings changed.");
             }
 
             DateTime currentTelemetryUtc;
@@ -1239,11 +1259,11 @@ namespace ResticBackuper.Dashboard
             if (verifiedUtc < lastSuccessFinishedUtc
                 || (currentHasTimestamp && verifiedUtc < currentTelemetryUtc))
             {
-                result.Kind = OffsiteStatusKind.Stale;
-                result.StatusLabel = "The Google Drive copy is waiting for its next check";
-                result.StatusDetail =
-                    "Your latest backup is newer than the last check of the Google Drive copy. The next check will include it.";
-                return result;
+                return StaleOffsiteStatus(
+                    result,
+                    verifiedUtc,
+                    "Your latest backup is newer than the last check of the Google Drive copy. The next check will include it.",
+                    "Your latest backup is newer than the last check of the Google Drive copy that worked, on {0}.");
             }
 
             result.PlanId = planId;
@@ -1262,6 +1282,48 @@ namespace ResticBackuper.Dashboard
             result.StatusDetail =
                 "Google Drive holds a complete copy of your backups, and a test restore from Google Drive worked.";
             return result;
+        }
+
+        // What to do about an off-site check that is overdue: the check runs at night as the signed-in person, and gives way to
+        // a backup that is running.
+        private const string OffsiteCheckOverdueNextStep =
+            "Leave this PC on and signed in overnight, with Google Drive running, so Rewindle can check the copy again.";
+
+        // An off-site copy whose last check does not cover the latest backup (or settings). That is a wait for the next nightly
+        // check, said calmly, until the last check that worked is OffsiteCheckOverdueAfter old: then no check has worked for a
+        // night or more, and the words say so, with what to do (the first line says why, the second what to do).
+        private static OffsiteStatusView StaleOffsiteStatus(
+            OffsiteStatusView result,
+            DateTime verifiedUtc,
+            string waitingDetail,
+            string overdueReasonFormat)
+        {
+            result.Kind = OffsiteStatusKind.Stale;
+            if (IsOffsiteCheckOverdue(verifiedUtc))
+            {
+                result.CheckOverdue = true;
+                result.StatusLabel = "The Google Drive copy hasn\u2019t been checked lately";
+                result.StatusDetail =
+                    string.Format(CultureInfo.CurrentCulture, overdueReasonFormat, FormatOffsiteTime(verifiedUtc)) +
+                    " No check has worked since.\n" + OffsiteCheckOverdueNextStep;
+                return result;
+            }
+            result.StatusLabel = "The Google Drive copy is waiting for its next check";
+            result.StatusDetail = waitingDetail;
+            return result;
+        }
+
+        // A moment in the future (a clock that was put back) is never overdue.
+        private static bool IsOffsiteCheckOverdue(DateTime checkUtc)
+        {
+            return DateTime.UtcNow - DateTime.SpecifyKind(checkUtc, DateTimeKind.Utc) > OffsiteCheckOverdueAfter;
+        }
+
+        private static string FormatOffsiteTime(DateTime utc)
+        {
+            return DateTime.SpecifyKind(utc, DateTimeKind.Utc)
+                .ToLocalTime()
+                .ToString("ddd, d MMM HH:mm", CultureInfo.CurrentCulture);
         }
 
         // The repository of the installed backup plan: backup-config.json under the active engine's protected install
@@ -2413,6 +2475,19 @@ namespace ResticBackuper.Dashboard
                 return statusAgeSeconds > MissingProcessGraceSeconds;
             }
 
+            // The engine records the wrapper's exact creation time, so the run is alive only while that very process is. A
+            // process ID alone is not enough: the wrapper runs elevated, Process.HasExited is refused on it, and a refusal used
+            // to count as running, so an ID that a SYSTEM or elevated process took over after a sign-out showed the backup as
+            // running for up to a day.
+            long wrapperStartFileTime;
+            if (TryGetProcessFileTime(document, "wrapper_start_filetime", out wrapperStartFileTime))
+            {
+                return !ProcessLiveness.IsSameProcessAlive((int)processIdValue, wrapperStartFileTime)
+                    && statusAgeSeconds > MissingProcessGraceSeconds;
+            }
+
+            // A status without that time (an older engine build) keeps the check by ID and start time, which leans towards
+            // running when Windows refuses to answer.
             try
             {
                 using (Process process = Process.GetProcessById((int)processIdValue))
@@ -2454,6 +2529,43 @@ namespace ResticBackuper.Dashboard
             {
                 return false;
             }
+        }
+
+        // A process creation time as the engine writes it: a FILETIME as a canonical decimal string (or, leniently, a JSON
+        // integer), above zero and within a signed 64-bit value. Anything else is treated as absent.
+        private static bool TryGetProcessFileTime(IDictionary<string, object> document, string key, out long fileTime)
+        {
+            fileTime = 0;
+            object value;
+            if (document == null || !document.TryGetValue(key, out value) || value == null)
+            {
+                return false;
+            }
+            string text = value as string;
+            if (text != null)
+            {
+                if (text.Length == 0 || text.Length > 19 || text[0] == '0')
+                {
+                    return false;
+                }
+                foreach (char character in text)
+                {
+                    if (character < '0' || character > '9')
+                    {
+                        return false;
+                    }
+                }
+                return long.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out fileTime) && fileTime > 0;
+            }
+            if (value is int)
+            {
+                fileTime = (int)value;
+            }
+            else if (value is long)
+            {
+                fileTime = (long)value;
+            }
+            return fileTime > 0;
         }
 
         [DllImport("kernel32.dll")]

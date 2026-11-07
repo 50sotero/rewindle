@@ -179,6 +179,7 @@ class DashboardEtaFallbackTests(unittest.TestCase):
                 str(TELEMETRY_SOURCE.parent / "AtomicFile.cs"),
                 str(TELEMETRY_SOURCE.parent / "ElevatedRequestSecurity.cs"),
                 str(TELEMETRY_SOURCE.parent / "SourceConfiguration.cs"),
+                str(TELEMETRY_SOURCE.parent / "ProcessLiveness.cs"),
                 str(TELEMETRY_SOURCE),
                 str(harness),
             ],

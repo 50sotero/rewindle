@@ -49,6 +49,7 @@ class DashboardRunDetailsTests(unittest.TestCase):
             DASHBOARD / "DashboardMotion.cs",
             DASHBOARD / "ElevatedRequestSecurity.cs",
             DASHBOARD / "SourceConfiguration.cs",
+            DASHBOARD / "ProcessLiveness.cs",
             DASHBOARD / "Telemetry.cs",
             DASHBOARD / "DashboardTheme.cs",
             DASHBOARD / "DashboardVisualStyle.cs",
