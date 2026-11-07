@@ -330,8 +330,8 @@ the list." The result is bound to `find_text_sha256` (SHA-256 of the UTF-8 text)
 checks both, the page's plan and query, every limit, and then that every backup the page names is in the list on screen with the
 same binding. The search state lives only in the dashboard's memory; the session record counts `find_files` and never holds the
 text. On the page the Find tab exists only while the host sends `restoreFlow.search`, which it does only for such a session; a
-search is refused while a backup or settings change runs, while Windows catches up on a missed backup, and in the two minutes
-before a scheduled one.
+search is refused while a backup, a settings change or a clean-up step runs (section 10), while Windows catches up on a missed
+backup, and in the two minutes before a scheduled one.
 
 **Lifetime.** The session ends after 10 idle minutes, after 60 minutes in all (checked between requests; a running restore is
 never interrupted), when the client disconnects or the dashboard process exits, when the protected configuration's SHA-256
