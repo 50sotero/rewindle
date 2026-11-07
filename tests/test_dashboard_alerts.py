@@ -219,6 +219,10 @@ class BackupAlertsSourceTests(unittest.TestCase):
         start = block(self.alerts, "internal static DateTime? LastStartUtc(")
         self.assertIn("BackupAlertPolicy.NotSignedIn", start)
 
+    def test_the_schedule_card_says_on_before_an_old_start(self) -> None:
+        # formatWhenAgo gives a plain date for a start more than two weeks old; in this sentence it needs its "on".
+        self.assertIn("Windows last started the backup {formatWhenAgoInSentence(lastStartedAt(state), locale)}.", self.app)
+
     def test_the_sample_data_shows_the_alerts(self) -> None:
         demo = read(WEB / "src" / "demo" / "demoState.ts")
         bridge = read(WEB / "src" / "demo" / "mockBridge.ts")

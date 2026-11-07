@@ -25,7 +25,7 @@ import {
   attentionText, isCancelled, isProblem, isUnchanged, lastSuccessfulBackup, lastVerified, resolvedByText, resolvedRuns, resultHint, resultLabel,
   typeLabel, unresolvedRuns, usualSeconds, type Verified,
 } from './runProblems';
-import { formatClock, formatWhen, formatWhenAgo, localClocks } from './when';
+import { formatClock, formatWhen, formatWhenAgo, formatWhenAgoInSentence, localClocks } from './when';
 import { canOpenRunDetails, driveOf, heroConcern, heroOffersRunDetails, heroTone, lastStartedAt, verifiedTimeKnown } from './protectionTone';
 import { createInFlight, sendOnceAtATime } from './oneShot';
 import { PendingCommands, usePendingCommand } from './pendingCommands';
@@ -438,7 +438,7 @@ function Protection({ state, send, folders, setFolders, stale, openRunDetails }:
           <div className="info-main">{state.schedule.nextRunAt ? formatWhen(state.schedule.nextRunAt, locale, state.schedule.nextRun) : state.schedule.nextRun || 'No upcoming run'}</div><div className="muted-copy">{localClocks(state.schedule.summary, locale)}</div>
           {state.schedule.clockChange && <p className="muted-copy schedule-clock-change">{state.schedule.clockChange}</p>}
           {/* What Task Scheduler recorded, so a missed backup can be placed against it (see alerts.lastRun). */}
-          {lastStartedAt(state) && <p className="muted-copy schedule-run-note">Windows last started the backup {formatWhenAgo(lastStartedAt(state), locale)}.</p>}
+          {lastStartedAt(state) && <p className="muted-copy schedule-run-note">Windows last started the backup {formatWhenAgoInSentence(lastStartedAt(state), locale)}.</p>}
         </>}
         <ScheduleNotice notice={state.schedule.notice} className="schedule-notice-slot" />
         <div className="info-action"><Action state={state} send={send} command="editSchedule" icon={<ArrowUpRight size={12} />} quiet={quiet} /></div></section>

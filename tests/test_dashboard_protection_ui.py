@@ -36,6 +36,7 @@ for (const [name, moment] of Object.entries(moments)) {
   report.moments[name] = {
     ago: when.formatWhenAgo(iso, 'en-US', 'unknown', local(moment.now)),
     plain: when.formatWhen(iso, 'en-US', 'unknown'),
+    inSentence: when.formatWhenAgoInSentence ? when.formatWhenAgoInSentence(iso, 'en-US', 'unknown', local(moment.now)) : null,
   };
 }
 report.invalid = when.formatWhenAgo('not a date', 'en-US', 'unknown', local([2026, 9, 11, 18, 0]));
@@ -435,6 +436,16 @@ class ProtectionUiTests(unittest.TestCase):
         moments = self.report["moments"]
         self.assertEqual(moments["three_weeks"]["ago"], moments["three_weeks"]["plain"])
         self.assertEqual(moments["tomorrow"]["ago"], moments["tomorrow"]["plain"])
+
+    def test_a_moment_in_a_sentence_puts_on_before_a_plain_date(self) -> None:
+        # "Windows last started the backup on Sun, Sep 20, 2:03 AM.", not "... the backup Sun, Sep 20, 2:03 AM."
+        moments = self.report["moments"]
+        for name in ("three_weeks", "tomorrow"):
+            with self.subTest(moment=name):
+                self.assertEqual(moments[name]["inSentence"], f"on {moments[name]['plain']}")
+        for name in ("today", "yesterday", "three_days", "two_weeks", "late_last_night"):
+            with self.subTest(moment=name):
+                self.assertEqual(moments[name]["inSentence"], moments[name]["ago"])
 
     def test_the_host_schedule_sentence_is_written_in_the_viewers_clock(self) -> None:
         clocks = self.report["clocks"]
