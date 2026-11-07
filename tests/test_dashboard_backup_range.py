@@ -121,11 +121,15 @@ class BackupRangeSourceTests(unittest.TestCase):
         self.assertIn("{ weekday: false, time: false }", app)
         protection = function_body(app, "Protection")
         self.assertIn("const range = backupRangeLine(state);", protection)
-        # Under the backup location, in one row of the card with the drive's line, so the button beside them stays put.
+        # Under the backup location, after how full the drive is (SpaceLine, which falls back to the drive's own line), in one row
+        # of the card's grid with it, so the button beside them stays put.
         self.assertRegex(
             protection,
-            r'<div className="location-facts"><VolumeLine repository=\{state\.repository\} />\{range && <div className="muted-copy backup-range-line">\{range\}</div>\}</div>',
+            r'<div className="location-facts"><SpaceLine repository=\{state\.repository\} />\{range && <div className="muted-copy backup-range-line">\{range\}</div>\}</div>',
         )
+        # The grid itself is left alone: the same rule places the Next automatic backup card's button.
+        css = read(WEB / "styles" / "app.css")
+        self.assertIn(".backup-destinations .info-action { grid-column: 2; grid-row: 1/4; align-self: center; margin: 0; }", css)
         restore = function_body(app, "RestorePage")
         self.assertIn("const range = backupRangeLine(state);", restore)
         self.assertIn('{range && <p className="muted-copy restore-range"><History size={13} aria-hidden="true" />{range}</p>}', restore)

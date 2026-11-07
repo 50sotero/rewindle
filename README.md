@@ -63,9 +63,6 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
 
 - One status line says when the last backup was verified and calls out a
   protected folder or backup drive that cannot be found.
-- The **Backup location** card says how far back your backups go ("412
-  backups, oldest 3 Mar 2025"), as counted by the last verified backup or the
-  last time Restore listed them; the Restore page says it too.
 - A backup missed while the PC was off, asleep or signed out shows as
   **Catching up** while Windows starts it, and becomes **Backup overdue** only
   if it has not started 45 minutes after you sign in or wake the PC.
@@ -93,6 +90,9 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
   time with what to do, and never by deleting anything inside the backup
   folder. With the earlier personal edition it shows the free space and says
   that the forecast isn't available with that backup program.
+- Under that, the card says how far back your backups go ("412 backups,
+  oldest 3 Mar 2025"), as counted by the last verified backup or the last time
+  Restore listed them; the Restore page says it too.
 - **Back up now**, live progress (throughput, elapsed time, estimate), and
   **Cancel backup**, which asks Restic to stop cooperatively. Existing
   snapshots are never touched.

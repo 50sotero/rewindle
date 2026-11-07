@@ -413,9 +413,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .backup-destinations .info-heading, .backup-destinations .info-main, .backup-destinations .muted-copy { grid-column: 1; }
 .backup-destinations .info-action { grid-column: 2; grid-row: 1/4; align-self: center; margin: 0; }
 .backup-destinations .info-main { font-size: var(--type-md); margin: 8px 0 4px; }
-/* The lines under the backup location (the drive, how far back the backups go) are one row of the card's grid. */
+/* The lines under the backup location (how full the drive is, how far back the backups go) are one row of the card's grid. */
 .backup-destinations .location-facts { grid-column: 1; min-width: 0; }
 .backup-range-line { margin-top: 2px; font-variant-numeric: tabular-nums; }
+/* Under the space lines it keeps their spacing, also below a warning box or the "How this is worked out" disclosure. */
+.space-line + .backup-range-line { margin-top: 4px; }
 /* How far back the backups go, on the Restore page, under what Restore can do right now. */
 .restore-range { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-variant-numeric: tabular-nums; }
 .restore-range svg { flex-shrink: 0; }
