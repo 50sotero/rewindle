@@ -319,7 +319,9 @@ function Get-InstallerFunctionText {
 . ([scriptblock]::Create((Get-InstallerFunctionText -Name @(
     'New-InstallFinding', 'Stop-InstallFinding', 'Stop-InstallValidation', 'Get-InstallFinding',
     'Get-VolumeEligibility', 'Select-RecommendedVolume', 'Assert-SourceDriveProperties', 'Assert-LocalNtfsVolume',
-    'Assert-VolumeFreeSpace', 'Test-DriveFsMount', 'Convert-FileAccessMask', 'Test-DescriptorGrantsAccess'))))
+    'Assert-VolumeFreeSpace', 'Test-DriveFsMount', 'Convert-FileAccessMask', 'Test-DescriptorGrantsAccess',
+    'Get-MicrosoftSignerProblem', 'Get-AuthenticodeSignerFacts', 'Assert-MicrosoftSignedExecutable',
+    'Test-TrustedStateOwner', 'Assert-StateFolderOwner', 'New-ProtectedDirectorySecurity'))))
 
 $regionMatch = [regex]::Match($installerText, '(?s)# region progress-feed.*?# endregion progress-feed')
 Assert-True $regionMatch.Success 'the progress feed region is found'
@@ -597,9 +599,41 @@ try {
     Write-Text -Path (Join-Path $keyRoots.ProgramData 'ResticBackuper\repository-password.dpapi.json') -Text '{}'
     $keyWithSecret = Invoke-Plan -Bundle $bundle -Roots $keyRoots -Temp $temp -Arguments @('-Repository', $goodRepository, '-SourceList', "$docs;$photos", '-MinimumFreeGiB', '1')
     Assert-True ((Get-ErrorCodes $keyWithSecret.Plan) -notcontains 'recovery_key_stale') 'a recovery key with its credential is not stale'
+    if ($isElevated) {
+        # The folder an install leaves belongs to Administrators, and such a folder is used.
+        $keyState = Join-Path $keyRoots.ProgramData 'ResticBackuper'
+        $keyStateAcl = Get-Acl -LiteralPath $keyState
+        $keyStateAcl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+        Set-Acl -LiteralPath $keyState -AclObject $keyStateAcl
+        $keyWithSecret = Invoke-Plan -Bundle $bundle -Roots $keyRoots -Temp $temp -Arguments @('-Repository', $goodRepository, '-SourceList', "$docs;$photos", '-MinimumFreeGiB', '1')
+        Assert-True ((Get-ErrorCodes $keyWithSecret.Plan) -notcontains 'state_folder_untrusted') 'a state folder Administrators own is trusted'
+    }
+    else {
+        Assert-True ((Get-ErrorCodes $keyWithSecret.Plan) -contains 'state_folder_untrusted') 'a state folder this account made is not trusted, even with a credential file in it'
+    }
     $linkRoots = New-RootsSet -Name 'linked-state'
     New-Junction -Link (Join-Path $linkRoots.ProgramData 'ResticBackuper') -Target $realFolder
     [void](Test-Invalid 'state folder that is a junction' @{} 'protected_path_reparse_point' 'environment' $linkRoots)
+    # Any account can create a folder in ProgramData. A state folder that Administrators or SYSTEM don't own is refused, and
+    # nothing in it is read: not a broken plan file, not one a reinstall would adopt, not a journal the managers would act on.
+    foreach ($planted in @(
+        @{ Name = 'foreign-state-garbage'; PlanState = 'garbage'; Label = 'a state folder another account made, with a broken plan file' },
+        @{ Name = 'foreign-state-plan'; PlanState = '{"schema_version": 1, "plan_id": "0badc0de-0000-4000-8000-000000000000", "config_generation": 41}'; Label = 'a state folder another account made, with a plan to adopt' }
+    )) {
+        $foreignRoots = New-RootsSet -Name $planted.Name
+        $foreignState = Join-Path $foreignRoots.ProgramData 'ResticBackuper'
+        Write-Text -Path (Join-Path $foreignState 'plan-state.json') -Text $planted.PlanState
+        Write-Text -Path (Join-Path $foreignState 'repository-relocation.journal.json') -Text '{"schema_version": 1}'
+        Set-OwnerToCurrentUser $foreignState
+        $foreignBefore = Get-TreeSnapshot -Roots @($foreignRoots.Base)
+        $foreign = Test-Invalid $planted.Label @{} 'state_folder_untrusted' 'environment' $foreignRoots
+        $foreignFinding = @(@($foreign.Plan.errors) | Where-Object { $_.code -ceq 'state_folder_untrusted' })
+        Assert-Equal 1 $foreignFinding.Count "$($planted.Label): reported once, although two stages check it"
+        Assert-Equal $foreignState $foreignFinding[0].path "$($planted.Label): the finding names the folder"
+        Assert-True ($foreignFinding[0].message -like "*$foreignState*") "$($planted.Label): the message names the folder"
+        Assert-True ((Get-ErrorCodes $foreign.Plan) -notcontains 'preserved_state_unreadable') "$($planted.Label): the plan file in it was not read"
+        Assert-True ($foreignBefore -ceq (Get-TreeSnapshot -Roots @($foreignRoots.Base))) "$($planted.Label): nothing was moved or changed"
+    }
 
     # the payload (the same integrity check as a real install: manifest, sizes, SHA-256 values and no unlisted files)
     $noPayload = New-Bundle -Name 'no-payload' -NoPayload
@@ -795,7 +829,156 @@ try {
     Assert-True ((Test-FileReadableByUser -Path $keyFile) -eq $true) 'with the real token the account reads its own key'
 
     # ====================================================================================================================
-    # 7. The progress feed writer
+    # 7. Who signed a Windows tool or the WebView2 installer
+    # ====================================================================================================================
+    $root2010 = '3B1EFD3A66EA28B16697394703A72CA340A05BD5'
+    $root2011 = '8F43288AD272F3103B6FB1428485EA3014C0BCFE'
+    $identityRoot2020 = 'F40042E2E5F7E8EF8189FED15519AECE42C3BFA2'
+    $publicRoot = 'DF3C24F9BFD666761B268073FE06D1CC8D4F82A4'
+    $leafThumbprint = '1111111111111111111111111111111111111111'
+    $intermediateThumbprint = '2222222222222222222222222222222222222222'
+    $microsoftSubject = "C=US`r`nS=Washington`r`nL=Redmond`r`nO=Microsoft Corporation`r`nCN=Microsoft Corporation"
+    $windowsSubject = "C=US`r`nS=Washington`r`nL=Redmond`r`nO=Microsoft Corporation`r`nCN=Microsoft Windows"
+    function Test-Signer {
+        param([string]$Status = 'Valid', [string]$Subject = $microsoftSubject, [string[]]$Chain = @($leafThumbprint, $intermediateThumbprint, $root2011), [bool]$ChainValid = $true, [bool]$OSBinary = $false)
+        return Get-MicrosoftSignerProblem -Status $Status -Subject $Subject -ChainThumbprints $Chain -ChainValid $ChainValid -IsOSBinary $OSBinary
+    }
+    Assert-True ($null -eq (Test-Signer)) 'Microsoft Corporation through Microsoft Root Certificate Authority 2011 passes'
+    Assert-True ($null -eq (Test-Signer -Subject $windowsSubject -Chain @($leafThumbprint, $intermediateThumbprint, $root2010))) 'Microsoft Windows (O=Microsoft Corporation) through Microsoft Root Certificate Authority 2010 passes'
+    Assert-True ($null -eq (Test-Signer -Subject "O=Microsoft Corporation`nCN=Microsoft Corporation" -Chain @($leafThumbprint, $intermediateThumbprint, '8f43 288a d272 f310 3b6f b142 8485 ea30 14c0 bcfe'))) 'line feeds alone, and a thumbprint with spaces in lower case, read the same'
+    Assert-True ($null -eq (Test-Signer -Subject $windowsSubject -Chain @() -ChainValid $false -OSBinary $true)) 'a file Windows reports as its own passes without its chain'
+    foreach ($refused in @(
+        @{ Label = 'an organization that merely contains Microsoft'; Subject = "C=US`r`nO=Contoso Microsoftware Ltd`r`nCN=Contoso Microsoftware Ltd" },
+        @{ Label = 'Microsoft Corporation in the common name only'; Subject = "C=US`r`nO=Contoso Ltd`r`nCN=Microsoft Corporation" },
+        @{ Label = 'an organization that starts with Microsoft Corporation'; Subject = "O=Microsoft Corporation Fan Club`r`nCN=x" },
+        @{ Label = 'a quoted organization with Microsoft Corporation in it'; Subject = "O=`"Microsoft Corporation, Evil`"`r`nCN=x" },
+        @{ Label = 'two organizations'; Subject = "O=Microsoft Corporation`r`nO=Contoso Ltd`r`nCN=x" },
+        @{ Label = 'a second organization in a multi-valued part'; Subject = "O=Contoso Ltd`r`nCN=x + O=Microsoft Corporation" },
+        @{ Label = 'the name in another case'; Subject = "o=microsoft corporation`r`nCN=x" },
+        @{ Label = 'a value with line breaks that would look like an organization'; Subject = "CN=`"x`r`nO=Microsoft Corporation`r`ny`"" },
+        @{ Label = 'no organization'; Subject = "C=US`r`nCN=Microsoft Corporation" },
+        @{ Label = 'an empty subject'; Subject = '' }
+    )) {
+        $problem = Test-Signer -Subject $refused.Subject
+        Assert-True (-not [string]::IsNullOrEmpty($problem)) "refused: $($refused.Label)"
+        $problem = Test-Signer -Subject $refused.Subject -OSBinary $true
+        Assert-True (-not [string]::IsNullOrEmpty($problem)) "refused even for a file Windows reports as its own: $($refused.Label)"
+    }
+    foreach ($refused in @(
+        @{ Label = "Microsoft's root for other publishers"; Chain = @($leafThumbprint, $intermediateThumbprint, $identityRoot2020); Valid = $true },
+        @{ Label = "a public certificate authority's root"; Chain = @($leafThumbprint, $intermediateThumbprint, $publicRoot); Valid = $true },
+        @{ Label = 'a one-certificate chain'; Chain = @($root2011); Valid = $true },
+        @{ Label = 'no chain'; Chain = @(); Valid = $true },
+        @{ Label = 'a chain that did not validate'; Chain = @($leafThumbprint, $intermediateThumbprint, $root2011); Valid = $false },
+        @{ Label = 'a Microsoft root that is not the last element'; Chain = @($leafThumbprint, $root2011, $intermediateThumbprint); Valid = $true }
+    )) {
+        $problem = Test-Signer -Chain $refused.Chain -ChainValid $refused.Valid
+        Assert-True (-not [string]::IsNullOrEmpty($problem)) "refused: $($refused.Label)"
+    }
+    foreach ($status in @('NotSigned', 'HashMismatch', 'NotTrusted', 'UnknownError', 'valid', '')) {
+        Assert-True (-not [string]::IsNullOrEmpty((Test-Signer -Status $status -OSBinary $true))) "refused: a signature whose status is '$status'"
+    }
+
+    # The check itself, with Windows' answer about the file replaced by a certificate made here and never stored.
+    $signedFixture = Join-Path $workspace 'signed-fixture.exe'
+    Write-Text -Path $signedFixture -Text 'not really a program'
+    function New-FixtureSignature {
+        param([string]$Subject, [bool]$OSBinary = $false)
+        $key = [Security.Cryptography.RSA]::Create(2048)
+        $request = [Security.Cryptography.X509Certificates.CertificateRequest]::new($Subject, $key, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+        $certificate = $request.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOffset]::UtcNow.AddDays(30))
+        return [pscustomobject]@{ Status = 'Valid'; SignatureType = 'Authenticode'; SignerCertificate = $certificate; IsOSBinary = $OSBinary }
+    }
+    foreach ($case in @(
+        @{ Subject = 'CN=Microsoft Corporation, O=Contoso Microsoft Fans Ltd, C=US'; OSBinary = $false; Code = 'system_tool_untrusted'; Label = 'a valid signature by a publisher with Microsoft in its name' },
+        @{ Subject = 'CN=Microsoft Corporation, O=Microsoft Corporation, C=US'; OSBinary = $false; Code = 'system_tool_untrusted'; Label = "a valid signature named Microsoft Corporation that doesn't lead to Microsoft's root" },
+        @{ Subject = 'CN=Microsoft Windows, O=Microsoft Corporation, C=US'; OSBinary = $true; Code = 'no-finding'; Label = 'a file Windows reports as its own' }
+    )) {
+        $fixtureSignature = New-FixtureSignature -Subject $case.Subject -OSBinary $case.OSBinary
+        $code = & {
+            function Get-AuthenticodeSignature { param([string]$LiteralPath) return $fixtureSignature }
+            Get-FindingCode { Assert-MicrosoftSignedExecutable -Path $signedFixture }
+        }
+        Assert-Equal $case.Code $code "the signer check: $($case.Label)"
+    }
+    $webViewCode = & {
+        function Get-AuthenticodeSignature { param([string]$LiteralPath) return (New-FixtureSignature -Subject 'CN=Microsoft Corporation, O=Contoso Microsoft Fans Ltd, C=US') }
+        Get-FindingCode { Assert-MicrosoftSignedExecutable -Path $signedFixture -Code 'webview2_installer_untrusted' }
+    }
+    Assert-Equal 'webview2_installer_untrusted' $webViewCode 'a WebView2 installer with the wrong signer is refused with its own code'
+    Assert-Equal 'system_tool_untrusted' (Get-FindingCode { Assert-MicrosoftSignedExecutable -Path $signedFixture }) 'an unsigned file is refused'
+    Assert-Equal 'system_tool_missing' (Get-FindingCode { Assert-MicrosoftSignedExecutable -Path (Join-Path $workspace 'no-such-tool.exe') }) 'a missing file is reported as missing'
+    # And Microsoft's real signatures pass: a .NET Framework file (Windows signs it through a catalog), and when the build has
+    # unpacked it, the pinned WebView2 SDK's loader, which carries its own Microsoft signature as the WebView2 installer does.
+    $frameworkCompiler = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+    Assert-Equal 'no-finding' (Get-FindingCode { Assert-MicrosoftSignedExecutable -Path $frameworkCompiler }) 'the .NET Framework compiler passes'
+    foreach ($loader in @(Get-ChildItem -Path (Join-Path $projectRoot 'src\dashboard\.packages\webview2.*\runtimes\win-x64\native\WebView2Loader.dll') -ErrorAction SilentlyContinue)) {
+        $loaderFacts = Get-AuthenticodeSignerFacts -Path $loader.FullName
+        Assert-True ($loaderFacts.status -eq 'Valid' -and -not $loaderFacts.os_binary -and $loaderFacts.chain_valid) "the WebView2 SDK's loader has a valid signature of its own and a chain ($($loader.FullName))"
+        Assert-True (@($root2010, $root2011) -contains @($loaderFacts.chain)[-1]) "the WebView2 SDK's loader leads to one of Microsoft's roots (got $(@($loaderFacts.chain) -join ' > '))"
+        Assert-Equal 'no-finding' (Get-FindingCode { Assert-MicrosoftSignedExecutable -Path $loader.FullName }) "the WebView2 SDK's loader passes"
+        # Invoke-HeldExecutable runs this check while it holds the downloaded file open with only reading shared, and the
+        # check opens the file again to read the certificates it carries. It still passes under that hold.
+        $loaderHold = [IO.File]::Open($loader.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+            $heldLoaderFacts = Get-AuthenticodeSignerFacts -Path $loader.FullName
+            Assert-True ($heldLoaderFacts.status -eq 'Valid' -and $heldLoaderFacts.chain_valid -and (@($root2010, $root2011) -contains @($heldLoaderFacts.chain)[-1])) "while held as a download is held, the loader's signature and chain read the same (got $(@($heldLoaderFacts.chain) -join ' > '))"
+            Assert-Equal 'no-finding' (Get-FindingCode { Assert-MicrosoftSignedExecutable -Path $loader.FullName }) "the WebView2 SDK's loader passes while it is held as a download is held"
+        }
+        finally {
+            $loaderHold.Dispose()
+        }
+    }
+
+    # ====================================================================================================================
+    # 8. Who owns the state folder
+    # ====================================================================================================================
+    foreach ($trusted in @('S-1-5-32-544', 'S-1-5-18')) {
+        Assert-True (Test-TrustedStateOwner -OwnerSid $trusted) "$trusted may own the state folder"
+    }
+    foreach ($untrusted in @($currentSid, 'S-1-5-32-545', 'S-1-1-0', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464', 's-1-5-32-544', '', $null)) {
+        Assert-True (-not (Test-TrustedStateOwner -OwnerSid $untrusted)) "'$untrusted' may not own the state folder"
+    }
+    $ownedState = Join-Path $workspace 'owner-fixture\ResticBackuper'
+    New-Item -ItemType Directory -Path $ownedState -Force | Out-Null
+    Set-OwnerToCurrentUser $ownedState
+    # Assert-StateFolderOwner reads $stateRoot and $PlanOnly and asks Get-FeedOwnerSid for the owner. Each is defined in a scope
+    # of its own here (a function statement, which never replaces the one outside), so the real Get-FeedOwnerSid stays in place
+    # for the progress feed checks below. The stub's answer has a name of its own: Assert-StateFolderOwner has an $owner.
+    function Get-StateOwnerCode {
+        param([string]$Folder, [scriptblock]$Owner, [bool]$PlanMode = $false)
+        return & {
+            $stateRoot = $Folder
+            $PlanOnly = $PlanMode
+            $stateOwnerAnswer = $Owner
+            if ($stateOwnerAnswer) {
+                function Get-FeedOwnerSid { param([string]$Path) return (& $stateOwnerAnswer) }
+            }
+            Get-FindingCode { Assert-StateFolderOwner }
+        }
+    }
+    Assert-Equal 'no-finding' (Get-StateOwnerCode -Folder $ownedState -Owner { 'S-1-5-32-544' }) 'a state folder Administrators own passes'
+    Assert-Equal 'no-finding' (Get-StateOwnerCode -Folder $ownedState -Owner { 'S-1-5-18' }) 'a state folder SYSTEM owns passes'
+    Assert-Equal 'state_folder_untrusted' (Get-StateOwnerCode -Folder $ownedState -Owner { 'S-1-5-32-545' }) 'a state folder the Users group owns is refused'
+    Assert-Equal 'state_folder_untrusted' (Get-StateOwnerCode -Folder $ownedState) 'a real state folder this account owns is refused'
+    Assert-Equal 'state_folder_untrusted' (Get-StateOwnerCode -Folder $ownedState -PlanMode $true) 'and so it is in plan mode'
+    $denied = { throw [UnauthorizedAccessException]::new('Access is denied.') }
+    Assert-Equal 'state_folder_untrusted' (Get-StateOwnerCode -Folder $ownedState -Owner $denied) 'an install treats an owner it cannot read as untrusted'
+    Assert-Equal 'no-finding' (Get-StateOwnerCode -Folder $ownedState -Owner $denied -PlanMode $true) 'plan mode leaves an owner it cannot read to the install'
+    Assert-Equal 'no-finding' (Get-StateOwnerCode -Folder (Join-Path $workspace 'owner-fixture\Missing')) 'no state folder, nothing to check'
+    # The folder the canary phase creates: owned by Administrators, with a protected list that lets only them and SYSTEM change it.
+    $protectedSecurity = New-ProtectedDirectorySecurity -UserSid $currentSid
+    Assert-Equal 'S-1-5-32-544' $protectedSecurity.GetOwner([Security.Principal.SecurityIdentifier]).Value 'a new state folder is owned by Administrators'
+    Assert-True $protectedSecurity.AreAccessRulesProtected 'a new state folder inherits nothing from ProgramData'
+    $protectedRules = @($protectedSecurity.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object {
+        '{0}={1}/{2}/{3}' -f $_.IdentityReference.Value, $_.AccessControlType, $_.FileSystemRights, $_.InheritanceFlags
+    } | Sort-Object)
+    $expectedRules = @(@('S-1-5-18=Allow/FullControl', 'S-1-5-32-544=Allow/FullControl', "$currentSid=Allow/ReadAndExecute, Synchronize", 'S-1-3-4=Allow/ReadAndExecute, Synchronize') |
+        ForEach-Object { $_ + '/ContainerInherit, ObjectInherit' } | Sort-Object)
+    Assert-Equal $expectedRules $protectedRules 'only Administrators and SYSTEM may change a new state folder, and what it holds inherits that'
+
+    # ====================================================================================================================
+    # 9. The progress feed writer
     # ====================================================================================================================
     $feedBase = Join-Path $workspace 'feed'
     $feedDirectory = Join-Path $feedBase 'RewindleSetup-feed-test'
@@ -913,7 +1096,7 @@ try {
     Remove-Junction $feedLink
 
     # ====================================================================================================================
-    # 8. Native calls are emitted in memory: nothing goes through the temporary folder
+    # 10. Native calls are emitted in memory: nothing goes through the temporary folder
     # ====================================================================================================================
     # The installer and the uninstaller run elevated with the account's own %TEMP%, which its unelevated programs can change.
     # Compiling P/Invoke code with csc.exe writes its source, command line and assembly there and loads the assembly back, so
@@ -1005,7 +1188,7 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
     Assert-Equal @('GetVolumeInformationW=True', 'CreateFileW=True', 'DeviceIoControl=True', 'CloseHandle=True') @($nativeResult.set_last_error) 'every emitted call imports kernel32 by its exact name with SetLastError'
 
     # ====================================================================================================================
-    # 9. A downloaded program is checked and run while held open
+    # 11. A downloaded program is checked and run while held open
     # ====================================================================================================================
     # The WebView2 bootstrapper is downloaded into a folder only administrators can change and held open, with only reading
     # shared, from before its signature check until it has exited. A copy of cmd.exe stands in for it here; nothing is
@@ -1102,6 +1285,8 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
         output_path_guards = 'passed'
         volume_recommendation = 'passed'
         recovery_key_access_check = 'passed'
+        signer_check = 'passed'
+        state_folder_owner = 'passed'
         progress_feed = 'passed'
         native_calls_compile_nothing = 'passed'
         downloaded_program_held = 'passed'

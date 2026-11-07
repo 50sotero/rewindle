@@ -19,8 +19,17 @@ namespace Rewindle.Setup
 
         private static SetupWindow window;
 
+        // Main does one thing before anything else: it keeps Windows from loading a DLL that sits next to this program in place of
+        // its own (DllSearch). The rest is in Start, compiled only after that, so nothing it uses is loaded before it.
         [STAThread]
         private static int Main(string[] args)
+        {
+            bool dllSearchRestricted = DllSearch.RestrictToSystem32();
+            return Start(args, dllSearchRestricted);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static int Start(string[] args, bool dllSearchRestricted)
         {
             foreach (string argument in args)
             {
@@ -67,6 +76,10 @@ namespace Rewindle.Setup
                 string temp = Path.GetTempPath();
                 SetupLog.Initialize(Path.Combine(temp, "Rewindle-Setup.log"));
                 SetupLog.Write("Rewindle Setup " + ProductVersion() + " starting.");
+                if (!dllSearchRestricted)
+                {
+                    SetupLog.Write("Windows did not accept the restricted DLL search order; DLLs may still be looked for next to this program.");
+                }
                 SetupWorkspace.SweepStale(temp);
                 workspace = SetupWorkspace.Create();
                 SetupLog.Write("Working in " + workspace.Root);

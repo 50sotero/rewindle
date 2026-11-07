@@ -90,7 +90,12 @@ dropped unless it comes from the page's own address, is a JSON object under 256 
   autofill and browser shortcuts are off; there is no remote content.
 - Embedded ZIPs are unpacked by `SafeZip` (no rooted, `..`, drive-qualified, duplicate or oversized entries).
 - The WebView2 bootstrapper is downloaded only from Microsoft's fixed address, and run only after a valid Authenticode
-  signature naming Microsoft (the check `Install-ResticBackuper.ps1` makes).
+  signature by Microsoft itself: the signer's one organization is exactly `Microsoft Corporation` and its certificate
+  chain ends at Microsoft Root Certificate Authority 2010 or 2011 (the rule `Install-ResticBackuper.ps1` applies). A
+  publisher whose name merely contains "Microsoft" is refused.
+- `Program.Main` first limits where Windows looks for a DLL that Setup asks for by name to System32
+  (`SetDefaultDllDirectories`, in `DllSearch.cs`), so a DLL left next to the downloaded setup program is never loaded in
+  place of Windows' own. Everything else runs after that, in `Program.Start`.
 - The log (`%TEMP%\Rewindle-Setup.log`) holds what Setup did, never file contents, passwords or the recovery key.
 - The unpacked bundle sits in the user's temp folder, which any program the user runs can change, also while Windows'
   permission prompt is showing. So an elevated run of the installer (or of the bundled uninstaller) never runs it from

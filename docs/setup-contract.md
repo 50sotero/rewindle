@@ -53,8 +53,9 @@ ignored. `-ProgressPath` is refused.
 
 * **No changes, no prompts, no downloads, no elevation.** The plan runs the same validation functions as a real install
   (they are shared code in `Install-ResticBackuper.ps1`) but never calls the ones that create, write, install or register
-  anything. The only thing it writes is `-PlanOutput`. (Windows itself may refresh its certificate cache while the
-  Microsoft signature of `powershell.exe` and `icacls.exe` is verified; that is outside the script.)
+  anything. The only thing it writes is `-PlanOutput`. (Windows itself may refresh its certificate cache, or fetch a
+  missing intermediate certificate, while the Microsoft signature of `powershell.exe` and `icacls.exe` is verified; that is
+  outside the script.)
 * **Exit code 0 whenever the plan document was written, even if `ok` is false.** Non-zero only when no plan could be
   produced: `-PlanOutput` missing or refused, or an unexpected failure outside every check. Standard output is empty. On a
   non-zero exit, standard error holds `No plan was written: <reason>`.
@@ -174,7 +175,7 @@ below, and the console shows the text the installer has always shown for it.
 | `plan_internal_error` | the stage's own | A check failed unexpectedly (a bug or an odd PC). `detail` holds the technical text. |
 | `os_not_64bit` | environment | Not 64-bit Windows with 64-bit Windows PowerShell. |
 | `system_tool_missing` | environment | `powershell.exe` or `icacls.exe` is missing from System32. |
-| `system_tool_untrusted` | environment | One of them does not carry a valid Microsoft signature. |
+| `system_tool_untrusted` | environment | One of them is not signed by Microsoft itself: a valid signature whose signer has one organization, exactly `Microsoft Corporation`, through a chain that ends at Microsoft Root Certificate Authority 2010 or 2011 (or that Windows reports as one of its own files). A name that merely contains "Microsoft" is not enough. |
 | `dotnet_framework_missing` | environment | .NET Framework 4.8 is missing or older. |
 | `scheduled_tasks_module_missing` | environment | The Windows ScheduledTasks module is missing. |
 | `payload_missing` | environment | `payload\` or `payload-manifest.json` is not next to the script. |
@@ -185,6 +186,7 @@ below, and the console shows the text the installer has always shown for it.
 | `stale_registration` | environment | Rewindle's entry in Installed apps exists. |
 | `preserved_state_unreadable` | environment | The state folder an earlier installation left (`C:\ProgramData\ResticBackuper`) has a `plan-state.json` that can't be read, or names an invalid backup-plan identity. A reinstall continues the plan recorded there, so it can't go on. Checked at install time when plan mode can't read the folder. |
 | `preserved_state_inconsistent` | environment | That state folder names more than one backup plan. |
+| `state_folder_untrusted` | environment | `C:\ProgramData\ResticBackuper` exists but Administrators or SYSTEM don't own it. Any account can create a folder there, so nothing in it is read or used, with or without a stored password; moving it away is left to the user. When plan mode can't read the owner, the install checks it (and refuses an owner it can't read); the install checks again just before it uses the folder. |
 | `start_menu_shortcut_exists` | environment | `ResticBackuper.lnk` exists in the Start menu (only matters with the dashboard). |
 | `task_name_in_use` | environment | A scheduled task named `ResticBackuper`, `ResticBackuperDashboard` or `ResticBackuperGoogleDriveSync` (a Google Drive verification task an earlier installation left behind) exists. `path` is the task name. Without elevation, tasks of other accounts may be invisible; the install checks again. |
 | `recovery_key_stale` | environment | `%USERPROFILE%\ResticBackuper-RecoveryKey.txt` exists but the stored password it belongs to does not. |
@@ -433,7 +435,7 @@ In addition to the validation codes of section 2.4, `result.error.code` can be:
 | --- | --- | --- |
 | `preflight_failed` | preflight | An unexpected problem while checking. |
 | `webview2_install_failed` | webview2 | The runtime could not be downloaded or installed. |
-| `webview2_installer_untrusted` | webview2 | The download failed Microsoft's signature check. |
+| `webview2_installer_untrusted` | webview2 | The download failed Microsoft's signature check (the rule of `system_tool_untrusted`). |
 | `drivefs_provider_failed` | payload | Google Drive did not accept the test file. |
 | `payload_copy_failed` | payload | Copying or checking the installed files failed. |
 | `canary_failed` | canary | The restore test file could not be prepared. |
