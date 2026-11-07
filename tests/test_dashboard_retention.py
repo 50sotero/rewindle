@@ -1220,7 +1220,8 @@ class RetentionStaticTests(unittest.TestCase):
         method = host[host.index("private bool TryGetRetentionSpaceChanges("):]
         method = method[:method.index("\n        }\n")]
         # A backup service without clean-up has freed nothing; records not read, or not trusted, leave it unknown.
-        self.assertIn("if (!RetentionSupportedByProfile() || !retentionCapabilityKnown || !retentionCapabilitySupported)", method)
+        self.assertIn("if (!RetentionCapabilityResolved())", method)
+        self.assertNotIn("retentionCapabilityKnown", method)
         self.assertIn("if (view == null || !view.HistoryKnown)", method)
         self.assertIn("cleanUps.Add(new BackupSpaceCleanUp(change.FinishedUtc, change.FreedBytes));", method)
         # This harness compiles RetentionManager.cs without BackupSpace.cs, so it never names that file's types.
@@ -1235,9 +1236,24 @@ class RetentionStaticTests(unittest.TestCase):
         method = host[host.index("private bool RetentionMayHaveRemovedSince(DateTime countedUtc)"):]
         method = method[:method.index("\n        }\n")]
         # Never for a backup service without clean-up (the legacy edition reads nothing); unknown while the records are not read.
-        self.assertIn("if (!RetentionSupportedByProfile() || !retentionCapabilityKnown || !retentionCapabilitySupported)", method)
+        self.assertIn("if (!RetentionCapabilityResolved())", method)
+        self.assertNotIn("retentionCapabilityKnown", method)
         self.assertIn("if (view == null || !view.HistoryKnown)", method)
         self.assertIn("view.BackupsRemovedUtc.Value > countedUtc.ToUniversalTime()", method)
+
+    def test_the_clean_up_capability_is_read_before_the_forecast_or_count_decides(self) -> None:
+        # The page's state builds the Backup location card and how far back backups go before the clean-up card, so the
+        # first state sent when the window opens must not take an engine whose capability is not read yet for one without
+        # clean-up. The helper both of them ask reads it first, and never for the legacy edition.
+        host = (DASHBOARD / "DashboardWindow.Retention.cs").read_text(encoding="utf-8")
+        method = host[host.index("private bool RetentionCapabilityResolved()"):]
+        method = method[:method.index("\n        }\n")]
+        legacy = method.index("if (!RetentionSupportedByProfile())")
+        read = method.index("if (!retentionCapabilityKnown)")
+        self.assertLess(legacy, read)
+        self.assertIn("return false;", method[legacy:read])
+        self.assertIn("RetentionCapabilityAvailable();", method[read:])
+        self.assertTrue(method.rstrip().endswith("return retentionCapabilitySupported;"))
 
 
 if __name__ == "__main__":

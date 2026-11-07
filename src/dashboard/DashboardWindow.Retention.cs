@@ -202,6 +202,23 @@ namespace ResticBackuper.Dashboard
             retentionNextReadAt = MonotonicAfter(RetentionReadInterval);
         }
 
+        // Whether the backup service in use has clean-up of old backups, so its records count for the Backup location card and for
+        // how far back backups go. Its capability document is read the first time this is asked, by whichever card asks first: the
+        // page's state builds those cards before the clean-up card, so the first state sent when the window opens would otherwise
+        // take a service that keeps clean-up records for one without clean-up. Nothing is read for the legacy personal edition.
+        private bool RetentionCapabilityResolved()
+        {
+            if (!RetentionSupportedByProfile())
+            {
+                return false;
+            }
+            if (!retentionCapabilityKnown)
+            {
+                RetentionCapabilityAvailable();
+            }
+            return retentionCapabilitySupported;
+        }
+
         // What clean-up of old backups freed, for the Backup location card's forecast (BackupSpaceEvaluator). False while it is not
         // known: the engine keeps clean-up records that have not been read yet, or that could not be read, so the card waits rather
         // than forecast from what the backups added alone. A backup service without clean-up (the earlier personal edition, or an
@@ -209,7 +226,7 @@ namespace ResticBackuper.Dashboard
         private bool TryGetRetentionSpaceChanges(out IList<BackupSpaceCleanUp> cleanUps)
         {
             cleanUps = new List<BackupSpaceCleanUp>();
-            if (!RetentionSupportedByProfile() || !retentionCapabilityKnown || !retentionCapabilitySupported)
+            if (!RetentionCapabilityResolved())
             {
                 return true;
             }
@@ -231,7 +248,7 @@ namespace ResticBackuper.Dashboard
         // clean-up records are not read yet or cannot be read. Never for a backup service without clean-up.
         private bool RetentionMayHaveRemovedSince(DateTime countedUtc)
         {
-            if (!RetentionSupportedByProfile() || !retentionCapabilityKnown || !retentionCapabilitySupported)
+            if (!RetentionCapabilityResolved())
             {
                 return false;
             }
