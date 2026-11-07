@@ -342,6 +342,18 @@ namespace ResticBackuper.Dashboard
             return alert.FailedInARow.ToString(CultureInfo.CurrentCulture) + " backups in a row didn’t finish";
         }
 
+        // The hover text while the amber mark is up because the schedule couldn't be read for an hour, or empty. The freshness
+        // check has nothing to say then, so without this the hover would read "verified 3 days ago" beside the mark.
+        private string DescribeScheduleAlert()
+        {
+            BackupAlert alert = backupAlerts == null ? null : backupAlerts.Current;
+            if (alert == null || alert.Reason != BackupAlertReason.Schedule)
+            {
+                return string.Empty;
+            }
+            return "can’t read the backup schedule";
+        }
+
         // What the page is told: the switch, the mark, the failing count and threshold, when Windows last started the backup, and
         // why the latest scheduled backup was missed while it is overdue. Null without alerts (the page then draws no switch).
         private Dictionary<string, object> BuildWebAlertsState()

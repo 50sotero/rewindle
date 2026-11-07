@@ -2118,6 +2118,23 @@ namespace RewindleRegression {
         Assert-True ([IO.File]::ReadAllText($alertsFile).Contains('failing|')) 'the failing alert was not remembered as told'
         $on = Invoke-AlertCommand 'on'
         Assert-True ($on[0] -and $on[1] -eq 'Backup alerts are on.') ('On was not taken: ' + $on[1])
+
+        # A schedule that can't be read for an hour puts up the amber mark, and the hover text says why: not "verified 5 days ago",
+        # which is all the freshness check leaves without a schedule.
+        $alertType = $assembly.GetType('ResticBackuper.Dashboard.BackupAlert', $true)
+        $alertInputsType = $assembly.GetType('ResticBackuper.Dashboard.BackupAlertInputs', $true)
+        $alertEvaluatorType = $assembly.GetType('ResticBackuper.Dashboard.BackupAlertEvaluator', $true)
+        $unreadableSchedule = [Activator]::CreateInstance($alertInputsType, $constructorFlags, $null, @(), $null)
+        $unreadableSchedule.StatusReadable = $true
+        Set-PrivateField $alertMonitor 'current' (Invoke-Static $alertEvaluatorType 'Evaluate' @($unreadableSchedule, $null, $true))
+        $settledSnapshot = New-AlertSnapshot 'success' 'run-e' @()
+        $scheduleState = Invoke-Private $alertDashboard 'BuildWebAlertsState'
+        Assert-True ($scheduleState['level'] -eq 'attention' -and $scheduleState['reason'] -eq 'schedule') 'the fixture is not the amber schedule alert'
+        $scheduleHover = [string](Invoke-Private $alertDashboard 'DescribeTrayStatus' @($settledSnapshot))
+        Assert-True ($scheduleHover -eq ('Rewindle - can' + [char]0x2019 + 't read the backup schedule')) ('the tray did not say that the schedule cannot be read: ' + $scheduleHover)
+        Set-PrivateField $alertMonitor 'current' ($alertType.GetField('Quiet', $flags).GetValue($null))
+        $quietHover = [string](Invoke-Private $alertDashboard 'DescribeTrayStatus' @($settledSnapshot))
+        Assert-True ($quietHover -eq 'Rewindle - verified 5 days ago') ('without the mark the tray did not say when the backup was verified: ' + $quietHover)
     }
     finally {
         Invoke-Private $alertDashboard 'DisposeBackupAlerts' | Out-Null

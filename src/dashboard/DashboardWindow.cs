@@ -7453,6 +7453,11 @@ namespace ResticBackuper.Dashboard
             {
                 return prefix + "confirm these changes";
             }
+            string scheduleAlert = DescribeScheduleAlert();
+            if (scheduleAlert.Length > 0)
+            {
+                return prefix + scheduleAlert;
+            }
             BackupFreshnessResult freshness = BackupFreshnessEvaluator.EvaluateNow(
                 currentTaskSchedule,
                 snapshot.LastVerifiedFinishedUtc,
