@@ -58,9 +58,11 @@ export function installSetupSampleBridge(): void {
   const volumesNow = () => spareDriveConnected && sample.name === 'no-second-drive' ? [...sample.volumes, SPARE_DRIVE] : sample.volumes;
   const volumeOf = (path: string) => volumesNow().find(volume => volume.root.toLowerCase() === rootOf(path).toLowerCase());
   const exists = (path: string) => !sample.missing.includes(lower(path));
-  // Whether the sample has been uninstalled: a reinstall starts from a PC without Rewindle on it.
+  // Whether the sample has been uninstalled: a reinstall starts from a PC without Rewindle on it, whose kept state names the backups.
   let uninstalled = false;
-  const existingNow = () => uninstalled ? { ...sample.existing, rewindle: null } : sample.existing;
+  const existingNow = () => uninstalled
+    ? { ...sample.existing, rewindle: null, kept_repository: sample.existing.kept_repository ?? sample.defaultRepository }
+    : sample.existing;
 
   // The checks the real installer makes in plan mode, imitated closely enough to show every message the wizard can get.
   type Finding = { code: string; field: string; message: string; path: string | null; detail: string | null };
@@ -100,7 +102,8 @@ export function installSetupSampleBridge(): void {
           errors.push(finding('repository_not_empty', 'repository', 'This folder already has files in it that aren’t a Rewindle backup. Choose an empty folder or a new one.', repository));
         }
         // The backups a removed copy kept are found again when the same folder is chosen.
-        if (uninstalled && sample.defaultRepository && lower(repository) === lower(sample.defaultRepository)) {
+        const kept = existingNow().kept_repository;
+        if (kept && lower(repository) === lower(kept)) {
           warnings.push(finding('repository_exists', 'repository', 'This folder already holds Rewindle backups. Setup carries on with them and keeps your earlier snapshots.', repository));
         }
         if (volume.is_system) {

@@ -424,9 +424,10 @@ try {
     Assert-True ($environment.dotnet_framework_48 -is [bool]) 'dotnet_framework_48 is a boolean'
     Assert-True ($environment.elevated -eq $isElevated) 'elevated reports the real elevation of the process'
     Assert-True ($null -eq $environment.webview2 -or $environment.webview2 -cmatch '^\d+(\.\d+){1,3}$') 'webview2 is a version or null'
-    Assert-Equal @('rewindle', 'legacy_personal_edition') @($environment.existing_install.PSObject.Properties.Name) 'existing_install properties'
+    Assert-Equal @('rewindle', 'legacy_personal_edition', 'kept_repository') @($environment.existing_install.PSObject.Properties.Name) 'existing_install properties'
     Assert-True ($null -eq $environment.existing_install.rewindle) 'a fresh fixture has no Rewindle installation'
     Assert-True ($environment.existing_install.legacy_personal_edition -eq $false) 'a fresh fixture has no legacy edition'
+    Assert-True ($null -eq $environment.existing_install.kept_repository) 'a fresh fixture has no backups kept from an earlier installation'
     $volumes = @($environment.volumes)
     Assert-True ($volumes.Count -ge 1) 'at least one volume is listed'
     $volumeProperties = @('root', 'label', 'filesystem', 'drive_type', 'size_bytes', 'free_bytes', 'is_system', 'same_physical_disk_as_system', 'eligible', 'ineligible_reason', 'ineligible_message', 'recommended')
@@ -1274,6 +1275,407 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
         Assert-Equal @() @(Get-ChildItem -LiteralPath $protectedParent -Force | ForEach-Object Name) 'and nothing is left behind'
     }
 
+    # ====================================================================================================================
+    # 12. Where an earlier installation kept its backups (the state folder an uninstall leaves)
+    # ====================================================================================================================
+    . ([scriptblock]::Create((Get-InstallerFunctionText -Name @('Test-TrustedStateOwner', 'Test-KeptRepositoryPath', 'ConvertTo-KeptRecordTime', 'Get-KeptRepository', 'Get-RepositoryInput'))))
+    # Only a state folder that Administrators or SYSTEM own is read (section 8). This account owns the fixture folders, so for
+    # the fixture state folder Get-FeedOwnerSid answers $script:keptStateOwner ($null: the owner can't be read). The stand-in is
+    # defined in a scope of its own, so the real Get-FeedOwnerSid stays in place for the progress feed checks below.
+    $script:keptStateOwner = 'S-1-5-32-544'
+    function Use-KeptStateOwner {
+        param([scriptblock]$Action)
+        return & {
+            function Get-FeedOwnerSid {
+                param([string]$Path)
+                if ($Path -ne $stateRoot) { throw "Unexpected owner lookup: $Path" }
+                if ($null -eq $script:keptStateOwner) { throw [UnauthorizedAccessException]::new('Access is denied.') }
+                return $script:keptStateOwner
+            }
+            & $Action
+        }
+    }
+    function Find-KeptRepository { return (Use-KeptStateOwner { Get-KeptRepository }) }
+    function Write-KeptRecord {
+        param([string]$Folder, [string]$Name, $Record)
+        $text = if ($Record -is [string]) { $Record } else { ConvertTo-Json -InputObject $Record -Depth 4 }
+        Write-Text -Path (Join-Path $Folder $Name) -Text $text
+    }
+    function Set-ReadDenied {
+        param([string]$Path, [bool]$Denied)
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($currentSid), 'ReadData', 'Deny')
+        $security = [IO.File]::GetAccessControl($Path, [Security.AccessControl.AccessControlSections]::Access)
+        if ($Denied) { $security.AddAccessRule($rule) } else { [void]$security.RemoveAccessRule($rule) }
+        [IO.File]::SetAccessControl($Path, $security)
+    }
+    $planId = '11111111-2222-4333-8444-555555555555'
+    $keptFirst = Join-Path $repositoryRoot 'kept\ResticBackups\Personal'
+    $keptMoved = Join-Path $repositoryRoot 'moved\Backups'
+    $setUp = [ordered]@{ schema_version = 1; initialized_utc = '2026-09-01T10:00:00.123456Z'; repository = $keptFirst; repository_storage_mode = 'local_ntfs' }
+    $afterMove = [ordered]@{ schema_version = 1; plan_id = $planId; config_generation = 2; started_utc = '2026-10-02T02:00:00.5Z'; finished_utc = '2026-10-02T02:21:07.250001Z'; repository = $keptMoved; repository_storage_mode = 'local_ntfs' }
+
+    # --- the reader, against a state folder of its own ---
+    $stateRoot = Join-Path $workspace 'kept-unit\ResticBackuper'
+    $secretFile = Join-Path $stateRoot 'repository-password.dpapi.json'
+    function Reset-KeptState {
+        param([hashtable]$Records = @{}, [switch]$NoSecret)
+        if (Test-Path -LiteralPath $stateRoot) { Remove-Item -LiteralPath $stateRoot -Recurse -Force }
+        New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
+        if (-not $NoSecret) { Write-Text -Path $secretFile -Text '{}' }
+        foreach ($name in $Records.Keys) { Write-KeptRecord -Folder $stateRoot -Name $name -Record $Records[$name] }
+    }
+    function Get-KeptPath { $found = Find-KeptRepository; if ($null -eq $found) { return '<none>' } return [string]$found.repository }
+    Remove-Item -LiteralPath (Split-Path -Parent $stateRoot) -Recurse -Force -ErrorAction SilentlyContinue
+    Assert-True ($null -eq (Find-KeptRepository)) 'no state folder: nothing was kept'
+    Reset-KeptState -Records @{ 'repository.json' = $setUp }
+    $found = Find-KeptRepository
+    Assert-Equal @($keptFirst, 'local_ntfs') @($found.repository, $found.storage_mode) 'repository.json names the kept backups and how they are stored'
+    Reset-KeptState -Records @{ 'repository.json' = $setUp } -NoSecret
+    Assert-Equal '<none>' (Get-KeptPath) 'without the stored password setup could not carry on with them, so none is reported'
+
+    # Nothing is read from a state folder that Administrators or SYSTEM don't own, or that is a link: any account can create it.
+    Reset-KeptState -Records @{ 'repository.json' = $setUp }
+    $script:keptStateOwner = 'S-1-5-18'
+    Assert-Equal $keptFirst (Get-KeptPath) 'a state folder SYSTEM owns is read'
+    foreach ($owner in @($currentSid, 'S-1-5-32-545', $null)) {
+        $script:keptStateOwner = $owner
+        Assert-Equal '<none>' (Get-KeptPath) "a state folder owned by '$owner' names no kept backups"
+    }
+    $script:keptStateOwner = 'S-1-5-32-544'
+    Set-OwnerToCurrentUser $stateRoot
+    Assert-Equal '<none>' (& { $found = Get-KeptRepository; if ($null -eq $found) { '<none>' } else { [string]$found.repository } }) 'a real state folder this account owns names no kept backups'
+    $keptLink = Join-Path $workspace 'kept-unit\Linked'
+    New-Junction -Link $keptLink -Target $stateRoot
+    $realKeptState = $stateRoot
+    $stateRoot = $keptLink
+    $secretFile = Join-Path $keptLink 'repository-password.dpapi.json'
+    try { Assert-Equal '<none>' (Get-KeptPath) 'a state folder that is a link names no kept backups' }
+    finally {
+        $stateRoot = $realKeptState
+        $secretFile = Join-Path $stateRoot 'repository-password.dpapi.json'
+        Remove-Junction $keptLink
+    }
+    $cloud = [ordered]@{ schema_version = 1; initialized_utc = '2026-09-01T10:00:00Z'; repository = (Join-Path $workspace 'console\My Drive\Rewindle\Backups'); repository_storage_mode = 'google_drivefs_stream' }
+    Reset-KeptState -Records @{ 'repository.json' = $cloud }
+    Assert-Equal 'google_drivefs_stream' (Find-KeptRepository).storage_mode 'backups kept in Google Drive are reported as such'
+    $noMode = [ordered]@{ schema_version = 1; initialized_utc = '2026-09-01T10:00:00Z'; repository = $keptFirst }
+    Reset-KeptState -Records @{ 'repository.json' = $noMode }
+    Assert-Equal 'local_ntfs' (Find-KeptRepository).storage_mode 'a record without a storage mode is local'
+
+    # The newest record wins: a backup after a move of the backup location names the new place, and a later rewrite of
+    # repository.json (updated_utc) wins over older backups.
+    Reset-KeptState -Records @{ 'repository.json' = $setUp; 'last-success.json' = $afterMove; 'status.json' = $afterMove }
+    Assert-Equal $keptMoved (Get-KeptPath) 'a backup after a move names the place the backups were moved to'
+    # Manage-Repository.ps1 rewrites repository.json when a move completes, keeping initialized_utc and adding relocated_utc.
+    # Until the next backup, the backups before the move still name the old place, so the time of the move counts.
+    $beforeMove = [ordered]@{ schema_version = 1; plan_id = $planId; config_generation = 2; started_utc = '2026-10-01T02:00:00Z'; finished_utc = '2026-10-01T02:20:00Z'; repository = $keptFirst; repository_storage_mode = 'local_ntfs' }
+    $relocated = [ordered]@{ schema_version = 1; initialized_utc = '2026-09-01T10:00:00.123456Z'; relocated_utc = '2026-10-01T09:30:00.1234567Z'; repository = $keptMoved; repository_storage_mode = 'local_ntfs' }
+    Reset-KeptState -Records @{ 'repository.json' = $relocated; 'last-success.json' = $beforeMove; 'status.json' = $beforeMove }
+    Assert-Equal $keptMoved (Get-KeptPath) 'a move completed after the last backup names the place the backups were moved to'
+    $rewritten = [ordered]@{ schema_version = 1; initialized_utc = '2026-09-01T10:00:00Z'; updated_utc = '2026-10-03T08:00:00Z'; repository = $keptFirst }
+    Reset-KeptState -Records @{ 'repository.json' = $rewritten; 'last-success.json' = $afterMove }
+    Assert-Equal $keptFirst (Get-KeptPath) 'a later updated_utc in repository.json wins over an older backup'
+    $failedLater = [ordered]@{ schema_version = 1; started_utc = '2026-10-05T02:00:00Z'; finished_utc = $null; repository = (Join-Path $repositoryRoot 'later'); repository_storage_mode = 'local_ntfs' }
+    Reset-KeptState -Records @{ 'repository.json' = $setUp; 'last-success.json' = $afterMove; 'status.json' = $failedLater }
+    Assert-Equal (Join-Path $repositoryRoot 'later') (Get-KeptPath) 'the newest run counts even when it did not finish'
+    Reset-KeptState -Records @{ 'repository.json' = $setUp; 'last-success.json' = '{not json' }
+    Assert-Equal $keptFirst (Get-KeptPath) 'a record that is not JSON is passed over for an older one'
+    Reset-KeptState -Records @{ 'repository.json' = $setUp; 'status.json' = ([ordered]@{ schema_version = 1; started_utc = 'yesterday'; repository = $keptMoved }) }
+    Assert-Equal $keptFirst (Get-KeptPath) 'a record without a readable time is passed over'
+    Reset-KeptState -Records @{ 'repository.json' = $setUp; 'status.json' = $afterMove }
+    Set-ReadDenied -Path (Join-Path $stateRoot 'status.json') -Denied $true
+    try { Assert-Equal $keptFirst (Get-KeptPath) 'a record this account may not read is passed over' }
+    finally { Set-ReadDenied -Path (Join-Path $stateRoot 'status.json') -Denied $false }
+
+    # Anything odd in a record means "not known".
+    $odd = @(
+        @('schema_version 2', ([ordered]@{ schema_version = 2; initialized_utc = '2026-09-01T10:00:00Z'; repository = $keptFirst })),
+        @('no schema_version', ([ordered]@{ initialized_utc = '2026-09-01T10:00:00Z'; repository = $keptFirst })),
+        @('an unknown storage mode', ([ordered]@{ schema_version = 1; initialized_utc = '2026-09-01T10:00:00Z'; repository = $keptFirst; repository_storage_mode = 'network' })),
+        @('no time', ([ordered]@{ schema_version = 1; repository = $keptFirst })),
+        @('a time that is not ISO-8601', ([ordered]@{ schema_version = 1; initialized_utc = '09/01/2026 10:00'; repository = $keptFirst })),
+        @('no repository', ([ordered]@{ schema_version = 1; initialized_utc = '2026-09-01T10:00:00Z' })),
+        @('a number for a repository', ([ordered]@{ schema_version = 1; initialized_utc = '2026-09-01T10:00:00Z'; repository = 42 })),
+        @('a JSON list', '[{"schema_version": 1}]'),
+        @('JSON null', 'null'),
+        @('an empty file', '')
+    )
+    foreach ($case in $odd) {
+        Reset-KeptState -Records @{ 'repository.json' = $case[1] }
+        Assert-Equal '<none>' (Get-KeptPath) "a record with $($case[0]) names no kept backups"
+    }
+    # Only strings are checked here: no drive is opened, and the letters are ones a test PC is unlikely to have.
+    foreach ($bad in @('relative\Backups', '\\server\share\Backups', '\\?\Q:\Backups', 'Q:', 'Q:\', 'Q:Backups', 'Q:\Backups\', 'Q:\Backups\..\Other',
+        'Q:\Backups\.\Rewindle', 'Q:\Backups\\Rewindle', 'Q:\Backups.', 'Q:\Back"ups', "Q:\Back`tups", 'Q:\Backups:stream', 'Q:\Back*ups', '', ('Q:\' + ('x' * 1100)))) {
+        Assert-True (-not (Test-KeptRepositoryPath -Value $bad)) "'$bad' is not a backup folder to suggest"
+        Reset-KeptState -Records @{ 'repository.json' = ([ordered]@{ schema_version = 1; initialized_utc = '2026-09-01T10:00:00Z'; repository = $bad }) }
+        Assert-Equal '<none>' (Get-KeptPath) "a record naming '$bad' names no kept backups"
+    }
+    foreach ($good in @('Q:\ResticBackups\Personal', 'r:\Rewindle\Backups', 'Q:\My Drive\Rewindle Backups', ('Q:\Fotos e v' + [char]0x00ED + 'deos'))) {
+        Assert-True (Test-KeptRepositoryPath -Value $good) "'$good' is a backup folder to suggest"
+    }
+    $utcMoment = [datetime]::new(2026, 10, 2, 2, 21, 7, [DateTimeKind]::Utc)
+    Assert-Equal $utcMoment.Ticks (ConvertTo-KeptRecordTime -Value $utcMoment).UtcTicks 'a time PowerShell already read as a date is used as it is'
+    Assert-Equal $utcMoment.Ticks (ConvertTo-KeptRecordTime -Value '2026-10-02T02:21:07Z').UtcTicks 'an ISO-8601 UTC time is read as UTC'
+    Assert-Equal $utcMoment.Ticks (ConvertTo-KeptRecordTime -Value '2026-10-02T04:21:07+02:00').UtcTicks 'an offset is honored'
+
+    # --- the console installer suggests the kept folder at its prompt ---
+    $script:consoleLines = [Collections.Generic.List[string]]::new()
+    function Invoke-ConsoleRepositoryPrompt {
+        param([string]$Mode)
+        $script:Repository = $null
+        $script:consolePrompt = $null
+        $script:consoleLines.Clear()
+        & {
+            # Stand-ins for the console and for the drive scan, so nothing on this PC is asked or listed.
+            function Read-Host { param([string]$Prompt) $script:consolePrompt = $Prompt; return '' }
+            function Write-Host { param([object]$Object) $script:consoleLines.Add([string]$Object) }
+            function Get-DefaultRepository { return (Join-Path $workspace 'console\Usual\ResticBackups\Personal') }
+            $PlanOnly = $false
+            $Unattended = $false
+            $Repository = $null
+            $RepositoryStorageMode = $Mode
+            $DriveFsMyDriveRoot = Join-Path $workspace 'console\My Drive'
+            $defaultRepositorySuffix = 'ResticBackups\Personal'
+            Use-KeptStateOwner { Get-RepositoryInput }
+        }
+        return $script:Repository
+    }
+    Reset-KeptState -Records @{ 'repository.json' = $setUp; 'last-success.json' = $afterMove }
+    Assert-Equal $keptMoved (Invoke-ConsoleRepositoryPrompt -Mode 'local_ntfs') 'pressing Enter at the console keeps the kept backups'
+    Assert-True ([string]$script:consolePrompt).Contains("[$keptMoved]") "the console prompt shows the kept folder as its default (got: $($script:consolePrompt))"
+    Assert-True (@($script:consoleLines | Where-Object { $_.Contains("earlier installation are in $keptMoved.") }).Count -eq 1) 'the console says where the earlier backups are'
+    Assert-Equal (Join-Path $workspace 'console\My Drive\ResticBackups\Personal') (Invoke-ConsoleRepositoryPrompt -Mode 'google_drivefs_stream') 'local backups are not suggested for a Google Drive install'
+    Assert-True (@($script:consoleLines | Where-Object { $_.Contains('-RepositoryStorageMode local_ntfs') }).Count -eq 1) 'the console says how to keep using local backups'
+    Reset-KeptState
+    Assert-Equal (Join-Path $workspace 'console\Usual\ResticBackups\Personal') (Invoke-ConsoleRepositoryPrompt -Mode 'local_ntfs') 'with nothing kept the console suggests the usual folder'
+    Assert-Equal 0 $script:consoleLines.Count 'with nothing kept the console says nothing about earlier backups'
+
+    # --- plan mode reports it, as the wizard's first plan sees it (no choices yet) ---
+    $keptRoots = New-RootsSet -Name 'kept'
+    $keptState = Join-Path $keptRoots.ProgramData 'ResticBackuper'
+    Write-Text -Path (Join-Path $keptState 'repository-password.dpapi.json') -Text '{}'
+    Write-KeptRecord -Folder $keptState -Name 'repository.json' -Record $setUp
+    if ($isElevated) {
+        # The folder an install leaves belongs to Administrators, and only such a folder is read.
+        $keptStateAcl = Get-Acl -LiteralPath $keptState
+        $keptStateAcl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+        Set-Acl -LiteralPath $keptState -AclObject $keptStateAcl
+        $keptRun = Invoke-Plan -Bundle $bundle -Roots $keptRoots -Temp $temp -Arguments @('-MinimumFreeGiB', '1')
+        Assert-Equal 0 $keptRun.ExitCode "a plan over the state an uninstall kept is written (stderr: $($keptRun.Error))"
+        Assert-Equal $keptFirst $keptRun.Plan.environment.existing_install.kept_repository 'existing_install.kept_repository names the kept backups'
+        Assert-True ($null -eq $keptRun.Plan.environment.existing_install.rewindle) 'kept state alone is not an installation'
+        Assert-Equal $keptRoots.DefaultRepository $keptRun.Plan.defaults.repository 'defaults.repository stays the recommendation'
+        Assert-Equal @(Get-ErrorCodes $noArguments.Plan) @(Get-ErrorCodes $keptRun.Plan) 'the kept state adds no error'
+        Assert-Equal @(Get-WarningCodes $noArguments.Plan) @(Get-WarningCodes $keptRun.Plan) 'the kept state adds no warning'
+        Write-KeptRecord -Folder $keptState -Name 'last-success.json' -Record $afterMove
+        $movedRun = Invoke-Plan -Bundle $bundle -Roots $keptRoots -Temp $temp -Arguments @('-MinimumFreeGiB', '1')
+        Assert-Equal $keptMoved $movedRun.Plan.environment.existing_install.kept_repository 'after a move of the backup location the plan names the new place'
+        Assert-Equal @(Get-ErrorCodes $noArguments.Plan) @(Get-ErrorCodes $movedRun.Plan) 'the kept plan identity adds no error'
+        # Records this account can't read, or that are malformed, mean "not known": no error, no warning, a plan all the same.
+        Write-KeptRecord -Folder $keptState -Name 'last-success.json' -Record '{not json'
+        Write-KeptRecord -Folder $keptState -Name 'status.json' -Record ([ordered]@{ schema_version = 1; started_utc = '2026-10-05T02:00:00Z'; repository = 'relative\Backups' })
+        Set-ReadDenied -Path (Join-Path $keptState 'repository.json') -Denied $true
+        try { $brokenRun = Invoke-Plan -Bundle $bundle -Roots $keptRoots -Temp $temp -Arguments @('-MinimumFreeGiB', '1') }
+        finally { Set-ReadDenied -Path (Join-Path $keptState 'repository.json') -Denied $false }
+        Assert-Equal 0 $brokenRun.ExitCode "unreadable and malformed records still give a plan (stderr: $($brokenRun.Error))"
+        Assert-True ($null -eq $brokenRun.Plan.environment.existing_install.kept_repository) 'unreadable and malformed records name no kept backups'
+        Assert-Equal @(Get-ErrorCodes $noArguments.Plan) @(Get-ErrorCodes $brokenRun.Plan) 'unreadable and malformed records add no error'
+        Assert-Equal @(Get-WarningCodes $noArguments.Plan) @(Get-WarningCodes $brokenRun.Plan) 'unreadable and malformed records add no warning'
+    }
+    else {
+        # A standard user cannot make Administrators the owner, and a state folder this account owns is never read: the plan
+        # names no kept backups and reports the folder instead (section 2), and adds nothing else.
+        Set-OwnerToCurrentUser $keptState
+        $untrustedRun = Invoke-Plan -Bundle $bundle -Roots $keptRoots -Temp $temp -Arguments @('-MinimumFreeGiB', '1')
+        Assert-Equal 0 $untrustedRun.ExitCode "a plan over a kept state folder this account owns is written (stderr: $($untrustedRun.Error))"
+        Assert-True ($null -eq $untrustedRun.Plan.environment.existing_install.kept_repository) 'a state folder this account owns names no kept backups'
+        Assert-True ((Get-ErrorCodes $untrustedRun.Plan) -contains 'state_folder_untrusted') 'the plan reports the state folder this account owns'
+        Assert-Equal @(Get-ErrorCodes $noArguments.Plan) @(Get-ErrorCodes $untrustedRun.Plan | Where-Object { $_ -cne 'state_folder_untrusted' }) 'the untrusted kept state adds no other error'
+        Assert-Equal @(Get-WarningCodes $noArguments.Plan) @(Get-WarningCodes $untrustedRun.Plan) 'the untrusted kept state adds no warning'
+    }
+
+    # ====================================================================================================================
+    # 13. Rolling back a failed install: what it started stops first, runtime-manifest.json goes last, and the folder is checked
+    # ====================================================================================================================
+    # The rollback helpers run in this process against a fixture program folder. Copies of the system's ping program stand in
+    # for the dashboard, under a name no real program uses, and no scheduled task is ever looked up.
+    . ([scriptblock]::Create((Get-InstallerFunctionText -Name @(
+        'Get-NormalizedPath', 'Write-Utf8NoBom', 'New-RuntimeManifest', 'Stop-OwnedProcesses', 'Stop-InstalledPrograms',
+        'Remove-RuntimeContent', 'Remove-InstalledRuntime', 'Write-InstallFailure'))))
+    $productName = 'ResticBackuper'
+    $primaryTaskEvidenceName = 'scheduled-task.xml'
+    $cloudTaskEvidenceName = 'google-drive-verification-task.xml'
+    $systemDirectory = [Environment]::SystemDirectory
+    $version = '9.9.9-fixture.1'
+    # The long spelling of the temporary folder, as a program's own path reports it (a hosted runner's is an 8.3 short name).
+    New-Item -ItemType Directory -Path (Join-Path $workspace 'rollback') -Force | Out-Null
+    $rollbackBase = Get-FeedLongPath (Join-Path $workspace 'rollback')
+    $programFilesRoot = Join-Path $rollbackBase 'Program Files'
+    $installRoot = Join-Path $programFilesRoot $productName
+    $rollbackManifest = Join-Path $installRoot 'runtime-manifest.json'
+    $fixtureProgram = 'RewindleRollbackFixture'
+    $pingProgram = Join-Path $env:SystemRoot 'System32\PING.EXE'
+    $script:fixtureProcesses = [Collections.Generic.List[Diagnostics.Process]]::new()
+    $script:heldFiles = [Collections.Generic.List[IDisposable]]::new()
+
+    function New-RollbackFixture {
+        param([switch]$NoManifest)
+        Assert-True (-not (Test-Path -LiteralPath $installRoot)) 'the previous rollback fixture is gone'
+        foreach ($relative in @('backup-config.json', 'VERSION', 'Python\python.txt', 'Python\Lib\site.py', 'web\index.html', 'WebView2Loader.dll')) {
+            Write-Text -Path (Join-Path $installRoot $relative) -Text "rollback fixture $relative"
+        }
+        Copy-Item -LiteralPath $pingProgram -Destination (Join-Path $installRoot "$fixtureProgram.exe")
+        if (-not $NoManifest) { [void](New-RuntimeManifest -Root $installRoot -Version $version) }
+    }
+    function Start-FixtureProgram {
+        param([string]$Path, [string]$WorkingDirectory)
+        $process = Start-Process -FilePath $Path -ArgumentList @('-n', '120', '127.0.0.1') -WorkingDirectory $WorkingDirectory -WindowStyle Hidden -PassThru
+        $script:fixtureProcesses.Add($process)
+        Start-Sleep -Milliseconds 300
+        Assert-True (-not $process.HasExited) "the fixture program $Path runs"
+        return $process
+    }
+    function Lock-FixtureFile {
+        param([string]$Path)
+        # Open for reading and shared for reading only, so the file can be neither deleted nor written while it is held.
+        $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        $script:heldFiles.Add($stream)
+        return $stream
+    }
+    function Get-FixtureFiles {
+        if (-not (Test-Path -LiteralPath $installRoot)) { return @() }
+        return @(Get-ChildItem -LiteralPath $installRoot -Recurse -File -Force | ForEach-Object { $_.FullName.Substring($installRoot.Length + 1) } | Sort-Object)
+    }
+    function Read-RollbackManifest { return ([IO.File]::ReadAllText($rollbackManifest) | ConvertFrom-Json) }
+
+    $savedDirectory = [Environment]::CurrentDirectory
+    Push-Location -LiteralPath $workspace
+    try {
+        # --- the dashboard the install started still runs from the program folder ---
+        New-RollbackFixture
+        $originalManifest = [IO.File]::ReadAllText($rollbackManifest)
+        $running = Start-FixtureProgram -Path (Join-Path $installRoot "$fixtureProgram.exe") -WorkingDirectory $installRoot
+        $otherCopy = Join-Path $rollbackBase "Elsewhere\$fixtureProgram.exe"
+        New-Item -ItemType Directory -Path (Split-Path -Parent $otherCopy) -Force | Out-Null
+        Copy-Item -LiteralPath $pingProgram -Destination $otherCopy
+        $other = Start-FixtureProgram -Path $otherCopy -WorkingDirectory (Split-Path -Parent $otherCopy)
+        Assert-Equal $installRoot (Remove-InstalledRuntime -Root $installRoot -Attempts 1) 'a program folder still in use is reported as left, not as removed'
+        Assert-Equal @("$fixtureProgram.exe", 'runtime-manifest.json') (Get-FixtureFiles) 'everything but the running program and runtime-manifest.json is removed'
+        Assert-Equal $originalManifest ([IO.File]::ReadAllText($rollbackManifest)) 'runtime-manifest.json stays as it was, since it lists the program left'
+        Stop-InstalledPrograms -TaskName @() -ProgramName @($fixtureProgram)
+        Assert-True ($running.WaitForExit(5000)) 'stopping what the install started ends the program running from the program folder'
+        Assert-True (-not $other.HasExited) 'a program with the same name elsewhere is left running'
+        Assert-True ($null -eq (Remove-InstalledRuntime -Root $installRoot)) 'once the program is stopped the program folder is removed'
+        Assert-True (-not (Test-Path -LiteralPath $installRoot)) 'the program folder is really gone'
+
+        # --- a file that is still open: runtime-manifest.json is kept with it ---
+        New-RollbackFixture
+        $held = Lock-FixtureFile (Join-Path $installRoot 'WebView2Loader.dll')
+        Assert-Equal $installRoot (Remove-InstalledRuntime -Root $installRoot -Attempts 2) 'a file still open leaves the program folder'
+        Assert-Equal @('runtime-manifest.json', 'WebView2Loader.dll') (Get-FixtureFiles) 'only the open file and runtime-manifest.json are left'
+        Assert-True (@((Read-RollbackManifest).files | ForEach-Object relative_path) -contains 'WebView2Loader.dll') 'runtime-manifest.json lists the file left'
+        $held.Dispose()
+        Assert-True ($null -eq (Remove-InstalledRuntime -Root $installRoot)) 'once the file is closed the program folder is removed'
+        Assert-True (-not (Test-Path -LiteralPath $installRoot)) 'the program folder is gone after the second try'
+
+        # --- a failure before runtime-manifest.json was written: one is written for what is left ---
+        New-RollbackFixture -NoManifest
+        $held = Lock-FixtureFile (Join-Path $installRoot 'Python\Lib\site.py')
+        Assert-Equal $installRoot (Remove-InstalledRuntime -Root $installRoot -Attempts 2) 'a file still open leaves a program folder that had no list of files'
+        Assert-Equal @('Python\Lib\site.py', 'runtime-manifest.json') (Get-FixtureFiles) 'the open file and a new runtime-manifest.json are left'
+        $written = Read-RollbackManifest
+        Assert-Equal @('Python\Lib\site.py') @($written.files | ForEach-Object relative_path) 'the new runtime-manifest.json lists exactly the file left'
+        Assert-True ($written.schema_version -eq 1 -and $written.product -eq $productName -and $written.file_count -eq 1) 'it is a manifest the uninstaller accepts (schema, product, count)'
+        Assert-Equal (Get-Sha256 (Join-Path $installRoot 'Python\Lib\site.py')) $written.files[0].sha256 'it carries the file hash'
+        $held.Dispose()
+        Assert-True ($null -eq (Remove-InstalledRuntime -Root $installRoot)) 'that folder is removed once the file is closed'
+
+        # --- a file left that runtime-manifest.json does not list: the list is written again ---
+        New-RollbackFixture
+        Write-Text -Path (Join-Path $installRoot 'Python\added-later.txt') -Text 'written after the list of files'
+        $held = Lock-FixtureFile (Join-Path $installRoot 'Python\added-later.txt')
+        Assert-Equal $installRoot (Remove-InstalledRuntime -Root $installRoot -Attempts 2) 'an unlisted file still open leaves the program folder'
+        Assert-Equal @('Python\added-later.txt') @((Read-RollbackManifest).files | ForEach-Object relative_path) 'runtime-manifest.json is written again to list it'
+        $held.Dispose()
+        Assert-True ($null -eq (Remove-InstalledRuntime -Root $installRoot)) 'that folder is removed once the file is closed'
+
+        # --- only the folder itself is in use, as some process's working directory ---
+        New-RollbackFixture
+        $inside = Start-FixtureProgram -Path $pingProgram -WorkingDirectory $installRoot
+        Assert-Equal $installRoot (Remove-InstalledRuntime -Root $installRoot -Attempts 2) 'a program folder that is still a working directory is reported as left'
+        Assert-Equal @('runtime-manifest.json') (Get-FixtureFiles) 'only a runtime-manifest.json is left in it'
+        $written = Read-RollbackManifest
+        Assert-True ($written.schema_version -eq 1 -and $written.product -eq $productName -and $written.file_count -eq 0 -and @($written.files).Count -eq 0) 'the empty folder still has a list of files, with no file in it'
+        $inside.Kill()
+        Assert-True ($inside.WaitForExit(5000)) 'the fixture working directory is released'
+        Assert-True ($null -eq (Remove-InstalledRuntime -Root $installRoot)) 'then the empty folder is removed'
+
+        # --- a reparse point is neither followed nor removed ---
+        New-RollbackFixture
+        $manifestBefore = [IO.File]::ReadAllText($rollbackManifest)
+        $outside = Join-Path $rollbackBase 'Outside'
+        Write-Text -Path (Join-Path $outside 'precious.txt') -Text 'outside the program folder'
+        $link = Join-Path $installRoot 'Python\Linked'
+        New-Junction -Link $link -Target $outside
+        Assert-Equal $installRoot (Remove-InstalledRuntime -Root $installRoot -Attempts 1) 'a program folder with a junction in it is reported as left'
+        Assert-True (Test-Path -LiteralPath (Join-Path $outside 'precious.txt') -PathType Leaf) 'nothing behind the junction is removed'
+        Assert-True (Test-Path -LiteralPath $link) 'the junction itself is left for the uninstaller to refuse'
+        Assert-Equal $manifestBefore ([IO.File]::ReadAllText($rollbackManifest)) 'runtime-manifest.json is not rewritten to vouch for a junction'
+        Remove-Junction $link
+        Assert-True ($null -eq (Remove-InstalledRuntime -Root $installRoot)) 'without the junction the program folder is removed'
+
+        # --- only the program folder itself is ever removed ---
+        $elsewhere = Join-Path $rollbackBase 'Elsewhere\ResticBackuper'
+        Write-Text -Path (Join-Path $elsewhere 'keep.txt') -Text 'not the program folder'
+        Assert-Equal $elsewhere (Remove-InstalledRuntime -Root $elsewhere) 'another folder is reported as left'
+        Assert-True (Test-Path -LiteralPath (Join-Path $elsewhere 'keep.txt') -PathType Leaf) 'and nothing in it is removed'
+        Assert-True ($null -eq (Remove-InstalledRuntime -Root $installRoot)) 'a program folder that is already gone counts as removed'
+    }
+    finally {
+        foreach ($stream in $script:heldFiles) { $stream.Dispose() }
+        foreach ($process in $script:fixtureProcesses) {
+            if (-not $process.HasExited) { $process.Kill(); [void]$process.WaitForExit(5000) }
+        }
+        Pop-Location
+        [Environment]::CurrentDirectory = $savedDirectory
+    }
+
+    # --- the progress feed says Setup undid its changes only when the program folder is gone ---
+    $installPhaseTitles = $null
+    $installPhaseFailures = $null
+    foreach ($table in @('installPhaseTitles', 'installPhaseFailures')) {
+        $tableText = [regex]::Match($installerText, '(?s)\$' + $table + ' = @\{.*?\n\}')
+        Assert-True $tableText.Success "the installer's $table table is found"
+        . ([scriptblock]::Create($tableText.Value))
+    }
+    function Get-RecoveryKeyFacts { return [ordered]@{ path = $null; readable = $null } }
+    $script:installWarnings = [Collections.Generic.List[object]]::new()
+    $lateFailure = $(try { throw 'Updating the recovery key failed with exit code 1.' } catch { $_ })
+    $rollbackMessages = @{}
+    foreach ($case in @('gone', 'left')) {
+        $script:FeedResultWritten = $false
+        $rollbackFeed = Join-Path $feedDirectory "rollback-$case.jsonl"
+        Open-ProgressFeed -Path $rollbackFeed -ExpectedSid $currentSid
+        Write-FeedPhase -Phase 'verification' -State 'started' -Title $installPhaseTitles['verification']
+        Write-InstallFailure -ErrorRecord $lateFailure -RolledBack $true -Leftover $(if ($case -eq 'left') { $installRoot } else { $null })
+        Close-ProgressFeed
+        $rollbackLines = @([IO.File]::ReadAllLines($rollbackFeed) | ForEach-Object { $_ | ConvertFrom-Json })
+        Assert-Equal @('phase', 'phase', 'result') @($rollbackLines | ForEach-Object type) "$case : the feed ends with the failed phase and the result"
+        Assert-Equal $rollbackLines[2].error.message $rollbackLines[1].detail "$case : the failed phase says the same as the result"
+        Assert-Equal 'verification_failed' $rollbackLines[2].error.code "$case : the code is the failed phase's"
+        $rollbackMessages[$case] = [string]$rollbackLines[2].error.message
+    }
+    Assert-True ($rollbackMessages['gone'].EndsWith(' Setup undid its changes. Backups and the recovery key it had already created were kept.')) "with the program folder gone Setup says it undid its changes (got: $($rollbackMessages['gone']))"
+    $leftMessage = $rollbackMessages['left']
+    Assert-True (-not $leftMessage.Contains('Setup undid its changes.')) "with program files left Setup does not say it undid all its changes (got: $leftMessage)"
+    foreach ($text in @("some of Rewindle's program files could not be removed", 'Restart your PC', 'run Setup again', 'Reinstall or repair', 'were kept.')) {
+        Assert-True $leftMessage.Contains($text) "with program files left the message says '$text' (got: $leftMessage)"
+    }
+    foreach ($word in @('restic', 'repository', 'snapshot', 'engine')) {
+        Assert-True (-not $leftMessage.ToLowerInvariant().Contains($word)) "the message for program files left uses plain words (found '$word')"
+    }
+
     $summary = [pscustomobject]@{
         ok = $true
         tests = $script:assertions
@@ -1290,6 +1692,8 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
         progress_feed = 'passed'
         native_calls_compile_nothing = 'passed'
         downloaded_program_held = 'passed'
+        kept_repository = 'passed'
+        rollback = 'passed'
     }
 }
 catch {

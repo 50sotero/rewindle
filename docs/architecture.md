@@ -589,7 +589,10 @@ section 9, and [`SECURITY.md`](../SECURITY.md).
   the backup is left running and the dashboard reports that fact instead of
   silently hard-killing it.
 - Installer rollback removes newly created application objects while
-  preserving repository and recovery data.
+  preserving repository and recovery data. It stops the dashboard and task
+  launcher it started first, removes `runtime-manifest.json` last and checks
+  that the program folder is gone; whatever is still in use stays listed in
+  the manifest, so the uninstaller can remove it after a restart.
 - Restore operations reject overlapping or non-empty targets and targets inside
   Windows, Program Files or ProgramData, hold the target open while Restic
   writes into an administrator-only folder inside it, and never need to modify

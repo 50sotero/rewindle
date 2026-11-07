@@ -110,10 +110,26 @@ export function inputsOf(choices: Choices, plan: InstallPlan | null): PlanInputs
 
 /**
  * The folder a drive card stands for: "<drive>\Rewindle\Backups". (The installer's own suggestion, ResticBackups\Personal, is only
- * used to pick the drive; a reinstall goes back to the folder the removed copy kept, see initialChoices.)
+ * used to pick the drive; a reinstall goes back to the folder an earlier copy kept its backups in, see keptPlace.)
  */
 export function defaultRepositoryFor(root: string, _plan: InstallPlan | null): string {
   return joinPath(root, DEFAULT_FOLDER_NAME);
+}
+
+export type LocationChoice = Pick<Choices, 'storageMode' | 'driveRoot' | 'repository' | 'customRepository'>;
+
+/**
+ * Where the backups an earlier copy kept can be carried on with on this PC now, or null when the drive that holds them isn't
+ * here. Backups in Google Drive for desktop sit on a drive that is never an eligible local volume (DriveFS reports FAT32), so
+ * they are recognized by the My Drive folder instead, as browseRepository does.
+ */
+export function keptPlace(plan: InstallPlan, kept: string): LocationChoice | null {
+  const myDrive = plan.environment.drivefs.detected ? plan.environment.drivefs.myDriveRoot : null;
+  if (myDrive && isWithin(kept, myDrive) && !samePath(kept, myDrive)) {
+    return { storageMode: 'google_drivefs_stream', driveRoot: '', repository: kept, customRepository: true };
+  }
+  const drive = plan.environment.volumes.find(volume => volume.eligible && samePath(volume.root, driveRoot(kept)));
+  return drive ? { storageMode: 'local_ntfs', driveRoot: drive.root, repository: kept, customRepository: true } : null;
 }
 
 function initialDrive(plan: InstallPlan): PlanVolume | undefined {
@@ -135,36 +151,13 @@ function initialChoices(plan: InstallPlan, preferredRepository?: string): Choice
   for (const path of defaults) {
     if (!folders.some(folder => samePath(folder.path, path))) folders.push({ path, key: null, exists: true, custom: true, selected: true });
   }
-  // A reinstall carries on with the backups the removed copy kept, when the drive that holds them is there. Backups in Google
-  // Drive for desktop sit on a drive that is never an eligible local volume (DriveFS reports FAT32), so they are recognized by
-  // the My Drive folder instead, as browseRepository does.
-  const myDrive = plan.environment.drivefs.detected ? plan.environment.drivefs.myDriveRoot : null;
-  const keptInDriveFs = !!(preferredRepository && myDrive && isWithin(preferredRepository, myDrive) && !samePath(preferredRepository, myDrive));
-  if (preferredRepository && keptInDriveFs) {
-    return {
-      folders: folders.slice(0, MAX_SOURCES),
-      storageMode: 'google_drivefs_stream',
-      driveRoot: '',
-      repository: preferredRepository,
-      customRepository: true,
-      schedule: plan.defaults.schedule,
-      vss: true,
-      startBackup: true,
-    };
-  }
-  const keptDrive = preferredRepository ? plan.environment.volumes.find(volume => volume.eligible && samePath(volume.root, driveRoot(preferredRepository))) : undefined;
-  const drive = keptDrive ?? initialDrive(plan);
-  const repository = keptDrive && preferredRepository ? preferredRepository : drive ? defaultRepositoryFor(drive.root, plan) : '';
-  return {
-    folders: folders.slice(0, MAX_SOURCES),
-    storageMode: 'local_ntfs',
-    driveRoot: drive?.root ?? '',
-    repository,
-    customRepository: !!(keptDrive && preferredRepository),
-    schedule: plan.defaults.schedule,
-    vss: true,
-    startBackup: true,
+  // A reinstall carries on with the backups an earlier copy kept, when the drive that holds them is there.
+  const keptLocation = preferredRepository ? keptPlace(plan, preferredRepository) : null;
+  const drive = initialDrive(plan);
+  const location: LocationChoice = keptLocation ?? {
+    storageMode: 'local_ntfs', driveRoot: drive?.root ?? '', repository: drive ? defaultRepositoryFor(drive.root, plan) : '', customRepository: false,
   };
+  return { folders: folders.slice(0, MAX_SOURCES), ...location, schedule: plan.defaults.schedule, vss: true, startBackup: true };
 }
 
 function firstScreen(plan: InstallPlan): Screen {
@@ -232,7 +225,9 @@ export function useWizard() {
   // A message for one page: what went wrong with something the person just did there (or why the install did not start).
   const [notice, setNotice] = useState<Notice | null>(null);
   const [maintenance, setMaintenance] = useState(false);
-  // Where the copy removed by a reinstall kept its backups (null on a first install), so Location can say when that drive is not there.
+  // Where an earlier copy kept its backups (null on a first install): the folder the removal half of a reinstall reported, or else
+  // the one the installer found in the state an uninstall keeps. Location says when that drive is not there, or when another
+  // place is chosen.
   const [keptRepository, setKeptRepository] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshNote, setRefreshNote] = useState<string | null>(null);
@@ -374,7 +369,10 @@ export function useWizard() {
       setTheme(current => current ?? { dark: info.dark, highContrast: info.highContrast, reducedMotion: info.reducedMotion });
       const plan = parsePlan(await bridge.request('getPlan', { inputs: {} }));
       setBase(plan);
-      const initial = initialChoices(plan, preferredRepository);
+      // The removal this session ran read the folder from the installed configuration, so it comes first; a Setup started after a
+      // separate uninstall (or closed between the two halves of a reinstall) has only what the installer found in the kept state.
+      const kept = preferredRepository ?? plan.environment.existingInstall.keptRepository ?? undefined;
+      const initial = initialChoices(plan, kept);
       // A new run (after the removal half of a reinstall, say) measures every folder again: what was measured before may be
       // out of date, for example files OneDrive has since made online-only.
       for (const request of activeMeasures.current) void bridge.request('cancelMeasure', { request }).catch(() => undefined);
@@ -383,7 +381,7 @@ export function useWizard() {
       measured.current.clear();
       setSizes({});
       setChoices(initial);
-      setKeptRepository(preferredRepository ?? null);
+      setKeptRepository(kept ?? null);
       setValidation({ plan, checking: false, error: null });
       setScreen(firstScreen(plan));
       setMaintenance(!!plan.environment.existingInstall.rewindle);
@@ -516,6 +514,11 @@ export function useWizard() {
         setRefreshNote(messageOf(error));
       } finally { setRefreshing(false); }
     },
+    /** Goes back to the folder that holds the earlier backups, when its drive is here. */
+    chooseKeptRepository: () => update(current => {
+      const place = base && keptRepository ? keptPlace(base, keptRepository) : null;
+      return place ? { ...current, ...place } : current;
+    }),
     chooseDriveFs: () => update(current => {
       const myDrive = base?.environment.drivefs.myDriveRoot;
       if (!myDrive) return current;
@@ -556,7 +559,7 @@ export function useWizard() {
     setVss: (vss: boolean) => update(current => ({ ...current, vss })),
     setStartBackup: (startBackup: boolean) => update(current => ({ ...current, startBackup })),
     dismissNotice: () => setNotice(null),
-  }), [base, choices, forgetMeasurement, measure, setScreen, start, update]);
+  }), [base, choices, forgetMeasurement, keptRepository, measure, setScreen, start, update]);
 
   const runOperation = useCallback(async (kind: Operation, options: { reinstall?: boolean } = {}) => {
     if (!choices) return;

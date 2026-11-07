@@ -21,6 +21,8 @@ CI = PROJECT / ".github" / "workflows" / "ci.yml"
 CONTRACT_TEST = PROJECT / "tests" / "Test-InstallerContract.ps1"
 
 REGION = re.compile(r"# region progress-feed.*?# endregion progress-feed", re.S)
+OWNED_PROCESSES = re.compile(r"# region owned-processes.*?# endregion owned-processes", re.S)
+MAINTENANCE = PROJECT / "src" / "dashboard" / "web" / "src" / "setup" / "screens" / "Maintenance.tsx"
 
 
 def read(path: Path) -> str:
@@ -156,7 +158,10 @@ class PlanModeCannotChangeTheMachineTests(unittest.TestCase):
         cls.reachable = reachable
 
     def test_the_graph_is_not_trivially_small(self) -> None:
-        for name in ("Resolve-RepositorySelection", "Resolve-SourceSelection", "Assert-RepositoryTarget", "Get-PlanVolumes", "Write-PlanDocument"):
+        for name in (
+            "Resolve-RepositorySelection", "Resolve-SourceSelection", "Assert-RepositoryTarget", "Get-PlanVolumes", "Write-PlanDocument",
+            "Get-KeptRepository",
+        ):
             self.assertIn(name, self.reachable)
 
     def test_no_install_only_function_is_reachable(self) -> None:
@@ -258,6 +263,7 @@ class ContractMatchesTheScriptsTests(unittest.TestCase):
              "eligible", "ineligible_reason", "ineligible_message", "recommended"],
             list(plan["environment"]["volumes"][0]),
         )
+        self.assertEqual(["rewindle", "legacy_personal_edition", "kept_repository"], list(plan["environment"]["existing_install"]))
         phase, result = documents[1], documents[2]
         self.assertEqual(["schema", "seq", "time", "type", "phase", "state", "title", "detail"], list(phase))
         self.assertEqual(
@@ -297,6 +303,35 @@ class ContractMatchesTheScriptsTests(unittest.TestCase):
             self.assertIn(text, self.installer)
         for text in ("app components were removed.", "Preserved backup state:", "Uninstall cancelled before any changes were made."):
             self.assertIn(text, self.uninstaller)
+
+    def test_the_kept_backup_location_is_reported_and_never_a_finding(self) -> None:
+        # A reinstall after a separate uninstall is told where the earlier backups are, from the state folder the uninstall kept.
+        defined = functions(self.installer)
+        plan = defined["Invoke-PlanMode"]
+        self.assertIn("$keptRepository = Get-KeptRepository\n", plan)
+        self.assertNotRegex(plan, r"Get-PlanEnvironmentPart[^\n]*Get-KeptRepository")
+        existing = re.search(r"existing_install = \[ordered\]@\{\n(.*?)\n\s+\}", plan, re.S).group(1)
+        self.assertEqual(["rewindle", "legacy_personal_edition", "kept_repository"], re.findall(r"^\s+(\w+) = ", existing, re.M))
+        reader = defined["Get-KeptRepository"]
+        # It reads the three records, needs the stored password, never throws and never raises a finding.
+        for name in ("'repository.json'", "'last-success.json'", "'status.json'", "$secretFile"):
+            self.assertIn(name, reader)
+        # A completed move of the backup location rewrites repository.json and stamps relocated_utc, which counts too.
+        self.assertIn("@('repository.json', @('initialized_utc', 'updated_utc', 'relocated_utc'))", reader)
+        self.assertIn("-Name 'relocated_utc'", read(PROJECT / "src" / "Manage-Repository.ps1"))
+        self.assertTrue(reader.lstrip().startswith("try {"))
+        for finding in ("Stop-InstallValidation", "New-InstallFinding", "Add-PlanFinding", "throw"):
+            self.assertNotIn(finding, reader)
+        self.assertIn("`environment.existing_install.kept_repository`", self.contract)
+        self.assertIn("**A reinstall.**", self.contract.split("## 6. Notes for the wizard", 1)[1])
+
+    def test_the_console_suggests_the_kept_backup_location(self) -> None:
+        prompt = functions(self.installer)["Get-RepositoryInput"]
+        unattended = prompt.index("if ($Unattended)")
+        self.assertLess(prompt.index("if ($PlanOnly)"), prompt.index("Get-KeptRepository"))
+        self.assertLess(unattended, prompt.index("Get-KeptRepository"))
+        self.assertLess(prompt.index("Get-KeptRepository"), prompt.index("Get-DefaultRepository"))
+        self.assertLess(prompt.index("Get-KeptRepository"), prompt.index("Read-Host"))
 
     def test_the_wizard_facing_deviations_are_written_down(self) -> None:
         section = self.contract.split("## 7. Deviations and additions", 1)[1]
@@ -420,6 +455,16 @@ class StateFolderOwnerTests(unittest.TestCase):
         statements = [line.strip() for line in body.splitlines() if line.strip() and not line.strip().startswith("#")]
         self.assertEqual("Assert-StateFolderOwner", statements[0])
 
+    def test_the_kept_backup_location_is_read_only_from_a_folder_they_own(self) -> None:
+        # Get-KeptRepository reads a reinstall's suggested backup location from the same folder. It never raises a finding, so
+        # it checks the folder itself, and an owner it can't read counts as one Administrators and SYSTEM don't have.
+        reader = self.defined["Get-KeptRepository"]
+        owner = reader.index("if (-not (Test-TrustedStateOwner -OwnerSid (Get-FeedOwnerSid -Path $stateRoot))) { return $null }")
+        self.assertLess(reader.index("[IO.FileAttributes]::ReparsePoint) { return $null }"), owner)
+        for later in ("Test-Path -LiteralPath $secretFile", "Join-Path $stateRoot $record[0]", "ReadAllText"):
+            with self.subTest(later=later):
+                self.assertLess(owner, reader.index(later))
+
     def test_plan_mode_reports_it_whatever_backup_location_is_chosen(self) -> None:
         plan = self.defined["Invoke-PlanMode"]
         stage = plan.index("[void](Invoke-PlanStage { Assert-StateFolderOwner })")
@@ -443,6 +488,83 @@ class StateFolderOwnerTests(unittest.TestCase):
         self.assertIn("$acl.SetOwner($administrators)", security)
         self.assertIn("$acl.SetAccessRuleProtection($true, $false)", security)
         self.assertIn("New-ProtectedDirectorySecurity -UserSid $UserSid", self.defined["Set-ProtectedDirectory"])
+
+
+class FailedInstallRollbackTests(unittest.TestCase):
+    """A late failure stops what the install started before it removes the program folder, removes runtime-manifest.json last,
+    and says Setup undid its changes only when the folder is gone. Test-InstallPlan.ps1 runs the helpers themselves."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.installer = read(INSTALLER)
+        cls.defined = functions(cls.installer)
+        main = cls.installer.split("$preflightSucceeded = $false", 1)[1]
+        cls.rollback = main.rsplit("\ncatch {\n", 1)[1].split("\nfinally {\n", 1)[0]
+
+    def test_the_owned_processes_region_is_identical_in_both_scripts(self) -> None:
+        installer = OWNED_PROCESSES.search(self.installer)
+        uninstaller = OWNED_PROCESSES.search(read(UNINSTALLER))
+        self.assertIsNotNone(installer)
+        self.assertIsNotNone(uninstaller)
+        self.assertEqual(installer.group(0), uninstaller.group(0), "re-copy the region between the two scripts")
+        self.assertIn("function Stop-OwnedProcesses {", installer.group(0))
+
+    def test_the_rollback_helpers_are_install_only(self) -> None:
+        marker = self.installer.index("if ($PlanOnly) {\n    try {")
+        for name in ("Stop-OwnedProcesses", "Stop-InstalledPrograms", "Remove-RuntimeContent", "Remove-InstalledRuntime"):
+            self.assertGreater(self.installer.index(f"function {name} "), marker, f"{name} is defined after plan mode exits")
+
+    def test_the_started_programs_are_stopped_while_their_tasks_are_still_registered(self) -> None:
+        stop = self.rollback.index("Stop-InstalledPrograms -TaskName $startedTasks")
+        for later in (
+            "Unregister-ScheduledTask -TaskName $dashboardTaskName",
+            "Unregister-ScheduledTask -TaskName $backupTaskName",
+            "Remove-InstalledRuntime -Root $installRoot",
+        ):
+            self.assertLess(stop, self.rollback.index(later), later)
+        for task in ("$startedTasks += $dashboardTaskName", "$startedTasks += $backupTaskName"):
+            self.assertLess(self.rollback.index(task), stop)
+        body = self.defined["Stop-InstalledPrograms"]
+        self.assertIn("'ResticBackuperDashboard', 'ResticBackuperTaskLauncher'", body)
+        # Through Task Scheduler first, waiting until the task stops, and only then the processes; and it never throws.
+        self.assertLess(body.index("Stop-ScheduledTask"), body.index("Start-Sleep"))
+        self.assertLess(body.index("Start-Sleep"), body.index("Stop-OwnedProcesses"))
+        self.assertNotIn("throw", body)
+
+    def test_the_program_folder_is_removed_with_runtime_manifest_last_and_checked(self) -> None:
+        # No more Remove-Item -Recurse -ErrorAction SilentlyContinue of the program folder, which deleted the manifest and
+        # left the files in use without saying so.
+        self.assertNotRegex(self.rollback, r"Remove-Item[^\n]*(\$installRoot|\$resolved)")
+        self.assertIn("$leftover = Remove-InstalledRuntime -Root $installRoot", self.rollback)
+        self.assertIn("Write-InstallFailure -ErrorRecord $caught -RolledBack $true -Leftover $leftover", self.rollback)
+        remove = self.defined["Remove-InstalledRuntime"]
+        delete_manifest = remove.index("[IO.File]::Delete($manifestPath)")
+        self.assertLess(remove.index("Remove-RuntimeContent -Directory $resolved -Keep $manifestPath"), delete_manifest)
+        self.assertIn("if ($left.Count -eq 0) {", remove[:delete_manifest])
+        self.assertIn("Join-Path $programFilesRoot $productName", remove)
+        self.assertIn("New-RuntimeManifest -Root $resolved", remove)
+        self.assertNotIn("-Recurse", remove)
+        content = self.defined["Remove-RuntimeContent"]
+        self.assertLess(content.index("ReparsePoint"), content.index("$entry.Delete()"))
+
+    def test_the_leftover_message_names_a_choice_setup_really_offers(self) -> None:
+        failure = self.defined["Write-InstallFailure"]
+        undid = failure.index("' Setup undid its changes.")
+        self.assertIn("if ($RolledBack -and $Leftover) {", failure[:undid])
+        self.assertIn("elseif ($RolledBack) {", failure[:undid])
+        left = re.search(r'\$message \+= "( Setup undid its other changes[^"]*)"', failure).group(1)
+        for word in ("restic", "repository", "snapshot", "engine", "canary"):
+            self.assertNotIn(word, left.lower())
+        self.assertIn("Restart your PC, then run Setup again and choose Reinstall or repair", left)
+        self.assertIn("<strong>Reinstall or repair", read(MAINTENANCE))
+        section = self.contract_section()
+        for text in ("runtime-manifest.json", "stops the dashboard", "Reinstall or repair"):
+            self.assertIn(text, section)
+
+    @staticmethod
+    def contract_section() -> str:
+        section = read(CONTRACT).split("### 3.5 Failure semantics", 1)[1].split("\n### ", 1)[0]
+        return " ".join(section.split())
 
 
 class ContinuousIntegrationTests(unittest.TestCase):

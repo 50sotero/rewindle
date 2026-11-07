@@ -7,11 +7,11 @@
 
 export type ScenarioName =
   | 'fresh' | 'no-second-drive' | 'drivefs' | 'existing-install' | 'legacy-installed'
-  | 'unsupported-os' | 'plan-errors' | 'install-failure' | 'uac-declined' | 'key-unreadable' | 'goes-online-only';
+  | 'unsupported-os' | 'plan-errors' | 'install-failure' | 'uac-declined' | 'key-unreadable' | 'goes-online-only' | 'kept-backups';
 
 export const SCENARIOS: readonly ScenarioName[] = [
   'fresh', 'no-second-drive', 'drivefs', 'existing-install', 'legacy-installed',
-  'unsupported-os', 'plan-errors', 'install-failure', 'uac-declined', 'key-unreadable', 'goes-online-only',
+  'unsupported-os', 'plan-errors', 'install-failure', 'uac-declined', 'key-unreadable', 'goes-online-only', 'kept-backups',
 ];
 
 const GB = 1024 ** 3;
@@ -32,7 +32,8 @@ export interface Scenario {
   dotnet: boolean;
   volumes: SampleVolume[];
   drivefs: { detected: boolean; my_drive_root: string | null };
-  existing: { rewindle: null | { version: string; install_root: string }; legacy_personal_edition: boolean };
+  /** `kept_repository`: the backup folder an earlier installation left, as the installer reads it from the kept state. */
+  existing: { rewindle: null | { version: string; install_root: string }; legacy_personal_edition: boolean; kept_repository?: string | null };
   knownFolders: { key: string; path: string; exists: boolean; default_selected: boolean }[];
   defaultSources: string[];
   defaultRepository: string | null;
@@ -127,6 +128,9 @@ export function scenario(name: ScenarioName): Scenario {
       };
     case 'existing-install':
       return { ...base, name, existing: { rewindle: { version: '0.2.0-alpha.1', install_root: 'C:\\Program Files\\ResticBackuper' }, legacy_personal_edition: false } };
+    case 'kept-backups':
+      // Rewindle was removed from Installed apps; its backups are where the console installer suggested them, not where Setup would.
+      return { ...base, name, existing: { rewindle: null, legacy_personal_edition: false, kept_repository: 'E:\\ResticBackups\\Personal' } };
     case 'legacy-installed':
       return { ...base, name, existing: { rewindle: null, legacy_personal_edition: true } };
     case 'unsupported-os':

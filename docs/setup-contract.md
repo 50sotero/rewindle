@@ -102,7 +102,7 @@ ignored. `-ProgressPath` is refused.
     "version": "0.2.0-alpha.2",
     "os": { "caption": "Microsoft Windows 11 Pro", "build": "26100", "x64": true, "supported": true },
     "powershell": "5.1.26100.1", "dotnet_framework_48": true, "elevated": false, "webview2": "126.0.2592.87",
-    "existing_install": { "rewindle": null, "legacy_personal_edition": false },
+    "existing_install": { "rewindle": null, "legacy_personal_edition": false, "kept_repository": null },
     "volumes": [
       { "root": "D:\\", "label": "Data", "filesystem": "NTFS", "drive_type": "fixed", "size_bytes": 1000203091968,
         "free_bytes": 640000000000, "is_system": false, "same_physical_disk_as_system": false,
@@ -141,6 +141,7 @@ Property by property:
 | `environment.webview2` | string or null | Version of the Microsoft Edge WebView2 Runtime, null when missing. |
 | `environment.existing_install.rewindle` | object or null | `{ "version": string or null, "install_root": string }` when Rewindle's program folder, its entry in Installed apps, its Start menu shortcut or its backup or dashboard task exists, otherwise null. Without the program folder (no `already_installed` error) these are leftovers, which the uninstaller clears. |
 | `environment.existing_install.legacy_personal_edition` | boolean | The earlier personal edition (`ResticPersonalBackup`) is installed. An unreadable folder counts as installed. Informational: it does not block Rewindle. |
+| `environment.existing_install.kept_repository` | string or null | The repository folder of an earlier installation, from the state folder an uninstall keeps (`C:\ProgramData\ResticBackuper`): the newest of `repository.json` (written when that repository was set up, and rewritten with `relocated_utc` when a move of it completes) and `last-success.json` and `status.json` (written by every backup, so they name the repository each backup used), judged by their UTC times. Reported whether or not Rewindle is still installed. Null when there is no such record, when the state folder is a link or Administrators or SYSTEM don't own it (see `state_folder_untrusted`; an owner the plan's account can't read counts as such here), when the plan's account can't read the record (the installer gives only the installing account access), when it is malformed or names anything but a full path below a drive letter, or when the stored password (`repository-password.dpapi.json`) is gone, since setup could not carry on with that repository then. The plan reads only those files, never the repository folder, so the folder may be missing or on a drive that is not connected. Informational: never an error or a warning, and `defaults.repository` does not change. |
 | `environment.volumes[]` | array | Every drive letter Windows reports, in letter order (section 2.5). Strings are never null (`label` and `filesystem` are `""` when unknown). |
 | `environment.drivefs` | object | `detected` is true only for a running Google Drive for desktop with its streaming drive at `G:\My Drive`, which is the only arrangement the installer accepts. |
 | `environment.known_folders[]` | array | `key` in the order Desktop, Documents, Pictures, Music, Videos, Downloads, Favorites. `path` is null when Windows has none, `exists` says whether the folder is there, `default_selected` whether it is in `defaults.sources`. |
@@ -373,7 +374,7 @@ Result line, **always the last line**, written even when the install fails or is
 | Property | Meaning |
 | --- | --- |
 | `ok` | The installation is complete and verified. |
-| `error` | null, or `{ "code", "message", "detail" }`. `code` is a validation code from section 2.4, or one of the failure codes in section 3.5. `message` is a plain sentence to show; on a failure after setup changed things it ends with a sentence saying setup undid its changes and kept the repository and recovery key. `detail` is the technical text for a log. |
+| `error` | null, or `{ "code", "message", "detail" }`. `code` is a validation code from section 2.4, or one of the failure codes in section 3.5. `message` is a plain sentence to show; on a failure after setup changed things it ends with a sentence saying setup undid its changes and kept the repository and recovery key, or, when some program files could not be removed, what to do about them (section 3.5). `detail` is the technical text for a log. |
 | `install_root` | `C:\Program Files\ResticBackuper`. |
 | `recovery_key_path` | The recovery key file, or null when none exists (a failure before it was written). |
 | `recovery_key_readable_by_user` | `true` or `false` as section 5 determines it; null when there is no key or it could not be determined. |
@@ -428,6 +429,18 @@ state, task or registration (a WebView2 Runtime that was installed stays, since 
 shortcut, the entry in Installed apps and the program folder. It keeps what must never be lost: the repository, the
 recovery key, the recovery-tools folder and the ProgramData state, **if they were created**. The result line comes after
 that cleanup.
+
+The order matters, because the dashboard is started (phase `dashboard`) before the last checks. The installer first stops
+the dashboard and the backup task launcher it started, through Task Scheduler while their tasks are still registered and
+then by their exact program files in the program folder. It then removes the tasks, the shortcut and the Installed apps
+entry, and finally the program folder, with `runtime-manifest.json` last: the uninstaller removes a program folder only
+when that file lists every file in it. If something in the folder still cannot be removed (a file stays in use), the
+manifest stays, or is written for exactly what is left when the install failed before writing it or it lacks a file that
+is left; reparse points are never followed or removed. Whether the folder is gone is checked before the result is
+written. Only when the folder is gone does `error.message` end with "Setup undid
+its changes. Backups and the recovery key it had already created were kept." Otherwise it says that some program files
+could not be removed yet and tells the user to restart the PC, then run Setup again and choose **Reinstall or repair**
+(which runs the uninstaller first); the next plan reports `already_installed` until then.
 
 In addition to the validation codes of section 2.4, `result.error.code` can be:
 
@@ -536,6 +549,13 @@ saves and a printout are the supported ways to keep it.
   planned with. A plan with `ok: false` would fail the real install at the same place.
 * **A repository path.** Any new or empty folder on an eligible volume. `RecoveryTools` is created beside it, so prefer a
   folder with a parent that is not a drive root if the drive's top level should stay tidy.
+* **A reinstall.** When `environment.existing_install.kept_repository` is set, propose that folder (in Google Drive mode
+  when it is inside `environment.drivefs.my_drive_root`), even though it is not `defaults.repository`: the reinstall then
+  carries on with the backups already there (`repository_exists`). When the person chooses another folder, say before the
+  install that setup starts a new, empty repository there, which needs room for a full first backup and does not show the
+  earlier backups. An uninstall your wizard ran itself reports the folder it kept (`kept.repository`), read from the
+  installed configuration; prefer that one in the same session. The console installer suggests the same kept folder at its
+  prompt.
 * **Plan again after the user changes a choice.** A plan takes a few seconds (about three on a development machine); most of
   it is reading drives, checking signatures and hashing the payload.
 * **The progress folder.** Create `%TEMP%\RewindleSetup-<guid>\` as the unelevated user, pass
@@ -550,8 +570,9 @@ saves and a printout are the supported ways to keep it.
 
 * **Phase order**: `canary` and `permissions` are emitted at the positions in section 3.3, not at the positions of the
   request's list, for the reasons given there. The twelve ids are unchanged.
-* **Extra properties** (additive): `path` and `detail` on findings; `ineligible_message` on volumes; `schema`, `seq`, `time`
-  and `warnings` on the result line; `operation`, `removed` and `kept` on the uninstall result.
+* **Extra properties** (additive): `path` and `detail` on findings; `ineligible_message` on volumes; `kept_repository` in
+  `environment.existing_install`; `schema`, `seq`, `time` and `warnings` on the result line; `operation`, `removed` and
+  `kept` on the uninstall result.
 * **Extra plan parameters**: `-MinimumFreeGiB`, `-DriveFsCacheDirectory` and `-SkipDashboard` are accepted by `-PlanOnly`.
 * **`-Schedule`** is validated in the script body instead of by a parameter attribute, so that a plan can report it; the
   rule is the same and a real install checks it before anything else.

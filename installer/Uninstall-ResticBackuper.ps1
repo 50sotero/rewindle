@@ -689,6 +689,10 @@ function Convert-TaskPrincipalToSid {
     }
 }
 
+# region owned-processes
+# This region is byte-identical in Install-ResticBackuper.ps1 and Uninstall-ResticBackuper.ps1; tests/test_setup_contract.py keeps
+# the two copies equal. It stops the processes of one program file in the program folder, and only that exact file, so another
+# copy of the same program elsewhere (an earlier edition, a build folder) is never touched.
 function Stop-OwnedProcesses {
     param(
         [string]$ProcessName,
@@ -717,6 +721,7 @@ function Stop-OwnedProcesses {
         }
     }
 }
+# endregion owned-processes
 
 $uninstallPhaseTitles = @{
     preflight = 'Checking what is installed'

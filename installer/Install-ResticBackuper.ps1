@@ -1949,6 +1949,94 @@ function Get-RewindleInstallInfo {
     }
 }
 
+# A backup folder as an earlier installation recorded it: a full, normalized path below the root of a lettered drive. Anything
+# else in a record is not trusted as a place to suggest.
+function Test-KeptRepositoryPath {
+    param([object]$Value)
+    if ($Value -isnot [string] -or $Value.Length -lt 4 -or $Value.Length -gt 1024) { return $false }
+    if ($Value -cnotmatch '^[A-Za-z]:\\[^\\]' -or $Value -match '["*?<>|\x00-\x1f]' -or $Value.IndexOf(':', 2) -ge 0) { return $false }
+    try { $full = [IO.Path]::GetFullPath($Value) } catch { return $false }
+    # GetFullPath folds "." and ".." segments, doubled separators and trailing dots, so only a path that was already in that form
+    # comes back unchanged.
+    return ([string]::Equals($full, $Value, [StringComparison]::Ordinal) -and -not $full.EndsWith('\'))
+}
+
+# The time a record was written, from one of its ISO-8601 UTC fields. Windows PowerShell leaves those as text; a newer
+# PowerShell may already have turned them into a [datetime].
+function ConvertTo-KeptRecordTime {
+    param([object]$Value)
+    if ($Value -is [datetime]) {
+        $moment = if ($Value.Kind -eq [DateTimeKind]::Unspecified) { [datetime]::SpecifyKind($Value, [DateTimeKind]::Utc) } else { $Value }
+        return [DateTimeOffset]::new($moment.ToUniversalTime())
+    }
+    if ($Value -isnot [string] -or $Value -cnotmatch '^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,7})?(?:Z|[+-]\d\d:\d\d)$') { return $null }
+    $parsed = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse($Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$parsed)) {
+        return $null
+    }
+    return $parsed
+}
+
+# Where the backups of an earlier installation are, from the records it left in the state folder that an uninstall keeps:
+# repository.json (written when its backup location was set up, and rewritten with relocated_utc when Manage-Repository.ps1
+# completes a move of it) and last-success.json and status.json (written by every backup, so they name the place each backup
+# used). The newest record wins. Returns { repository, storage_mode }, or $null when there is no such record, when this account
+# can't read the records (only the account that installed is given access), when they are malformed, or when the stored
+# password those backups need is gone, so setup could not carry on with them. It reads those small files only, never the
+# backup folder (which may be on Google Drive), and never throws. As everywhere else (Assert-StateFolderOwner), nothing is read
+# from a state folder that is a link or that Administrators or SYSTEM don't own, since any account can create that folder;
+# here an owner that can't be read counts as one they don't own.
+function Get-KeptRepository {
+    try {
+        if (-not (Test-Path -LiteralPath $stateRoot -PathType Container)) { return $null }
+        if ((Get-Item -LiteralPath $stateRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { return $null }
+        if (-not (Test-TrustedStateOwner -OwnerSid (Get-FeedOwnerSid -Path $stateRoot))) { return $null }
+        if (-not (Test-Path -LiteralPath $secretFile -PathType Leaf)) { return $null }
+        $kept = $null
+        $keptTime = $null
+        foreach ($record in @(
+            @('repository.json', @('initialized_utc', 'updated_utc', 'relocated_utc')),
+            @('last-success.json', @('started_utc', 'finished_utc')),
+            @('status.json', @('started_utc', 'finished_utc'))
+        )) {
+            try {
+                $path = Join-Path $stateRoot $record[0]
+                if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+                if ((Get-Item -LiteralPath $path -Force).Length -gt 16MB) { continue }
+                $document = [IO.File]::ReadAllText($path, [Text.UTF8Encoding]::new($false)) | ConvertFrom-Json
+                if ($null -eq $document -or $document -isnot [Management.Automation.PSCustomObject]) { continue }
+                $properties = $document.PSObject.Properties
+                if ($null -eq $properties['schema_version'] -or $document.schema_version -ne 1) { continue }
+                if ($null -eq $properties['repository'] -or -not (Test-KeptRepositoryPath -Value $document.repository)) { continue }
+                $mode = 'local_ntfs'
+                if ($null -ne $properties['repository_storage_mode']) {
+                    $mode = $document.repository_storage_mode
+                    if ($mode -isnot [string] -or $mode -cnotin @('local_ntfs', 'google_drivefs_stream')) { continue }
+                }
+                $written = $null
+                foreach ($name in $record[1]) {
+                    if ($null -eq $properties[$name]) { continue }
+                    $time = ConvertTo-KeptRecordTime -Value $document.$name
+                    if ($null -ne $time -and ($null -eq $written -or $time -gt $written)) { $written = $time }
+                }
+                if ($null -eq $written) { continue }
+                if ($null -eq $keptTime -or $written -gt $keptTime) {
+                    $kept = [pscustomobject]@{ repository = [string]$document.repository; storage_mode = $mode }
+                    $keptTime = $written
+                }
+            }
+            catch {
+                # Unreadable for this account, being replaced, or not JSON: this record says nothing.
+                continue
+            }
+        }
+        return $kept
+    }
+    catch {
+        return $null
+    }
+}
+
 function Get-DriveFsInfo {
     $result = [ordered]@{ detected = $false; my_drive_root = $null }
     if (-not (Test-Path -LiteralPath $expectedDriveFsRoot -PathType Container)) {
@@ -2172,7 +2260,19 @@ function Get-RepositoryInput {
         Stop-InstallValidation -Code 'repository_required' -Field 'repository' `
             -Message 'Choose where your backups should be kept.' -Console '-Repository is required with -Unattended.'
     }
-    $defaultRepository = if ($RepositoryStorageMode -eq 'google_drivefs_stream') {
+    # A reinstall suggests the folder that already holds this PC's backups, so it carries on with them instead of starting a
+    # second, empty backup somewhere else.
+    $kept = Get-KeptRepository
+    $keptFits = $null -ne $kept -and $kept.storage_mode -eq $RepositoryStorageMode
+    if ($keptFits) {
+        Write-Host "Backups from an earlier installation are in $($kept.repository). Press Enter to keep using them."
+    }
+    elseif ($null -ne $kept) {
+        Write-Host "Backups from an earlier installation are in $($kept.repository). To keep using them, run setup again with -RepositoryStorageMode $($kept.storage_mode)."
+    }
+    $defaultRepository = if ($keptFits) {
+        $kept.repository
+    } elseif ($RepositoryStorageMode -eq 'google_drivefs_stream') {
         Join-Path $DriveFsMyDriveRoot $defaultRepositorySuffix
     } else {
         Get-DefaultRepository
@@ -2743,6 +2843,8 @@ function Invoke-PlanMode {
     $webView2 = Get-PlanEnvironmentPart -Name 'WebView2' -Default $null -Probe { Get-WebView2RuntimeVersion }
     $rewindleInstall = Get-PlanEnvironmentPart -Name 'existing installation' -Default $null -Probe { Get-RewindleInstallInfo }
     $legacy = Get-PlanEnvironmentPart -Name 'earlier edition' -Default $false -Probe { Test-LegacyEngineInstalled }
+    # Not a probe that can fail: a record this account can't read, or a malformed one, means "not known", with no warning.
+    $keptRepository = Get-KeptRepository
     $driveFs = Get-PlanEnvironmentPart -Name 'Google Drive' -Default ([ordered]@{ detected = $false; my_drive_root = $null }) -Probe { Get-DriveFsInfo }
     $knownFolders = @(Get-PlanEnvironmentPart -Name 'known folders' -Default @() -Probe { Get-PlanKnownFolders })
     $elevated = [bool](Get-PlanEnvironmentPart -Name 'elevation' -Default $false -Probe { Test-Administrator })
@@ -2842,6 +2944,7 @@ function Invoke-PlanMode {
             existing_install = [ordered]@{
                 rewindle = $rewindleInstall
                 legacy_personal_edition = [bool]$legacy
+                kept_repository = if ($null -ne $keptRepository) { $keptRepository.repository } else { $null }
             }
             volumes = @(
                 foreach ($entry in $volumes) {
@@ -2968,7 +3071,9 @@ function Get-RecoveryKeyFacts {
 function Write-InstallFailure {
     param(
         [Parameter(Mandatory)][Management.Automation.ErrorRecord]$ErrorRecord,
-        [bool]$RolledBack = $false
+        [bool]$RolledBack = $false,
+        # After a rollback: the program folder when Remove-InstalledRuntime could not remove all of it, otherwise empty.
+        [string]$Leftover
     )
     if ($null -eq $script:FeedStream) { return }
     $phase = $script:FeedCurrentPhase
@@ -2985,7 +3090,11 @@ function Write-InstallFailure {
         $code = 'setup_failed'
         $message = 'Setup could not finish.'
     }
-    if ($RolledBack) {
+    if ($RolledBack -and $Leftover) {
+        # The program folder is still there, so a new install refuses until it is removed; say how, in Setup's own words.
+        $message += " Setup undid its other changes, but some of Rewindle's program files could not be removed yet, usually because one of them was still in use. Restart your PC, then run Setup again and choose Reinstall or repair, which removes them first. Backups and the recovery key it had already created were kept."
+    }
+    elseif ($RolledBack) {
         $message += ' Setup undid its changes. Backups and the recovery key it had already created were kept.'
     }
     if ($phase) {
@@ -3136,6 +3245,191 @@ function Assert-InstallationVerified {
             Stop-Verification "the installed file $($entry.relative_path) is intact"
         }
     }
+}
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# Rolling back a failed install
+# ---------------------------------------------------------------------------------------------------------------------------
+# The dashboard starts from the program folder before the last checks, so a late failure finds it running, and its program file
+# and working directory keep the folder in use. The rollback stops it and the backup program first, while their tasks are still
+# registered, then removes the folder with runtime-manifest.json last. The uninstaller removes a program folder only when that
+# list names every file in it, so whatever cannot be removed yet is left in a state that Setup's Uninstall (and Reinstall or
+# repair) can remove later, instead of one that blocks every later install.
+
+# region owned-processes
+# This region is byte-identical in Install-ResticBackuper.ps1 and Uninstall-ResticBackuper.ps1; tests/test_setup_contract.py keeps
+# the two copies equal. It stops the processes of one program file in the program folder, and only that exact file, so another
+# copy of the same program elsewhere (an earlier edition, a build folder) is never touched.
+function Stop-OwnedProcesses {
+    param(
+        [string]$ProcessName,
+        [string]$ExpectedExecutable
+    )
+    $expected = Get-NormalizedPath $ExpectedExecutable
+    $stopped = @()
+    foreach ($process in Get-Process -Name $ProcessName -ErrorAction SilentlyContinue) {
+        try {
+            $actual = Get-NormalizedPath $process.MainModule.FileName
+            if ($actual -eq $expected) {
+                Stop-Process -Id $process.Id -Force -ErrorAction Stop
+                $stopped += $process
+            }
+        }
+        catch [System.ComponentModel.Win32Exception] {
+            throw "Could not verify process $($process.Id); refusing runtime removal."
+        }
+        catch [InvalidOperationException] {
+            continue
+        }
+    }
+    foreach ($process in $stopped) {
+        if (-not $process.WaitForExit(10000)) {
+            throw "Owned process did not exit; runtime is preserved: $ProcessName ($($process.Id))"
+        }
+    }
+}
+# endregion owned-processes
+
+# Stops what the install started from the program folder: the given scheduled tasks through Task Scheduler, waiting until they
+# no longer run, then every process of the given programs that runs from the program folder. It never throws: what could not be
+# stopped is reported as a warning, and its files are then the ones Remove-InstalledRuntime cannot remove.
+function Stop-InstalledPrograms {
+    param(
+        [string[]]$TaskName = @(),
+        [string[]]$ProgramName = @('ResticBackuperDashboard', 'ResticBackuperTaskLauncher')
+    )
+    $active = @('Running', 'Queued')
+    foreach ($name in $TaskName) {
+        try {
+            $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+            if ($task -and ([string]$task.State) -in $active) {
+                Stop-ScheduledTask -TaskName $name -ErrorAction Stop
+            }
+        }
+        catch {
+            Write-Warning "Could not stop the scheduled task ${name}: $($_.Exception.Message)"
+        }
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    foreach ($name in $TaskName) {
+        while ([DateTime]::UtcNow -lt $deadline) {
+            $task = $null
+            try { $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue } catch { }
+            if (-not $task -or ([string]$task.State) -notin $active) { break }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+    foreach ($name in $ProgramName) {
+        try {
+            Stop-OwnedProcesses -ProcessName $name -ExpectedExecutable (Join-Path $installRoot ($name + '.exe'))
+        }
+        catch {
+            Write-Warning "Could not stop ${name}: $($_.Exception.Message)"
+        }
+    }
+}
+
+# Removes everything in a folder of the program folder that can be removed, except the file -Keep, and returns what is left: the
+# files and folders that could not be removed, and every reparse point, which is never followed or removed.
+function Remove-RuntimeContent {
+    param(
+        [Parameter(Mandatory)][string]$Directory,
+        [Parameter(Mandatory)][string]$Keep
+    )
+    $left = [Collections.Generic.List[IO.FileSystemInfo]]::new()
+    $folder = [IO.DirectoryInfo]::new($Directory)
+    try {
+        $entries = $folder.GetFileSystemInfos()
+    }
+    catch {
+        $left.Add($folder)
+        return ,$left
+    }
+    foreach ($entry in $entries) {
+        if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            $left.Add($entry)
+        }
+        elseif ($entry -is [IO.DirectoryInfo]) {
+            $inner = Remove-RuntimeContent -Directory $entry.FullName -Keep $Keep
+            if ($inner.Count -gt 0) {
+                $left.AddRange($inner)
+            }
+            else {
+                try { $entry.Delete() } catch { $left.Add($entry) }
+            }
+        }
+        elseif (-not [string]::Equals($entry.FullName, $Keep, [StringComparison]::OrdinalIgnoreCase)) {
+            try {
+                $entry.Attributes = [IO.FileAttributes]::Normal
+                $entry.Delete()
+            }
+            catch {
+                $left.Add($entry)
+            }
+        }
+    }
+    return ,$left
+}
+
+# Removes the program folder of a failed install, runtime-manifest.json last, and checks that it is gone. Returns $null when it is,
+# otherwise the folder's path; runtime-manifest.json then lists every file left in it (it is written for them when the install
+# failed before writing it, or lacks one of them), so the uninstaller can remove the rest later. A reparse point is left alone,
+# and the uninstaller refuses it. Only the program folder itself is accepted. It never throws.
+function Remove-InstalledRuntime {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        # Each attempt after the first waits half a second: a program that was just stopped, or one it started (a web view
+        # helper), can keep a file or its working directory open a moment longer.
+        [int]$Attempts = 10
+    )
+    $resolved = [IO.Path]::GetFullPath($Root)
+    if ($resolved -ne [IO.Path]::GetFullPath((Join-Path $programFilesRoot $productName))) {
+        return $resolved
+    }
+    $manifestPath = Join-Path $resolved 'runtime-manifest.json'
+    try {
+        Set-Location -LiteralPath $systemDirectory
+        [Environment]::CurrentDirectory = $systemDirectory
+        $left = [Collections.Generic.List[IO.FileSystemInfo]]::new()
+        for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+            if (-not [IO.Directory]::Exists($resolved)) { return $null }
+            if ($attempt -gt 1) { Start-Sleep -Milliseconds 500 }
+            $left = Remove-RuntimeContent -Directory $resolved -Keep $manifestPath
+            if ($left.Count -eq 0) {
+                # Only the list of files is left. The folder can still be some process's working directory; then it stays
+                # empty, and the list is written again below.
+                if ([IO.File]::Exists($manifestPath)) { [IO.File]::Delete($manifestPath) }
+                try { [IO.Directory]::Delete($resolved) } catch { }
+            }
+        }
+        if (-not [IO.Directory]::Exists($resolved)) { return $null }
+        if (@($left | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -eq 0) {
+            $listed = $null
+            try {
+                $existing = [IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
+                if ($existing.schema_version -eq 1 -and $existing.product -eq $productName -and $existing.file_count -eq @($existing.files).Count) {
+                    $listed = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+                    foreach ($entry in @($existing.files)) { [void]$listed.Add([string]$entry.relative_path) }
+                }
+            }
+            catch {
+                $listed = $null
+            }
+            $unlisted = @(
+                $left | Where-Object { $_ -is [IO.FileInfo] } |
+                    ForEach-Object { $_.FullName.Substring($resolved.Length + 1) } |
+                    Where-Object { $_ -notin @($primaryTaskEvidenceName, $cloudTaskEvidenceName) -and ($null -eq $listed -or -not $listed.Contains($_)) }
+            )
+            if ($null -eq $listed -or $unlisted.Count -gt 0) {
+                [void](New-RuntimeManifest -Root $resolved -Version ([string]$version))
+            }
+        }
+    }
+    catch {
+        Write-Warning "Could not finish removing the program folder ${resolved}: $($_.Exception.Message)"
+    }
+    if (-not [IO.Directory]::Exists($resolved)) { return $null }
+    return $resolved
 }
 
 # Real installation: validate (the preflight phase), make sure WebView2 is present, then change the machine.
@@ -3416,6 +3710,14 @@ catch {
     if ($script:FeedCurrentPhase -eq 'credential') {
         Set-InitializationFailurePhase
     }
+    # The dashboard (started before the last checks) and the backup program run from the program folder and keep it in use,
+    # so they are stopped first, while their tasks are still registered.
+    if ($runtimeCreated) {
+        $startedTasks = @()
+        if ($dashboardTaskCreated) { $startedTasks += $dashboardTaskName }
+        if ($backupTaskCreated) { $startedTasks += $backupTaskName }
+        Stop-InstalledPrograms -TaskName $startedTasks
+    }
     if ($dashboardTaskCreated) {
         Unregister-ScheduledTask -TaskName $dashboardTaskName -Confirm:$false -ErrorAction SilentlyContinue
     }
@@ -3428,14 +3730,14 @@ catch {
     if ($registryCreated -and (Test-Path -LiteralPath $installRegistry)) {
         Remove-Item -LiteralPath $installRegistry -Recurse -Force -ErrorAction SilentlyContinue
     }
-    if ($runtimeCreated -and (Test-Path -LiteralPath $installRoot)) {
-        $resolved = [IO.Path]::GetFullPath($installRoot)
-        $expected = [IO.Path]::GetFullPath((Join-Path $programFilesRoot $productName))
-        if ($resolved -eq $expected) {
-            Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction SilentlyContinue
-        }
+    $leftover = $null
+    if ($runtimeCreated) {
+        $leftover = Remove-InstalledRuntime -Root $installRoot
     }
-    Write-InstallFailure -ErrorRecord $caught -RolledBack $true
+    Write-InstallFailure -ErrorRecord $caught -RolledBack $true -Leftover $leftover
+    if ($leftover) {
+        Write-Warning "Some program files could not be removed and are still in $leftover. Restart Windows, then remove them with Rewindle Setup (Reinstall or repair, or Uninstall) or with $(Join-Path $payloadRoot 'Uninstall-ResticBackuper.ps1')."
+    }
     Write-Error "INSTALLATION FAILED: $failure`nRepository, recovery key, recovery tools, and ProgramData state are intentionally preserved if they were created."
     exit 1
 }
