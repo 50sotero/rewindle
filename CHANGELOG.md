@@ -7,6 +7,17 @@ labels. Releases before 0.2.0 were published under the name ResticBackuper.
 
 ## [Unreleased]
 
+### Added
+
+- **Backup alerts.** When backups are overdue, paused or have failed three
+  times in a row, Rewindle shows one Windows notification for each problem and
+  marks its icon in the notification area, amber or red, until the problem is
+  put right. Protection says why a scheduled backup didn't run (the PC was off,
+  asleep or signed out, the backup drive was unplugged, or Windows couldn't
+  start it, with its error code) and what to do next, and the schedule card
+  says when Windows last started the backup. Settings > Backup plan > Backup
+  alerts turns the notifications off; the mark on the icon stays.
+
 ### Changed
 
 A pass over every page of the dashboard and Setup, so that nothing raises an

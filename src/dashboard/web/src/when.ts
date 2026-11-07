@@ -78,3 +78,15 @@ export function formatWhenAgo(iso: string | undefined | null, locale?: string, f
   if (days > 1 && days <= 14) return `${days} days ago (${formatWhen(iso, locale, fallback)})`;
   return formatWhen(iso, locale, fallback);
 }
+
+/**
+ * `formatWhenAgo` for the middle of a sentence ("Windows last started the backup on Fri, Sep 12, 2:00 AM."): the plain date it gives
+ * for a moment more than two weeks old, or still to come, gets its "on"; "today at", "yesterday at" and "3 days ago" read right as they are.
+ */
+export function formatWhenAgoInSentence(iso: string | undefined | null, locale?: string, fallback = '', now: Date = new Date()): string {
+  const date = iso ? new Date(iso) : null;
+  if (!date || Number.isNaN(date.getTime())) return fallback;
+  const days = daysBefore(date, now);
+  const words = formatWhenAgo(iso, locale, fallback, now);
+  return days >= 0 && days <= 14 ? words : `on ${words}`;
+}

@@ -152,7 +152,11 @@ the backup: <relative path>`) and ignored in a DriveFS folder. The result docume
 ## 4. Task Scheduler contract
 
 Read with `schtasks.exe /Query /TN "<backup task>" /XML` (as the user, 15 s, 256 K characters) and the
-`Schedule.Service` COM object for state, next run and last run (a last run that cannot be read is left unknown). The XML
+`Schedule.Service` COM object for state, next run, last run and the last run's result (`LastRunTime` and `LastTaskResult`,
+each read on its own and best effort: a value that cannot be read is left unknown and never fails the schedule read; a
+`LastRunTime` before 2000 means the task never ran). The backup alerts read the launcher's exit codes (64-66: the program is
+not as installed; 75: busy; 67-74 and 76-78: it could not start or watch the run) and Task Scheduler's own results from
+`LastTaskResult`, so both engines' launchers must keep these meanings. The XML
 must have exactly one `Exec` action whose command is the launcher, no arguments, working directory `<install>`; exactly
 one principal that resolves to the current user, with `InteractiveToken` and `HighestAvailable`; `URI` = `\<backup task>`;
 `IgnoreNew`, `ExecutionTimeLimit` `PT0S`, priority 7, no idle or network conditions, hard terminate and on-demand start
@@ -197,6 +201,15 @@ All under the presentation store (section 2): `settings.json` and `tray-hint-sho
 preference, the text size (`zoom.json`), `run-history.json` (schema 1, at most 400 runs), `heartbeat.json`, `crash.log` (+ `.old`), and the WebView2
 profile in `WebView2\`. With `--isolated-presentation-store` the isolated folders are used instead and history and
 heartbeat writes are off.
+
+`alerts.json` (backup alerts, beside `settings.json`): `schema_version` 1, `notify` (bool, default true), `user_paused`
+(bool, optional, default false: the schedule was turned off in the dashboard's Edit schedule, and no read since has shown it
+on; that pause is not told) and `told` (at most 8 entries of `key` `<reason>|<last verified UTC or none>` and `at_utc`;
+entries older than 30 days are dropped). At
+most 16 KiB, strict UTF-8, written atomically, never through a reparse point. A missing or damaged file gives the
+defaults; one that cannot be read just now, or that a newer version wrote, is left untouched and this run keeps its
+choices in memory. With `--isolated-presentation-store`, or a `--state-dir` other than the engine's own, it is neither
+read nor written and no notification is shown (the tray mark still is).
 
 ## 7. Known limitations (unchanged)
 

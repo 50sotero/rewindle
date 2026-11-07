@@ -344,7 +344,55 @@ namespace ResticBackuper.Dashboard
             State = state;
             NextRunTime = nextRunTime;
             LastRunTime = lastRunTime;
+            LastRunKnown = lastRunTime.HasValue;
             SemanticFingerprint = semanticFingerprint;
+        }
+
+        // The same, with what else Task Scheduler said about the last run: whether it answered at all (a time, or that the task
+        // never ran) and the result it recorded for that run.
+        internal TaskSchedule(
+            BackupScheduleCadence cadence,
+            TimeSpan timeOfDay,
+            TimeSpan? fixedUtcOffset,
+            DayOfWeek[] days,
+            bool enabled,
+            bool startWhenAvailable,
+            bool wakeToRun,
+            bool allowStartOnBatteries,
+            bool stopIfGoingOnBatteries,
+            bool allowDemandStart,
+            string taskName,
+            string userSid,
+            string command,
+            string workingDirectory,
+            BackupTaskState state,
+            DateTime? nextRunTime,
+            DateTime? lastRunTime,
+            bool lastRunKnown,
+            int? lastTaskResult,
+            string semanticFingerprint)
+            : this(
+                cadence,
+                timeOfDay,
+                fixedUtcOffset,
+                days,
+                enabled,
+                startWhenAvailable,
+                wakeToRun,
+                allowStartOnBatteries,
+                stopIfGoingOnBatteries,
+                allowDemandStart,
+                taskName,
+                userSid,
+                command,
+                workingDirectory,
+                state,
+                nextRunTime,
+                lastRunTime,
+                semanticFingerprint)
+        {
+            LastRunKnown = lastRunKnown || lastRunTime.HasValue;
+            LastTaskResult = LastRunKnown ? lastTaskResult : null;
         }
 
         public BackupScheduleCadence Cadence { get; private set; }
@@ -402,7 +450,21 @@ namespace ResticBackuper.Dashboard
         // as Task Scheduler reports it; null when it never ran or that could not be read. A task that is running has the start
         // of that run here.
         public DateTime? LastRunTime { get; private set; }
+        // Whether Task Scheduler answered for the last run: true with a LastRunTime, and true without one for a task Windows has
+        // never run; false when that could not be read. Only the backup alerts tell the two apart.
+        public bool LastRunKnown { get; private set; }
+        // The result Windows recorded for the last run (the launcher's exit code, or one of Task Scheduler's own HRESULTs), as the
+        // signed value Task Scheduler reports; null when it could not be read.
+        public int? LastTaskResult { get; private set; }
         public string SemanticFingerprint { get; private set; }
+
+        // A result as a person can quote it: "code 66" for an exit code, "error 0x800710E0" for one of Windows' own.
+        internal static string DescribeTaskResult(int value)
+        {
+            return value >= 0 && value <= 65535
+                ? "code " + value.ToString(CultureInfo.InvariantCulture)
+                : "error 0x" + unchecked((uint)value).ToString("X8", CultureInfo.InvariantCulture);
+        }
 
         public string Summary
         {
@@ -504,15 +566,29 @@ namespace ResticBackuper.Dashboard
         }
 
         public TaskScheduleRuntimeInfo(BackupTaskState state, DateTime? nextRunTime, DateTime? lastRunTime)
+            : this(state, nextRunTime, lastRunTime, lastRunTime.HasValue, null)
+        {
+        }
+
+        public TaskScheduleRuntimeInfo(
+            BackupTaskState state,
+            DateTime? nextRunTime,
+            DateTime? lastRunTime,
+            bool lastRunKnown,
+            int? lastTaskResult)
         {
             State = state;
             NextRunTime = nextRunTime;
             LastRunTime = lastRunTime;
+            LastRunKnown = lastRunKnown || lastRunTime.HasValue;
+            LastTaskResult = LastRunKnown ? lastTaskResult : null;
         }
 
         public BackupTaskState State { get; private set; }
         public DateTime? NextRunTime { get; private set; }
         public DateTime? LastRunTime { get; private set; }
+        public bool LastRunKnown { get; private set; }
+        public int? LastTaskResult { get; private set; }
 
         public static TaskScheduleRuntimeInfo Unknown
         {
@@ -818,6 +894,8 @@ namespace ResticBackuper.Dashboard
                     runtime.LastRunTime.HasValue && runtime.LastRunTime.Value.Year >= 2000
                         ? runtime.LastRunTime
                         : null,
+                    runtime.LastRunKnown,
+                    runtime.LastTaskResult,
                     TaskScheduleCanonicalizer.ComputeTaskXmlFingerprint(document));
                 return true;
             }
@@ -1121,26 +1199,11 @@ namespace ResticBackuper.Dashboard
                 BackupTaskState state = Enum.IsDefined(typeof(BackupTaskState), stateValue)
                     ? (BackupTaskState)stateValue
                     : BackupTaskState.Unknown;
-                // Only the freshness check uses the last run, to tell a missed backup Windows has yet to start from one it
-                // already tried. A failure to read it leaves it unknown and never fails the schedule read.
-                DateTime? lastRunTime = null;
-                try
-                {
-                    object lastValue = InvokeCom(task, "LastRunTime", BindingFlags.GetProperty, null);
-                    if (lastValue != null)
-                    {
-                        DateTime candidate = Convert.ToDateTime(lastValue, CultureInfo.InvariantCulture);
-                        if (candidate.Year >= 2000)
-                        {
-                            lastRunTime = candidate;
-                        }
-                    }
-                }
-                catch (Exception)
-                {
-                    lastRunTime = null;
-                }
-                runtime = new TaskScheduleRuntimeInfo(state, nextRunTime, lastRunTime);
+                DateTime? lastRunTime;
+                bool lastRunKnown;
+                int? lastTaskResult;
+                ReadLastRun(task, out lastRunTime, out lastRunKnown, out lastTaskResult);
+                runtime = new TaskScheduleRuntimeInfo(state, nextRunTime, lastRunTime, lastRunKnown, lastTaskResult);
                 return true;
             }
             catch (Exception exception)
@@ -1154,6 +1217,56 @@ namespace ResticBackuper.Dashboard
                 ReleaseCom(task);
                 ReleaseCom(folder);
                 ReleaseCom(service);
+            }
+        }
+
+        // The last run and its result. The freshness check uses the time, to tell a missed backup Windows has yet to start from one
+        // it already tried; the backup alerts use both to say why a backup did not happen. Each is read on its own, and a failure
+        // leaves only that one unknown: it never fails the schedule read. Task Scheduler reports a task that never ran as
+        // 30 Dec 1899 (some builds 1999), which is an answer (known, no time), not a run. The result is a LONG that the COM
+        // binder can hand over as an int or a uint; both become the same signed value.
+        internal static void ReadLastRun(
+            object task,
+            out DateTime? lastRunTime,
+            out bool lastRunKnown,
+            out int? lastTaskResult)
+        {
+            lastRunTime = null;
+            lastRunKnown = false;
+            lastTaskResult = null;
+            try
+            {
+                object lastValue = InvokeCom(task, "LastRunTime", BindingFlags.GetProperty, null);
+                if (lastValue != null)
+                {
+                    DateTime candidate = Convert.ToDateTime(lastValue, CultureInfo.InvariantCulture);
+                    if (candidate.Year >= 2000)
+                    {
+                        lastRunTime = candidate;
+                    }
+                    lastRunKnown = true;
+                }
+            }
+            catch (Exception)
+            {
+                lastRunTime = null;
+                lastRunKnown = false;
+            }
+            if (!lastRunKnown)
+            {
+                return;
+            }
+            try
+            {
+                object resultValue = InvokeCom(task, "LastTaskResult", BindingFlags.GetProperty, null);
+                if (resultValue != null)
+                {
+                    lastTaskResult = unchecked((int)Convert.ToInt64(resultValue, CultureInfo.InvariantCulture));
+                }
+            }
+            catch (Exception)
+            {
+                lastTaskResult = null;
             }
         }
 

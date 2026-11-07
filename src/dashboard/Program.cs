@@ -373,6 +373,9 @@ namespace ResticBackuper.Dashboard
     public sealed class AppOptions
     {
         public string StateDirectory { get; private set; }
+        // True when --state-dir named a folder other than the engine's own protected state folder (the logon task names the
+        // engine's own): this window then reports on another folder, and leaves the backup alerts to the installed dashboard.
+        public bool UsesOtherStateDirectory { get; private set; }
         public bool StartMinimized { get; private set; }
         public bool Preview { get; private set; }
         public bool Demo { get { return false; } }
@@ -401,10 +404,12 @@ namespace ResticBackuper.Dashboard
                 throw new ArgumentNullException("engine");
             }
             Engine = engine;
+            string engineStateDirectory = engine.Profile.StateDirectory();
             if (string.IsNullOrEmpty(StateDirectory))
             {
-                StateDirectory = engine.Profile.StateDirectory();
+                StateDirectory = engineStateDirectory;
             }
+            UsesOtherStateDirectory = !TaskScheduleReader.SamePath(StateDirectory, engineStateDirectory);
         }
 
         public static AppOptions Parse(string[] args)

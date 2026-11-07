@@ -249,6 +249,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .motion-choice > span { position: relative; z-index: 1; }
 .motion-choice[aria-pressed=true] { color: var(--ink); }
 .motion-highlight { position: absolute; inset: 0; background: var(--surface); border-radius: inherit; box-shadow: var(--shadow-btn), inset 0 0 0 1px var(--accent); }
+.schedule-run-note { margin-top: 6px; }
 .connection-screen { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; background: var(--page); }
 .connection-screen p { max-width: 430px; text-align: center; font-size: var(--type-sm); color: var(--ink-2); line-height: 1.7; }
 /* What replaces something that failed to draw (ErrorBoundary in App.tsx): the whole app, one page, a dialog, or a chart card.

@@ -14,7 +14,9 @@ export type CommandName = 'ready' | 'refresh' | 'navigate' | 'setTheme' | 'toggl
   | 'restoreFlowCancel' | 'restoreFlowRetry' | 'restoreFlowClose' | 'restoreFlowNavigate'
   | 'restoreFlowOpenDestination' | 'restoreFlowCopyDestination'
   // Settings > About: opens the licenses folder beside the app. The host builds the path itself; the page sends none.
-  | 'openLicensesFolder';
+  | 'openLicensesFolder'
+  // Settings > Backup alerts: notifications on or off ({ notify: 'on' | 'off' }). A per-user preference like the theme, not protected.
+  | 'setAlerts';
 /**
  * The commands that change the backup plan, the schedule, the repository or a restore, or ask the host to read them.
  * They need a live link and readable backup status, and the animation preview pauses them. Everything else (moving
@@ -223,6 +225,8 @@ export interface DashboardState {
   repository: { path: string; volume: string; volumeReady?: boolean };
   /** `CatchingUp`: a backup was missed while the PC was off, asleep or signed out, and Windows starts it by itself shortly (not a problem; an older host never sends it). */
   freshness: { title: string; detail: string; state: 'Unavailable' | 'Healthy' | 'NoVerifiedBackup' | 'Overdue' | 'Paused' | 'ClockAnomaly' | 'CatchingUp'; verifiedAt: string };
+  /** Backup alerts (the Settings switch, the tray mark, what Windows last did with the backup). Additive: an older host does not send it. */
+  alerts?: AlertsState;
   offsite: {
     title: string; detail: string; evidence: string; kind: 'NotConfigured' | 'StatusUnavailable' | 'Stale' | 'Failed' | 'InProgress' | 'LocalVerifiedProviderPending' | 'ProviderConfirmed' | 'RestoreVerified'; checkedAt: string; providerConfirmed: boolean; restoreVerified: boolean;
     /** The provider the off-site evidence comes from ("Google Drive"), only when the host's evidence names one. Absent or empty otherwise. */
@@ -241,6 +245,36 @@ export interface DashboardState {
   actions: Partial<Record<CommandName, ActionState>>;
   runDetails?: RunDetailsState | null;
   restoreFlow?: RestoreFlowState | null;
+}
+/** Why a scheduled backup did not happen, as the host's MissedRunExplainer names it; `unknown` when nothing more is known. */
+export type MissedRunKind = 'unknown' | 'driveMissing' | 'repairPending' | 'ranAndFailed' | 'cancelled' | 'busy' | 'programProblem'
+  | 'couldNotStart' | 'waitingForPower' | 'noCatchUp' | 'pcOff';
+export interface MissedRunState {
+  kind: MissedRunKind;
+  /** The moment the sentence is about (the slot, or when Windows or the backup started), ISO 8601 UTC, or empty. */
+  at: string;
+  /** The host's sentence, with 24-hour times for localClocks ("The PC was off, asleep or signed out today at 02:00, …"). */
+  text: string;
+  /** What to do when it is not the hero's own Back up now ("Plug the PC in, …"), or empty. */
+  nextStep: string;
+  /** "code 66" or "error 0x800710E0" when Windows recorded one, or empty. */
+  code: string;
+  tone: 'warning' | 'danger';
+}
+/** Backup alerts: whether Rewindle shows Windows notifications for them, what the tray mark shows, and why a scheduled backup was missed. */
+export interface AlertsState {
+  /** Whether alerts are told with a Windows notification (Settings > Backup alerts). The tray mark shows either way. */
+  notify: boolean;
+  level: 'none' | 'attention' | 'failing';
+  reason: '' | 'overdue' | 'paused' | 'failing' | 'clock' | 'schedule';
+  /** Failed backups in a row since the last verified one, as far as the run history shows (0 when none). */
+  failedRuns: number;
+  /** How many failed backups in a row turn the mark red (the host's own number). */
+  failingAfter: number;
+  /** When Windows last started the backup task (ISO UTC) and what it recorded; null when that can't be read, it never ran, or Windows waited for a sign-in. */
+  lastRun: { at: string; ok: boolean; code: string } | null;
+  /** Set while the backup is overdue; null otherwise. */
+  missedRun: MissedRunState | null;
 }
 export interface NativeCommand { type: 'command'; id: string; command: CommandName; payload?: Record<string, string | boolean> }
 /** `heartbeat` carries no state: it says the app is alive when there is nothing new to show (an unchanged state, or a hidden window). */

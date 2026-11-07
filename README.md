@@ -66,6 +66,17 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
 - A backup missed while the PC was off, asleep or signed out shows as
   **Catching up** while Windows starts it, and becomes **Backup overdue** only
   if it has not started 45 minutes after you sign in or wake the PC.
+- **Backup alerts.** When backups are overdue, paused or have failed three
+  times in a row, Rewindle shows a Windows notification, once for each problem,
+  and marks its icon in the notification area: amber while something needs
+  attention, red while backups keep failing. Selecting the notification (the
+  latest one from Rewindle) opens Protection, which says why the scheduled
+  backup didn't run (from the run history and what Task Scheduler recorded for
+  the task's last run: the PC was off, asleep or signed out, the backup drive
+  was unplugged, or Windows couldn't start it, with its code) and what to do
+  next. The schedule card says when Windows last started the backup.
+  Notifications come from the Rewindle running in the notification area, so
+  they wait until it is running.
 - Separate **Local backup**, **Off-site copy** and **Restore test** cards, each
   with its own evidence and time. With no off-site copy set up, the card is
   replaced by one quiet line: **Off-site copy · Not set up (optional)**. An
@@ -111,6 +122,8 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
 - **Change location** moves the repository: it copies to an empty folder,
   verifies the copy and then switches, keeping the old repository.
   **Edit schedule** sets daily or selected-day backups and their run conditions.
+- **Backup alerts** (under Backup plan) turns the Windows notifications on or
+  off. The mark on the icon in the notification area stays either way.
 - Under **Help and about**: **Save problem report** (a redacted support bundle) and
   **About Rewindle**: version, backup service, MIT License, **Open licenses folder** and the keyboard shortcuts.
 
@@ -196,7 +209,7 @@ engine, each step still asks separately. The protocol is in
 | Repository | The folder you choose |
 | Recovery tools (Restic, restore script, `RECOVERY.md`; no password) | `RecoveryTools` beside a local repository, or `C:\ProgramData\ResticBackuperRecoveryTools` for Google Drive mode |
 | Recovery key (plain text) | `%USERPROFILE%\ResticBackuper-RecoveryKey.txt` |
-| Dashboard settings, run history and crash log | `%LOCALAPPDATA%\ResticBackuperDashboard` |
+| Dashboard settings (including `alerts.json` for backup alerts), run history and crash log | `%LOCALAPPDATA%\ResticBackuperDashboard` |
 | Google Drive verifier assets and evidence (optional) | `C:\ProgramData\ResticBackuperCloudVerification` |
 
 See [docs/architecture.md](docs/architecture.md) for the full data flow and

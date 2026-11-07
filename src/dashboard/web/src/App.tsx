@@ -5,7 +5,7 @@ import {
   HardDrive, Clock3, LockKeyhole, Check, X, Play, Pause,
   Search, Sun, Moon, Monitor, CloudCheck, ArchiveRestore,
   Files, Gauge, Database, CircleAlert, CircleCheck, Activity, ListChecks, TriangleAlert, Info, OctagonAlert, Copy,
-  Type as TextSize, Keyboard,
+  Type as TextSize, Keyboard, Bell,
 } from 'lucide-react';
 import SidebarNav from '@/components/primitives/SidebarNav';
 import TaskRows, { type TaskRow } from '@/components/primitives/TaskRows';
@@ -25,8 +25,8 @@ import {
   attentionText, isCancelled, isProblem, isUnchanged, lastSuccessfulBackup, lastVerified, resolvedByText, resolvedRuns, resultHint, resultLabel,
   typeLabel, unresolvedRuns, usualSeconds, type Verified,
 } from './runProblems';
-import { formatClock, formatWhen, formatWhenAgo, localClocks } from './when';
-import { canOpenRunDetails, driveOf, heroConcern, heroOffersRunDetails, heroTone, verifiedTimeKnown } from './protectionTone';
+import { formatClock, formatWhen, formatWhenAgo, formatWhenAgoInSentence, localClocks } from './when';
+import { canOpenRunDetails, driveOf, heroConcern, heroOffersRunDetails, heroTone, lastStartedAt, verifiedTimeKnown } from './protectionTone';
 import { createInFlight, sendOnceAtATime } from './oneShot';
 import { PendingCommands, usePendingCommand } from './pendingCommands';
 import { effectiveFrom, presetStart, rangeMenuValue, type ActivityDateFilter, type RangePreset } from './activityRange';
@@ -396,7 +396,7 @@ function Protection({ state, send, folders, setFolders, stale, openRunDetails }:
           {s.detail && !repairDuplicate && <div className="status-detail">{s.detail}</div>}
           {/* What the colour above is about, when the host's title does not say it (see heroConcern). The container is always present, so a
               drive that is unplugged while the page is open is announced. */}
-          <div role="status">{concern && <p className={`hero-concern ${concern.tone}`}>{concern.tone === 'danger' ? <OctagonAlert size={14} aria-hidden="true" /> : <TriangleAlert size={14} aria-hidden="true" />}<span>{concern.text}</span></p>}</div>
+          <div role="status">{concern && <p className={`hero-concern ${concern.tone}`}>{concern.tone === 'danger' ? <OctagonAlert size={14} aria-hidden="true" /> : <TriangleAlert size={14} aria-hidden="true" />}<span>{localClocks(concern.text, locale)}</span></p>}</div>
           {s.active ? <div className="progress-area">
             {/* No clock of its own: the loader counts from when it mounted, which is not when the run began (open the app 20 minutes in, or
                 leave this page and come back, and it read 0s beside the host's real Elapsed). */}
@@ -437,6 +437,8 @@ function Protection({ state, send, folders, setFolders, stale, openRunDetails }:
         </div> : <>
           <div className="info-main">{state.schedule.nextRunAt ? formatWhen(state.schedule.nextRunAt, locale, state.schedule.nextRun) : state.schedule.nextRun || 'No upcoming run'}</div><div className="muted-copy">{localClocks(state.schedule.summary, locale)}</div>
           {state.schedule.clockChange && <p className="muted-copy schedule-clock-change">{state.schedule.clockChange}</p>}
+          {/* What Task Scheduler recorded, so a missed backup can be placed against it (see alerts.lastRun). */}
+          {lastStartedAt(state) && <p className="muted-copy schedule-run-note">Windows last started the backup {formatWhenAgoInSentence(lastStartedAt(state), locale)}.</p>}
         </>}
         <ScheduleNotice notice={state.schedule.notice} className="schedule-notice-slot" />
         <div className="info-action"><Action state={state} send={send} command="editSchedule" icon={<ArrowUpRight size={12} />} quiet={quiet} /></div></section>
@@ -898,6 +900,7 @@ function SettingsPage({ state, send, stale = false }: { state: DashboardState; s
           <Button size="sm" onClick={() => send('refresh')}><RefreshCw size={13} />Try again</Button>
         </div> : <><p className="muted-copy">Next: {formatWhen(state.schedule.nextRunAt, usableLocale(state.locale), state.schedule.nextRun)}</p>{state.schedule.clockChange && <p className="muted-copy schedule-clock-change">{state.schedule.clockChange}</p>}<details className="inline-details"><summary>Run conditions</summary><p className="muted-copy">{state.schedule.detail}</p></details></>}
         <ScheduleNotice notice={state.schedule.notice} className="schedule-notice-slot" /></div><div className="setting-controls"><Action state={state} send={send} command="editSchedule" quiet={quiet} /></div></section>
+      {state.alerts && <AlertsSetting alerts={state.alerts} send={send} />}
     </div><div className="settings-notes">
       <p className="muted-copy settings-note"><LockKeyhole size={12} aria-hidden="true" />Windows asks for your permission before the location or schedule changes.</p>
       {/* Closing the window sends it to the tray (the host says so once, in a balloon, and never again). */}
@@ -925,6 +928,17 @@ function SettingsPage({ state, send, stale = false }: { state: DashboardState; s
       <AboutSection state={state} send={send} />
     </div></section>
   </>;
+}
+
+// Settings > Backup plan > Backup alerts: whether Rewindle tells the person with a Windows notification when backups are overdue,
+// paused or keep failing. A per-user preference like the theme: it works during a backup, and On/Off can be pressed again safely.
+// The mark on the tray icon shows either way.
+function AlertsSetting({ alerts, send }: { alerts: NonNullable<DashboardState['alerts']>; send: Send }) {
+  const choices: { value: 'on' | 'off'; label: string; on: boolean }[] = [{ value: 'on', label: 'On', on: true }, { value: 'off', label: 'Off', on: false }];
+  return <section className="surface setting-row wide-row"><div className="setting-copy"><h3 className="info-heading"><Bell size={15} />Backup alerts</h3>
+    <p className="muted-copy">If backups are overdue, paused or fail {alerts.failingAfter} times in a row, Rewindle tells you with a Windows notification, once for each problem. Select it to open Rewindle and see what to do.</p>
+    <p className="muted-copy">The Rewindle icon in the notification area also shows a mark while something needs your attention: amber, or red when backups keep failing. The mark stays when notifications are off.</p></div>
+    <div className="setting-controls"><div className="motion-picker" role="group" aria-label="Backup alert notifications">{choices.map(choice => <button key={choice.value} className="motion-choice" aria-pressed={alerts.notify === choice.on} onClick={() => send('setAlerts', { notify: choice.value })}>{alerts.notify === choice.on && <motion.div className="motion-highlight" layoutId="alerts-thumb" transition={{ type: 'spring', stiffness: 440, damping: 34 }} />}<span>{choice.label}</span></button>)}</div></div></section>;
 }
 
 // What the keyboard does, said where a person looks for help (these used to be a tooltip on the footer's clock). The page handles the

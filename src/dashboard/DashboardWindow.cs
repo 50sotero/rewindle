@@ -373,6 +373,7 @@ namespace ResticBackuper.Dashboard
             SystemParameters.StaticPropertyChanged += OnSystemParametersChanged;
             sessionSignInUtc = ReadSessionSignInUtc();
             SystemEvents.PowerModeChanged += OnPowerModeChanged;
+            SystemEvents.SessionSwitch += OnSessionSwitch;
             // WPF raises SessionEnding only when it is about to shut the application down for a sign-out or shutdown, which
             // happens only if the session-end guard (see InstallSessionEndGuard) could not be put in place: the window must
             // then close rather than hide.
@@ -380,6 +381,7 @@ namespace ResticBackuper.Dashboard
             SourceInitialized += delegate { InstallSessionEndGuard(); };
 
             trayIcon = BuildTrayIcon();
+            InitializeBackupAlerts();
             refreshTimer = new DispatcherTimer(DispatcherPriority.Background);
             refreshTimer.Interval = TimeSpan.FromSeconds(1);
             refreshTimer.Tick += OnRefreshTick;
@@ -4006,6 +4008,7 @@ namespace ResticBackuper.Dashboard
             if (loadFailure != null)
             {
                 ShowTelemetryUnavailable(loadFailure);
+                UpdateBackupAlerts(null);
                 UpdateTrayText(null);
             }
             else
@@ -4019,6 +4022,7 @@ namespace ResticBackuper.Dashboard
                     {
                         ApplyPreview(snapshot);
                     }
+                    UpdateBackupAlerts(snapshot);
                     HandleStateTransition(snapshot);
                     UpdateTrayText(snapshot);
                 }
@@ -5982,6 +5986,7 @@ namespace ResticBackuper.Dashboard
                 SetCurrentTaskSchedule(independentRead.Schedule);
                 scheduleReadError = string.Empty;
                 SetScheduleStatus("Schedule updated and independently verified.", Green, "success");
+                NoteBackupAlertScheduleSaved(requested);
             }
             else
             {
@@ -7239,8 +7244,9 @@ namespace ResticBackuper.Dashboard
             {
                 ShowTrayMessage("Backup verified", "Your files were backed up, checked, and test-restored.", Forms.ToolTipIcon.Info);
             }
-            else if (snapshot.IsFailure)
+            else if (snapshot.IsFailure && !alertToastShownThisRefresh)
             {
+                // Not when this refresh already said "Backups keep failing" (see UpdateBackupAlerts), which includes this run.
                 ShowTrayMessage("Backup didn\u2019t finish", snapshot.StatusDetail, Forms.ToolTipIcon.Error);
             }
             lastStateKey = snapshot.StateKey;
@@ -7434,6 +7440,11 @@ namespace ResticBackuper.Dashboard
                 return prefix + "backup running " +
                     Math.Round(percent, MidpointRounding.AwayFromZero).ToString("0", CultureInfo.CurrentCulture) + "%";
             }
+            string failingStreak = DescribeFailingStreak();
+            if (failingStreak.Length > 0)
+            {
+                return prefix + failingStreak;
+            }
             if (snapshot.IsFailure)
             {
                 return prefix + "last backup didn\u2019t finish";
@@ -7441,6 +7452,11 @@ namespace ResticBackuper.Dashboard
             if (snapshot.NeedsAnomalyReview)
             {
                 return prefix + "confirm these changes";
+            }
+            string scheduleAlert = DescribeScheduleAlert();
+            if (scheduleAlert.Length > 0)
+            {
+                return prefix + scheduleAlert;
             }
             BackupFreshnessResult freshness = BackupFreshnessEvaluator.EvaluateNow(
                 currentTaskSchedule,
@@ -7502,6 +7518,8 @@ namespace ResticBackuper.Dashboard
 
         private void ShowTrayMessage(string title, string message, Forms.ToolTipIcon icon)
         {
+            // A new number for each balloon: an alert shown before this one no longer owns the click (see NewestBalloonIsAlert).
+            trayBalloonsShown = trayBalloonsShown == int.MaxValue ? 1 : trayBalloonsShown + 1;
             trayIcon.BalloonTipTitle = title;
             trayIcon.BalloonTipText = ShortenBalloonText(message);
             trayIcon.BalloonTipIcon = icon;
@@ -7703,9 +7721,11 @@ namespace ResticBackuper.Dashboard
             StopSourceOperationAnimation();
             SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
             SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+            SystemEvents.SessionSwitch -= OnSessionSwitch;
             SystemParameters.StaticPropertyChanged -= OnSystemParametersChanged;
             trayIcon.Visible = false;
             trayIcon.Dispose();
+            DisposeBackupAlerts();
             if (trayApplicationIcon != null)
             {
                 trayApplicationIcon.Dispose();

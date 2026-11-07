@@ -18,12 +18,14 @@ WHEN = WEB / "src" / "when.ts"
 RUNNER = """
 const tone = await import(process.argv[1]);
 const when = await import(process.argv[2]);
-const { states, moments, offsite } = JSON.parse(process.argv[3]);
+// The states come on stdin: with every state on the command line it would pass Windows' length limit.
+const { readFileSync } = await import('node:fs');
+const { states, moments, offsite } = JSON.parse(readFileSync(0, 'utf8'));
 // A moment is given as local wall-clock parts [year, month0, day, hour, minute], so no result depends on the machine's time zone.
 const local = parts => new Date(parts[0], parts[1], parts[2], parts[3], parts[4]);
 const report = { states: {}, moments: {} };
 for (const [name, state] of Object.entries(states)) {
-  report.states[name] = { tone: tone.heroTone(state), concern: tone.heroConcern(state) };
+  report.states[name] = { tone: tone.heroTone(state), concern: tone.heroConcern(state), lastStartedAt: tone.lastStartedAt ? tone.lastStartedAt(state) : null };
 }
 report.offsite = {};
 for (const [name, copy] of Object.entries(offsite)) {
@@ -34,6 +36,7 @@ for (const [name, moment] of Object.entries(moments)) {
   report.moments[name] = {
     ago: when.formatWhenAgo(iso, 'en-US', 'unknown', local(moment.now)),
     plain: when.formatWhen(iso, 'en-US', 'unknown'),
+    inSentence: when.formatWhenAgoInSentence ? when.formatWhenAgoInSentence(iso, 'en-US', 'unknown', local(moment.now)) : null,
   };
 }
 report.invalid = when.formatWhenAgo('not a date', 'en-US', 'unknown', local([2026, 9, 11, 18, 0]));
@@ -70,17 +73,47 @@ def state(
     setup_problem: str = "",
     data_error: str = "",
     engine: str = "rewindle",
+    alerts: dict | None = None,
+    run_id: str = "",
+    run_details: bool = False,
 ) -> dict:
+    # An older host sends no "alerts"; a state built without them is one.
+    extra: dict = {} if alerts is None else {"alerts": alerts}
+    if run_id:
+        extra["history"] = [{"id": run_id}]
     return {
-        "status": {"active": active, "success": success, "failure": failure, "cancelled": cancelled, "unavailable": unavailable},
+        **extra,
+        "status": {"active": active, "success": success, "failure": failure, "cancelled": cancelled, "unavailable": unavailable, "runId": run_id},
         "recovery": {"repairNeeded": repair_needed, "repairBusy": repair_busy, **({} if move_running is None else {"moveRunning": move_running})},
         "repository": {"path": repository, "volume": "", **({} if volume_ready is None else {"volumeReady": volume_ready})},
         "sources": [source()] if sources is None else sources,
         "freshness": {"state": freshness},
-        "actions": {"reviewChanges": {"visible": review, "enabled": True, "label": "Review changes", "help": ""}},
+        "actions": {
+            "reviewChanges": {"visible": review, "enabled": True, "label": "Review changes", "help": ""},
+            **({"viewRunDetails": {"visible": True, "enabled": True, "label": "See what happened", "help": ""}} if run_details else {}),
+        },
         "setup": {"problem": setup_problem, "engineProfile": engine},
         "dataError": data_error,
     }
+
+
+def alerts(*, level: str = "none", reason: str = "", failed: int = 0, missed: dict | None = None, last_run: dict | None = None) -> dict:
+    # The host's backup alerts (DashboardWindow.Alerts.cs BuildWebAlertsState).
+    return {"notify": True, "level": level, "reason": reason, "failedRuns": failed, "failingAfter": 3, "lastRun": last_run, "missedRun": missed}
+
+
+def missed(kind: str, text: str, next_step: str = "", *, tone: str = "warning", code: str = "") -> dict:
+    # Why the overdue backup was missed, as the host's MissedRunExplainer words it for the page (24-hour times).
+    return {"kind": kind, "at": "2026-07-21T02:00:00Z", "text": text, "nextStep": next_step, "code": code, "tone": tone}
+
+
+PC_OFF = "The PC was off, asleep or signed out today at 02:00, and Windows hasn’t run the missed backup yet."
+NO_CATCH_UP = "The PC was off, asleep or signed out today at 02:00, and the schedule waits for the next time instead of catching up."
+CATCH_UP_STEP = "To catch up by itself next time, turn on “Run when the PC is next available” in Edit schedule."
+COULD_NOT_START = "Windows tried to run the backup today at 02:00, but it stopped with error 0x800710E0."
+REPORT_STEP = "If it happens again, save a problem report in Settings."
+PROGRAM_PROBLEM = "Windows couldn’t start the backup program today at 02:00 (code 66)."
+REINSTALL_STEP = "Open Rewindle Setup and choose Reinstall or repair."
 
 
 def moment(at: tuple[int, ...], now: tuple[int, ...] = (2026, 9, 11, 18, 0)) -> dict:
@@ -133,6 +166,25 @@ class ProtectionUiTests(unittest.TestCase):
             "catching_up_review": state(freshness="CatchingUp", review=True),
             "catching_up_unplugged": state(freshness="CatchingUp", volume_ready=False),
             "catching_up_after_a_stop": state(freshness="CatchingUp", cancelled=True, success=False),
+            # Backup alerts: why the overdue backup was missed, and backups that keep failing.
+            "alert_pc_off": state(freshness="Overdue", alerts=alerts(level="attention", reason="overdue", missed=missed("pcOff", PC_OFF))),
+            "alert_no_catch_up": state(freshness="Overdue", alerts=alerts(level="attention", reason="overdue", missed=missed("noCatchUp", NO_CATCH_UP, CATCH_UP_STEP))),
+            "alert_could_not_start": state(freshness="Overdue", alerts=alerts(level="attention", reason="overdue", missed=missed("couldNotStart", COULD_NOT_START, REPORT_STEP, code="error 0x800710E0"))),
+            "alert_program_problem": state(freshness="Overdue", alerts=alerts(level="attention", reason="overdue", missed=missed("programProblem", PROGRAM_PROBLEM, REINSTALL_STEP, tone="danger", code="code 66"))),
+            "alert_ran_and_failed": state(failure=True, success=False, freshness="Overdue", alerts=alerts(level="attention", reason="overdue", missed=missed("ranAndFailed", "The backup that started today at 02:01 didn’t finish.", "Choose See what happened.", tone="danger"))),
+            "alert_unknown": state(freshness="Overdue", alerts=alerts(level="attention", reason="overdue", missed=missed("unknown", "The backup due today at 02:00 didn’t happen."))),
+            "alert_drive_missing": state(freshness="Overdue", volume_ready=False, alerts=alerts(level="attention", reason="overdue", missed=missed("driveMissing", "The backup drive (D:) isn’t connected, so the backup due today at 02:00 couldn’t run.", "Plug it back in, then choose Back up now.", tone="danger"))),
+            "alert_repair_pending": state(freshness="Overdue", alerts=alerts(level="attention", reason="overdue", missed=missed("repairPending", "Backups can’t run until the unfinished move of your backup location is repaired.", "Choose Repair interrupted move.", tone="danger"))),
+            "alert_review_and_missed": state(freshness="Overdue", review=True, alerts=alerts(level="attention", reason="overdue", missed=missed("pcOff", PC_OFF))),
+            "alert_failing_details": state(failure=True, success=False, freshness="Overdue", run_id="run-3", run_details=True, alerts=alerts(level="failing", reason="failing", failed=3)),
+            "alert_failing_no_details": state(failure=True, success=False, freshness="Overdue", run_id="run-3", alerts=alerts(level="failing", reason="failing", failed=3)),
+            "alert_failing_review": state(failure=True, success=False, freshness="Overdue", review=True, alerts=alerts(level="failing", reason="failing", failed=4)),
+            "alert_two_failures": state(failure=True, success=False, freshness="Overdue", alerts=alerts(level="attention", reason="overdue", failed=2)),
+            # A missed run the host still had from an earlier refresh says nothing once the backup is no longer overdue.
+            "alert_catching_up": state(freshness="CatchingUp", alerts=alerts(missed=missed("pcOff", PC_OFF))),
+            "alert_paused": state(freshness="Paused", alerts=alerts(level="attention", reason="paused")),
+            "alert_healthy_last_run": state(alerts=alerts(last_run={"at": "2026-07-21T02:00:05Z", "ok": True, "code": "code 0"})),
+            "alert_never_ran": state(alerts=alerts()),
         }
         offsite = {
             "waiting": {"kind": "Stale"},
@@ -159,7 +211,8 @@ class ProtectionUiTests(unittest.TestCase):
         }
         completed = subprocess.run(
             [node, "--no-warnings", "--experimental-strip-types", "--input-type=module", "-e", RUNNER,
-             TONE.as_uri(), WHEN.as_uri(), json.dumps({"states": states, "moments": moments, "offsite": offsite})],
+             TONE.as_uri(), WHEN.as_uri()],
+            input=json.dumps({"states": states, "moments": moments, "offsite": offsite}),
             capture_output=True, encoding="utf-8", timeout=60, check=False,
         )
         if completed.returncode != 0 and "ERR_UNKNOWN_FILE_EXTENSION" in completed.stderr:
@@ -271,6 +324,58 @@ class ProtectionUiTests(unittest.TestCase):
         self.assertEqual(self.tone("catching_up_unplugged"), "danger")
         self.assertEqual(self.tone("catching_up_after_a_stop"), "neutral")
 
+    def test_an_overdue_backup_says_why_it_was_missed_once_and_what_to_do(self) -> None:
+        # The hero stays red for an overdue backup; the concern is the reason, and a next step only when it isn't Back up now.
+        self.assertEqual(self.tone("alert_pc_off"), "danger")
+        self.assertEqual(self.concern("alert_pc_off"), {"tone": "warning", "text": PC_OFF})
+        self.assertEqual(self.concern("alert_no_catch_up"), {"tone": "warning", "text": f"{NO_CATCH_UP} {CATCH_UP_STEP}"})
+        self.assertEqual(self.concern("alert_could_not_start"), {"tone": "warning", "text": f"{COULD_NOT_START} {REPORT_STEP}"})
+        self.assertEqual(self.concern("alert_program_problem"), {"tone": "danger", "text": f"{PROGRAM_PROBLEM} {REINSTALL_STEP}"})
+        self.assertNotIn("Back up now", self.concern("alert_pc_off")["text"])
+        # What the page already says is not said again: the failed run has the hero's See what happened, the plain "didn't happen"
+        # is the hero's own overdue text, and the repair banner says the rest.
+        self.assertIsNone(self.concern("alert_ran_and_failed"))
+        self.assertIsNone(self.concern("alert_unknown"))
+        self.assertIsNone(self.concern("alert_repair_pending"))
+        # The drive concern above wins, worded once.
+        drive = self.concern("alert_drive_missing")["text"]
+        self.assertIn("backup drive (D:)", drive)
+        self.assertNotIn("due today", drive)
+        # The change review comes first, and the missed run is not said on top of it.
+        self.assertIn("Confirm these changes", self.concern("alert_review_and_missed")["text"])
+        # A backup Windows is catching up on, and a pause (the host's own title says it), add no alert sentence.
+        self.assertIsNone(self.concern("alert_catching_up"))
+        self.assertEqual(self.tone("alert_catching_up"), "neutral")
+        self.assertIsNone(self.concern("alert_paused"))
+        self.assertEqual(self.tone("alert_paused"), "warning")
+
+    def test_backups_that_keep_failing_are_red_and_point_to_the_details(self) -> None:
+        details = self.concern("alert_failing_details")
+        self.assertEqual(details["tone"], "danger")
+        self.assertEqual(details["text"], "The last 3 backups didn’t finish. Choose See what happened to find out why, then Back up now to try again.")
+        # Without a See what happened button on the hero, the page points to Activity instead.
+        self.assertEqual(
+            self.concern("alert_failing_no_details")["text"],
+            "The last 3 backups didn’t finish. Open Activity and choose the latest failed backup to see why, then choose Back up now to try again.",
+        )
+        self.assertEqual(self.tone("alert_failing_details"), "danger")
+        # Two failures in a row are not yet the red alert, and the change review still comes first.
+        self.assertIsNone(self.concern("alert_two_failures"))
+        self.assertIn("Confirm these changes", self.concern("alert_failing_review")["text"])
+
+    def test_the_schedule_card_says_when_windows_last_started_the_backup(self) -> None:
+        self.assertEqual(self.report["states"]["alert_healthy_last_run"]["lastStartedAt"], "2026-07-21T02:00:05Z")
+        self.assertIsNone(self.concern("alert_healthy_last_run"))
+        self.assertIsNone(self.report["states"]["alert_never_ran"]["lastStartedAt"])
+        # A state from an older host carries no alerts: nothing about them is shown, and its concerns are as before.
+        for name, entry in self.report["states"].items():
+            if name.startswith("alert_"):
+                continue
+            with self.subTest(state=name):
+                self.assertIsNone(entry["lastStartedAt"])
+        self.assertIsNone(self.concern("overdue"))
+        self.assertIsNone(self.concern("failed"))
+
     def offsite(self, name: str) -> dict:
         return self.report["offsite"][name]
 
@@ -331,6 +436,16 @@ class ProtectionUiTests(unittest.TestCase):
         moments = self.report["moments"]
         self.assertEqual(moments["three_weeks"]["ago"], moments["three_weeks"]["plain"])
         self.assertEqual(moments["tomorrow"]["ago"], moments["tomorrow"]["plain"])
+
+    def test_a_moment_in_a_sentence_puts_on_before_a_plain_date(self) -> None:
+        # "Windows last started the backup on Sun, Sep 20, 2:03 AM.", not "... the backup Sun, Sep 20, 2:03 AM."
+        moments = self.report["moments"]
+        for name in ("three_weeks", "tomorrow"):
+            with self.subTest(moment=name):
+                self.assertEqual(moments[name]["inSentence"], f"on {moments[name]['plain']}")
+        for name in ("today", "yesterday", "three_days", "two_weeks", "late_last_night"):
+            with self.subTest(moment=name):
+                self.assertEqual(moments[name]["inSentence"], moments[name]["ago"])
 
     def test_the_host_schedule_sentence_is_written_in_the_viewers_clock(self) -> None:
         clocks = self.report["clocks"]

@@ -1997,6 +1997,161 @@ namespace RewindleRegression {
         $hoverIcon.Dispose()
     }
 
+    # Backup alerts (BackupAlerts.cs, DashboardWindow.Alerts.cs) on a window that was never shown, with a hidden tray icon. The alert
+    # monitor keeps alerts.json under a fresh TEMP folder, never the per-user settings folder, and no schedule is read from Windows.
+    Add-Type -AssemblyName System.Drawing
+    $alertLevelType = $assembly.GetType('ResticBackuper.Dashboard.BackupAlertLevel', $true)
+    $alertStoreType = $assembly.GetType('ResticBackuper.Dashboard.BackupAlertStore', $true)
+    $alertMonitorType = $assembly.GetType('ResticBackuper.Dashboard.BackupAlertMonitor', $true)
+    $alertPresenceType = $assembly.GetType('ResticBackuper.Dashboard.BackupAlertPresence', $true)
+    $runViewType = $assembly.GetType('ResticBackuper.Dashboard.RunMetricView', $true)
+    $alertRoot = Join-Path ([IO.Path]::GetTempPath()) ('rewindle-alert-regressions-' + [Guid]::NewGuid().ToString('N'))
+    $alertDashboard = [Runtime.Serialization.FormatterServices]::GetUninitializedObject($dashboardType)
+    $alertIcon = New-Object System.Windows.Forms.NotifyIcon
+    $alertBaseIcon = New-Object System.Drawing.Icon ([System.Drawing.SystemIcons]::Application), 32, 32
+    try {
+        Set-PrivateField $alertDashboard 'trayIcon' $alertIcon
+        Set-PrivateField $alertDashboard 'trayApplicationIcon' $alertBaseIcon
+        $alertIcon.Icon = $alertBaseIcon
+        function Set-AlertLevel([int]$Level) { Invoke-Private $alertDashboard 'ApplyTrayBadge' @([Enum]::ToObject($alertLevelType, $Level)) | Out-Null; return $alertIcon.Icon }
+        function Get-IconPixels([System.Drawing.Icon]$Icon) {
+            $bitmap = $Icon.ToBitmap()
+            try { return @(for ($y = 0; $y -lt $bitmap.Height; $y++) { for ($x = 0; $x -lt $bitmap.Width; $x++) { $bitmap.GetPixel($x, $y).ToArgb() } }) -join ',' }
+            finally { $bitmap.Dispose() }
+        }
+        $amberIcon = Set-AlertLevel 1
+        Assert-True (-not [object]::ReferenceEquals($amberIcon, $alertBaseIcon)) 'an amber alert did not mark the tray icon'
+        Assert-True ([object]::ReferenceEquals((Set-AlertLevel 1), $amberIcon)) 'the same alert level drew the tray icon again'
+        $redIcon = Set-AlertLevel 2
+        Assert-True (-not [object]::ReferenceEquals($redIcon, $amberIcon) -and -not [object]::ReferenceEquals($redIcon, $alertBaseIcon)) 'a red alert did not change the tray icon'
+        Assert-True ((Get-IconPixels $redIcon) -ne (Get-IconPixels $amberIcon)) 'the amber and red marks look the same'
+        Assert-True ((Get-IconPixels $amberIcon) -ne (Get-IconPixels $alertBaseIcon)) 'the amber mark left the icon as it was'
+        Assert-True ([object]::ReferenceEquals((Set-AlertLevel 1), $amberIcon)) 'the amber mark was drawn a second time'
+        Assert-True ([object]::ReferenceEquals((Set-AlertLevel 0), $alertBaseIcon)) 'putting the problem right did not give back the very same app icon'
+        Invoke-Private $alertDashboard 'DisposeBackupAlerts' | Out-Null
+        Invoke-Private $alertDashboard 'DisposeBackupAlerts' | Out-Null
+
+        # Three failed backups in a row: "Backups keep failing" is told, in place of the run's own "Backup didn't finish". A fourth failure
+        # is the same problem, so only the run's own balloon follows it.
+        $alertStore = [Activator]::CreateInstance($alertStoreType, $constructorFlags, $null, @([string](Join-Path $alertRoot 'settings')), $null)
+        $alertMonitor = [Activator]::CreateInstance($alertMonitorType, $constructorFlags, $null, @($alertStore, $true), $null)
+        # Wired to the tray icon as the window wires itself (this window has no options, so the monitor it makes never tells), then
+        # given the test's monitor.
+        Invoke-Private $alertDashboard 'InitializeBackupAlerts' | Out-Null
+        Set-PrivateField $alertDashboard 'backupAlerts' $alertMonitor
+        $someoneThere = [Activator]::CreateInstance($alertPresenceType, $constructorFlags, $null, @(), $null)
+        $someoneThere.UserActive = $true
+        # One last verified backup for every refresh: a new one would be a new problem.
+        $alertVerifiedUtc = [DateTime]::UtcNow.AddDays(-5)
+        function New-AlertSnapshot([string]$StateKey, [string]$RunId, [string[]]$Failed) {
+            $next = [Activator]::CreateInstance($telemetrySnapshotType, $constructorFlags, $null, @(), $null)
+            $next.StateKey = $StateKey
+            $next.RunId = $RunId
+            $next.IsActive = $StateKey -eq 'starting'
+            $next.IsSuccess = $StateKey -eq 'success'
+            $next.IsFailure = $StateKey -eq 'failed'
+            $next.StatusDetail = 'fixture'
+            $next.LastVerifiedFinishedUtc = $alertVerifiedUtc
+            $history = New-GenericList $runViewType
+            $age = 1
+            foreach ($id in $Failed) {
+                $run = [Activator]::CreateInstance($runViewType)
+                $run.RunId = $id
+                $run.TypeKey = 'backup'
+                $run.StateKey = 'failed'
+                $run.StartedUtc = [DateTime]::UtcNow.AddHours(-$age)
+                $run.StartedLocal = $run.StartedUtc.ToLocalTime()
+                [void]$history.Add($run)
+                $age++
+            }
+            $next.History = $history
+            return $next
+        }
+        function Get-AlertRefreshTitle([object]$Snapshot) {
+            $alertIcon.BalloonTipTitle = '(none)'
+            Invoke-Private $alertDashboard 'ApplyBackupAlerts' @($Snapshot, $someoneThere) | Out-Null
+            Invoke-Private $alertDashboard 'HandleStateTransition' @($Snapshot) | Out-Null
+            return [string]$alertIcon.BalloonTipTitle
+        }
+        Get-AlertRefreshTitle (New-AlertSnapshot 'success' 'run-a' @()) | Out-Null
+        Assert-True ((Get-AlertRefreshTitle (New-AlertSnapshot 'failed' 'run-c' @('run-c', 'run-b2', 'run-b1'))) -eq 'Backups keep failing') 'a third failure in a row did not say that backups keep failing'
+        Assert-True ([bool](Invoke-Private $alertDashboard 'NewestBalloonIsAlert')) 'the failing balloon was not marked as an alert'
+        # Windows can report the balloon the alert replaced as closed after the alert is up, and reports the alert itself closed when
+        # it times out into the notification centre: neither takes the alert's click away.
+        [System.Windows.Forms.NotifyIcon].GetMethod('OnBalloonTipClosed', $constructorFlags).Invoke($alertIcon, [object[]]@()) | Out-Null
+        Assert-True ([bool](Invoke-Private $alertDashboard 'NewestBalloonIsAlert')) 'a balloon reported closed took the click away from the alert'
+        Assert-True ([bool](Invoke-Private $alertDashboard 'AlertBalloonOpensProtection' @($true))) 'selecting an alert did not open Protection'
+        Assert-True ((Invoke-Private $alertDashboard 'DescribeTrayStatus' @((New-AlertSnapshot 'failed' 'run-c' @('run-c', 'run-b2', 'run-b1')))) -eq ('Rewindle - 3 backups in a row didn' + [char]0x2019 + 't finish')) 'the tray did not say that backups keep failing'
+        $alertsState = Invoke-Private $alertDashboard 'BuildWebAlertsState'
+        foreach ($key in @('notify', 'level', 'reason', 'failedRuns', 'failingAfter', 'lastRun', 'missedRun')) {
+            Assert-True ($alertsState.ContainsKey($key)) "the page was not told alerts.$key"
+        }
+        Assert-True ($alertsState['notify'] -is [bool] -and [bool]$alertsState['notify']) 'the page was not told that alerts are on'
+        Assert-True ($alertsState['level'] -eq 'failing' -and $alertsState['reason'] -eq 'failing') 'the page was not told that backups keep failing'
+        Assert-True ($alertsState['failedRuns'] -is [int] -and $alertsState['failedRuns'] -eq 3 -and $alertsState['failingAfter'] -eq 3) 'the page was not told the failing count'
+        Assert-True ($null -eq $alertsState['lastRun'] -and $null -eq $alertsState['missedRun']) 'a schedule that was never read reached the page as a last run'
+        Assert-True ((Get-AlertRefreshTitle (New-AlertSnapshot 'starting' 'run-d' @('run-c', 'run-b2', 'run-b1'))) -eq 'Backup started') 'a backup starting during an alert was not announced'
+        Assert-True (-not [bool](Invoke-Private $alertDashboard 'NewestBalloonIsAlert')) 'a run balloon was taken for an alert'
+        Assert-True (-not [bool](Invoke-Private $alertDashboard 'AlertBalloonOpensProtection' @($false))) 'selecting a run balloon opened Protection'
+        Assert-True ((Get-AlertRefreshTitle (New-AlertSnapshot 'failed' 'run-d' @('run-d', 'run-c', 'run-b2', 'run-b1'))) -eq ('Backup didn' + [char]0x2019 + 't finish')) 'a fourth failure was told as a new alert'
+        Set-PrivateField $alertDashboard 'restoreFlowOpen' $true
+        Assert-True (-not [bool](Invoke-Private $alertDashboard 'AlertBalloonOpensProtection' @($true))) 'selecting an alert left the guided restore for Protection'
+        Set-PrivateField $alertDashboard 'restoreFlowOpen' $false
+
+        # Settings > Backup alerts takes only on or off, and Off is written to this monitor's alerts.json.
+        function Invoke-AlertCommand([object]$Value) {
+            $payload = [System.Collections.Generic.Dictionary[string,object]]::new()
+            $payload['notify'] = $Value
+            $arguments = New-Object object[] 3
+            $arguments[0] = 'setAlerts'
+            $arguments[1] = $payload.PSObject.BaseObject
+            $accepted = [bool](Invoke-Private $alertDashboard 'ExecuteWebCommand' $arguments)
+            return @($accepted, [string]$arguments[2])
+        }
+        $refused = Invoke-AlertCommand 'maybe'
+        Assert-True ((-not $refused[0]) -and $refused[1] -eq 'The requested alert setting is not valid.') ('an alert setting other than on or off was taken: ' + $refused[1])
+        $off = Invoke-AlertCommand 'off'
+        Assert-True ($off[0] -and $off[1].StartsWith('Backup alerts are off.')) ('Off was not taken: ' + $off[1])
+        $alertsFile = Join-Path $alertRoot 'settings\alerts.json'
+        Assert-True ([IO.File]::ReadAllText($alertsFile).Contains('"notify":false')) 'Off was not saved to alerts.json'
+        Assert-True (-not [bool](Invoke-Private $alertDashboard 'BuildWebAlertsState')['notify']) 'the page was not told that alerts are off'
+        Assert-True ([IO.File]::ReadAllText($alertsFile).Contains('failing|')) 'the failing alert was not remembered as told'
+        $on = Invoke-AlertCommand 'on'
+        Assert-True ($on[0] -and $on[1] -eq 'Backup alerts are on.') ('On was not taken: ' + $on[1])
+
+        # A schedule that can't be read for an hour puts up the amber mark, and the hover text says why: not "verified 5 days ago",
+        # which is all the freshness check leaves without a schedule.
+        $alertType = $assembly.GetType('ResticBackuper.Dashboard.BackupAlert', $true)
+        $alertInputsType = $assembly.GetType('ResticBackuper.Dashboard.BackupAlertInputs', $true)
+        $alertEvaluatorType = $assembly.GetType('ResticBackuper.Dashboard.BackupAlertEvaluator', $true)
+        $unreadableSchedule = [Activator]::CreateInstance($alertInputsType, $constructorFlags, $null, @(), $null)
+        $unreadableSchedule.StatusReadable = $true
+        Set-PrivateField $alertMonitor 'current' (Invoke-Static $alertEvaluatorType 'Evaluate' @($unreadableSchedule, $null, $true))
+        $settledSnapshot = New-AlertSnapshot 'success' 'run-e' @()
+        $scheduleState = Invoke-Private $alertDashboard 'BuildWebAlertsState'
+        Assert-True ($scheduleState['level'] -eq 'attention' -and $scheduleState['reason'] -eq 'schedule') 'the fixture is not the amber schedule alert'
+        $scheduleHover = [string](Invoke-Private $alertDashboard 'DescribeTrayStatus' @($settledSnapshot))
+        Assert-True ($scheduleHover -eq ('Rewindle - can' + [char]0x2019 + 't read the backup schedule')) ('the tray did not say that the schedule cannot be read: ' + $scheduleHover)
+        Set-PrivateField $alertMonitor 'current' ($alertType.GetField('Quiet', $flags).GetValue($null))
+        $quietHover = [string](Invoke-Private $alertDashboard 'DescribeTrayStatus' @($settledSnapshot))
+        Assert-True ($quietHover -eq 'Rewindle - verified 5 days ago') ('without the mark the tray did not say when the backup was verified: ' + $quietHover)
+
+        # A second dashboard (an isolated store, or another state folder) never notifies: its switch says so and changes nothing,
+        # and it does not claim that a choice could not be saved.
+        $secondStore = [Activator]::CreateInstance($alertStoreType, $constructorFlags, $null, @([string]''), $null)
+        Set-PrivateField $alertDashboard 'backupAlerts' ([Activator]::CreateInstance($alertMonitorType, $constructorFlags, $null, @($secondStore, $false), $null))
+        $second = Invoke-AlertCommand 'off'
+        Assert-True ($second[0] -and $second[1].StartsWith('This Rewindle window was started in a separate mode and doesn') -and $second[1].EndsWith('Open Rewindle the usual way to change it.')) ('a second dashboard did not say that it sends no notifications: ' + $second[1])
+        Assert-True ([bool](Invoke-Private $alertDashboard 'BuildWebAlertsState')['notify']) 'the switch of a second dashboard changed'
+        Set-PrivateField $alertDashboard 'backupAlerts' $alertMonitor
+    }
+    finally {
+        Invoke-Private $alertDashboard 'DisposeBackupAlerts' | Out-Null
+        $alertIcon.Dispose()
+        $alertBaseIcon.Dispose()
+        if (Test-Path -LiteralPath $alertRoot) { Remove-Item -LiteralPath $alertRoot -Recurse -Force }
+    }
+
     # What the page is told about the backup service. engineFound is false only once the host is sure nothing is installed, and `problem` is the
     # one fixed sentence for a configuration that is not in use (and empty while one is). The words of an exception never reach it: they can
     # name a path.
@@ -2244,6 +2399,19 @@ namespace RewindleRegression {
         try { [void](Invoke-Static $appOptionsType 'Parse' @(,[string[]]$badArguments)) } catch { $optionRefusal = $_.Exception.ToString() }
         Assert-True ($optionRefusal -match 'ArgumentException') ('bad --engine arguments were accepted: ' + ($badArguments -join ' '))
     }
+    # The logon task and the Start menu shortcut pass the engine's own state folder with --state-dir, and that dashboard tells backup
+    # alerts. Only another folder (a second dashboard reading a copy) leaves them to the installed one.
+    $engineStateFolder = [string](Invoke-Private $rewindleProfile 'StateDirectory')
+    $rewindleSelection = Select-Engine 'rewindle'
+    function Test-OtherStateFolder([string[]]$Arguments) {
+        $stateOptions = Invoke-Static $appOptionsType 'Parse' @(,[string[]]$Arguments)
+        Invoke-Private $stateOptions 'UseEngine' @($rewindleSelection) | Out-Null
+        return [bool]$stateOptions.UsesOtherStateDirectory
+    }
+    Assert-True (-not (Test-OtherStateFolder @('--minimized', '--state-dir', $engineStateFolder))) 'the logon task (the engine state folder) was taken for a second dashboard'
+    Assert-True (-not (Test-OtherStateFolder @('--state-dir', $engineStateFolder.ToUpperInvariant()))) 'the engine state folder in other letter case was taken for another folder'
+    Assert-True (-not (Test-OtherStateFolder @('--minimized'))) 'a dashboard without --state-dir was taken for a second dashboard'
+    Assert-True (Test-OtherStateFolder @('--state-dir', (Join-Path $engineFixtureRoot 'OtherStateCopy'))) 'a dashboard reading another state folder would tell backup alerts'
     $refusedRoot = ''
     try { [void]$engineProfileType.GetMethod('UseFolderRootsForTesting', $flags).Invoke($null, [object[]]@([string]$env:SystemRoot)) } catch { $refusedRoot = $_.Exception.ToString() }
     Assert-True ($refusedRoot -match 'temporary folder') 'the test folder override accepted a folder outside the temporary folder'
@@ -2728,4 +2896,4 @@ finally {
 }
 
 foreach ($note in $skipped) { Write-Output $note }
-Write-Output 'Regressions passed: snapshot scope reset, explicit whole-snapshot validation, observed-path enforcement, review invalidation, reload, retry routing, inline folder-read failures, launch guards, the restore folder looked at again before Review and Restore now and acted on only while that look is current and passes, honest cancellation, UNC/reparse/no-overwrite/overlap destination guards and their plain-language refusals, diagnostics redaction of object keys, of whole paths (either slash, any root) and of account IDs, capped run history that is not rewritten for an evicted baseline, no live samples written and the old file removed, readable run-details timelines from long and odd logs, the restore approval wait, one Windows approval per restore session (every listing and one restore, a new session only after one ended, closed with the flow and a changed plan, a declined approval, a pipe served by another process, oversized and foreign frames), no folder read on choosing a backup or restoring all of it, folder listings kept per snapshot and bounded, the session-or-per-step choice from the installed engine, the published reason a restore cannot start, Open and Copy on a restore result acting only on the folder the restore reported once it has finished, an unreadable schedule and the outcome of a schedule change, schedule summaries for every day and lenient schedule times, capped automatic web view reloads, missing-runtime detection, a configuration check that could not complete ending the read it followed, cut-short folder listings and the published path limit, history lists bound again only when a run differs, one not-responding notice per stuck web view, backup freshness across a change of the clocks and of the run times, a missed backup Windows catches up on after a sign-in or a wake, an off-site check that is overdue, the tray balloon for a backup starting once per run, the not-started note for an accepted backup request that started nothing, timers on a clock that setting the time does not move, the window hiding to the tray again after a cancelled sign-out, the bounded crash log and its redacted copy in a diagnostic bundle, the installed plan read without keeping its writer out (and still refused when cut short, not an object or too large) with an install root that follows Program Files, the backup-location window''s done/current/failed steps and refused folders, the recovery-readiness window''s explained actions, the folder picker''s cloud-only walk (bounded by entries and time, skipping excluded folders and links), OneDrive paths and wording, the free-space warning for a whole snapshot that will not fit (a warning and never an error), the history limit the page is told, the schedule, location and readiness dialogs sharing the page tokens and the schedule wording, a status that cannot be read for a moment, a missing state folder, the retired legacy cloud file, a run history that is never written over while it is unreadable, the tray hover text and first-close hint, the setup state the page is told, and diagnostics that say what they left out and read a log cut inside a character.'
+Write-Output 'Regressions passed: snapshot scope reset, explicit whole-snapshot validation, observed-path enforcement, review invalidation, reload, retry routing, inline folder-read failures, launch guards, the restore folder looked at again before Review and Restore now and acted on only while that look is current and passes, honest cancellation, UNC/reparse/no-overwrite/overlap destination guards and their plain-language refusals, diagnostics redaction of object keys, of whole paths (either slash, any root) and of account IDs, capped run history that is not rewritten for an evicted baseline, no live samples written and the old file removed, readable run-details timelines from long and odd logs, the restore approval wait, one Windows approval per restore session (every listing and one restore, a new session only after one ended, closed with the flow and a changed plan, a declined approval, a pipe served by another process, oversized and foreign frames), no folder read on choosing a backup or restoring all of it, folder listings kept per snapshot and bounded, the session-or-per-step choice from the installed engine, the published reason a restore cannot start, Open and Copy on a restore result acting only on the folder the restore reported once it has finished, an unreadable schedule and the outcome of a schedule change, schedule summaries for every day and lenient schedule times, capped automatic web view reloads, missing-runtime detection, a configuration check that could not complete ending the read it followed, cut-short folder listings and the published path limit, history lists bound again only when a run differs, one not-responding notice per stuck web view, backup freshness across a change of the clocks and of the run times, a missed backup Windows catches up on after a sign-in or a wake, an off-site check that is overdue, the tray balloon for a backup starting once per run, the not-started note for an accepted backup request that started nothing, timers on a clock that setting the time does not move, the window hiding to the tray again after a cancelled sign-out, the bounded crash log and its redacted copy in a diagnostic bundle, the installed plan read without keeping its writer out (and still refused when cut short, not an object or too large) with an install root that follows Program Files, the backup-location window''s done/current/failed steps and refused folders, the recovery-readiness window''s explained actions, the folder picker''s cloud-only walk (bounded by entries and time, skipping excluded folders and links), OneDrive paths and wording, the free-space warning for a whole snapshot that will not fit (a warning and never an error), the history limit the page is told, the schedule, location and readiness dialogs sharing the page tokens and the schedule wording, a status that cannot be read for a moment, a missing state folder, the retired legacy cloud file, a run history that is never written over while it is unreadable, the tray hover text and first-close hint, backup alerts (the tray mark, a failing streak told in place of the run balloon, the Settings switch), the setup state the page is told, and diagnostics that say what they left out and read a log cut inside a character.'

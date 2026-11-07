@@ -110,6 +110,77 @@ namespace ResticBackuper.Dashboard
                 : "none";
         }
 
+        // What else the parsed schedule carries of Task Scheduler's last run: whether it was read, and the result Windows recorded.
+        public static string ParseLastResult(
+            string xml,
+            string launcher,
+            string root,
+            string sid,
+            string lastRun,
+            bool known,
+            string result)
+        {
+            TaskSchedule schedule;
+            string error;
+            if (!TaskScheduleReader.TryParseTaskXml(
+                xml,
+                launcher,
+                root,
+                sid,
+                new TaskScheduleRuntimeInfo(
+                    BackupTaskState.Ready,
+                    null,
+                    string.IsNullOrEmpty(lastRun)
+                        ? (System.DateTime?)null
+                        : System.DateTime.Parse(lastRun, System.Globalization.CultureInfo.InvariantCulture),
+                    known,
+                    string.IsNullOrEmpty(result)
+                        ? (int?)null
+                        : unchecked((int)long.Parse(result, System.Globalization.CultureInfo.InvariantCulture))),
+                out schedule,
+                out error))
+            {
+                return "ERROR|" + error;
+            }
+            return (schedule.LastRunKnown ? "known" : "unknown") + "|" +
+                (schedule.LastRunTime.HasValue
+                    ? schedule.LastRunTime.Value.ToString("yyyy-MM-ddTHH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)
+                    : "none") + "|" +
+                (schedule.LastTaskResult.HasValue ? TaskSchedule.DescribeTaskResult(schedule.LastTaskResult.Value) : "none");
+        }
+
+        // Stand-ins for the Task Scheduler COM object: InvokeMember reads their properties the way it reads the real one's.
+        public sealed class FakeTask
+        {
+            public object LastRunTime { get; set; }
+            public object LastTaskResult { get; set; }
+        }
+
+        public sealed class TaskWithUnreadableRun
+        {
+            public object LastRunTime { get { throw new System.UnauthorizedAccessException("denied"); } }
+            public object LastTaskResult { get { return 0; } }
+        }
+
+        public sealed class TaskWithUnreadableResult
+        {
+            public object LastRunTime { get { return new System.DateTime(2026, 7, 21, 2, 0, 0); } }
+            public object LastTaskResult { get { throw new System.InvalidOperationException("gone"); } }
+        }
+
+        public static string ReadLastRun(object task)
+        {
+            System.DateTime? lastRun;
+            bool known;
+            int? result;
+            TaskScheduleReader.ReadLastRun(task, out lastRun, out known, out result);
+            return (known ? "known" : "unknown") + "|" +
+                (lastRun.HasValue
+                    ? lastRun.Value.ToString("yyyy-MM-ddTHH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)
+                    : "none") + "|" +
+                (result.HasValue ? TaskSchedule.DescribeTaskResult(result.Value) : "none");
+        }
+
         public static string Request(
             string cadence,
             string time,
@@ -220,6 +291,38 @@ Assert-Equal '2026-07-21T08:01:00' (Parse-LastRun '2026-07-21T08:01:00') 'The la
 Assert-Equal 'none' (Parse-LastRun '1899-12-30T00:00:00') 'A never-run marker from 1899 must not be a last run.'
 Assert-Equal 'none' (Parse-LastRun '1999-11-30T00:00:00') 'A never-run marker from 1999 must not be a last run.'
 Assert-Equal 'none' (Parse-LastRun '') 'An unknown last run must stay unknown.'
+
+# The backup alerts tell a task Windows never ran (known, no time) from a last run that could not be read (unknown), and use the
+# result Windows recorded. A result is never carried without a known last run.
+function Parse-LastResult { param([string]$LastRun, [bool]$Known, [string]$Result) return [ResticBackuper.Dashboard.TaskScheduleFixtureHarness]::ParseLastResult((New-Xml -Trigger $daily), $launcher, $root, $sid, $LastRun, $Known, $Result) }
+Assert-Equal 'known|2026-07-21T02:00:00|code 75' (Parse-LastResult '2026-07-21T02:00:00' $true '75') 'The last result must be carried to the schedule.'
+Assert-Equal 'known|2026-07-21T02:00:00|error 0x800710E0' (Parse-LastResult '2026-07-21T02:00:00' $true '-2147020576') 'A Task Scheduler result must be carried as its signed value.'
+Assert-Equal 'known|none|error 0x00041303' (Parse-LastResult '1899-12-30T00:00:00' $true '267011') 'A task that never ran must be known, with no time.'
+Assert-Equal 'unknown|none|none' (Parse-LastResult '' $false '0') 'A last run that could not be read must carry no result.'
+Assert-Equal 'known|2026-07-21T08:01:00|none' (Parse-LastResult '2026-07-21T08:01:00' $false '') 'A last run time on its own must count as known.'
+
+# Reading the COM object: each value on its own, and a failure leaves only that one unknown.
+$harnessType = [ResticBackuper.Dashboard.TaskScheduleFixtureHarness]
+$fake = New-Object 'ResticBackuper.Dashboard.TaskScheduleFixtureHarness+FakeTask'
+$fake.LastRunTime = [DateTime]::new(2026, 7, 21, 2, 1, 0)
+$fake.LastTaskResult = [int]0
+Assert-Equal 'known|2026-07-21T02:01:00|code 0' ($harnessType::ReadLastRun($fake)) 'A last run and its result must be read.'
+$fake.LastTaskResult = [int](-2147020576)
+$signed = $harnessType::ReadLastRun($fake)
+$fake.LastTaskResult = [uint32]2147946720
+Assert-Equal $signed ($harnessType::ReadLastRun($fake)) 'A result handed over as an int or a uint must be the same value.'
+Assert-Equal 'known|2026-07-21T02:01:00|error 0x800710E0' $signed 'A negative result must read as the error Windows recorded.'
+$fake.LastRunTime = [DateTime]::new(1899, 12, 30)
+$fake.LastTaskResult = [int]267011
+Assert-Equal 'known|none|error 0x00041303' ($harnessType::ReadLastRun($fake)) 'The never-ran marker must be a known answer with no time.'
+$fake.LastRunTime = $null
+Assert-Equal 'unknown|none|none' ($harnessType::ReadLastRun($fake)) 'A missing last run must leave the result unread.'
+Assert-Equal 'unknown|none|none' ($harnessType::ReadLastRun((New-Object 'ResticBackuper.Dashboard.TaskScheduleFixtureHarness+TaskWithUnreadableRun'))) 'A last run that throws must be unknown, not a failure.'
+Assert-Equal 'known|2026-07-21T02:00:00|none' ($harnessType::ReadLastRun((New-Object 'ResticBackuper.Dashboard.TaskScheduleFixtureHarness+TaskWithUnreadableResult'))) 'A result that throws must leave only the result unknown.'
+Assert-Equal 'unknown|none|none' ($harnessType::ReadLastRun($null)) 'No task object must be unknown.'
+$fake.LastRunTime = [DateTime]::new(2026, 7, 21, 2, 1, 0)
+$fake.LastTaskResult = [int]66
+Assert-Equal 'known|2026-07-21T02:01:00|code 66' ($harnessType::ReadLastRun($fake)) 'A program exit code must read as a code.'
 
 $defaultEnabledSettings = '<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><AllowHardTerminate>true</AllowHardTerminate><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Hidden>false</Hidden><RunOnlyIfIdle>false</RunOnlyIfIdle><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><WakeToRun>true</WakeToRun><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>7</Priority>'
 Assert-Match '^OK\|Daily\|02:05\|\|1\|' (Parse (New-Xml -Trigger $daily -Settings $defaultEnabledSettings)) 'An omitted task Enabled setting must use the Windows schema default of true.'
