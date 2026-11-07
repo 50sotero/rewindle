@@ -7513,7 +7513,8 @@ namespace ResticBackuper.Dashboard
 
         private void ShowTrayMessage(string title, string message, Forms.ToolTipIcon icon)
         {
-            trayBalloonIsAlert = false;
+            // A new number for each balloon: an alert shown before this one no longer owns the click (see NewestBalloonIsAlert).
+            trayBalloonsShown = trayBalloonsShown == int.MaxValue ? 1 : trayBalloonsShown + 1;
             trayIcon.BalloonTipTitle = title;
             trayIcon.BalloonTipText = ShortenBalloonText(message);
             trayIcon.BalloonTipIcon = icon;

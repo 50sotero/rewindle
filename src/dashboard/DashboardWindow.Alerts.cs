@@ -24,8 +24,10 @@ namespace ResticBackuper.Dashboard
         private bool sessionLocked;
         // Set when this refresh showed an alert, so the per-run "Backup didn't finish" balloon does not land on top of it.
         private bool alertToastShownThisRefresh;
-        // Whether the newest balloon is an alert: only selecting an alert opens Protection (ShowTrayMessage clears it).
-        private bool trayBalloonIsAlert;
+        // Each balloon's number (ShowTrayMessage counts them), and the number of the balloon that is an alert (0: none). Only
+        // selecting an alert opens Protection, and the alert's number stays its own: a later balloon replaces it, and nothing else does.
+        private int trayBalloonsShown;
+        private int trayAlertBalloon;
         private bool alertFailureLogged;
         private DateTime? alertProcessStartUtc;
 
@@ -65,7 +67,6 @@ namespace ResticBackuper.Dashboard
             if (trayIcon != null)
             {
                 trayIcon.BalloonTipClicked += OnTrayBalloonClicked;
-                trayIcon.BalloonTipClosed += OnTrayBalloonClosed;
             }
         }
 
@@ -92,7 +93,7 @@ namespace ResticBackuper.Dashboard
                         toast.Title,
                         toast.Text,
                         toast.Failing ? Forms.ToolTipIcon.Error : Forms.ToolTipIcon.Warning);
-                    trayBalloonIsAlert = true;
+                    trayAlertBalloon = trayBalloonsShown;
                     alertToastShownThisRefresh = true;
                 }
             }
@@ -295,8 +296,8 @@ namespace ResticBackuper.Dashboard
         // the folder chooser is open: those keep the page they are on.
         private void OnTrayBalloonClicked(object sender, EventArgs args)
         {
-            bool alert = trayBalloonIsAlert;
-            trayBalloonIsAlert = false;
+            bool alert = NewestBalloonIsAlert();
+            trayAlertBalloon = 0;
             Dispatcher.BeginInvoke(new Action(delegate
             {
                 ShowDashboard();
@@ -313,9 +314,12 @@ namespace ResticBackuper.Dashboard
             return alertBalloon && !restoreFlowOpen && webRunDetails == null && !sourcePickerOpen;
         }
 
-        private void OnTrayBalloonClosed(object sender, EventArgs args)
+        // Whether the newest balloon is the alert. A click doesn't say which balloon was selected; it is taken as the newest one's.
+        // Windows' "balloon closed" is not used: it can come for the balloon an alert replaced after the alert is up, which would
+        // take the alert's click away, and it also comes when a balloon times out into the notification centre.
+        private bool NewestBalloonIsAlert()
         {
-            trayBalloonIsAlert = false;
+            return trayAlertBalloon != 0 && trayAlertBalloon == trayBalloonsShown;
         }
 
         // Edit schedule saved the schedule turned off: the pause is the person's own and is not announced while it lasts.

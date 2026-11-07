@@ -147,7 +147,13 @@ class BackupAlertsSourceTests(unittest.TestCase):
         opens = block(self.glue, "private bool AlertBalloonOpensProtection(")
         for guard in ("alertBalloon", "!restoreFlowOpen", "webRunDetails == null", "!sourcePickerOpen"):
             self.assertIn(guard, opens)
-        self.assertIn("trayBalloonIsAlert = false;\n            trayIcon.BalloonTipTitle = title;", self.window)
+        # Each balloon gets a number and the alert keeps its own, so only a later balloon takes the alert's click away. Windows'
+        # "balloon closed" can come for the balloon an alert replaced after the alert is up, so it is not used.
+        self.assertIn("trayBalloonsShown = ", block(self.window, "private void ShowTrayMessage("))
+        self.assertIn("trayAlertBalloon = trayBalloonsShown;", self.glue)
+        self.assertIn("bool alert = NewestBalloonIsAlert();", block(self.glue, "private void OnTrayBalloonClicked("))
+        self.assertNotIn("BalloonTipClosed", self.glue)
+        self.assertNotIn("BalloonTipClosed", self.window)
 
     def test_the_page_is_told_and_the_switch_takes_only_on_or_off(self) -> None:
         self.assertIn('state["alerts"] = BuildWebAlertsState();', self.web_host)

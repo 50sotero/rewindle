@@ -80,18 +80,21 @@ dashboard shows one Windows notification for each problem (a balloon from its
 notification-area icon, which Windows 10 and 11 show as a notification) and
 marks that icon: an amber triangle while something needs attention, a red disc
 while backups keep failing, with a dark ring so it reads on a light or dark
-taskbar. Selecting an alert while it is on screen opens Protection, unless a
-restore, run details or the folder chooser is open. An amber problem waits 15
-minutes before it is told, a red one is told at once, and nothing is told while
-nobody is at the PC (the session is locked or there was no input for two
-minutes) or while Rewindle's window is in front. A pause made in Edit schedule
-is not told for as long as it lasts, restarts and backups made by hand
-meanwhile included; it ends when a schedule read shows backups on again, and a
-pause made anywhere after that is told. Catching up, a status that cannot be
-read and a run in progress raise nothing. `BackupAlerts.cs` holds the logic
-(missed-run explanation from the run history and the task's `LastRunTime` and
-`LastTaskResult`, the failing count, the store and the tray mark);
-`DashboardWindow.Alerts.cs` feeds it on each refresh.
+taskbar. Selecting an alert opens Protection, unless a restore, run details or
+the folder chooser is open; the alert keeps that until another balloon from
+Rewindle replaces it (Windows' report that a balloon closed is not used, since
+it can arrive for the balloon an alert replaced after the alert is up). An
+amber problem waits 15 minutes before it is told, a red one is told at once,
+and nothing is told while nobody is at the PC (the session is locked or there
+was no input for two minutes); with someone there, Rewindle's window in front
+counts as told. A pause made in Edit schedule is not told for as long as it
+lasts, restarts and backups made by hand meanwhile included; it ends when a
+schedule read shows backups on again, and a pause made anywhere after that is
+told. Catching up, a status that cannot be read and a run in progress raise
+nothing. `BackupAlerts.cs` holds the logic (missed-run explanation from the run
+history and the task's `LastRunTime` and `LastTaskResult`, the failing count,
+the store and the tray mark); `DashboardWindow.Alerts.cs` feeds it on each
+refresh.
 
 Settings > Backup plan > Backup alerts turns the notifications on or off; the
 mark stays either way. The choice, the problems already told and a pause made

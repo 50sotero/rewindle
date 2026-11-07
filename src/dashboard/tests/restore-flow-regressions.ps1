@@ -2035,6 +2035,9 @@ namespace RewindleRegression {
         # is the same problem, so only the run's own balloon follows it.
         $alertStore = [Activator]::CreateInstance($alertStoreType, $constructorFlags, $null, @([string](Join-Path $alertRoot 'settings')), $null)
         $alertMonitor = [Activator]::CreateInstance($alertMonitorType, $constructorFlags, $null, @($alertStore, $true), $null)
+        # Wired to the tray icon as the window wires itself (this window has no options, so the monitor it makes never tells), then
+        # given the test's monitor.
+        Invoke-Private $alertDashboard 'InitializeBackupAlerts' | Out-Null
         Set-PrivateField $alertDashboard 'backupAlerts' $alertMonitor
         $someoneThere = [Activator]::CreateInstance($alertPresenceType, $constructorFlags, $null, @(), $null)
         $someoneThere.UserActive = $true
@@ -2072,7 +2075,11 @@ namespace RewindleRegression {
         }
         Get-AlertRefreshTitle (New-AlertSnapshot 'success' 'run-a' @()) | Out-Null
         Assert-True ((Get-AlertRefreshTitle (New-AlertSnapshot 'failed' 'run-c' @('run-c', 'run-b2', 'run-b1'))) -eq 'Backups keep failing') 'a third failure in a row did not say that backups keep failing'
-        Assert-True ([bool](Get-FieldValue $alertDashboard 'trayBalloonIsAlert')) 'the failing balloon was not marked as an alert'
+        Assert-True ([bool](Invoke-Private $alertDashboard 'NewestBalloonIsAlert')) 'the failing balloon was not marked as an alert'
+        # Windows can report the balloon the alert replaced as closed after the alert is up, and reports the alert itself closed when
+        # it times out into the notification centre: neither takes the alert's click away.
+        [System.Windows.Forms.NotifyIcon].GetMethod('OnBalloonTipClosed', $constructorFlags).Invoke($alertIcon, [object[]]@()) | Out-Null
+        Assert-True ([bool](Invoke-Private $alertDashboard 'NewestBalloonIsAlert')) 'a balloon reported closed took the click away from the alert'
         Assert-True ([bool](Invoke-Private $alertDashboard 'AlertBalloonOpensProtection' @($true))) 'selecting an alert did not open Protection'
         Assert-True ((Invoke-Private $alertDashboard 'DescribeTrayStatus' @((New-AlertSnapshot 'failed' 'run-c' @('run-c', 'run-b2', 'run-b1')))) -eq ('Rewindle - 3 backups in a row didn' + [char]0x2019 + 't finish')) 'the tray did not say that backups keep failing'
         $alertsState = Invoke-Private $alertDashboard 'BuildWebAlertsState'
@@ -2084,7 +2091,7 @@ namespace RewindleRegression {
         Assert-True ($alertsState['failedRuns'] -is [int] -and $alertsState['failedRuns'] -eq 3 -and $alertsState['failingAfter'] -eq 3) 'the page was not told the failing count'
         Assert-True ($null -eq $alertsState['lastRun'] -and $null -eq $alertsState['missedRun']) 'a schedule that was never read reached the page as a last run'
         Assert-True ((Get-AlertRefreshTitle (New-AlertSnapshot 'starting' 'run-d' @('run-c', 'run-b2', 'run-b1'))) -eq 'Backup started') 'a backup starting during an alert was not announced'
-        Assert-True (-not [bool](Get-FieldValue $alertDashboard 'trayBalloonIsAlert')) 'a run balloon was taken for an alert'
+        Assert-True (-not [bool](Invoke-Private $alertDashboard 'NewestBalloonIsAlert')) 'a run balloon was taken for an alert'
         Assert-True (-not [bool](Invoke-Private $alertDashboard 'AlertBalloonOpensProtection' @($false))) 'selecting a run balloon opened Protection'
         Assert-True ((Get-AlertRefreshTitle (New-AlertSnapshot 'failed' 'run-d' @('run-d', 'run-c', 'run-b2', 'run-b1'))) -eq ('Backup didn' + [char]0x2019 + 't finish')) 'a fourth failure was told as a new alert'
         Set-PrivateField $alertDashboard 'restoreFlowOpen' $true
