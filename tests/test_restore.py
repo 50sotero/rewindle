@@ -2294,14 +2294,33 @@ class FileSearchTests(unittest.TestCase):
             (payload["status"], payload["snapshots_searched"], payload["next_from_snapshot_id"]),
         )
 
-    def test_the_first_backup_waits_for_half_of_the_time(self) -> None:
+    def test_a_slow_list_of_backups_still_leaves_the_newest_backup_searched(self) -> None:
+        # The list took more than half of the time. The newest backup is still searched with what is left, so a location
+        # that is always slow to list still gets further with each page instead of repeating the same empty one.
         ids = self.backups(3)
-        self.write_found(snapshots_sleep=1.8)
+        self.write_found(snapshots_sleep=3.5, find_nodes={ids[0]: [found("/C/Docs/Budget.xlsx")]})
+        with mock.patch.object(restore, "FIND_SECONDS_MIN", 1):
+            result, payload, _ = self.search("Budget", "--find-seconds=6")
+        self.assertEqual(0, result)
+        calls = self.find_calls()
+        self.assertTrue(calls, "the newest backup was not searched after a slow list")
+        self.assertEqual(ids[0:1], self.batch(calls[0]))
+        self.assertIn(payload["status"], ("more", "complete"))
+        self.assertGreaterEqual(payload["snapshots_searched"], 1)
+        self.assertEqual(["/C/Docs/Budget.xlsx"], [match["path"] for match in payload["matches"]])
+        if payload["status"] == "more":
+            self.assertEqual(ids[payload["snapshots_searched"]], payload["next_from_snapshot_id"])
+
+    def test_a_slow_list_and_a_backup_that_does_not_fit_after_it_are_too_slow(self) -> None:
+        # Nothing could be searched in this page's time: too_slow (Try again, or choose by date), never "more" with nothing
+        # searched, which would offer to go on and then repeat the same work.
+        ids = self.backups(3)
+        self.write_found(snapshots_sleep=2, find_sleep={ids[0]: 30})
         with mock.patch.object(restore, "FIND_SECONDS_MIN", 1):
             result, payload, _ = self.search("Budget", "--find-seconds=3")
         self.assertEqual(0, result)
         self.assertEqual(
-            ("more", 3, 0, ids[0]),
+            ("too_slow", 3, 0, ids[0]),
             (
                 payload["status"],
                 payload["snapshots_total"],
@@ -2309,21 +2328,23 @@ class FileSearchTests(unittest.TestCase):
                 payload["next_from_snapshot_id"],
             ),
         )
-        self.assertEqual([], self.find_calls())
+        self.assertEqual([ids[0:1]], [self.batch(call) for call in self.find_calls()])
 
-    def test_a_list_of_backups_cut_by_the_time_searches_nothing(self) -> None:
+    def test_a_list_of_backups_cut_by_the_time_is_too_slow(self) -> None:
         ids = self.backups(3)
         self.write_found(snapshots_sleep=30)
         with mock.patch.object(restore, "FIND_SECONDS_MIN", 1):
             result, payload, _ = self.search("Budget", "--find-seconds=1", f"--find-from-snapshot={ids[1]}")
             self.assertEqual(0, result)
+            # The same start again: Try again repeats this page, and the list on screen still offers choosing by date.
             self.assertEqual(
-                ("more", 0, 0, ids[1]),
+                ("too_slow", 0, 0, ids[1], []),
                 (
                     payload["status"],
                     payload["snapshots_total"],
                     payload["snapshots_searched"],
                     payload["next_from_snapshot_id"],
+                    payload["matches"],
                 ),
             )
             with self.assertRaisesRegex(RuntimeError, "list of backups could not be read in the time"):
