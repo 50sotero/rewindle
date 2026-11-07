@@ -91,18 +91,20 @@ If you know a file's name but not which backup or folder holds it, Restic can
 look through every backup without changing anything:
 
 ```powershell
-.\restic.exe --repo 'X:\Path\To\Repository' find --ignore-case '*budget*'
+.\restic.exe --repo 'X:\Path\To\Repository' find --long --ignore-case '*budget*'
 ```
 
 Restic asks for the password, as above. For each backup that holds a matching
-file or folder it prints the path inside the backup, the size and when the item
-last changed. Add `--snapshot` with an ID from the `snapshots` list to look in
-one backup only. The pattern is matched against every part of a path, so a
-short one also lists everything inside folders whose names match; type more of
-the name to narrow it down. In a pattern `[` starts a set of characters, so for
-a name with `[` in it put `?` in its place: `'*Taxes ?2024]*'` finds
-`Taxes [2024]`. Then restore the path Restic printed as shown above, writing
-each `[` as `[[]` in `--include`.
+file or folder it prints a line with the backup's short ID and time, then one
+line for each match. With `--long`, as here, each of those lines ends with the
+item's size in bytes, the date and time it last changed, and its path inside the
+backup; without `--long` Restic prints only the paths. Add `--snapshot` with an
+ID from the `snapshots` list to look in one backup only. The pattern is matched
+against every part of a path, so a short one also lists everything inside
+folders whose names match; type more of the name to narrow it down. In a
+pattern `[` starts a set of characters, so for a name with `[` in it put `?` in
+its place: `'*Taxes ?2024]*'` finds `Taxes [2024]`. Then restore the path
+Restic printed as shown above, writing each `[` as `[[]` in `--include`.
 
 Restores never need to modify or delete the repository. Prefer a new empty
 target on a different path, inspect the restored files, and only then decide

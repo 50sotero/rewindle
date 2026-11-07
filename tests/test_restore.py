@@ -2809,6 +2809,37 @@ class PinnedResticRestoreTests(unittest.TestCase):
             self.assertEqual(["Photos [2020]"], [match["name"] for match in payload["matches"]])
             self.assertTrue(payload["matches"][0]["path"].endswith("/source/Photos [2020]"))
 
+            # The recovery guide's own command (src/RECOVERY.md, "Finding a file") prints what the guide says: a line for each
+            # backup with a match, then one line for each match that ends with its size in bytes, the date and time it last
+            # changed, and its path inside the backup.
+            guide = (SOURCE_ROOT / "RECOVERY.md").read_text(encoding="utf-8")
+            section = guide[guide.index("## Finding a file") :]
+            documented = re.search(r"^\.\\restic\.exe --repo '[^']+' (find .+)$", section, re.MULTILINE)
+            self.assertIsNotNone(documented)
+            arguments = [part.strip("'") for part in documented.group(1).split()]
+            finished = subprocess.run(
+                [*common, *arguments],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+                env=environment,
+            )
+            self.assertEqual(0, finished.returncode, finished.stderr)
+            lines = [line for line in finished.stdout.splitlines() if line.strip()]
+            headers = [line for line in lines if line.startswith("Found matching entries in snapshot ")]
+            self.assertEqual(2, len(headers), finished.stdout)
+            sizes = []
+            for line in lines:
+                if line in headers:
+                    continue
+                listed = re.fullmatch(r"\S+\s+\d+\s+\d+\s+(\d+) \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} (/\S.*)", line)
+                self.assertIsNotNone(listed, f"the guide's find command did not print a size and a date: {line!r}")
+                if listed.group(2).endswith("/source/Budget 2026.xlsx"):
+                    sizes.append(int(listed.group(1)))
+            self.assertEqual([8, 17], sorted(sizes))
+
 
 if __name__ == "__main__":
     unittest.main()
