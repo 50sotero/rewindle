@@ -142,6 +142,10 @@ class DashboardRestoreUiTests(unittest.TestCase):
         self.assertIn(f"$sessionProtocol = '{session['protocol']}'", self.protected_manager)
         self.assertIn(f"$sessionRequestDomain = '{session['request_domain']}'", self.protected_manager)
         self.assertEqual("Manage-Restore.ps1", session["manager"])
+        # A file search is served by a session only; the key is how a dashboard knows this engine has it.
+        self.assertEqual("ResticBackuper.FileSearch.v1", session["find_files"])
+        self.assertIn(f"$fileSearchSchema = '{session['find_files']}'", self.protected_manager)
+        self.assertIn("A file search is only served by a restore session.", self.protected_manager)
         # Every request a session serves goes through the single request's validation and protected step.
         self.assertIn("Initialize-RestoreRequest -RequestAction $Request.Action", self.protected_manager)
         self.assertIn("Initialize-RestoreRequest -RequestAction $Action", self.protected_manager)

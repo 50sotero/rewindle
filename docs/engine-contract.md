@@ -43,7 +43,7 @@ In the tables below `<P>` stands for the engine's product name (`ResticBackuper`
 | Single instance | `Local\ResticBackuperDashboard.Instance`, `.Show` (and `.Presentation.Instance`, `.Presentation.Show`) | `Local\ResticPersonalBackupDashboard.Instance`, `.Show` (and the presentation pair) |
 | Cancel event | `Local\ResticBackuper.Cancel.<64 hex>` | `Local\ResticPersonalBackup.Cancel.<64 hex>` |
 | Request domains | `ResticBackuper.SourceRequest.v1`, `.RestoreRequest.v2`, `.RepositoryRequest.v1`, `.RepositoryRecoveryRequest.v1`, `.ScheduleRequest.v1`, `.BackupControlRequest.v1`, task fingerprint `.TaskXml.v1` | the same suffixes with `ResticPersonalBackup.` |
-| Result and report schemas | `ResticBackuper.SnapshotList.v1`, `.SnapshotTree.v1`, `.RestoreReport.v1`, `.RecoveryHealth.v1`, `.AnomalyReview.v1`; diagnostics `ResticBackuper.Diagnostics.v1` | the same suffixes with `ResticPersonalBackup.` |
+| Result and report schemas | `ResticBackuper.SnapshotList.v1`, `.SnapshotTree.v1`, `.RestoreReport.v1`, `.RecoveryHealth.v1`, `.AnomalyReview.v1`, `.FileSearch.v1` (a restore session's file search, section 9); diagnostics `ResticBackuper.Diagnostics.v1` | the same suffixes with `ResticPersonalBackup.`; no `.FileSearch.v1` (no session) |
 | Manager scripts | `Manage-Sources.ps1`, `Manage-Schedule.ps1`, `Manage-Backup.ps1`, `Manage-Repository.ps1`, `Manage-Restore.ps1` under `<install>` | same |
 | Python | `<install>\Python\python.exe` with `-E -S -B` and scripts under `<install>` | same |
 | Restore approval session (section 9) | Request domain `ResticBackuper.RestoreRequest.v3`, protocol `ResticBackuper.RestoreSession.v1`, pipe `\\.\pipe\ResticBackuper.RestoreSession.<64 hex>`, capability document `<install>\engine-capabilities.json` (`ResticBackuper.EngineCapabilities.v1`) | None: one elevated request per step |
@@ -68,7 +68,7 @@ helper is held to the same rules.
 | --- | --- | --- | --- | --- | --- |
 | Add / remove a protected folder | `-Add <path>` or `-Remove <path>`, `-ResultPath`, `-RequestNonce` | lower-case action, canonical path, nonce | `SourceManagerResults`: `schema_version` 1, `request_nonce`, `request_digest`, `request_user_sid`, `action`, `ok`; on success `plan_id`, `previous_config_generation` = current, `config_generation` = current + 1, `path` = the canonical path | **Ported** (was missing; see section 8) | Yes |
 | List snapshots, list a tree, restore, recovery drill | `-Action list_snapshots\|list_tree\|restore\|restore_drill`, `-IncludesBase64`, `-ExpectedConfigSha256`, `-ExpectedPlanId`, `-ExpectedConfigGeneration`, `-AllowLegacyUnbound 0\|1`, `-ResultPath`, `-RequestNonce`, `-RequestDigest`, optional `-SnapshotId`, `-TreePath`, `-Target` | action, config SHA-256, plan, generation, legacy flag, snapshot, tree path, target, includes SHA-256, nonce | `RestoreManagerResults` (+ `<nonce>.json.progress.json`): binding fields, `ok`, `backend_exit_code`, `payload` (`SnapshotList.v1`, `SnapshotTree.v1` or `RestoreReport.v1`), drill evidence (`history_recorded`, canary and sample fields) | Yes | Yes |
-| Restore approval session: any number of snapshot and folder listings and at most one restore (section 9) | `-Operation session`, `-ExpectedConfigSha256`, `-ExpectedPlanId`, `-ExpectedConfigGeneration`, `-ResultPath`, `-RequestNonce`, `-RequestDigest`, `-DashboardProcessId`, `-PipeName`, `-SessionTokenSha256`, `-IdleTimeoutSeconds`, `-LifetimeSeconds`, `-ConnectTimeoutSeconds` | `session`, config SHA-256, plan, generation, dashboard PID, pipe name, session-token SHA-256, idle, lifetime and connect timeouts, nonce (domain `RestoreRequest.v3`) | Results on the pipe, each the document above bound to the session's nonce and digest; `RestoreManagerResults\<nonce>.json` records how the session ended (`close_reason`, `operations`) | Yes (advertised in `engine-capabilities.json`) | No |
+| Restore approval session: any number of snapshot and folder listings and file searches, and at most one restore (section 9). `find_files` is served only here; a single request for it is refused | `-Operation session`, `-ExpectedConfigSha256`, `-ExpectedPlanId`, `-ExpectedConfigGeneration`, `-ResultPath`, `-RequestNonce`, `-RequestDigest`, `-DashboardProcessId`, `-PipeName`, `-SessionTokenSha256`, `-IdleTimeoutSeconds`, `-LifetimeSeconds`, `-ConnectTimeoutSeconds` | `session`, config SHA-256, plan, generation, dashboard PID, pipe name, session-token SHA-256, idle, lifetime and connect timeouts, nonce (domain `RestoreRequest.v3`) | Results on the pipe, each the document above bound to the session's nonce and digest; `RestoreManagerResults\<nonce>.json` records how the session ended (`close_reason`, `operations`) | Yes (advertised in `engine-capabilities.json`) | No |
 | Clean-up of old backups: turn on or off, list what would go, remove a confirmed list (section 10) | `-Action configure\|preview\|apply`; only the arguments the action takes of `-Enabled`, `-KeepDaily`, `-KeepWeekly`, `-KeepMonthly`, `-ExpectedPreviewSha256`, `-ExpectedRemoveSetSha256`, `-ExpectedRemoveCount`, `-ConfirmEarlierChanges`; always `-ExpectedUserSid`, `-ExpectedConfigSha256`, `-ExpectedPlanId`, `-ExpectedConfigGeneration`, `-ResultPath`, `-RequestNonce`, `-RequestDigest` | action, config SHA-256, plan, generation, enabled, daily, weekly, monthly, preview SHA-256, remove-set SHA-256, remove count, earlier-changes confirmation, nonce (an argument the action does not take counts as empty; domain `RetentionRequest.v1`) | `RetentionManagerResults` (+ progress): binding fields, `ok` (true exactly when the exit code is 0), `state`, `refusal_code`, `policy_sha256`, `preview_sha256`, `remove_count`, `removed_count`, `removed_set_sha256`, `removal_unverified`, `prune_completed`, `check_completed`, `check_unfinished`, `history_recorded` | Yes (advertised in `engine-capabilities.json`) | No |
 | Move the repository | `-Relocate -NewRepository -ExpectedCurrentRepository -ExpectedConfigSha256 -ResultPath -RequestNonce -RequestDigest` | `relocate`, current, new, config SHA-256, nonce | `RepositoryManagerResults` (+ progress): binding fields, `changed`, `old_repository_retained`, optional generation transition | Yes | Yes |
 | Recover an interrupted move | `-Recover -ExpectedJournalSha256 -ResultPath -RequestNonce -RequestDigest` | `recover`, journal SHA-256, nonce | `RepositoryManagerResults`: binding fields, `plan_id`, generations, repositories | Yes | Yes |
@@ -173,7 +173,7 @@ than overdue until the task has run since the slot, or for at most 45 minutes af
 | --- | --- | --- | --- |
 | `<install>\backup-config.json` (≤ 1 MiB, read with full sharing, retried once) | `plan_id` (canonical UUID), `config_generation` (> 0), `cloud_placeholder_policy`, `repository`, `state_directory`, `sources` (canonical, unique), `source_identities` (one 8-hex serial per source), `canary_file` (inside a source), `topology_paths`, `recovery_tools_directory` (source-picker guard only); for the Backup location card only, and never a reason to refuse the plan: `minimum_free_gib` (the reserve: a number 0 or more, converted to bytes as the engine does; anything else is unknown) and `repository_storage_mode` (`google_drivefs_stream` or anything else, read as a local drive) | Yes (written by the installer and `Manage-Sources.ps1`) | Yes |
 | `<install>\runtime-manifest.json`, `VERSION` | Diagnostics (redacted) and the engine version; the manifest's `installation_id` (a new random value the installer writes on every install, kept by the managers that rewrite the manifest) binds the clean-up setting (section 10) | Yes | Manifest only |
-| `<install>\engine-capabilities.json` (≤ 16 KiB, no link, strict UTF-8 JSON) | `schema` `<P>.EngineCapabilities.v1`, `schema_version` 1, `restore_session.protocol`, `.request_domain`, `.manager`: whether restore approval sessions are used (section 9); `retention.manager`, `.request_domain`, `.policy_schema`, `.preview_schema`, `.history_schema`: whether clean-up of old backups is offered (section 10) | Yes (shipped in the payload, in the runtime manifest) | Not shipped |
+| `<install>\engine-capabilities.json` (≤ 16 KiB, no link, strict UTF-8 JSON) | `schema` `<P>.EngineCapabilities.v1`, `schema_version` 1, `restore_session.protocol`, `.request_domain`, `.manager`: whether restore approval sessions are used, and `restore_session.find_files` (`<P>.FileSearch.v1`): whether a session also serves Find a file (section 9); `retention.manager`, `.request_domain`, `.policy_schema`, `.preview_schema`, `.history_schema`: whether clean-up of old backups is offered (section 10) | Yes (shipped in the payload, in the runtime manifest) | Not shipped |
 | `<state>\status.json` | Run identity, `state`, progress, summary, errors, cancel channel (`wrapper_pid`, `wrapper_start_filetime`, `launcher_pid`, `launcher_start_filetime`, `cancel_channel_id`, `cancel_channel_fingerprint`), plan binding, `repository_storage_mode`, `maintenance_hold`, `change_anomaly`, `failure_code` (a run stopped by `repository_low_space` is not repeated by the Backup location card's hero sentence). A backup's new, changed and unchanged file counts are Restic's own `summary.files_new`, `.files_changed` and `.files_unmodified` (all three non-negative integers, or none is shown; never for a dry run) | Yes | Yes |
 | `<state>\last-success.json` | Verified run evidence; its SHA-256 binds anomaly reviews. For the Backup location card: `repository_bytes_after` (what the backups take after that run, a whole number of bytes or `null`), otherwise the Google Drive count before the run, `repository_readiness.total_bytes` (Rewindle) or `repository_storage_preflight.total_bytes` (legacy), plus `summary.data_added_packed` (else `data_added`), shown as an estimate. Anything that is not a whole number of bytes 0 or more is unknown. How far back the backups go is `snapshot_inventory` (`schema_version` 1, `count` 1 to 1,000,000, `oldest_utc` no later than `newest_utc`, `counted_utc`, `rule` `restore_browse`: the backups the Restore list offers, counted from the listing the backup already reads), bound to the record's own `plan_id` and `repository`, read only from a verified record and only shown. `status.json` carries the same key, which is not read | Yes (`repository_bytes_after` after every verified backup since this change; `null` when the size could not be measured; `snapshot_inventory` too) | Yes (never `repository_bytes_after`; the Google Drive count only; no `snapshot_inventory`: the backup range comes from the Restore list, section 6) |
 | `<state>\dry-run-latest.json` | Dry-run result and summary | Yes | Yes |
@@ -296,9 +296,9 @@ validation refuses, a recovery drill) ends the session.
 | --- | --- | --- |
 | `hello` | dashboard → broker | `type`, `protocol` (`ResticBackuper.RestoreSession.v1`), `session_token` (64 hex), `dashboard_process_id` |
 | `ready` | broker → dashboard | `type`, `protocol`, `request_nonce`, `request_digest`, `broker_process_id`, `idle_timeout_seconds`, `lifetime_seconds` |
-| `request` | dashboard → broker | `type`, `request_id` (1, 2, 3, …), `action` (`list_snapshots`, `list_tree` or `restore`), `snapshot_id`, `tree_path`, `target`, `includes_base64`, `allow_legacy_unbound` (`"0"`/`"1"`) — the single request's `-SnapshotId`, `-TreePath`, `-Target`, `-IncludesBase64`, `-AllowLegacyUnbound` |
+| `request` | dashboard → broker | `type`, `request_id` (1, 2, 3, …), `action` (`list_snapshots`, `list_tree`, `find_files` or `restore`), `snapshot_id`, `tree_path`, `target`, `includes_base64`, `allow_legacy_unbound` (`"0"`/`"1"`) — the single request's `-SnapshotId`, `-TreePath`, `-Target`, `-IncludesBase64`, `-AllowLegacyUnbound`; a `find_files` request also has `find_text` and `find_from_snapshot_id`, and no other request may |
 | `progress` | broker → dashboard | `type`, `request_id`, `stage`, `message`, `percent` (what a single request writes to its progress file) |
-| `result` | broker → dashboard | `type`, `request_id`, `exit_code` (what a single request exits with), `result` (the document a single request writes to its result file, bound to the session's nonce and digest) |
+| `result` | broker → dashboard | `type`, `request_id`, `exit_code` (what a single request exits with), `result` (the document a single request writes to its result file, bound to the session's nonce and digest; for `find_files` also `find_text_sha256` and `find_from_snapshot_id`) |
 | `close` | dashboard → broker | `type` |
 | `closed` | broker → dashboard | `type`, `reason` (sent when the session ends while idle, and in answer to `close`) |
 
@@ -307,6 +307,31 @@ after the restore whatever its outcome. Each request runs `Initialize-RestoreReq
 functions the single request uses, so the field validation, run lock (taken per request, never while idle), journal gate,
 plan and configuration checks, runtime-manifest check, destination guards, restore history and payload checks are identical.
 The dashboard validates each result with the same `RestoreManagerLauncher.ValidateResult`.
+
+**Find a file (`find_files`).** Served only by a session whose capability document names `restore_session.find_files`, and
+never as a single request. The request carries `find_text` (trimmed of spaces; 2 to 200 UTF-16 code units; no control
+character, unpaired surrogate or `\ / : * ? " < > |`; the same rules, in the same order, in `fileSearch.ts`,
+`RestoreFileSearch.cs`, `Manage-Restore.ps1` and `restore.py`, with the shared cases in
+`tests/fixtures/file-search-text-cases.json`) and `find_from_snapshot_id` (the exact 64-hex ID of the newest backup the dashboard
+lists, then the `next_from_snapshot_id` of the page before); its selectors, includes and legacy flag are empty. The broker
+refuses a text that is not already in that form, takes the run lock, and runs
+`restore.py --find-json --no-restic-lock --find-text=<text> --find-from-snapshot=<id> --find-seconds=20` (each a single token, so
+a text that starts with `-` is never an option). restore.py puts itself in a kill-on-close job, lists the plan's backups and
+runs `restic find --json --ignore-case --snapshot <id>… -- *<text>*` over them, newest first, in batches of 1, 2, 4 up to 32
+backups, each as large as the time left allows; Restic writes nothing to the repository. Each batch stops at 32 MiB or 100,000
+nodes of output. The page is `<P>.FileSearch.v1`: `binding` (plan), `query` (text and start), `status` (`complete`, `more`,
+`too_many` past 100 items, `too_broad` when a batch hit its cap, `too_slow` when no backup could be searched in the time because
+the list or the first backup after it took it all; `more` always means at least one backup was searched),
+`snapshots_total`, `snapshots_searched`, the newest and oldest time searched, `next_from_snapshot_id` (none for `complete`, and
+possibly none for `too_many`), and at most 100 matches of at most 10 versions (size and change time, the newest and oldest backup
+that hold it, `plan` or `legacy_unbound`). A backup cut by the deadline is not counted. The broker kills restore.py, and with it
+Restic, after 35 s, and fails a start that is no longer listed (restore.py exit 4) with "The backup to search from is no longer in
+the list." The result is bound to `find_text_sha256` (SHA-256 of the UTF-8 text) and `find_from_snapshot_id`; the dashboard
+checks both, the page's plan and query, every limit, and then that every backup the page names is in the list on screen with the
+same binding. The search state lives only in the dashboard's memory; the session record counts `find_files` and never holds the
+text. On the page the Find tab exists only while the host sends `restoreFlow.search`, which it does only for such a session; a
+search is refused while a backup, a settings change or a clean-up step runs (section 10), while Windows catches up on a missed
+backup, and in the two minutes before a scheduled one.
 
 **Lifetime.** The session ends after 10 idle minutes, after 60 minutes in all (checked between requests; a running restore is
 never interrupted), when the client disconnects or the dashboard process exits, when the protected configuration's SHA-256
@@ -329,11 +354,16 @@ backup." for a session; a declined prompt is a cancelled step with the existing 
 **Tests.** `tests/Test-ManageRestore.ps1` unit-tests the protocol functions (loaded from the manager's source with the parser)
 and runs sessions end to end in the disposable mode, non-elevated: framing, size limits, schema rejection, the single-restore
 rule, idle/lifetime/connect limits, client PID, SID and token mismatches, a squatted pipe name, a changed plan, and, with a
-built dashboard, the dashboard's own client against the broker. The disposable mode needs `-TestRoot` below the user's
+built dashboard, the dashboard's own client against the broker (including a search); file searches end to end (a bound page,
+a text that starts with `-`, a start that left the list, a search cut at the broker's time limit, the session going on after it,
+and the single request refused). The disposable mode needs `-TestRoot` below the user's
 temporary folder, a copy of the script inside that test root (the manager-path check), a script outside the protected install
 root and a non-elevated token, so the installed copy can never run in it.
 `src/dashboard/tests/restore-flow-regressions.ps1` covers the deferred root read, the cache, the session-or-per-step choice
-and the session lifecycle against a stand-in broker.
+and the session lifecycle against a stand-in broker, and Find a file: the capability (never for the legacy edition), the
+launcher's bindings, the flow's refusals, merged and bounded pages, a list that changed, and Restore this. `tests/test_restore.py`
+covers restore.py's find mode (the budget, the batch caps, the job object, a real Restic), and
+`tests/test_dashboard_file_search.py` the page's rules and words.
 
 ## 10. Clean-up of old backups
 

@@ -1,0 +1,222 @@
+[
+ {
+  "text": "Budget",
+  "valid": true,
+  "normalized": "Budget"
+ },
+ {
+  "text": "  Budget.xlsx  ",
+  "valid": true,
+  "normalized": "Budget.xlsx"
+ },
+ {
+  "text": "Budget 2026.xlsx",
+  "valid": true,
+  "normalized": "Budget 2026.xlsx"
+ },
+ {
+  "text": "ab",
+  "valid": true,
+  "normalized": "ab"
+ },
+ {
+  "text": "-notes",
+  "valid": true,
+  "normalized": "-notes"
+ },
+ {
+  "text": "--x",
+  "valid": true,
+  "normalized": "--x"
+ },
+ {
+  "text": "-rf",
+  "valid": true,
+  "normalized": "-rf"
+ },
+ {
+  "text": "[old]",
+  "valid": true,
+  "normalized": "[old]"
+ },
+ {
+  "text": "Photos [2020]",
+  "valid": true,
+  "normalized": "Photos [2020]"
+ },
+ {
+  "text": "!important.txt",
+  "valid": true,
+  "normalized": "!important.txt"
+ },
+ {
+  "text": ".hidden",
+  "valid": true,
+  "normalized": ".hidden"
+ },
+ {
+  "text": "R\u00e9sum\u00e9",
+  "valid": true,
+  "normalized": "R\u00e9sum\u00e9"
+ },
+ {
+  "text": "\u0130stanbul",
+  "valid": true,
+  "normalized": "\u0130stanbul"
+ },
+ {
+  "text": "\ud83d\udcc4 Notes",
+  "valid": true,
+  "normalized": "\ud83d\udcc4 Notes"
+ },
+ {
+  "text": "\u00a0Budget",
+  "valid": true,
+  "normalized": "\u00a0Budget"
+ },
+ {
+  "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "valid": true,
+  "normalized": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+ },
+ {
+  "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\ud83d\udcc4",
+  "valid": true,
+  "normalized": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\ud83d\udcc4"
+ },
+ {
+  "text": "",
+  "valid": false,
+  "error": "EMPTY"
+ },
+ {
+  "text": "    ",
+  "valid": false,
+  "error": "EMPTY"
+ },
+ {
+  "text": "a",
+  "valid": false,
+  "error": "SHORT"
+ },
+ {
+  "text": "  a  ",
+  "valid": false,
+  "error": "SHORT"
+ },
+ {
+  "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "valid": false,
+  "error": "LONG"
+ },
+ {
+  "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\ud83d\udcc4",
+  "valid": false,
+  "error": "LONG"
+ },
+ {
+  "text": "Documents/Budget",
+  "valid": false,
+  "error": "FORBIDDEN"
+ },
+ {
+  "text": "Documents\\Budget",
+  "valid": false,
+  "error": "FORBIDDEN"
+ },
+ {
+  "text": "C:",
+  "valid": false,
+  "error": "FORBIDDEN"
+ },
+ {
+  "text": "*.xlsx",
+  "valid": false,
+  "error": "FORBIDDEN"
+ },
+ {
+  "text": "Budget?",
+  "valid": false,
+  "error": "FORBIDDEN"
+ },
+ {
+  "text": "say \"hi\"",
+  "valid": false,
+  "error": "FORBIDDEN"
+ },
+ {
+  "text": "a<b",
+  "valid": false,
+  "error": "FORBIDDEN"
+ },
+ {
+  "text": "a>b",
+  "valid": false,
+  "error": "FORBIDDEN"
+ },
+ {
+  "text": "a|b",
+  "valid": false,
+  "error": "FORBIDDEN"
+ },
+ {
+  "text": "/",
+  "valid": false,
+  "error": "FORBIDDEN"
+ },
+ {
+  "text": "Bud\tget",
+  "valid": false,
+  "error": "CONTROL"
+ },
+ {
+  "text": "\tBudget",
+  "valid": false,
+  "error": "CONTROL"
+ },
+ {
+  "text": "\t",
+  "valid": false,
+  "error": "CONTROL"
+ },
+ {
+  "text": "Bud\u0000get",
+  "valid": false,
+  "error": "CONTROL"
+ },
+ {
+  "text": "Bud\u001fget",
+  "valid": false,
+  "error": "CONTROL"
+ },
+ {
+  "text": "Bud\u007fget",
+  "valid": false,
+  "error": "CONTROL"
+ },
+ {
+  "text": "Bud\nget",
+  "valid": false,
+  "error": "CONTROL"
+ },
+ {
+  "text": "Bud\ud800get",
+  "valid": false,
+  "error": "CONTROL"
+ },
+ {
+  "text": "Budget\udc00",
+  "valid": false,
+  "error": "CONTROL"
+ },
+ {
+  "text": "\ud800",
+  "valid": false,
+  "error": "CONTROL"
+ },
+ {
+  "text": "a/\t",
+  "valid": false,
+  "error": "CONTROL"
+ }
+]

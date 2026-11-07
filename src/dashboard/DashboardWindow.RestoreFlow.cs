@@ -104,7 +104,12 @@ namespace ResticBackuper.Dashboard
             "restoreFlowClose",
             // Neither takes anything from the page: they act on the folder the finished restore reported.
             "restoreFlowOpenDestination",
-            "restoreFlowCopyDestination"
+            "restoreFlowCopyDestination",
+            // Find a file (DashboardWindow.RestoreSearch.cs).
+            "restoreFlowFindFiles",
+            "restoreFlowFindMore",
+            "restoreFlowFindClear",
+            "restoreFlowPickFound"
         };
 
         private bool IsRestoreFlowCommand(string command)
@@ -184,6 +189,10 @@ namespace ResticBackuper.Dashboard
             if (command == "restoreFlowCopyDestination")
             {
                 return CopyRestoreFlowDestination(out error);
+            }
+            if (IsRestoreFlowSearchCommand(command))
+            {
+                return ExecuteRestoreFlowSearchCommand(command, payload, out error);
             }
             error = "The requested restore-flow command is not allowed.";
             return false;
@@ -266,6 +275,10 @@ namespace ResticBackuper.Dashboard
                 RestoreSessionCapability.IsSupported(EngineProfile.Current, configuration.InstallRoot)
                     ? new RestoreSessionHost(RestoreSessionHost.LaunchElevated)
                     : null;
+            // Find a file needs the session, and an engine whose session serves it.
+            restoreFlowSearchAvailable = restoreFlowApprovalSession != null &&
+                RestoreSessionCapability.SupportsFileSearch(EngineProfile.Current, configuration.InstallRoot);
+            ResetRestoreFlowSearch();
             restoreFlowOpen = true;
             restoreFlowBusy = false;
             restoreFlowConfiguration = configuration;
@@ -307,6 +320,7 @@ namespace ResticBackuper.Dashboard
             restoreFlowTreeEntries = new List<RestoreTreeEntry>();
             restoreFlowObservedPaths.Clear();
             ClearRestoreFlowTreeCache();
+            ResetRestoreFlowSearch();
             restoreFlowTreeLoaded = false;
             ClearRestoreFlowScope();
             ClearRestoreFlowTreeError();
@@ -1705,6 +1719,8 @@ namespace ResticBackuper.Dashboard
             restoreFlowDestinationValidationGeneration++;
             CloseRestoreFlowApprovalSession();
             ClearRestoreFlowTreeCache();
+            ResetRestoreFlowSearch();
+            restoreFlowSearchAvailable = false;
             restoreFlowTreeLoaded = false;
             restoreFlowAwaitingApproval = false;
             restoreFlowConfiguration = null;
@@ -1900,6 +1916,7 @@ namespace ResticBackuper.Dashboard
                     InvalidateRestoreFlowReview();
                     CloseRestoreFlowApprovalSession();
                     ClearRestoreFlowTreeCache();
+                    ResetRestoreFlowSearch();
                     restoreFlowStatus = "failed";
                     restoreFlowStep = "error";
                     restoreFlowFailedOperation = "config";
@@ -2613,7 +2630,7 @@ namespace ResticBackuper.Dashboard
                 { "retryable", restoreFlowResultStatus == "partial" || restoreFlowResultStatus == "error" || restoreFlowResultStatus == "cancelled" },
                 { "retryLabel", restoreFlowFailedOperation == "config" ? "Start again" : "Try again" }
             };
-            return new Dictionary<string, object>
+            Dictionary<string, object> flow = new Dictionary<string, object>
             {
                 { "open", true },
                 { "step", restoreFlowStep },
@@ -2695,6 +2712,13 @@ namespace ResticBackuper.Dashboard
                     } },
                 { "result", result }
             };
+            // Find a file: sent only while the flow's session serves it, so the page shows no Find tab otherwise.
+            Dictionary<string, object> search = BuildWebRestoreFlowSearchState();
+            if (search != null)
+            {
+                flow["search"] = search;
+            }
+            return flow;
         }
     }
 }

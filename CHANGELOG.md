@@ -45,6 +45,16 @@ labels. Releases before 0.2.0 were published under the name ResticBackuper.
   forecast takes away the space a clean-up frees, and how far back your
   backups go is counted again after one. The earlier personal edition says
   clean-up isn't available.
+- **Restore can find a file in all your backups.** On the first step, choose
+  Find a file and type part of a name, such as Budget. Rewindle looks through
+  your backups, newest first, and lists each version it finds with when it
+  changed, its size and its folder, and says when a file is gone from the newer
+  backups. Restore this picks that version, and the usual steps follow. The
+  search only reads your backups, uses the Windows permission Restore already
+  asked for, looks for about 20 seconds at a time (Look further back goes on),
+  and is not offered while a backup is running or about to start (the Find a
+  file tab says why). It is not available with the earlier personal edition of
+  the backup service.
 
 ### Changed
 

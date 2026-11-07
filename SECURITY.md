@@ -115,8 +115,17 @@ or backup repository.
   dashboard, read its memory and start the same requests; an approved session
   gives it nothing beyond what that session may do: listings and one
   non-overwriting restore into a new or empty folder, within the session's
-  limits. Standard users approving with another administrator's credentials
-  are refused, as for every elevated request.
+  limits. A session can also look for a file name in every backup (Find a
+  file): a read-only `restic find` without a repository lock, run under the
+  run lock for at most 20 seconds a page (the broker kills it at 35, and the
+  job object takes Restic with it), with the text checked against the same
+  rules by the page, the dashboard, the broker and restore.py and passed to
+  Restic only as one pattern after `--`. It reads names, sizes and dates that
+  folder listings already show, including those of files deleted since, and
+  is refused while a backup runs or is about to start; there is no search
+  outside a session, so the legacy engine has none. Standard users approving
+  with another administrator's credentials are refused, as for every elevated
+  request.
 
 No backup tool can protect against every threat. Keep an offline recovery-key
 copy, test restores, and maintain at least one repository copy that is not
