@@ -4,6 +4,7 @@ import { ArrowRight, Check, CircleAlert, Folder, FolderOpen, FolderPlus, Image, 
 import { Button } from '@/components/atoms/Button';
 import LoadingState from '@/components/primitives/LoadingState';
 import type { Availability, CommandName, Notice, SourcePickerState } from '@/src/native-types';
+import { usePendingCommand } from '@/src/pendingCommands';
 
 type Send = (command: CommandName, payload?: Record<string, string | boolean>) => void;
 const shortcutIcon = (name: string) => /picture/i.test(name) ? Image : /music/i.test(name) ? Music2 : /video/i.test(name) ? Video : /desktop/i.test(name) ? Laptop : Folder;
@@ -19,6 +20,8 @@ export default function FolderPickerModal({ picker, send, reducedMotion, availab
   notice: Notice | null; dismissNotice: () => void;
 }) {
   const connected = availability === 'ok';
+  // Add folder stays off from the press until the host answers, so a double-click is one request, not a second one refused in red.
+  const pending = usePendingCommand();
   const unavailable = availability === 'ok' ? null : UNAVAILABLE[availability];
   const dialog = useRef<HTMLDialogElement>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -147,8 +150,8 @@ export default function FolderPickerModal({ picker, send, reducedMotion, availab
       </div>
       <footer className="folder-picker-footer"><span><LockKeyhole size={14} />{success ? 'No backup was started.' : 'Windows will ask for your permission.'}</span><div>
         <Button size="md" onClick={close} disabled={busy} data-done={success ? '' : undefined}>{success ? 'Done' : 'Cancel'}</Button>
-        {success ? <Button size="md" variant="primary" disabled={!connected} onClick={() => { dismissNotice(); send('addSource'); }}><FolderPlus size={15} />Add another folder</Button>
-          : <Button size="md" variant="primary" disabled={!ready || busy || checking} onClick={() => { dismissNotice(); send('confirmSourcePicker', { path: current.path }); }}><FolderPlus size={15} />{busy ? 'Adding folder…' : 'Add folder'}</Button>}
+        {success ? <Button size="md" variant="primary" disabled={!connected || pending('addSource')} onClick={() => { dismissNotice(); send('addSource'); }}><FolderPlus size={15} />Add another folder</Button>
+          : <Button size="md" variant="primary" disabled={!ready || busy || checking || pending('confirmSourcePicker')} onClick={() => { dismissNotice(); send('confirmSourcePicker', { path: current.path }); }}><FolderPlus size={15} />{busy ? 'Adding folder…' : 'Add folder'}</Button>}
       </div></footer>
     </motion.div>}
   </dialog>;

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   ArchiveRestore,
@@ -36,6 +36,8 @@ import type {
   SourceState,
 } from '@/src/native-types';
 import { noticeHoldProps, type NoticeHold } from '@/src/useDashboard';
+import { usePendingCommand } from '@/src/pendingCommands';
+import { pageSnapshots, SNAPSHOT_PAGE, snapshotListSignature } from '@/src/restoreList';
 import { formatClock, formatWhen } from '@/src/when';
 
 // `onResult` hears how the host answered a command: false when it refused it, or when the page could not send it.
@@ -170,18 +172,19 @@ function ApprovalHint({ notice }: { notice: string }) {
   return <p className="restore-progress-hint"><Info size={13} aria-hidden="true" /><span>{notice || 'Windows is asking for your permission.'} Choose Yes on the Windows permission prompt. If you cannot see it, look for a flashing shield icon on the taskbar. Choosing No stops this step and changes nothing.</span></p>;
 }
 
-function SnapshotCard({ snapshot, selected, newest, disabled, onSelect, reducedMotion, locale }: {
-  snapshot: RestoreSnapshot; selected: boolean; newest: boolean; disabled: boolean; onSelect: () => void; reducedMotion: boolean; locale?: string;
+// A card is drawn again only when something on it changes (see restoreList.ts): its backup's date words come in ready-made, and
+// `onSelect` keeps its identity while the flow is idle.
+const SnapshotCard = memo(function SnapshotCard({ snapshot, when, full, selected, newest, disabled, onSelect, reducedMotion }: {
+  snapshot: RestoreSnapshot; when: string; full: string; selected: boolean; newest: boolean; disabled: boolean; onSelect: (snapshot: RestoreSnapshot) => void; reducedMotion: boolean;
 }) {
-  const when = backupWhen(snapshot, locale);
-  return <motion.button type="button" className={`restore-snapshot-card ${selected ? 'is-selected' : ''}`} aria-current={selected ? 'true' : undefined} disabled={disabled} onClick={onSelect}
-    title={snapshot.shortId ? `Backup ${snapshot.shortId}` : undefined}
+  return <motion.button type="button" className={`restore-snapshot-card ${selected ? 'is-selected' : ''}`} aria-current={selected ? 'true' : undefined} disabled={disabled} onClick={() => onSelect(snapshot)}
+    title={snapshot.shortId ? `Backup ${snapshot.shortId}` : undefined} data-snapshot-id={snapshot.id}
     initial={{ opacity: 0, y: reducedMotion ? 0 : 7 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: reducedMotion ? 0 : .18 }}>
     <span className="restore-snapshot-icon"><ArchiveRestore size={17} /></span>
-    <span className="restore-snapshot-main"><strong title={backupWhenFull(snapshot, locale)}>{when}</strong><span title={snapshotSource(snapshot)}>{snapshotSource(snapshot)}</span><small>{snapshotFiles(snapshot)} · {snapshotSize(snapshot)}</small></span>
+    <span className="restore-snapshot-main"><strong title={full}>{when}</strong><span title={snapshotSource(snapshot)}>{snapshotSource(snapshot)}</span><small>{snapshotFiles(snapshot)} · {snapshotSize(snapshot)}</small></span>
     <span className="restore-snapshot-meta">{newest && <ValuePill tone="accent">Newest</ValuePill>}{snapshot.isLegacyUnbound && <span title="Made before your current backup settings. You will be asked to confirm before restoring from it."><ValuePill tone="orange">Older setup</ValuePill></span>}{selected ? <CheckCircle2 size={17} /> : <ChevronRight size={16} />}</span>
   </motion.button>;
-}
+});
 
 export default function RestoreFlowModal({ flow, reducedMotion, availability, send, notice, dismissNotice, holdNotice, locale, sources }: {
   flow: RestoreFlowState | null;
@@ -198,6 +201,8 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
   sources?: SourceState[];
 }) {
   const connected = availability === 'ok';
+  // Review restore and Restore now stay off from the press until the host answers, so a double-click asks once (see oneShot.ts).
+  const pending = usePendingCommand();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   // The scrolling body, which a new step starts again from the top of; and the folder list, which is where focus goes back to after a read.
@@ -277,6 +282,9 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
   const treeId = useId();
   const treePath = current?.tree?.path || '';
   const [rowLimit, setRowLimit] = useState(ROW_CHUNK);
+  // How many backups the list draws (see restoreList.ts), and the backup that takes focus once "Show older backups" has drawn it.
+  const [snapshotLimit, setSnapshotLimit] = useState(SNAPSHOT_PAGE);
+  const revealSnapshotRef = useRef('');
   // Closing throws the choices away, so it asks first once there is something to lose beyond the backup itself.
   const hasChoices = ['files', 'destination', 'review'].includes(activeStep) && (paths.length > 0 || wholeSnapshot || !!destinationDraft.trim());
 
@@ -292,6 +300,8 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
   useEffect(() => { setFileQuery(''); }, [treePath, selectedId]);
   // Another folder, or another filter, starts again with the first rows.
   useEffect(() => { setRowLimit(ROW_CHUNK); }, [treePath, selectedId, fileQuery]);
+  // So does another search of the backups, other dates, or Restore opened again.
+  useEffect(() => { setSnapshotLimit(SNAPSHOT_PAGE); }, [snapshotQuery, dateFrom, dateTo, flow?.open]);
   // A question about closing belongs to the step it was asked on, and to a flow that is still open.
   useEffect(() => { setConfirmClose(false); }, [activeStep, flow?.open, busy]);
   useEffect(() => {
@@ -448,28 +458,57 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
     if (dialogRef.current?.open) dialogRef.current.close();
   }, []);
 
+  // The host sends the whole list of backups with every state, as new objects each time. It is taken as new only when something a card
+  // shows has changed, so neither the dates in words nor the cards are worked out again for a state that changed something else.
+  const snapshotSignature = snapshotListSignature(current?.snapshots ?? []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const snapshots = useMemo(() => current?.snapshots ?? [], [snapshotSignature]);
+  // Each backup's date in words and what the search looks through. "Today" turns into "Yesterday" at midnight, so the day is part of the key.
+  const today = new Date().toDateString();
+  const snapshotLabels = useMemo(() => {
+    const labels = new Map<string, { when: string; full: string; search: string }>();
+    for (const snapshot of snapshots) {
+      const when = backupWhen(snapshot, locale), full = backupWhenFull(snapshot, locale);
+      labels.set(snapshot.id, { when, full, search: [snapshot.id, snapshot.shortId, when, full, snapshot.whenDisplay, snapshotSource(snapshot), snapshot.hostname].filter(Boolean).join(' ').toLowerCase() });
+    }
+    return labels;
+  }, [snapshots, locale, today]);
+  // The search and the dates look through every backup; only what is drawn is paged (below).
   const filteredSnapshots = useMemo(() => {
-    if (!current) return [];
     const query = snapshotQuery.trim().toLowerCase();
     const from = dateFrom ? new Date(`${dateFrom}T00:00:00`).getTime() : Number.NEGATIVE_INFINITY;
     const to = dateTo ? new Date(`${dateTo}T23:59:59.999`).getTime() : Number.POSITIVE_INFINITY;
-    return current.snapshots.filter(snapshot => {
-      const haystack = [snapshot.id, snapshot.shortId, backupWhen(snapshot, locale), backupWhenFull(snapshot, locale), snapshot.whenDisplay, snapshotSource(snapshot), snapshot.hostname].filter(Boolean).join(' ').toLowerCase();
+    return snapshots.filter(snapshot => {
+      const haystack = snapshotLabels.get(snapshot.id)?.search ?? '';
       const time = Date.parse(snapshot.when);
       const dateFilterActive = !!dateFrom || !!dateTo;
       const dateMatches = dateFilterActive && Number.isNaN(time) ? false : (!dateFilterActive || (time >= from && time <= to));
       return (!query || haystack.includes(query)) && dateMatches;
     });
-  }, [current, dateFrom, dateTo, locale, snapshotQuery]);
+  }, [dateFrom, dateTo, snapshotLabels, snapshotQuery, snapshots]);
+  // The newest page of what matches, with the chosen backup kept in view, and how many older ones wait behind "Show older backups".
+  const snapshotPage = useMemo(() => pageSnapshots(filteredSnapshots, snapshotLimit, selectedId), [filteredSnapshots, selectedId, snapshotLimit]);
+  const showOlderBackups = () => {
+    revealSnapshotRef.current = snapshotPage.nextId;
+    setSnapshotLimit(limit => limit + SNAPSHOT_PAGE);
+  };
+  // The first of the backups just drawn takes focus, so the keyboard goes on from where the list grew, as the button it pressed may be gone.
+  useEffect(() => {
+    const id = revealSnapshotRef.current;
+    if (!id) return;
+    revealSnapshotRef.current = '';
+    const cards = panelRef.current?.querySelectorAll<HTMLElement>('[data-snapshot-id]') ?? [];
+    Array.from(cards).find(card => card.dataset.snapshotId === id)?.focus();
+  }, [snapshotPage]);
   // The most recent backup, marked in the list: when someone is looking for yesterday's file it is the first one to try.
   const newestId = useMemo(() => {
     let best = '', time = Number.NEGATIVE_INFINITY;
-    for (const snapshot of current?.snapshots ?? []) {
+    for (const snapshot of snapshots) {
       const at = Date.parse(snapshot.when);
       if (!Number.isNaN(at) && at > time) { time = at; best = snapshot.id; }
     }
     return best;
-  }, [current?.snapshots]);
+  }, [snapshots]);
 
   // The backed-up folders as shortcuts. A backup shows one folder per read, so reaching Documents from the top is a read for every level.
   const jumpFolders = useMemo(() => {
@@ -527,17 +566,20 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
     send('restoreFlowNavigate', { step: 'files', snapshotId: selectedId });
   };
 
-  const selectSnapshot = (snapshot: RestoreSnapshot) => {
+  // Kept the same function while the flow is idle, so a state that changes nothing on the cards draws none of them again.
+  const selectSnapshot = useCallback((snapshot: RestoreSnapshot) => {
     if (busy || !connected) return;
-    // The backup that is already chosen keeps what was picked from it (the host keeps it too); only another backup starts over.
-    if (snapshot.id === selectedId) { openFiles(); return; }
     dismissNotice();
-    setDraftPaths([]);
-    setDraftWhole(false);
-    setDraftSnapshotId(snapshot.id);
-    setLegacyConfirmed(false);
+    // The backup that is already chosen keeps what was picked from it (the host keeps it too), and going on reads nothing (see openFiles);
+    // only another backup starts over.
+    if (snapshot.id !== selectedId) {
+      setDraftPaths([]);
+      setDraftWhole(false);
+      setDraftSnapshotId(snapshot.id);
+      setLegacyConfirmed(false);
+    }
     send('restoreFlowNavigate', { step: 'files', snapshotId: snapshot.id });
-  };
+  }, [busy, connected, dismissNotice, selectedId, send]);
 
   const browseFiles = (parentPath: string) => {
     if (!selectedId || !connected || busy) return;
@@ -565,12 +607,12 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
   };
 
   const goReview = () => {
-    if (!selectedId || (!wholeSnapshot && paths.length === 0) || !selectionAccepted || !destinationValid || !connected || busy) return;
+    if (!selectedId || (!wholeSnapshot && paths.length === 0) || !selectionAccepted || !destinationValid || !connected || busy || pending('restoreFlowReview')) return;
     move('restoreFlowReview');
   };
 
   const startRestore = () => {
-    if (!selectedId || (!wholeSnapshot && paths.length === 0) || !selectionAccepted || !destinationValid || (selectedSnapshot?.isLegacyUnbound && !legacyConfirmed) || !connected || busy) return;
+    if (!selectedId || (!wholeSnapshot && paths.length === 0) || !selectionAccepted || !destinationValid || (selectedSnapshot?.isLegacyUnbound && !legacyConfirmed) || !connected || busy || pending('restoreFlowStart')) return;
     dismissNotice();
     send('restoreFlowStart', { legacyConfirmed });
   };
@@ -703,6 +745,8 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
     if (activeStep === 'error') return ['Your current files and your backups were not changed.', false];
     if (availability !== 'ok') return [UNAVAILABLE_HINT[availability], true];
     if (activeStep === 'destination' && destinationChecking) return ['Checking the folder…', true];
+    // Restore now looks at the folder once more before anything is written; the restore starts when that look has answered.
+    if (activeStep === 'review' && busy) return ['Checking the folder before restoring…', true];
     if (busy && approvalWaiting) return ['Waiting for you to answer the Windows permission prompt…', true];
     if (busy) return ['Working… this can take a minute.', true];
     if (activeStep === 'backup') return selectedId ? ['Choose files to go on with the selected backup, or pick another.', false] : ['Click the backup you want to restore from.', true];
@@ -779,7 +823,8 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
             <div className="restore-snapshot-filters"><label className="restore-flow-search"><Search size={14} /><span className="sr-only">Search backups</span><input value={snapshotQuery} onChange={event => setSnapshotQuery(event.target.value)} onKeyDown={clearOnEscape(snapshotQuery, () => setSnapshotQuery(''))} placeholder="Search by date, folder or computer…" /></label><label className="restore-date-field"><CalendarDays size={13} /><span className="sr-only">From date</span><input type="date" value={dateFrom} onChange={event => setDateFrom(event.target.value)} onKeyDown={clearOnEscape(dateFrom, () => setDateFrom(''))} aria-label="From date" /></label><span className="restore-date-separator">to</span><label className="restore-date-field"><CalendarDays size={13} /><span className="sr-only">To date</span><input type="date" value={dateTo} onChange={event => setDateTo(event.target.value)} onKeyDown={clearOnEscape(dateTo, () => setDateTo(''))} aria-label="To date" /></label>{filtersActive && <Button size="xs" variant="quiet" onClick={clearFilters}>Clear</Button>}</div>
             <div className="restore-snapshot-list" role="list" aria-label="Available backups">
               {loadingBackups && <div className="restore-flow-empty"><LoadingState label={approvalWaiting ? 'Waiting for Windows permission…' : 'Opening your list of backups…'} variant="Orbit" live={false} />{approvalWaiting && <ApprovalHint notice={approvalNotice} />}</div>}
-              {!loadingBackups && filteredSnapshots.map(snapshot => <div key={snapshot.id} role="listitem"><SnapshotCard snapshot={snapshot} selected={snapshot.id === selectedId} newest={snapshot.id === newestId} disabled={busy || !connected} onSelect={() => selectSnapshot(snapshot)} reducedMotion={reducedMotion} locale={locale} /></div>)}
+              {!loadingBackups && snapshotPage.shown.map(snapshot => { const label = snapshotLabels.get(snapshot.id); return <div key={snapshot.id} role="listitem"><SnapshotCard snapshot={snapshot} when={label?.when ?? whenOf(snapshot)} full={label?.full ?? ''} selected={snapshot.id === selectedId} newest={snapshot.id === newestId} disabled={busy || !connected} onSelect={selectSnapshot} reducedMotion={reducedMotion} /></div>; })}
+              {!loadingBackups && snapshotPage.hidden > 0 && <div role="listitem" className="restore-snapshot-more"><Button size="sm" onClick={showOlderBackups}>Show older backups<span> · {snapshotPage.hidden.toLocaleString()} not shown</span></Button></div>}
               {!loadingBackups && filteredSnapshots.length === 0 && <div className="restore-flow-empty"><Search size={20} /><strong>{dateFrom && dateTo && dateFrom > dateTo ? 'Choose a valid date range' : current.snapshots.length ? 'No backups match those filters' : 'No backups to restore from'}</strong><p>{dateFrom && dateTo && dateFrom > dateTo ? 'The start date must be on or before the end date.' : current.snapshots.length ? 'Try a different date range or search.' : 'Rewindle did not find a backup it can restore from. If you have not made a backup yet, run one from the Protection page first. If you have, choose Try again.'}</p>{filtersActive && <Button size="sm" onClick={clearFilters}>Clear filters</Button>}{!current.snapshots.length && <Button size="sm" disabled={busy || !connected} onClick={() => move('restoreFlowRetry')}><RotateCcw size={13} />Try again</Button>}</div>}
             </div>
             {availability !== 'ok' && <div className="restore-flow-inline-warning" role="alert"><CircleAlert size={15} />{UNAVAILABLE_WARNING[availability]}</div>}
@@ -881,8 +926,8 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
           {!restoring && activeStep === 'files' && <Button size="md" variant="primary" aria-describedby={HINT_ID} disabled={!canContinueFiles || !connected || busy} onClick={goDestination}>Choose folder <ArrowRight size={14} /></Button>}
           {!restoring && activeStep === 'destination' && (needsCheck
             ? <Button size="md" variant="primary" aria-describedby={HINT_ID} disabled={!connected || busy} onClick={validateDestination}>{destinationChecking ? <LoaderCircle size={14} className="restore-spin" /> : <Check size={14} />}Check folder</Button>
-            : <Button size="md" variant="primary" aria-describedby={HINT_ID} data-review-restore disabled={!destinationValid || !canContinueFiles || !connected || busy} onClick={goReview}>Review restore <ArrowRight size={14} /></Button>)}
-          {!restoring && activeStep === 'review' && <Button size="md" variant="primary" aria-describedby={HINT_ID} disabled={!canStart || !connected || busy} onClick={startRestore}><ArchiveRestore size={15} />Restore now</Button>}
+            : <Button size="md" variant="primary" aria-describedby={HINT_ID} data-review-restore disabled={!destinationValid || !canContinueFiles || !connected || busy || pending('restoreFlowReview')} onClick={goReview}>Review restore <ArrowRight size={14} /></Button>)}
+          {!restoring && activeStep === 'review' && <Button size="md" variant="primary" aria-describedby={HINT_ID} disabled={!canStart || !connected || busy || pending('restoreFlowStart')} onClick={startRestore}><ArchiveRestore size={15} />Restore now</Button>}
           {/* On a restore that worked, opening the folder is the next thing anyone does, so it is the main button and Close steps back. After a
               partial one, Try again stays the main button and the folder is offered beside it. */}
           {!restoring && ['success', 'partial', 'error'].includes(activeStep) && <>

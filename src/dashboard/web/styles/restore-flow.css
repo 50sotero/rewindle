@@ -230,9 +230,10 @@ button.restore-crumb { justify-content: center; min-width: 24px; min-height: 24p
 .restore-tree-row { display: flex; min-height: 43px; align-items: center; gap: 9px; padding: 5px 11px; border-bottom: 1px solid var(--line-soft); }
 .restore-tree-row:last-child { border-bottom: 0; }
 .restore-tree-row.is-selected { background: var(--accent-tint); }
-/* Under the rows a long folder has not shown yet; the row before it already draws the rule above. */
-.restore-tree-more { display: flex; justify-content: center; padding: 10px 11px; }
-.restore-tree-more span { color: var(--ink-3); }
+/* Under the rows a long folder has not shown yet (the row before it already draws the rule above), and under the backups the list
+ * has not drawn yet (it draws the newest first, a page at a time). */
+.restore-tree-more, .restore-snapshot-more { display: flex; justify-content: center; padding: 10px 11px; }
+.restore-tree-more span, .restore-snapshot-more span { color: var(--ink-3); }
 .restore-entry-check { display: grid; width: 22px; height: 28px; flex: 0 0 22px; place-items: center; }
 .restore-entry-name { display: flex; min-width: 0; flex: 1; align-items: center; gap: 8px; padding: 4px 5px; border: 0; border-radius: var(--r-chip); color: var(--ink-2); background: transparent; text-align: left; }
 .restore-entry-name:not(:disabled):hover { color: var(--ink); background: var(--surface); }

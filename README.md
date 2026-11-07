@@ -444,7 +444,8 @@ separate system you have tested.
 
 **In the dashboard.** Go to **Restore > Open Restore Center**:
 
-1. **Choose a backup.** Search and filter snapshots by date.
+1. **Choose a backup.** Search and filter snapshots by date. The newest 50 are
+   listed first; **Show older backups** lists 50 more each time.
 2. **Choose the files.** Browse the snapshot and select files or folders (up to
    64 items; select a parent folder to cover more), or the whole snapshot.
 3. **Choose a destination.** It must be a new or empty local folder that does

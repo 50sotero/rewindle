@@ -58,6 +58,18 @@ the page and tells it the app is alive at least every five seconds, so the page
 can tell when it has lost the app. Commands that open a folder in File Explorer
 carry no path from the page; the host decides which folder to open.
 
+The host answers every command once it has run it, after any dialog of its own
+has closed. Work that waits on a drive or on the backup service runs off the
+window's thread, so the window keeps answering: reading the list of backups or
+a folder of one, and every look at the folder to restore into, including the
+one Review restore and Restore now take again. Such a command is answered once
+the work has begun, and what it found reaches the page in the state; until then
+the restore flow is busy and refuses every other change. A button that asks for
+something once per press (Back up now, Stop backing up, Add folder, Restore now
+and the others in `ONE_SHOT_COMMANDS`, in `web/src/oneShot.ts`) stays off from
+the press until that answer, so a double-click is one request. The host still
+refuses a second folder change while one is waiting for approval.
+
 `--native` starts an older WPF-only presentation instead of the web view, for
 diagnosis.
 
@@ -293,8 +305,10 @@ these user-facing rules when you change the dashboard:
   technology.
 - **Restore never overwrites.** Destinations must be new or empty, local, and
   outside sources, the repository and Rewindle's folders; network paths and
-  reparse points are refused. A started restore cannot be cancelled from the
-  UI, because the restore manager cannot do it.
+  reparse points are refused. The folder is looked at again before the review
+  opens and once more before the restore starts, and the restore starts only
+  if that last look passed and nothing reviewed has changed. A started restore
+  cannot be cancelled from the UI, because the restore manager cannot do it.
 - **Accessibility is a feature.** Status is never shown by color alone; every
   page is a named region; screen readers hear when a backup starts, progresses,
   finishes, fails or is cancelled; focus returns where it belongs when a dialog

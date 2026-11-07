@@ -6,6 +6,7 @@ import { ValuePill } from '@/components/atoms/ValuePill';
 import LoadingState from '@/components/primitives/LoadingState';
 import type { CommandName, DashboardState } from '@/src/native-types';
 import { reinstallAdvice } from '@/src/protectionTone';
+import { usePendingCommand } from '@/src/pendingCommands';
 
 export type FolderView = { query: string; unavailable: boolean };
 type Send = (command: CommandName, payload?: Record<string, string | boolean>) => void;
@@ -22,6 +23,8 @@ export default function ProtectedFolders({ state, send, view, setView, lockReaso
   state: DashboardState; send: Send; view: FolderView; setView: (value: FolderView) => void; lockReason?: string;
 }) {
   const noteId = useId();
+  // A press that is still waiting for the host's answer keeps its button off, so a double-click never asks twice (see oneShot.ts).
+  const pending = usePendingCommand();
   // The list is empty because the configuration could not be read, not because nothing is protected.
   const unreadable = !state.sources.length && !!state.setup?.problem;
   const missing = state.sources.filter(source => !source.exists);
@@ -48,7 +51,7 @@ export default function ProtectedFolders({ state, send, view, setView, lockReaso
   return <section className="protected-folders" aria-labelledby="protected-folders-title">
     <div className="section-toolbar"><div><h2 className="section-title" id="protected-folders-title">Protected folders <span className="count-badge">{state.sources.length} {state.sources.length === 1 ? 'folder' : 'folders'}</span></h2>
       <p className="muted-copy" style={{ margin: '5px 0 0' }}>Each location includes its files and subfolders. Add more at any time.</p></div>
-      <span title={lockText || undefined}><Button size="md" disabled={!addEnabled} aria-describedby={lockText ? noteId : undefined} title={state.actions.addSource?.help} onClick={() => send('addSource')}><FolderPlus size={15} />Add folder</Button></span>
+      <span title={lockText || undefined}><Button size="md" disabled={!addEnabled || pending('addSource')} aria-describedby={lockText ? noteId : undefined} title={state.actions.addSource?.help} onClick={() => send('addSource')}><FolderPlus size={15} />Add folder</Button></span>
     </div>
     {lockText && <p id={noteId} className={lockReason ? 'sr-only' : 'muted-copy folder-lock-note'}>{lockText}</p>}
     {showToolbar && <div className="folder-toolbar"><label className="search-field"><Search size={14} /><input aria-label="Search protected folders" placeholder="Find a folder or path…" value={view.query} onChange={event => setView({ ...view, query: event.target.value })} />
@@ -72,7 +75,7 @@ export default function ProtectedFolders({ state, send, view, setView, lockReaso
     {!state.sourcePicker?.open && (stagedOperation || waitingOnRemoval) && <div className={operation.active ? 'operation-note' : 'attention-note'} role={operation.stage === 'Failed' ? 'alert' : 'status'}>
       <div>{operation.active ? <LoadingState label={(stagedOperation ? operation.message : notice?.text) || 'Updating protected folders'} variant="Orbit" /> : <><strong>{operation.stage === 'Cancelled' ? 'Folder change cancelled' : 'The folder wasn’t added'}</strong><p>{operation.message}</p></>}
         {stagedOperation && operation.path && <p className="folder-full-path">{operation.path}</p>}</div>
-      {stagedOperation && <div className="actions">{(['retrySourceChange', 'dismissSourceChange'] as const).map(command => state.actions[command]?.visible && <Button key={command} size="sm" disabled={!state.actions[command]?.enabled} onClick={() => send(command)}>{state.actions[command]?.label}</Button>)}</div>}
+      {stagedOperation && <div className="actions">{(['retrySourceChange', 'dismissSourceChange'] as const).map(command => state.actions[command]?.visible && <Button key={command} size="sm" disabled={!state.actions[command]?.enabled || pending(command)} onClick={() => send(command)}>{state.actions[command]?.label}</Button>)}</div>}
     </div>}
     {notice && !waitingOnRemoval && !state.sourcePicker?.open && <p className={`source-notice ${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}><NoticeIcon size={14} aria-hidden="true" />{notice.text}</p>}
     {sources.length ? <div className="surface protected-folder-list" role="list" aria-label="Protected folder locations">{sources.map((source, i) => <motion.div role="listitem" className="protected-folder-row" key={source.path}
@@ -82,14 +85,14 @@ export default function ProtectedFolders({ state, send, view, setView, lockReaso
       {/* Only exceptions get a pill. Every folder in this list is included, so saying so on each row was noise. */}
       {!source.exists ? <ValuePill tone="orange">Unavailable</ValuePill> : source.isCanary ? <ValuePill tone="accent">Required</ValuePill> : null}
       {source.isCanary ? <span className="folder-row-lock" title="This folder holds the restore test file, so it can’t be removed"><LockKeyhole size={14} /></span>
-        : <span title={source.canRemove ? undefined : lockText || undefined}><Button size="sm" variant="quiet" disabled={!source.canRemove} aria-describedby={!source.canRemove && lockText ? noteId : undefined}
+        : <span title={source.canRemove ? undefined : lockText || undefined}><Button size="sm" variant="quiet" disabled={!source.canRemove || pending('removeSource')} aria-describedby={!source.canRemove && lockText ? noteId : undefined}
           aria-label={`Stop backing up ${source.name}`} title={source.canRemove ? 'Stop backing up this folder. Backups you already made are kept.' : undefined} onClick={() => send('removeSource', { path: source.path })}><X size={14} /><span className="folder-remove-label">Stop backing up</span></Button></span>}
     </motion.div>)}</div> : <div className="surface empty-state">
       {/* An empty list is only "no folders" when the configuration was read. When it could not be (setup.problem is set), the list is not
           presented as a plan with nothing in it; the host's reason is the note above, which is where a disabled control's reason goes. */}
       {state.sources.length > 0 && view.unavailable && !view.query.trim() ? <Check size={26} /> : unreadable ? <CircleAlert size={26} /> : <Folder size={26} />}<strong>{!state.sources.length ? (unreadable ? 'Protected folders unavailable' : 'Nothing is being backed up yet') : view.unavailable && !view.query.trim() ? 'All protected folders are available' : 'No matching folders'}</strong>
       <p>{!state.sources.length ? (unreadable ? 'Your folders appear here as soon as Rewindle can read the backup configuration.' : state.sourceStatus || 'Add the folders you want Rewindle to protect.') : view.unavailable && !view.query.trim() ? 'The Unavailable filter is on. Switch to All folders to see your backup scope.' : 'Try another folder name or clear your filters.'}</p>
-      {!state.sources.length ? <span title={lockText || undefined}><Button size="sm" disabled={!addEnabled} aria-describedby={lockText ? noteId : undefined} onClick={() => send('addSource')}><FolderPlus size={13} />Add folder</Button></span> : <Button size="sm" onClick={() => setView({ query: '', unavailable: false })}>Show all folders</Button>}
+      {!state.sources.length ? <span title={lockText || undefined}><Button size="sm" disabled={!addEnabled || pending('addSource')} aria-describedby={lockText ? noteId : undefined} onClick={() => send('addSource')}><FolderPlus size={13} />Add folder</Button></span> : <Button size="sm" onClick={() => setView({ query: '', unavailable: false })}>Show all folders</Button>}
     </div>}
     <p className="folder-list-footnote"><LockKeyhole size={12} />Adding or removing a folder asks Windows for approval. Neither starts a backup. Removing a folder never deletes your files.</p>
   </section>;

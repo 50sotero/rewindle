@@ -93,3 +93,29 @@ export function offsiteOverdueWords(offsite: Offsite): { title: string; detail: 
     ? { title: 'Check didn’t finish', detail: `A check of ${copy} started more than two days ago and never finished, so Rewindle can’t confirm the copy has your latest backups.`, nextStep }
     : { title: 'Not checked lately', detail: `Rewindle checks ${copy} every night, but no check has worked in more than two days, so it can’t confirm the copy has your latest backups.`, nextStep };
 }
+
+/**
+ * Whether the time of the last verified backup can be shown: not when the backup status could not be read (the page lost the host's
+ * answer, or the host could read no status file) or the clocks disagree. Then "No verified backup yet" would be a guess, said under
+ * a title that already says the status is unavailable.
+ */
+export const verifiedTimeKnown = (state: Pick<DashboardState, 'dataError' | 'status' | 'freshness'>): boolean =>
+  !state.dataError && !state.status.unavailable && state.freshness.state !== 'ClockAnomaly';
+
+/** Whether the run history the host sent has this run. A failed run that never reached the history has no details to open. */
+export const runInHistory = (state: Pick<DashboardState, 'history'>, runId: string | undefined): boolean =>
+  !!runId && state.history.some(run => run.id === runId);
+
+/** Whether the Protection hero offers "See what happened": the latest run failed, it is in the history, and run details exist at all. */
+export function heroOffersRunDetails(state: Pick<DashboardState, 'status' | 'history' | 'actions'>): boolean {
+  const s = state.status, action = state.actions.viewRunDetails;
+  return !!s.failure && !s.active && !!action && action.visible !== false && runInHistory(state, s.runId);
+}
+
+/**
+ * Whether a run's details can be opened from a button outside Activity's table. The host turns its own Open details on only once a
+ * run is selected in its table, and nothing selects one when Rewindle starts; but it takes the run's id and selects that run itself.
+ * So the page goes by the link to the host and by the run being in the history, as Activity's Open details does.
+ */
+export const canOpenRunDetails = (state: Pick<DashboardState, 'history' | 'actions'>, runId: string | undefined, connected: boolean): boolean =>
+  connected && !!state.actions.viewRunDetails && state.actions.viewRunDetails.visible !== false && runInHistory(state, runId);

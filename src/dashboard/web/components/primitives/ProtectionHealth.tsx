@@ -3,8 +3,9 @@ import { motion } from 'motion/react';
 import { ArchiveRestore, ArrowUpRight, Check, ChevronDown, Clock3, Cloud, HardDrive, LoaderCircle, OctagonAlert, Play, RefreshCw, TriangleAlert } from 'lucide-react';
 import { Button } from '@/components/atoms/Button';
 import { usableLocale, type CommandName, type DashboardState } from '@/src/native-types';
-import { offsiteOverdueWords, offsiteTone } from '@/src/protectionTone';
+import { heroOffersRunDetails, offsiteOverdueWords, offsiteTone } from '@/src/protectionTone';
 import { formatClock, formatWhen, formatWhenAgo } from '@/src/when';
+import { usePendingCommand } from '@/src/pendingCommands';
 import './protection-health.css';
 
 type Send = (command: CommandName, payload?: Record<string, string | boolean>) => void;
@@ -133,7 +134,8 @@ export function protectionHealthItems(state: DashboardState, context: HealthCont
   // schedule that cannot be read is looked at in Settings.
   const needsBackup = freshness.state === 'Overdue' || freshness.state === 'NoVerifiedBackup';
   const viewActivity: ItemAction | undefined = here ? undefined : { command: 'navigate', label: 'View activity', payload: { page: 'Activity' } };
-  const heroOffersRun = here && !!s.runId;
+  // The hero offers a failed run only when that run is in the history; otherwise this card sends the person to Activity.
+  const heroOffersRun = here && heroOffersRunDetails(state);
   const localAction: ItemAction | undefined = unavailable ? { command: 'refresh', label: 'Try again' }
     : s.active ? viewActivity
     : freshness.state === 'Paused' ? { command: 'editSchedule', label: 'Review schedule' }
@@ -218,6 +220,8 @@ function HealthAction({ item, state, send, quiet, locale }: { item: HealthItem; 
   // press that changed nothing looked as if it had done nothing. The card says when it last asked; the count restarts the note, so a
   // second press within the same minute is still seen (and heard).
   const [reread, setReread] = useState<{ at: string; count: number } | null>(null);
+  // A press that is still waiting for the host's answer keeps the button off, so a double-click is one request.
+  const pending = usePendingCommand();
   if (!item.action) return null;
   const action = item.action;
   const stateAction = state.actions[action.command];
@@ -232,7 +236,7 @@ function HealthAction({ item, state, send, quiet, locale }: { item: HealthItem; 
     send(action.command, action.payload);
     if (refreshes) setReread(previous => ({ at: formatClock(new Date().toISOString(), locale), count: (previous?.count ?? 0) + 1 }));
   };
-  return <div className="health-action" title={quiet && reason ? reason : undefined}><Button size="xs" variant={item.primary ? 'primary' : item.subdued ? 'quiet' : 'secondary'} disabled={!!reason} aria-describedby={reason ? id : undefined}
+  return <div className="health-action" title={quiet && reason ? reason : undefined}><Button size="xs" variant={item.primary ? 'primary' : item.subdued ? 'quiet' : 'secondary'} disabled={!!reason || pending(action.command)} aria-describedby={reason ? id : undefined}
     onClick={press}>{starts && <Icon size={11} fill="currentColor" aria-hidden="true" />}{action.label}{!starts && <Icon size={12} aria-hidden="true" />}</Button>
     {reason && <p id={id} className={quiet ? 'sr-only' : 'action-disabled-reason'}>{reason}</p>}
     {/* Always present, so a note that appears after a press is announced. */}
