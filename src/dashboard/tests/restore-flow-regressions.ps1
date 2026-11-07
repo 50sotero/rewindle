@@ -1017,7 +1017,8 @@ try {
     # How far back the backups go, as the Restore list counted them. Once the list is shown the dashboard keeps the count in memory.
     # A Load, which the dashboard also runs on the window's thread, writes nothing; the background refresh writes backup-range.json
     # in the dashboard's own folder (under the fixture roots here). The page is told it only for the plan and backup location in use
-    # and never while the status is a data error. A list whose count cannot be kept still ends ready: the count is only ever shown.
+    # and never while the status is a data error. A list whose count cannot be kept still ends ready, even when keeping it throws:
+    # the count is only ever shown.
     $rangeState = Join-Path $telemetryRoot 'range-state'
     New-Item -ItemType Directory -Path $rangeState -Force | Out-Null
     $rangeReader = [Activator]::CreateInstance($readerType, $constructorFlags, $null, [object[]]@([string]$rangeState, $true, [string]$offsiteOverride), $null)
@@ -1028,21 +1029,36 @@ try {
     $showArgs[1] = $config
     Set-PrivateField $dashboard 'restoreFlowOpen' $true
     Set-PrivateField $dashboard 'restoreFlowSelectedSnapshotId' ''
-    foreach ($keeper in @($null, 'no-file')) {
-        if ($null -eq $keeper) { Set-PrivateField $dashboard 'reader' $null }
-        else {
-            $quietReader = [Activator]::CreateInstance($readerType, $constructorFlags, $null, [object[]]@([string]$rangeState, $false, [string]$offsiteOverride), $null)
-            Set-PrivateField $quietReader 'backupRangePath' ''
-            Set-PrivateField $dashboard 'reader' $quietReader
+    # A reader that throws when it is given a count (its lock is gone), so only the hook's try/catch keeps Restore going.
+    $throwingReader = [Activator]::CreateInstance($readerType, $constructorFlags, $null, [object[]]@([string]$rangeState, $false, [string]$offsiteOverride), $null)
+    Set-PrivateField $throwingReader 'listedBackupRangeGate' $null
+    $recordFailure = $null
+    try {
+        [void]$readerType.GetMethod('RecordListedBackupRange', $flags).Invoke($throwingReader, [object[]]@([string]$config.PlanId, [string]$config.RepositoryPath, [long]1, [DateTime]::UtcNow, [DateTime]::UtcNow))
+    }
+    catch { $recordFailure = $_.Exception }
+    Assert-True ($null -ne $recordFailure) 'the reader meant to throw when it is given a count did not throw'
+    foreach ($keeper in @('no reader', 'nowhere to write', 'keeping it throws')) {
+        switch ($keeper) {
+            'no reader' { Set-PrivateField $dashboard 'reader' $null }
+            'nowhere to write' {
+                $quietReader = [Activator]::CreateInstance($readerType, $constructorFlags, $null, [object[]]@([string]$rangeState, $false, [string]$offsiteOverride), $null)
+                Set-PrivateField $quietReader 'backupRangePath' ''
+                Set-PrivateField $dashboard 'reader' $quietReader
+            }
+            'keeping it throws' { Set-PrivateField $dashboard 'reader' $throwingReader }
         }
         Set-PrivateField $dashboard 'restoreFlowStatus' 'loading'
-        Invoke-Private $dashboard 'ShowRestoreFlowSnapshotList' $showArgs | Out-Null
+        $escaped = $null
+        try { Invoke-Private $dashboard 'ShowRestoreFlowSnapshotList' $showArgs | Out-Null }
+        catch { $escaped = $_.Exception }
+        Assert-True ($null -eq $escaped) ('a count that could not be kept reached Restore (' + $keeper + '): ' + $escaped)
         Assert-True ((Get-FieldValue $dashboard 'restoreFlowStatus') -eq 'ready' -and (Get-FieldValue $dashboard 'restoreFlowMessageTitle') -eq 'Choose a backup') ('a list of backups whose count could not be kept did not end ready (' + $keeper + ')')
-        if ($null -ne $keeper) {
+        if ($keeper -eq 'nowhere to write') {
             [void]$quietReader.Load()
             Invoke-BackgroundRangeWrite $quietReader
         }
-        Assert-True (-not (Test-Path -LiteralPath $rangeFile)) 'a count that could not be kept was written'
+        Assert-True (-not (Test-Path -LiteralPath $rangeFile)) ('a count that could not be kept was written (' + $keeper + ')')
     }
     Set-PrivateField $dashboard 'reader' $rangeReader
     Set-PrivateField $dashboard 'restoreFlowStatus' 'loading'
