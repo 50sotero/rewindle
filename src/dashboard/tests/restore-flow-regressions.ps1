@@ -3196,7 +3196,8 @@ namespace RewindleRegression {
         $kindsView = [Activator]::CreateInstance($retentionViewType, $true)
         Set-ObjectField $kindsView 'Mode' 'on'
         Set-ObjectField $kindsView 'PreviewStatus' 'ready'
-        $earlierList = Get-ObjectField $kindsView 'EarlierChanges'
+        # Read directly: a function would unroll the empty list into nothing.
+        $earlierList = $retentionViewType.GetField('EarlierChanges', $flags).GetValue($kindsView)
         foreach ($pair in @(@('2026-09-29T00:30:00Z', 'unknown'), @('2026-09-28T00:30:00Z', 'not_compared'), @('2026-09-27T00:30:00Z', 'hold'), @('2026-09-26T00:30:00Z', 'something_new'))) {
             $change = [Activator]::CreateInstance($earlierType, $true)
             Set-ObjectField $change 'FinishedUtc' $pair[0]
