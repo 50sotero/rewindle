@@ -20,8 +20,10 @@ namespace ResticBackuper.Dashboard
         None = 0,
         // At the recent rate the backups fill the drive within the person's Low space warning.
         Forecast = 1,
-        // Little room now, whatever the rate: less than 1.5 times the reserve (when Check recovery readiness warns too), or, while there
-        // is no forecast, less than a tenth of the drive above the reserve.
+        // Little room now, whatever the rate: less than 1.5 times the reserve (when Check recovery readiness warns too), or, while the
+        // forecast is still learning or unreadable, less than a tenth of the drive above the reserve. Not the tenth where the backup
+        // service records nothing to forecast from (Unavailable): there it would be amber for good, and the warning that could tune it
+        // is not offered.
         Percent = 2,
         // Less free space than the backup service keeps in reserve, so it refuses to start a backup.
         Reserve = 3
@@ -163,7 +165,8 @@ namespace ResticBackuper.Dashboard
         }
 
         // The level and reason for a forecast already worked out, in this order: too full for the next backup; full within the warning
-        // at this rate; less than 1.5 times the reserve; with no forecast, less than a tenth of the drive above the reserve; otherwise fine.
+        // at this rate; less than 1.5 times the reserve; with no forecast yet (learning or unreadable), less than a tenth of the drive
+        // above the reserve; otherwise fine. Where no forecast is available at all, only the reserve rules apply (see Percent).
         internal static BackupSpaceResult Judge(BackupSpaceFacts facts, BackupSpaceForecastState state, long weeklyBytes)
         {
             BackupSpaceFacts known = facts ?? new BackupSpaceFacts();
@@ -208,7 +211,7 @@ namespace ResticBackuper.Dashboard
                 result.Level = BackupSpaceLevel.Low;
                 result.Reason = BackupSpaceReason.Percent;
             }
-            else if (state != BackupSpaceForecastState.Growing && state != BackupSpaceForecastState.Flat &&
+            else if ((state == BackupSpaceForecastState.Learning || state == BackupSpaceForecastState.Unknown) &&
                 headroom < PercentFloor * total)
             {
                 result.Level = BackupSpaceLevel.Low;
@@ -223,18 +226,23 @@ namespace ResticBackuper.Dashboard
 
         // While a backup runs, its own writes can take the free space below the reserve, which the backup service checks only as a run
         // starts. So the card keeps what it said before the run and moves only its figures. A "too full" from before the run is not
-        // repeated: a run the service accepted had room, and one it refuses ends within moments and is judged again.
-        internal static BackupSpaceResult HoldDuringRun(BackupSpaceResult beforeRun)
+        // repeated: a run the service accepted had room, and one it refuses ends within moments and is judged again. With nothing said
+        // before the run (the dashboard started during it, or a preview), the level is unknown until the run ends; where the backup
+        // service records nothing to forecast from, the answer still says so, so Settings does not offer a warning that would do nothing.
+        internal static BackupSpaceResult HoldDuringRun(BackupSpaceResult beforeRun, BackupSpaceFacts facts)
         {
-            if (beforeRun == null)
-            {
-                return new BackupSpaceResult();
-            }
-            BackupSpaceResult held = beforeRun.Copy();
+            BackupSpaceResult held = beforeRun == null ? new BackupSpaceResult() : beforeRun.Copy();
             if (held.Level == BackupSpaceLevel.Full)
             {
                 held.Level = BackupSpaceLevel.Unknown;
                 held.Reason = BackupSpaceReason.None;
+            }
+            if (facts != null && !facts.ForecastAvailable)
+            {
+                held.ForecastState = BackupSpaceForecastState.Unavailable;
+                held.WeeksLeft = null;
+                held.WeeksRounded = null;
+                held.WeeklyBytes = -1;
             }
             return held;
         }

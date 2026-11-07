@@ -222,7 +222,7 @@ export interface BackupSpaceState {
     weeklyBytes: number; weeklyDisplay: string;
   };
   level: 'unknown' | 'ok' | 'low' | 'full';
-  /** 'percent': little room now (under 1.5 times the reserve, or, with no forecast, under a tenth of the drive above it). */
+  /** 'percent': little room now (under 1.5 times the reserve, or, while the forecast is learning or unknown, under a tenth of the drive above it). */
   reason: '' | 'forecast' | 'percent' | 'reserve';
   /** The person's Low space warning, in weeks: 4, 8 or 12. */
   warnWeeks: number;

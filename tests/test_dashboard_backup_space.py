@@ -103,11 +103,11 @@ namespace ResticBackuper.Dashboard
                 }
                 if (Flag(spec, "hold", false))
                 {
-                    result = BackupSpaceEvaluator.HoldDuringRun(result);
+                    result = BackupSpaceEvaluator.HoldDuringRun(result, facts);
                 }
                 if (Flag(spec, "holdNothing", false))
                 {
-                    result = BackupSpaceEvaluator.HoldDuringRun(null);
+                    result = BackupSpaceEvaluator.HoldDuringRun(null, facts);
                 }
                 Dictionary<string, object> outcome = new Dictionary<string, object>();
                 outcome["level"] = result.Level.ToString();
@@ -173,6 +173,11 @@ EVALUATOR_CASES = [
     {"name": "round_8_4999", "facts": {"free": 84999, "total": 10**12, "reserve": 0}, "judge": {"state": "Growing", "weekly": 10000}},
     {"name": "percent_learning", "facts": {"free": 60 * GIB, "total": 931 * GIB, "reserve": 10 * GIB}},
     {
+        "name": "percent_unreadable",
+        "facts": {"free": 60 * GIB, "total": 931 * GIB, "reserve": 10 * GIB, "historyReadable": False},
+        "samples": daily(15, GIB),
+    },
+    {
         "name": "percent_but_growing_slowly",
         "facts": {"free": 60 * GIB, "total": 931 * GIB, "reserve": 10 * GIB},
         "judge": {"state": "Growing", "weekly": 50 * GIB // 40},
@@ -193,6 +198,10 @@ EVALUATOR_CASES = [
         "samples": daily(15, GIB),
     },
     {
+        "name": "unavailable_under_one_and_a_half_reserves",
+        "facts": {"free": 14 * GIB, "total": 931 * GIB, "reserve": 10 * GIB, "forecastAvailable": False},
+    },
+    {
         "name": "unavailable_too_full",
         "facts": {"free": 5 * GIB, "total": 931 * GIB, "reserve": 10 * GIB, "forecastAvailable": False},
     },
@@ -211,6 +220,13 @@ EVALUATOR_CASES = [
     {"name": "hold_full", "facts": {"free": 5 * GIB, "total": 931 * GIB, "reserve": 10 * GIB}, "samples": daily(15, GIB), "hold": True},
     {"name": "hold_low", "facts": {"free": 20 * GIB, "total": 931 * GIB, "reserve": 10 * GIB}, "samples": daily(15, GIB), "hold": True},
     {"name": "hold_nothing", "holdNothing": True},
+    # The dashboard started during a run with the earlier personal edition: still no forecast, so no warning choice to offer.
+    {"name": "hold_nothing_unavailable", "facts": {"forecastAvailable": False}, "holdNothing": True},
+    {
+        "name": "hold_unavailable_low",
+        "facts": {"free": 14 * GIB, "total": 931 * GIB, "reserve": 10 * GIB, "forecastAvailable": False},
+        "hold": True,
+    },
 ]
 
 
@@ -316,6 +332,7 @@ class BackupSpaceEvaluatorTests(unittest.TestCase):
 
     def test_little_room_with_no_forecast_is_low(self) -> None:
         self.assertEqual(("Low", "Percent"), self.level("percent_learning"))
+        self.assertEqual(("Low", "Percent"), self.level("percent_unreadable"))
         # A forecast that is far off wins; backups that do not grow are no reason either.
         self.assertEqual(("Ok", "None"), self.level("percent_but_growing_slowly"))
         self.assertEqual(40.0, self.case("percent_but_growing_slowly")["weeksLeft"])
@@ -333,7 +350,11 @@ class BackupSpaceEvaluatorTests(unittest.TestCase):
         self.assertEqual("Unavailable", self.case("unavailable")["state"])
         self.assertEqual("-1", self.case("unavailable")["weekly"])
         self.assertEqual(("Ok", "None"), self.level("unavailable"))
-        self.assertEqual(("Low", "Percent"), self.level("unavailable_little_room"))
+        # Only the reserve rules: less than a tenth of the drive free would be amber for good there, with no warning choice to tune
+        # it, so it is not a reason. Below 1.5 times the reserve (Check recovery readiness warns too) and too full still are.
+        self.assertEqual(("Ok", "None"), self.level("unavailable_little_room"))
+        self.assertEqual(("Low", "Percent"), self.level("unavailable_under_one_and_a_half_reserves"))
+        self.assertEqual(("Full", "Reserve"), self.level("unavailable_too_full"))
 
     def test_the_warning_is_4_8_or_12_weeks(self) -> None:
         self.assertEqual(("Low", "Forecast"), self.level("warn_5_is_8"))
@@ -355,6 +376,11 @@ class BackupSpaceEvaluatorTests(unittest.TestCase):
         self.assertEqual("Growing", self.case("hold_full")["state"])
         self.assertEqual(("Low", "Forecast"), self.level("hold_low"))
         self.assertEqual(("Unknown", "None", "Unknown"), (*self.level("hold_nothing"), self.case("hold_nothing")["state"]))
+        # With the earlier personal edition there is still no forecast, so Settings offers no Low space warning during the run.
+        self.assertEqual(
+            ("Unknown", "None", "Unavailable"), (*self.level("hold_nothing_unavailable"), self.case("hold_nothing_unavailable")["state"])
+        )
+        self.assertEqual(("Low", "Percent", "Unavailable"), (*self.level("hold_unavailable_low"), self.case("hold_unavailable_low")["state"]))
 
 
 def space(
@@ -417,7 +443,7 @@ CARDS = {
     "local_no_letter": repository(space(level="low", reason="percent", state="learning", drive=""), path="\\\\nas\\backups"),
     "local_held_during_run": repository(space(level="unknown", state="growing")),
     "legacy_local": repository(space(state="unavailable", backups=-1)),
-    "legacy_local_low": repository(space(state="unavailable", backups=-1, level="low", reason="percent", free_display="60.0 GiB")),
+    "legacy_local_low": repository(space(state="unavailable", backups=-1, level="low", reason="percent", free_display="14.0 GiB")),
     "legacy_google": repository(space(kind="googleDrive", drive="G:", state="unavailable", estimated=True), path="G:\\My Drive\\Rewindle"),
     "google_growing": repository(space(kind="googleDrive", drive="G:", weeks=20.0, rounded=20), path="G:\\My Drive\\Rewindle"),
     "google_far": repository(space(kind="googleDrive", drive="G:", weeks=1099.0, rounded=1099), path="G:\\My Drive\\Rewindle"),
@@ -587,8 +613,12 @@ class BackupSpaceWordingTests(unittest.TestCase):
         self.assertEqual(
             "With this backup program, Rewindle can’t forecast when your Google storage will be full.", self.card("legacy_google")["status"]
         )
-        # What the dashboard can read itself still counts.
+        # What the dashboard can read itself still counts, with what to do.
         self.assertEqual("warning", self.card("legacy_local_low")["tone"])
+        self.assertEqual(
+            "Space is running low: only 14.0 GiB is free on D:, and backups stop below 10.0 GiB.", self.card("legacy_local_low")["status"]
+        )
+        self.assertIn("never anything inside the backup folder", self.card("legacy_local_low")["nextStep"])
         self.assertIsNone(self.report["concerns"]["legacy_local_low"])
 
     def test_how_it_is_worked_out_is_only_shown_for_a_forecast(self) -> None:

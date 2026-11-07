@@ -195,7 +195,8 @@ namespace ResticBackuper.Dashboard
             if (runActive)
             {
                 result = BackupSpaceEvaluator.HoldDuringRun(
-                    string.Equals(idleSpacePath, path, StringComparison.OrdinalIgnoreCase) ? idleSpaceResult : null);
+                    string.Equals(idleSpacePath, path, StringComparison.OrdinalIgnoreCase) ? idleSpaceResult : null,
+                    facts);
             }
             else
             {

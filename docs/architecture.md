@@ -68,16 +68,19 @@ would be refused. Amber: full within the person's **Low space warning** (4, 8
 or 12 weeks, kept in `space-warning.json` in the dashboard's own per-user
 folder, not protected configuration), less than 1.5 times the reserve (where
 **Check recovery readiness** warns too, so the card is never calmer than it),
-or, with no forecast yet, less than a tenth of the drive above the reserve.
-Readiness can still say a drive has plenty of free space beside an amber card:
-it looks at the space now, the card at the trend. While a backup runs, the card
-keeps what it said before the run (its own writes may take the free space
-below the reserve, which the engine checks only as a run starts). Every
-sentence that asks the person to make room also says never to delete anything
-inside the backup folder. The earlier personal edition records no size, so
-with it the card shows the free space and the drive's size, keeps the red and
-amber rules that need only those, and says the forecast isn't available with
-that backup program (`EngineProfile.ForecastsBackupSpace`). The forecast counts
+or, while the forecast is still learning, less than a tenth of the drive above
+the reserve. Readiness can still say a drive has plenty of free space beside
+an amber card: it looks at the space now, the card at the trend. While a backup
+runs, the card keeps what it said before the run (its own writes may take the
+free space below the reserve, which the engine checks only as a run starts).
+Every sentence that asks the person to make room also says never to delete
+anything inside the backup folder. The earlier personal edition records no
+size, so with it the card shows the free space and the drive's size, says the
+forecast isn't available with that backup program
+(`EngineProfile.ForecastsBackupSpace`) and offers no Low space warning. It
+keeps only the reserve rules: red below the reserve and amber below 1.5 times
+it. The tenth-of-the-drive rule is left out there, since on a drive mostly full
+of other files it would stay amber for good with nothing to tune. The forecast counts
 only what backups add: once a retention feature removes old data, it must
 switch to the measured size over time, or it would keep warning about a backup
 whose size is steady.

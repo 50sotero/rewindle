@@ -155,11 +155,32 @@ try {
     Set-PrivateField $spaceWindow 'repositoryVolumeFreeBytes' ([long](5 * $spaceGiB))
     $legacyFull = Invoke-Private $spaceWindow 'BuildWebSpaceState'
     Assert-True ($legacyFull['level'] -eq 'full' -and $legacyFull['reason'] -eq 'reserve') 'the earlier edition was not told its drive is too full for the next backup'
+    # Only the reserve rules: a drive mostly full of other files is not amber for good there, since no warning choice could tune it.
+    Set-PrivateField $spaceWindow 'repositoryVolumeFreeBytes' ([long](60 * $spaceGiB))
+    $legacyRoomy = Invoke-Private $spaceWindow 'BuildWebSpaceState'
+    Assert-True ($legacyRoomy['level'] -eq 'ok' -and $legacyRoomy['reason'] -eq '') ('the earlier edition was amber with 60 GiB free above a 10 GiB reserve: ' + $legacyRoomy['level'] + '/' + $legacyRoomy['reason'])
+    Set-PrivateField $spaceWindow 'repositoryVolumeFreeBytes' ([long](14 * $spaceGiB))
+    $legacyLow = Invoke-Private $spaceWindow 'BuildWebSpaceState'
+    Assert-True ($legacyLow['level'] -eq 'low' -and $legacyLow['reason'] -eq 'percent') 'the earlier edition was not warned below 1.5 times the reserve'
+    # Started while a backup runs, with nothing said before it: there is still no forecast, so Settings offers no Low space warning.
+    Set-PrivateField $spaceWindow 'idleSpaceResult' $null
+    Set-PrivateField $spaceWindow 'idleSpacePath' $null
+    $spaceSnapshot.IsActive = $true
+    $legacyStartedDuringRun = Invoke-Private $spaceWindow 'BuildWebSpaceState'
+    Assert-True ($legacyStartedDuringRun['forecast']['state'] -eq 'unavailable' -and $legacyStartedDuringRun['level'] -eq 'unknown') ('the earlier edition, started during a backup, was given a forecast to tune: ' + $legacyStartedDuringRun['forecast']['state'] + '/' + $legacyStartedDuringRun['level'])
 }
 finally {
     [void]$engineProfileType.GetMethod('Activate', $flags).Invoke($null, [object[]]@($engineProfileType.GetProperty('Rewindle', $flags).GetValue($null)))
     $spaceSnapshot.BackupsBytes = 212 * $spaceGiB
+    $spaceSnapshot.IsActive = $false
 }
+# On the Rewindle engine the same start during a run has a forecast to come, so the warning choice stays.
+Set-PrivateField $spaceWindow 'idleSpaceResult' $null
+Set-PrivateField $spaceWindow 'idleSpacePath' $null
+$spaceSnapshot.IsActive = $true
+$rewindleStartedDuringRun = Invoke-Private $spaceWindow 'BuildWebSpaceState'
+Assert-True ($rewindleStartedDuringRun['forecast']['state'] -eq 'unknown' -and $rewindleStartedDuringRun['level'] -eq 'unknown') ('the Rewindle engine, started during a backup, did not wait for the run to end: ' + $rewindleStartedDuringRun['forecast']['state'] + '/' + $rewindleStartedDuringRun['level'])
+$spaceSnapshot.IsActive = $false
 $fullBeforeRun = Invoke-Private $spaceWindow 'BuildWebSpaceState'
 Assert-True ($fullBeforeRun['level'] -eq 'full') 'a drive below the reserve was not too full'
 $spaceSnapshot.IsActive = $true
