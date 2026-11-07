@@ -493,7 +493,7 @@ namespace ResticBackuper.Dashboard
                         onElevatedProcessStarted,
                         onProgress);
                 }
-                string nonce = CreateNonce();
+                string nonce = ElevatedRequestSecurity.CreateNonce();
                 if (action == "restore_drill")
                 {
                     target = BuildRecoveryDrillTarget(nonce);
@@ -565,7 +565,7 @@ namespace ResticBackuper.Dashboard
 
                 ProcessStartInfo start = new ProcessStartInfo();
                 start.FileName = powerShell;
-                start.Arguments = BuildArgumentString(arguments);
+                start.Arguments = ElevatedRequestSecurity.BuildArgumentString(arguments);
                 start.WorkingDirectory = configuration.InstallRoot;
                 start.UseShellExecute = true;
                 start.Verb = "runas";
@@ -778,7 +778,8 @@ namespace ResticBackuper.Dashboard
                 !string.Equals(Path.GetFileName(resultRoot), ResultDirectoryName, StringComparison.OrdinalIgnoreCase) ||
                 !string.Equals(Path.GetFileName(resultPath), nonce + ".json", StringComparison.Ordinal) ||
                 !IsRegularFile(resultPath) ||
-                !HasProtectedAcl(stateRoot, userSid) || !HasProtectedAcl(resultRoot, userSid))
+                !ElevatedRequestSecurity.HasProtectedResultAcl(stateRoot, userSid, true) ||
+                !ElevatedRequestSecurity.HasProtectedResultAcl(resultRoot, userSid, true))
             {
                 return RestoreManagerResult.Failure(
                     UnusedResultMessage(action, "Rewindle could not confirm the result of this step, so it was not used."),
@@ -794,7 +795,7 @@ namespace ResticBackuper.Dashboard
                     8192,
                     FileOptions.SequentialScan))
                 {
-                    if (!HasProtectedAcl(stream.GetAccessControl(), userSid) ||
+                    if (!ElevatedRequestSecurity.HasProtectedResultAcl(stream.GetAccessControl(), userSid) ||
                         stream.Length <= 0 || stream.Length > MaximumResultBytes)
                     {
                         return RestoreManagerResult.Failure(
@@ -867,19 +868,19 @@ namespace ResticBackuper.Dashboard
             int exitCode)
         {
             if (document == null || ReadLong(document, "schema_version") != 1 ||
-                !FixedEquals(ReadString(document, "request_nonce"), nonce) ||
-                !FixedEquals(ReadString(document, "request_digest"), digest) ||
-                !FixedEquals(ReadString(document, "request_user_sid"), userSid) ||
-                !FixedEquals(ReadString(document, "action"), action) ||
-                !FixedEquals(ReadString(document, "expected_config_sha256"), configHash) ||
-                !FixedEquals(ReadString(document, "plan_id"), planId) ||
+                !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_nonce"), nonce) ||
+                !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_digest"), digest) ||
+                !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_user_sid"), userSid) ||
+                !ElevatedRequestSecurity.FixedEquals(ReadString(document, "action"), action) ||
+                !ElevatedRequestSecurity.FixedEquals(ReadString(document, "expected_config_sha256"), configHash) ||
+                !ElevatedRequestSecurity.FixedEquals(ReadString(document, "plan_id"), planId) ||
                 ReadLong(document, "config_generation") != generation ||
                 ReadBoolean(document, "allow_legacy_unbound") != allowLegacyUnbound ||
                 (action != "restore_drill" &&
-                    !FixedEquals(NullToEmpty(ReadOptionalString(document, "snapshot_id")), snapshotId)) ||
-                !FixedEquals(NullToEmpty(ReadOptionalString(document, "tree_path")), treePath) ||
+                    !ElevatedRequestSecurity.FixedEquals(NullToEmpty(ReadOptionalString(document, "snapshot_id")), snapshotId)) ||
+                !ElevatedRequestSecurity.FixedEquals(NullToEmpty(ReadOptionalString(document, "tree_path")), treePath) ||
                 !PathOrEmptyEquals(ReadOptionalString(document, "target"), target) ||
-                !FixedEquals(ReadString(document, "includes_sha256"), includesHash))
+                !ElevatedRequestSecurity.FixedEquals(ReadString(document, "includes_sha256"), includesHash))
             {
                 return RestoreManagerResult.Failure(
                     UnusedResultMessage(action, "The result did not match what was asked for, so it was not used."),
@@ -972,7 +973,7 @@ namespace ResticBackuper.Dashboard
                 throw new InvalidDataException("The snapshot-list payload schema is invalid.");
             }
             IDictionary<string, object> binding = ReadObject(payload, "binding");
-            if (!FixedEquals(ReadString(binding, "plan_id"), planId) ||
+            if (!ElevatedRequestSecurity.FixedEquals(ReadString(binding, "plan_id"), planId) ||
                 ReadString(binding, "legacy_match_policy") !=
                     "exact-host-scheduled-tags-and-sources")
             {
@@ -996,7 +997,7 @@ namespace ResticBackuper.Dashboard
                 if (bindingState == "plan")
                 {
                     generation = ReadLong(snapshot, "config_generation");
-                    if (!FixedEquals(ReadString(snapshot, "plan_id"), planId) || generation <= 0)
+                    if (!ElevatedRequestSecurity.FixedEquals(ReadString(snapshot, "plan_id"), planId) || generation <= 0)
                     {
                         throw new InvalidDataException(
                             "The snapshot list contains invalid plan-binding metadata.");
@@ -1041,7 +1042,7 @@ namespace ResticBackuper.Dashboard
         {
             if (payload == null || ReadString(payload, "schema") !=
                     EngineProfile.Current.SnapshotTreeSchema ||
-                !FixedEquals(ReadString(payload, "snapshot_id"), snapshotId))
+                !ElevatedRequestSecurity.FixedEquals(ReadString(payload, "snapshot_id"), snapshotId))
             {
                 throw new InvalidDataException("The snapshot-tree payload binding is invalid.");
             }
@@ -1049,7 +1050,7 @@ namespace ResticBackuper.Dashboard
             string expectedBinding = allowLegacyUnbound ? "legacy_unbound" : "plan";
             if (ReadString(payload, "snapshot_binding") != expectedBinding ||
                 ReadString(snapshot, "binding_state") != expectedBinding ||
-                (!allowLegacyUnbound && !FixedEquals(ReadString(snapshot, "plan_id"), planId)) ||
+                (!allowLegacyUnbound && !ElevatedRequestSecurity.FixedEquals(ReadString(snapshot, "plan_id"), planId)) ||
                 (allowLegacyUnbound &&
                     (ReadOptionalString(snapshot, "plan_id") != null ||
                      ReadOptionalLong(snapshot, "config_generation") != null)))
@@ -1088,9 +1089,9 @@ namespace ResticBackuper.Dashboard
         {
             string expectedBinding = allowLegacyUnbound ? "legacy_unbound" : "plan";
             if (ReadString(payload, "schema") != EngineProfile.Current.RestoreReportSchema ||
-                !FixedEquals(ReadString(payload, "snapshot_id"), snapshotId) ||
+                !ElevatedRequestSecurity.FixedEquals(ReadString(payload, "snapshot_id"), snapshotId) ||
                 ReadString(payload, "snapshot_binding") != expectedBinding ||
-                (!allowLegacyUnbound && !FixedEquals(ReadString(payload, "plan_id"), planId)) ||
+                (!allowLegacyUnbound && !ElevatedRequestSecurity.FixedEquals(ReadString(payload, "plan_id"), planId)) ||
                 (allowLegacyUnbound &&
                     (ReadOptionalString(payload, "plan_id") != null ||
                      ReadOptionalLong(payload, "snapshot_generation") != null)) ||
@@ -1169,7 +1170,7 @@ namespace ResticBackuper.Dashboard
                 if (fingerprint == lastFingerprint || item.Length <= 0 ||
                     item.Length > 256 * 1024 ||
                     (item.Attributes & FileAttributes.ReparsePoint) != 0 ||
-                    !HasProtectedAcl(progressPath, userSid))
+                    !ElevatedRequestSecurity.HasProtectedResultAcl(progressPath, userSid, false))
                 {
                     return;
                 }
@@ -1177,11 +1178,11 @@ namespace ResticBackuper.Dashboard
                     new JavaScriptSerializer().DeserializeObject(
                         File.ReadAllText(progressPath, Encoding.UTF8)) as IDictionary<string, object>;
                 if (document == null || ReadLong(document, "schema_version") != 1 ||
-                    !FixedEquals(ReadString(document, "request_nonce"), nonce) ||
-                    !FixedEquals(ReadString(document, "request_digest"), digest) ||
-                    !FixedEquals(ReadString(document, "request_user_sid"), userSid) ||
-                    !FixedEquals(ReadString(document, "action"), action) ||
-                    !FixedEquals(ReadString(document, "plan_id"), planId) ||
+                    !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_nonce"), nonce) ||
+                    !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_digest"), digest) ||
+                    !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_user_sid"), userSid) ||
+                    !ElevatedRequestSecurity.FixedEquals(ReadString(document, "action"), action) ||
+                    !ElevatedRequestSecurity.FixedEquals(ReadString(document, "plan_id"), planId) ||
                     ReadLong(document, "config_generation") != generation ||
                     ReadBoolean(document, "allow_legacy_unbound") != allowLegacyUnbound ||
                     !ProgressSnapshotMatches(action, ReadOptionalString(document, "snapshot_id"), snapshotId) ||
@@ -1334,16 +1335,6 @@ namespace ResticBackuper.Dashboard
             }
         }
 
-        internal static string CreateNonce()
-        {
-            byte[] bytes = new byte[32];
-            using (RandomNumberGenerator generator = RandomNumberGenerator.Create())
-            {
-                generator.GetBytes(bytes);
-            }
-            return ToLowerHex(bytes);
-        }
-
         private static string ToLowerHex(byte[] bytes)
         {
             StringBuilder builder = new StringBuilder(bytes.Length * 2);
@@ -1354,130 +1345,12 @@ namespace ResticBackuper.Dashboard
             return builder.ToString();
         }
 
-        internal static string BuildArgumentString(IEnumerable<string> arguments)
-        {
-            List<string> values = new List<string>();
-            foreach (string argument in arguments)
-            {
-                values.Add(QuoteWindowsArgument(argument));
-            }
-            return string.Join(" ", values.ToArray());
-        }
-
-        private static string QuoteWindowsArgument(string value)
-        {
-            if (value == null)
-            {
-                return "\"\"";
-            }
-            if (value.Length > 0 && value.IndexOfAny(new[] { ' ', '\t', '\n', '\v', '"' }) < 0)
-            {
-                return value;
-            }
-            StringBuilder result = new StringBuilder("\"");
-            int slashes = 0;
-            foreach (char character in value)
-            {
-                if (character == '\\')
-                {
-                    slashes++;
-                    continue;
-                }
-                if (character == '"')
-                {
-                    result.Append('\\', slashes * 2 + 1);
-                    result.Append('"');
-                    slashes = 0;
-                    continue;
-                }
-                if (slashes > 0)
-                {
-                    result.Append('\\', slashes);
-                    slashes = 0;
-                }
-                result.Append(character);
-            }
-            if (slashes > 0)
-            {
-                result.Append('\\', slashes * 2);
-            }
-            result.Append('"');
-            return result.ToString();
-        }
-
         internal static bool IsRegularFile(string path)
         {
             try
             {
                 return File.Exists(path) &&
                     (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        private static bool HasProtectedAcl(string path, string userSid)
-        {
-            try
-            {
-                FileSystemSecurity security = Directory.Exists(path)
-                    ? (FileSystemSecurity)new DirectoryInfo(path).GetAccessControl(
-                        AccessControlSections.Owner | AccessControlSections.Access)
-                    : (FileSystemSecurity)new FileInfo(path).GetAccessControl(
-                        AccessControlSections.Owner | AccessControlSections.Access);
-                return HasProtectedAcl(security, userSid);
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        private static bool HasProtectedAcl(FileSystemSecurity security, string userSid)
-        {
-            try
-            {
-                SecurityIdentifier owner = security.GetOwner(
-                    typeof(SecurityIdentifier)) as SecurityIdentifier;
-                if (owner == null || owner.Value != "S-1-5-32-544" ||
-                    !security.AreAccessRulesProtected)
-                {
-                    return false;
-                }
-                HashSet<string> required = new HashSet<string>(
-                    new[] { "S-1-5-18", "S-1-5-32-544", userSid },
-                    StringComparer.OrdinalIgnoreCase);
-                HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                HashSet<string> allowed = new HashSet<string>(required, StringComparer.OrdinalIgnoreCase);
-                allowed.Add("S-1-3-4");
-                FileSystemRights dangerous = FileSystemRights.WriteData |
-                    FileSystemRights.AppendData | FileSystemRights.WriteAttributes |
-                    FileSystemRights.WriteExtendedAttributes | FileSystemRights.Delete |
-                    FileSystemRights.DeleteSubdirectoriesAndFiles |
-                    FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership;
-                foreach (FileSystemAccessRule rule in security.GetAccessRules(
-                    true,
-                    true,
-                    typeof(SecurityIdentifier)))
-                {
-                    SecurityIdentifier sid = rule.IdentityReference as SecurityIdentifier;
-                    string value = sid == null ? null : sid.Value;
-                    if (value == null || rule.IsInherited ||
-                        rule.AccessControlType != AccessControlType.Allow ||
-                        !allowed.Contains(value))
-                    {
-                        return false;
-                    }
-                    if (value != "S-1-5-18" && value != "S-1-5-32-544" &&
-                        (rule.FileSystemRights & dangerous) != 0)
-                    {
-                        return false;
-                    }
-                    seen.Add(value);
-                }
-                return required.IsSubsetOf(seen);
             }
             catch
             {
@@ -1597,20 +1470,6 @@ namespace ResticBackuper.Dashboard
             return message;
         }
 
-        internal static bool FixedEquals(string left, string right)
-        {
-            if (left == null || right == null || left.Length != right.Length)
-            {
-                return false;
-            }
-            int difference = 0;
-            for (int index = 0; index < left.Length; index++)
-            {
-                difference |= left[index] ^ right[index];
-            }
-            return difference == 0;
-        }
-
         private static bool PathOrEmptyEquals(string left, string right)
         {
             string expected = right ?? string.Empty;
@@ -1636,7 +1495,7 @@ namespace ResticBackuper.Dashboard
             {
                 return value.Length == 0 || IsExactSnapshotId(value);
             }
-            return FixedEquals(value, expected);
+            return ElevatedRequestSecurity.FixedEquals(value, expected);
         }
 
         private static string NullToEmpty(string value)
@@ -2132,9 +1991,9 @@ namespace ResticBackuper.Dashboard
             {
                 throw new InvalidOperationException("A part of Rewindle that restoring needs is missing. " + EngineProfile.Current.ReinstallAdvice());
             }
-            string token = RestoreManagerLauncher.CreateNonce();
+            string token = ElevatedRequestSecurity.CreateNonce();
             RestoreSessionRequest request = new RestoreSessionRequest();
-            request.Nonce = RestoreManagerLauncher.CreateNonce();
+            request.Nonce = ElevatedRequestSecurity.CreateNonce();
             request.UserSid = userSid;
             request.ConfigHash = configHash.ToLowerInvariant();
             request.PlanId = configuration.PlanId;
@@ -2143,7 +2002,7 @@ namespace ResticBackuper.Dashboard
             {
                 request.DashboardProcessId = current.Id;
             }
-            request.PipeName = profile.RestoreSessionPipePrefix + RestoreManagerLauncher.CreateNonce();
+            request.PipeName = profile.RestoreSessionPipePrefix + ElevatedRequestSecurity.CreateNonce();
             request.SessionTokenSha256 = RestoreManagerLauncher.ComputeSha256(new UTF8Encoding(false).GetBytes(token));
             request.IdleTimeoutSeconds = IdleTimeoutSeconds;
             request.LifetimeSeconds = LifetimeSeconds;
@@ -2178,7 +2037,7 @@ namespace ResticBackuper.Dashboard
             });
             ProcessStartInfo start = new ProcessStartInfo();
             start.FileName = powerShell;
-            start.Arguments = RestoreManagerLauncher.BuildArgumentString(arguments);
+            start.Arguments = ElevatedRequestSecurity.BuildArgumentString(arguments);
             start.WorkingDirectory = configuration.InstallRoot;
             start.UseShellExecute = true;
             start.Verb = "runas";
@@ -2306,8 +2165,8 @@ namespace ResticBackuper.Dashboard
                 "idle_timeout_seconds", "lifetime_seconds");
             if (RestoreSessionFraming.TypeOf(ready) != "ready" ||
                 RestoreSessionFraming.ReadString(ready, "protocol", 128) != EngineProfile.Current.RestoreSessionProtocol ||
-                !RestoreManagerLauncher.FixedEquals(RestoreSessionFraming.ReadString(ready, "request_nonce", 64), Nonce) ||
-                !RestoreManagerLauncher.FixedEquals(RestoreSessionFraming.ReadString(ready, "request_digest", 64), Digest) ||
+                !ElevatedRequestSecurity.FixedEquals(RestoreSessionFraming.ReadString(ready, "request_nonce", 64), Nonce) ||
+                !ElevatedRequestSecurity.FixedEquals(RestoreSessionFraming.ReadString(ready, "request_digest", 64), Digest) ||
                 RestoreSessionFraming.ReadInteger(ready, "broker_process_id") != BrokerProcessId ||
                 RestoreSessionFraming.ReadInteger(ready, "idle_timeout_seconds") != request.IdleTimeoutSeconds ||
                 RestoreSessionFraming.ReadInteger(ready, "lifetime_seconds") != request.LifetimeSeconds)

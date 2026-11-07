@@ -30,6 +30,10 @@ or backup repository.
 - The limited dashboard never writes protected configuration directly. Source
   changes require same-user UAC elevation, the shared backup lock, and strict
   path/overlap validation.
+- The shared backup lock (`run.lock` in the state folder) can be opened only
+  by Administrators and SYSTEM, so a program running with standard rights
+  cannot hold it to stop backups and protected changes. The dashboard never
+  opens it.
 - **Back up now** validates the exact scheduled task, protected launcher,
   principal, working directory, and duplicate-run policy before asking a
   separate UAC-elevated System32 task utility to request it. The dashboard does
@@ -43,6 +47,11 @@ or backup repository.
   after revalidating the current run, process creation identities, user SID,
   and exact task definition. The normal cancel path sends Restic a targeted
   Ctrl-Break and never calls Task Scheduler End or kills an arbitrary PID.
+- Every action in the GitHub workflows is pinned to a full commit SHA. The
+  release workflow records signed build provenance for the files it builds,
+  which `gh attestation verify <file> --repo 50sotero/rewindle` checks (the
+  README's "Download and verify" also limits it to release tag builds). The
+  releases are not code-signed.
 - The plaintext recovery key is intentionally separate. Anyone with that key
   and the repository can decrypt the backup.
 - `google_drivefs_stream` is an explicit storage-mode opt-in. Its synthetic

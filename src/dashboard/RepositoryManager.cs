@@ -243,7 +243,7 @@ namespace ResticBackuper.Dashboard
                     -1);
             }
 
-            string nonce = CreateNonce();
+            string nonce = ElevatedRequestSecurity.CreateNonce();
             string digest = ComputeRequestDigest(
                 userSid,
                 currentRepository,
@@ -291,7 +291,7 @@ namespace ResticBackuper.Dashboard
 
             ProcessStartInfo startInfo = new ProcessStartInfo();
             startInfo.FileName = powerShell;
-            startInfo.Arguments = BuildArgumentString(arguments);
+            startInfo.Arguments = ElevatedRequestSecurity.BuildArgumentString(arguments);
             startInfo.WorkingDirectory = configuration.InstallRoot;
             startInfo.UseShellExecute = true;
             startInfo.Verb = "runas";
@@ -383,7 +383,7 @@ namespace ResticBackuper.Dashboard
                 string userSid = identity.User == null ? null : identity.User.Value;
                 if (string.IsNullOrWhiteSpace(userSid) ||
                     !IsRegularFile(journalPath) ||
-                    !HasProtectedResultAcl(journalPath, userSid))
+                    !ElevatedRequestSecurity.HasProtectedResultAcl(journalPath, userSid, false))
                 {
                     return RepositoryRecoveryStatus.Blocked(
                         "Rewindle can't trust the record of the unfinished move (its permissions look wrong). Backups remain paused.");
@@ -472,7 +472,7 @@ namespace ResticBackuper.Dashboard
                     -1);
             }
 
-            string nonce = CreateNonce();
+            string nonce = ElevatedRequestSecurity.CreateNonce();
             string digest = ComputeRecoveryRequestDigest(userSid, journalSha256, nonce);
             string resultRoot = EngineProfile.Current.StateResultDirectory(ResultDirectoryName);
             string resultPath = Path.Combine(resultRoot, nonce + ".json");
@@ -511,7 +511,7 @@ namespace ResticBackuper.Dashboard
 
             ProcessStartInfo startInfo = new ProcessStartInfo();
             startInfo.FileName = powerShell;
-            startInfo.Arguments = BuildArgumentString(arguments);
+            startInfo.Arguments = ElevatedRequestSecurity.BuildArgumentString(arguments);
             startInfo.WorkingDirectory = Path.GetDirectoryName(managerPath);
             startInfo.UseShellExecute = true;
             startInfo.Verb = "runas";
@@ -656,8 +656,8 @@ namespace ResticBackuper.Dashboard
                 !string.Equals(Path.GetFileName(resultRoot), ResultDirectoryName, StringComparison.OrdinalIgnoreCase) ||
                 !string.Equals(Path.GetFileName(resultPath), nonce + ".json", StringComparison.Ordinal) ||
                 !IsRegularFile(resultPath) ||
-                !HasProtectedResultAcl(stateRoot, userSid) ||
-                !HasProtectedResultAcl(resultRoot, userSid))
+                !ElevatedRequestSecurity.HasProtectedResultAcl(stateRoot, userSid, true) ||
+                !ElevatedRequestSecurity.HasProtectedResultAcl(resultRoot, userSid, true))
             {
                 return RepositoryManagerResult.Failure(
                     "Rewindle's data folder looks unsafe, so the result of the change was not accepted. " + EngineProfile.Current.ReinstallAdvice(),
@@ -674,7 +674,7 @@ namespace ResticBackuper.Dashboard
                     4096,
                     FileOptions.SequentialScan))
                 {
-                    if (!HasProtectedResultAcl(stream.GetAccessControl(), userSid) ||
+                    if (!ElevatedRequestSecurity.HasProtectedResultAcl(stream.GetAccessControl(), userSid) ||
                         stream.Length <= 0 || stream.Length > MaximumJsonBytes)
                     {
                         return RepositoryManagerResult.Failure(
@@ -727,13 +727,13 @@ namespace ResticBackuper.Dashboard
             int exitCode)
         {
             if (document == null || ReadInteger(document, "schema_version") != 1 ||
-                !FixedEquals(ReadString(document, "request_nonce"), nonce) ||
-                !FixedEquals(ReadString(document, "request_digest"), digest) ||
-                !FixedEquals(ReadString(document, "request_user_sid"), userSid) ||
-                !FixedEquals(ReadString(document, "action"), "relocate") ||
+                !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_nonce"), nonce) ||
+                !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_digest"), digest) ||
+                !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_user_sid"), userSid) ||
+                !ElevatedRequestSecurity.FixedEquals(ReadString(document, "action"), "relocate") ||
                 !PathEquals(ReadString(document, "current_repository"), currentRepository) ||
                 !PathEquals(ReadString(document, "new_repository"), newRepository) ||
-                !FixedEquals(ReadString(document, "expected_config_sha256"), configSha256))
+                !ElevatedRequestSecurity.FixedEquals(ReadString(document, "expected_config_sha256"), configSha256))
             {
                 return RepositoryManagerResult.Failure(
                     "The protected repository-manager result did not match this request.",
@@ -751,7 +751,7 @@ namespace ResticBackuper.Dashboard
             long? reportedGeneration = ReadOptionalLong(document, "config_generation");
             string error = ReadOptionalString(document, "error");
             bool planTransitionMatches =
-                FixedEquals(reportedPlanId, planId) &&
+                ElevatedRequestSecurity.FixedEquals(reportedPlanId, planId) &&
                 reportedPreviousGeneration.HasValue &&
                 reportedPreviousGeneration.Value == configGeneration &&
                 configGeneration < long.MaxValue &&
@@ -817,8 +817,8 @@ namespace ResticBackuper.Dashboard
                 !string.Equals(Path.GetFileName(resultRoot), ResultDirectoryName, StringComparison.OrdinalIgnoreCase) ||
                 !string.Equals(Path.GetFileName(resultPath), nonce + ".json", StringComparison.Ordinal) ||
                 !IsRegularFile(resultPath) ||
-                !HasProtectedResultAcl(stateRoot, userSid) ||
-                !HasProtectedResultAcl(resultRoot, userSid))
+                !ElevatedRequestSecurity.HasProtectedResultAcl(stateRoot, userSid, true) ||
+                !ElevatedRequestSecurity.HasProtectedResultAcl(resultRoot, userSid, true))
             {
                 return RepositoryManagerResult.Failure(
                     "The protected repository-recovery result path is not trustworthy.",
@@ -835,7 +835,7 @@ namespace ResticBackuper.Dashboard
                     4096,
                     FileOptions.SequentialScan))
                 {
-                    if (!HasProtectedResultAcl(stream.GetAccessControl(), userSid) ||
+                    if (!ElevatedRequestSecurity.HasProtectedResultAcl(stream.GetAccessControl(), userSid) ||
                         stream.Length <= 0 || stream.Length > MaximumJsonBytes)
                     {
                         return RepositoryManagerResult.Failure(
@@ -880,11 +880,11 @@ namespace ResticBackuper.Dashboard
             int exitCode)
         {
             if (document == null || ReadInteger(document, "schema_version") != 1 ||
-                !FixedEquals(ReadString(document, "request_nonce"), nonce) ||
-                !FixedEquals(ReadString(document, "request_digest"), digest) ||
-                !FixedEquals(ReadString(document, "request_user_sid"), userSid) ||
-                !FixedEquals(ReadString(document, "action"), "recover") ||
-                !FixedEquals(ReadString(document, "expected_journal_sha256"), journalSha256))
+                !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_nonce"), nonce) ||
+                !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_digest"), digest) ||
+                !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_user_sid"), userSid) ||
+                !ElevatedRequestSecurity.FixedEquals(ReadString(document, "action"), "recover") ||
+                !ElevatedRequestSecurity.FixedEquals(ReadString(document, "expected_journal_sha256"), journalSha256))
             {
                 return RepositoryManagerResult.Failure(
                     "The protected repository-recovery result did not match this request.",
@@ -961,7 +961,7 @@ namespace ResticBackuper.Dashboard
                 }
                 if (item.Length <= 0 || item.Length > MaximumJsonBytes ||
                     (item.Attributes & FileAttributes.ReparsePoint) != 0 ||
-                    !HasProtectedResultAcl(progressPath, userSid))
+                    !ElevatedRequestSecurity.HasProtectedResultAcl(progressPath, userSid, false))
                 {
                     return;
                 }
@@ -970,11 +970,11 @@ namespace ResticBackuper.Dashboard
                         File.ReadAllText(progressPath, Encoding.UTF8)) as IDictionary<string, object>;
                 if (document == null ||
                     ReadInteger(document, "schema_version") != 1 ||
-                    !FixedEquals(ReadString(document, "request_nonce"), nonce) ||
-                    !FixedEquals(ReadString(document, "request_digest"), digest) ||
-                    !FixedEquals(ReadString(document, "request_user_sid"), userSid) ||
-                    !FixedEquals(ReadString(document, "action"), "recover") ||
-                    !FixedEquals(ReadString(document, "expected_journal_sha256"), journalSha256))
+                    !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_nonce"), nonce) ||
+                    !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_digest"), digest) ||
+                    !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_user_sid"), userSid) ||
+                    !ElevatedRequestSecurity.FixedEquals(ReadString(document, "action"), "recover") ||
+                    !ElevatedRequestSecurity.FixedEquals(ReadString(document, "expected_journal_sha256"), journalSha256))
                 {
                     return;
                 }
@@ -1036,7 +1036,7 @@ namespace ResticBackuper.Dashboard
                 }
                 if (item.Length <= 0 || item.Length > MaximumJsonBytes ||
                     (item.Attributes & FileAttributes.ReparsePoint) != 0 ||
-                    !HasProtectedResultAcl(progressPath, userSid))
+                    !ElevatedRequestSecurity.HasProtectedResultAcl(progressPath, userSid, false))
                 {
                     return;
                 }
@@ -1048,13 +1048,13 @@ namespace ResticBackuper.Dashboard
                     return;
                 }
                 if (ReadInteger(document, "schema_version") != 1 ||
-                    !FixedEquals(ReadString(document, "request_nonce"), nonce) ||
-                    !FixedEquals(ReadString(document, "request_digest"), digest) ||
-                    !FixedEquals(ReadString(document, "request_user_sid"), userSid) ||
-                    !FixedEquals(ReadString(document, "action"), "relocate") ||
+                    !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_nonce"), nonce) ||
+                    !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_digest"), digest) ||
+                    !ElevatedRequestSecurity.FixedEquals(ReadString(document, "request_user_sid"), userSid) ||
+                    !ElevatedRequestSecurity.FixedEquals(ReadString(document, "action"), "relocate") ||
                     !PathEquals(ReadString(document, "current_repository"), currentRepository) ||
                     !PathEquals(ReadString(document, "new_repository"), newRepository) ||
-                    !FixedEquals(ReadString(document, "expected_config_sha256"), configSha256))
+                    !ElevatedRequestSecurity.FixedEquals(ReadString(document, "expected_config_sha256"), configSha256))
                 {
                     return;
                 }
@@ -1065,7 +1065,7 @@ namespace ResticBackuper.Dashboard
                 bool hasAnyPlanField = reportedPlanId != null ||
                     reportedPreviousGeneration.HasValue || reportedGeneration.HasValue;
                 if (hasAnyPlanField &&
-                    (!FixedEquals(reportedPlanId, planId) ||
+                    (!ElevatedRequestSecurity.FixedEquals(reportedPlanId, planId) ||
                      !reportedPreviousGeneration.HasValue ||
                      reportedPreviousGeneration.Value != configGeneration ||
                      configGeneration == long.MaxValue ||
@@ -1157,96 +1157,6 @@ namespace ResticBackuper.Dashboard
             return candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
         }
 
-        private static bool HasProtectedResultAcl(string path, string userSid)
-        {
-            try
-            {
-                FileSystemSecurity security = Directory.Exists(path)
-                    ? (FileSystemSecurity)new DirectoryInfo(path).GetAccessControl(
-                        AccessControlSections.Owner | AccessControlSections.Access)
-                    : (FileSystemSecurity)new FileInfo(path).GetAccessControl(
-                        AccessControlSections.Owner | AccessControlSections.Access);
-                return HasProtectedResultAcl(security, userSid);
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        private static bool HasProtectedResultAcl(FileSystemSecurity security, string userSid)
-        {
-            try
-            {
-                SecurityIdentifier owner = security.GetOwner(
-                    typeof(SecurityIdentifier)) as SecurityIdentifier;
-                if (owner == null || owner.Value != "S-1-5-32-544" ||
-                    !security.AreAccessRulesProtected)
-                {
-                    return false;
-                }
-                HashSet<string> required = new HashSet<string>(
-                    new[] { "S-1-5-18", "S-1-5-32-544", userSid },
-                    StringComparer.OrdinalIgnoreCase);
-                HashSet<string> allowed = new HashSet<string>(required, StringComparer.OrdinalIgnoreCase);
-                allowed.Add("S-1-3-4");
-                HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                FileSystemRights dangerous = FileSystemRights.WriteData |
-                    FileSystemRights.AppendData |
-                    FileSystemRights.WriteAttributes |
-                    FileSystemRights.WriteExtendedAttributes |
-                    FileSystemRights.Delete |
-                    FileSystemRights.DeleteSubdirectoriesAndFiles |
-                    FileSystemRights.ChangePermissions |
-                    FileSystemRights.TakeOwnership;
-                AuthorizationRuleCollection rules = security.GetAccessRules(
-                    true,
-                    true,
-                    typeof(SecurityIdentifier));
-                foreach (FileSystemAccessRule rule in rules)
-                {
-                    SecurityIdentifier sid = rule.IdentityReference as SecurityIdentifier;
-                    string value = sid == null ? null : sid.Value;
-                    if (value == null || rule.IsInherited ||
-                        rule.AccessControlType != AccessControlType.Allow ||
-                        !allowed.Contains(value))
-                    {
-                        return false;
-                    }
-                    if (value == "S-1-5-18" || value == "S-1-5-32-544")
-                    {
-                        if ((rule.FileSystemRights & FileSystemRights.FullControl) !=
-                            FileSystemRights.FullControl)
-                        {
-                            return false;
-                        }
-                    }
-                    else if ((rule.FileSystemRights & dangerous) != 0 ||
-                        (rule.FileSystemRights & FileSystemRights.ReadAndExecute) !=
-                            FileSystemRights.ReadAndExecute)
-                    {
-                        return false;
-                    }
-                    seen.Add(value);
-                }
-                return required.IsSubsetOf(seen);
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        private static string CreateNonce()
-        {
-            byte[] bytes = new byte[32];
-            using (RandomNumberGenerator generator = RandomNumberGenerator.Create())
-            {
-                generator.GetBytes(bytes);
-            }
-            return ToLowerHex(bytes);
-        }
-
         private static string ToLowerHex(byte[] bytes)
         {
             StringBuilder value = new StringBuilder(bytes.Length * 2);
@@ -1280,20 +1190,6 @@ namespace ResticBackuper.Dashboard
             {
                 return false;
             }
-        }
-
-        private static bool FixedEquals(string left, string right)
-        {
-            if (left == null || right == null || left.Length != right.Length)
-            {
-                return false;
-            }
-            int difference = 0;
-            for (int index = 0; index < left.Length; index++)
-            {
-                difference |= left[index] ^ right[index];
-            }
-            return difference == 0;
         }
 
         private static string ReadString(IDictionary<string, object> document, string name)
@@ -1379,56 +1275,6 @@ namespace ResticBackuper.Dashboard
                 }
             }
             return clean.ToString().Trim();
-        }
-
-        private static string BuildArgumentString(IEnumerable<string> arguments)
-        {
-            StringBuilder result = new StringBuilder();
-            foreach (string argument in arguments)
-            {
-                if (result.Length > 0)
-                {
-                    result.Append(' ');
-                }
-                result.Append(QuoteWindowsArgument(argument));
-            }
-            return result.ToString();
-        }
-
-        private static string QuoteWindowsArgument(string value)
-        {
-            if (value == null)
-            {
-                throw new ArgumentNullException("value");
-            }
-            if (value.Length > 0 && value.IndexOfAny(new[] { ' ', '\t', '\n', '\v', '"' }) < 0)
-            {
-                return value;
-            }
-            StringBuilder result = new StringBuilder();
-            result.Append('"');
-            int backslashes = 0;
-            foreach (char character in value)
-            {
-                if (character == '\\')
-                {
-                    backslashes++;
-                    continue;
-                }
-                if (character == '"')
-                {
-                    result.Append('\\', backslashes * 2 + 1);
-                    result.Append('"');
-                    backslashes = 0;
-                    continue;
-                }
-                result.Append('\\', backslashes);
-                backslashes = 0;
-                result.Append(character);
-            }
-            result.Append('\\', backslashes * 2);
-            result.Append('"');
-            return result.ToString();
         }
     }
 }

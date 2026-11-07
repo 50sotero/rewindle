@@ -107,6 +107,7 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
                 f"/reference:{framework / 'System.Web.Extensions.dll'}",
                 str(DASHBOARD / "EngineProfile.cs"),
                 str(DASHBOARD / "AtomicFile.cs"),
+                str(DASHBOARD / "ElevatedRequestSecurity.cs"),
                 str(DASHBOARD / "SourceConfiguration.cs"),
                 str(TELEMETRY_SOURCE),
                 str(harness),

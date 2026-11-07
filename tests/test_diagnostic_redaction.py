@@ -35,6 +35,7 @@ class DiagnosticRedactionTests(unittest.TestCase):
             DASHBOARD / "EngineProfile.cs",
             DASHBOARD / "AtomicFile.cs",
             DASHBOARD / "CrashLog.cs",
+            DASHBOARD / "ElevatedRequestSecurity.cs",
             DASHBOARD / "SourceConfiguration.cs",
             DASHBOARD / "Telemetry.cs",
             DASHBOARD / "TaskSchedule.cs",

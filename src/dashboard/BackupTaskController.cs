@@ -53,7 +53,7 @@ namespace ResticBackuper.Dashboard
             string schtasks = Path.Combine(systemDirectory, "schtasks.exe");
             ProcessStartInfo startInfo = new ProcessStartInfo();
             startInfo.FileName = schtasks;
-            startInfo.Arguments = "/Run /TN " + QuoteArgument(TaskName);
+            startInfo.Arguments = "/Run /TN " + ElevatedRequestSecurity.QuoteWindowsArgument(TaskName);
             startInfo.WorkingDirectory = systemDirectory;
             startInfo.UseShellExecute = true;
             startInfo.Verb = "runas";
@@ -146,11 +146,6 @@ namespace ResticBackuper.Dashboard
                 return false;
             }
             return true;
-        }
-
-        private static string QuoteArgument(string value)
-        {
-            return "\"" + value.Replace("\"", "\\\"") + "\"";
         }
     }
 }

@@ -327,6 +327,20 @@ no Authenticode signature. Users must obtain checksums from the project's
 GitHub release, compare them locally, and decide whether they trust the
 project. Signing credentials are deliberately not required by the alpha build.
 
+The release workflow (`.github/workflows/installers.yml`) also records signed
+build provenance for the setup executable and the ZIPs it builds, as GitHub
+artifact attestations. A separate job downloads the built files and signs
+them, and only that job holds `id-token: write` and `attestations: write`,
+so the dependency installs, tests and build never run where a signing token
+can be minted. `gh attestation verify <file> --repo 50sotero/rewindle` checks
+that a file came from a workflow run of this repository and names the commit
+it was built from; the README adds `--signer-workflow` and `--source-ref
+refs/tags/v<VERSION>` so that only this workflow's build of a release tag
+passes. It does not prove that the build inputs were clean, and it
+does not replace Authenticode: SmartScreen still sees an unknown publisher.
+Every action the workflows use is pinned to a full commit SHA, with its
+release in a comment beside it, so a moved tag cannot change what runs.
+
 ## Installation and privilege model
 
 The installer starts interactively as the intended backup user, then requests
@@ -518,7 +532,17 @@ section 9, and [`SECURITY.md`](../SECURITY.md).
 
 ## Failure behavior
 
-- A process-level run lock prevents concurrent wrapper runs.
+- A process-level run lock prevents concurrent wrapper runs. Every backup,
+  manager and verifier takes byte zero of `run.lock`, and only Administrators
+  and SYSTEM may open that file, so a program running with standard rights
+  cannot hold the lock and keep backups from starting. The dashboard never
+  opens it. A `run.lock` left readable by an older version, or by a reset of
+  the state folder's permissions, is repaired the next time a backup or a
+  manager tries to take the lock, and the installer protects it again after
+  it resets the state folder. A repair needs no access to the file's
+  contents, so it also succeeds while another program holds the file open
+  without sharing; that backup or change reports that it did not start, and
+  the program cannot open the file again once it lets go.
 - A pending protected source-update journal makes backup runs fail closed. The
   next elevated source-manager invocation uses its undo records to restore and
   verify the complete pre-change metadata set before normal work continues.

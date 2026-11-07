@@ -1297,6 +1297,76 @@ function Set-ProtectedDirectory {
     }
 }
 
+function New-RunLockSecurity {
+    # run.lock is the lock every backup and protected change takes, and any handle that can read a file can lock its
+    # bytes. Only Administrators and SYSTEM may open it, so a program running with standard rights cannot hold it.
+    $security = [Security.AccessControl.FileSecurity]::new()
+    $security.SetAccessRuleProtection($true, $false)
+    $security.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+    foreach ($sidText in @('S-1-5-18', 'S-1-5-32-544')) {
+        $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new($sidText),
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.AccessControl.AccessControlType]::Allow))
+    }
+    return $security
+}
+
+function Test-RunLockSecurity {
+    param([Security.AccessControl.FileSystemSecurity]$Acl)
+    $owner = $Acl.GetOwner([Security.Principal.SecurityIdentifier])
+    if (-not $Acl.AreAccessRulesProtected -or $null -eq $owner -or $owner.Value -ne 'S-1-5-32-544') { return $false }
+    $seen = [Collections.Generic.HashSet[string]]::new()
+    foreach ($rule in $Acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        if ($rule.IsInherited -or
+            $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+            $rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+            -not $seen.Add($rule.IdentityReference.Value)) {
+            return $false
+        }
+    }
+    return $seen.SetEquals([string[]]@('S-1-5-18', 'S-1-5-32-544'))
+}
+
+function Protect-RunLock {
+    param([string]$File, [Security.AccessControl.FileSecurity]$Policy)
+    # An older run.lock, or one an ACL reset touched, may still be readable by the user. Repair it before taking the
+    # lock, so a handle that blocks the lock now cannot be opened again later.
+    $sections = [Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access
+    if (Test-RunLockSecurity -Acl ([IO.File]::GetAccessControl($File, $sections))) { return }
+    [IO.File]::SetAccessControl($File, $Policy)
+    if (-not (Test-RunLockSecurity -Acl ([IO.File]::GetAccessControl($File, $sections)))) {
+        throw "The run lock $File could not be limited to Administrators and SYSTEM. An administrator can delete it so " +
+            'the next backup creates it again.'
+    }
+}
+
+function Protect-RunLockFile {
+    param([string]$StateRoot)
+    # Set-ProtectedDirectory gives every file in the state folder the folder's inherited permissions, which let the user
+    # read run.lock. Give run.lock back its own: Administrators and SYSTEM only, as the backup and the managers expect.
+    $file = Join-Path $StateRoot 'run.lock'
+    if (Test-Path -LiteralPath $file) {
+        $item = Get-Item -LiteralPath $file -Force
+        if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "Expected a normal, non-reparse file: $file"
+        }
+        # Changing permissions needs no access to the contents, so a program that holds the file open, even without
+        # sharing, can stop neither this repair nor the upgrade, and cannot open the file again once it lets go.
+        Protect-RunLock -File $file -Policy (New-RunLockSecurity)
+        return
+    }
+    $security = New-RunLockSecurity
+    $stream = [IO.FileStream]::new($file, [IO.FileMode]::OpenOrCreate,
+        ([Security.AccessControl.FileSystemRights]::Read -bor [Security.AccessControl.FileSystemRights]::Write),
+        [IO.FileShare]::ReadWrite, 4096, [IO.FileOptions]::None, $security)
+    try {
+        Protect-RunLock -File $file -Policy $security
+        if ($stream.Length -eq 0) { $stream.WriteByte(0); $stream.Flush($true) }
+    }
+    finally { $stream.Dispose() }
+}
+
 function Get-DefaultRepository {
     $systemRoot = [IO.Path]::GetPathRoot($systemDirectory)
     $candidates = @(
@@ -3198,6 +3268,7 @@ try {
     Start-InstallPhase 'permissions'
     Set-ProtectedDirectory -Path $installRoot -UserSid $currentSid
     Set-ProtectedDirectory -Path $stateRoot -UserSid $currentSid
+    Protect-RunLockFile -StateRoot $stateRoot
     if ($RepositoryStorageMode -eq 'local_ntfs') {
         Set-ProtectedDirectory -Path $repositoryPath -UserSid $currentSid
     }

@@ -106,6 +106,7 @@ $sources = @(
     (Join-Path $project 'EngineProfile.cs'),
     (Join-Path $project 'CrashLog.cs'),
     (Join-Path $project 'Program.cs'),
+    (Join-Path $project 'ElevatedRequestSecurity.cs'),
     (Join-Path $project 'SourceConfiguration.cs'),
     (Join-Path $project 'RepositoryManager.cs'),
     (Join-Path $project 'RepositoryLocationWindow.cs'),
