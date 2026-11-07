@@ -23,8 +23,49 @@ LONG_MAX = 2**63 - 1
 
 # Words a home user should never have to read on these lines (rule 8 of the dashboard's wording).
 TECHNICAL = re.compile(r"repositor|snapshot|engine|canary|restic|volume", re.IGNORECASE)
-# A sentence that asks the person to make room.
-FREES_SPACE = re.compile(r"free (up|some)", re.IGNORECASE)
+# A sentence that asks the person to make room: free up or free some space, make room or space, clear space, or delete or remove
+# files or data.
+FREES_SPACE = re.compile(
+    r"\bfree (up|some)\b"
+    r"|\bmake (some |more )?(room|space)\b"
+    r"|\bclear(ing)? (up |out )?(some |more )?(disk |drive )?space\b"
+    r"|\b(delete|deleting|remove|removing|erase|erasing) (some |other |old |unneeded |unused |large |big |a few )?(files|data)\b",
+    re.IGNORECASE,
+)
+# What such a sentence must also say: never anything inside the backup folder (the page's NEVER_INSIDE).
+NEVER_INSIDE = re.compile(r"never[^.]*inside the (backup|repository) folder|NEVER_INSIDE", re.IGNORECASE)
+
+
+def surface_blocks(text: str, *, markdown: bool) -> list[tuple[int, str]]:
+    """What the scan reads as one unit, with its first line number: each line of a source file, and each paragraph, list item,
+    heading or table row of a Markdown file, whose sentences wrap over several lines."""
+    lines = text.splitlines()
+    if not markdown:
+        return list(enumerate(lines, 1))
+    blocks: list[tuple[int, str]] = []
+    current: list[str] = []
+    first = 0
+    for number, line in enumerate(lines, 1):
+        stripped = line.strip()
+        standalone = stripped.startswith(("#", "|"))
+        if current and (not stripped or standalone or re.match(r"(?:[-*+]|\d+\.)\s", stripped)):
+            blocks.append((first, " ".join(current)))
+            current = []
+        if not stripped:
+            continue
+        if standalone:
+            blocks.append((number, stripped))
+            continue
+        if not current:
+            first = number
+        current.append(stripped)
+    if current:
+        blocks.append((first, " ".join(current)))
+    return blocks
+
+
+def asks_to_free_space_without_the_clause(blocks: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    return [(number, text) for number, text in blocks if FREES_SPACE.search(text) and not NEVER_INSIDE.search(text)]
 
 
 HARNESS_SOURCE = r"""
@@ -711,12 +752,49 @@ class FreeSpaceAdviceSurfaceTests(unittest.TestCase):
         for path in sources:
             if "node_modules" in path.parts:
                 continue
-            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                if FREES_SPACE.search(line):
-                    found += 1
-                    with self.subTest(file=path.name, line=number):
-                        self.assertRegex(line, r"never|NEVER_INSIDE")
-        self.assertGreater(found, 4)
+            blocks = surface_blocks(path.read_text(encoding="utf-8"), markdown=path.suffix.lower() == ".md")
+            found += sum(1 for _number, text in blocks if FREES_SPACE.search(text))
+            for number, text in asks_to_free_space_without_the_clause(blocks):
+                with self.subTest(file=path.name, line=number):
+                    self.fail("asks to free space without saying never anything inside the backup folder: " + text)
+        # The card's and hero's next steps, the low-space failure sentence and next step, RECOVERY.md and the architecture notes.
+        self.assertGreater(found, 7)
+
+    def test_the_scan_knows_every_way_of_asking_to_free_space(self) -> None:
+        asks = [
+            "Free up space on D:.",
+            "Free some up.",
+            "Make room on the backup drive.",
+            "Make some space on D: first.",
+            "Clear space on the drive.",
+            "Clear up some disk space, then try again.",
+            "Delete files you no longer need.",
+            "Remove old files from the drive.",
+            "Try deleting other files.",
+            "Removing unneeded data helps.",
+        ]
+        for text in asks:
+            with self.subTest(text=text):
+                self.assertTrue(FREES_SPACE.search(text))
+                self.assertEqual([(1, text)], asks_to_free_space_without_the_clause([(1, text)]))
+                guarded = text[:-1] + " (never anything inside the backup folder)."
+                self.assertEqual([], asks_to_free_space_without_the_clause([(1, guarded)]))
+        # Words that only describe space, or remove something else, are not asks.
+        for text in ("96.0 GiB free of 931 GiB", "Open to review or remove items.", "The backup drive doesn’t have enough free space."):
+            with self.subTest(text=text):
+                self.assertIsNone(FREES_SPACE.search(text))
+        # "Never" alone, or a clause about some other folder, is not the clause.
+        self.assertTrue(asks_to_free_space_without_the_clause([(1, "Make room by deleting old files. Never wait.")]))
+        self.assertTrue(asks_to_free_space_without_the_clause([(1, "Make room, but never anything inside the Windows folder.")]))
+
+    def test_in_markdown_a_wrapped_paragraph_is_read_whole(self) -> None:
+        guarded = "Backups stop below the reserve. Make room by removing other\nfiles from that drive. Never delete anything inside the\nrepository folder.\n"
+        self.assertEqual([], asks_to_free_space_without_the_clause(surface_blocks(guarded, markdown=True)))
+        bare = "Intro.\n\nBackups stop below the reserve. Make room by removing other\nfiles from that drive.\n"
+        self.assertEqual([3], [number for number, _ in asks_to_free_space_without_the_clause(surface_blocks(bare, markdown=True))])
+        # A list item is its own unit: the clause in the next item does not cover it.
+        items = "- Make room by deleting old files\n  from that drive.\n- Never delete anything inside the backup folder.\n"
+        self.assertEqual([1], [number for number, _ in asks_to_free_space_without_the_clause(surface_blocks(items, markdown=True))])
 
 
 class BackupSpaceWiringTests(unittest.TestCase):
