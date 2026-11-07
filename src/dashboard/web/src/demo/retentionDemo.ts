@@ -32,7 +32,7 @@ export function createSampleRetention(now = Date.now()): RetentionState {
       status: 'ready', blocked: '', errorCode: '', checkedAt: new Date(now - 3_600_000).toISOString(),
       removeCount: rows.remove.length, keepCount: rows.keep.length,
       oldestRemoveAt: rows.remove[rows.remove.length - 1].when, newestRemoveAt: rows.remove[0].when,
-      earlierChangeAt: '', earlierChangesUnknown: false, futureDatedAt: '', prunePending: false,
+      earlierChanges: [], earlierChangesUnknown: false, futureDatedAt: '', prunePending: false,
     },
     lastRun: { finishedAt: new Date(now - 32 * 86_400_000).toISOString(), outcome: 'removed', removedCount: 9, confirmedCount: 9, freedDisplay: '3.4 GiB' },
     operation: { active: false, action: '', stage: '', count: 0, percent: null },

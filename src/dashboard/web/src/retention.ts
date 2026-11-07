@@ -1,4 +1,4 @@
-import type { RetentionAbility, RetentionBlocked, RetentionLastRun, RetentionReviewState, RetentionState } from './native-types';
+import type { RetentionAbility, RetentionBlocked, RetentionEarlierChange, RetentionLastRun, RetentionReviewState, RetentionState } from './native-types';
 
 // Everything the Old backups card and its dialogs say, worked out from the host's state. The host reports codes and counts; the words
 // are here, so they can be checked in one place: plain language, the person's words (backup, backup location, backup service), and a
@@ -191,6 +191,34 @@ export function lastRunSentence(run: RetentionLastRun, locale?: string): string 
   }
 }
 
+/**
+ * Why the person is asked to check their files before old backups go, for the card (one line, or empty when there is nothing to
+ * add) or for the list of old backups (always a sentence: the list shows it only when it asks for the tick). Only a backup that
+ * changed far more files than usual is described that way. One that couldn't be compared with the backup before it (the first
+ * backup, or the first after a folder change) or whose record doesn't say (an older backup service) gets a calm sentence instead.
+ */
+export function filesCheckSentence(changes: RetentionEarlierChange[] | null | undefined, recordUnknown: boolean, place: 'card' | 'list', locale?: string): string {
+  const list = changes ?? [];
+  const hold = list.find(change => change.kind === 'hold');
+  const ask = 'Before anything is removed, you’ll be asked to check that your files look right.';
+  if (hold) {
+    const day = formatDay(hold.at, locale);
+    const which = day ? `A backup on ${day}` : 'A recent backup';
+    return place === 'card'
+      ? `${which} changed far more files than usual. ${ask}`
+      : `${which} changed far more files than usual, and those changes weren’t confirmed. If you didn’t expect them, some files may be missing or damaged, and these old backups may hold the only good copies. Open your folders and check them before you continue.`;
+  }
+  if (list.length > 0) {
+    return place === 'card'
+      ? `Rewindle couldn’t compare some recent backups with the ones before them. ${ask}`
+      : 'Rewindle couldn’t compare some recent backups with the ones before them, so check that your files look right before you continue.';
+  }
+  if (recordUnknown) {
+    return place === 'card' ? ask : 'Rewindle couldn’t read all its records of earlier backups, so check that your files look right before you continue.';
+  }
+  return place === 'card' ? '' : 'This is the first clean-up, so check that your files look right before you continue: these old backups may hold the only copies of files that changed or were deleted since.';
+}
+
 /** The card: one main line, the lines under it, its buttons, and how loud it is. */
 export function cardModel(state: RetentionState, locale?: string): CardModel {
   const model: CardModel = { main: '', lines: [], tone: 'neutral', buttons: [], busy: false };
@@ -210,6 +238,11 @@ export function cardModel(state: RetentionState, locale?: string): CardModel {
     model.main = operation.action === 'apply' ? 'Removing old backups…' : operation.action === 'configure' ? 'Saving your clean-up setting…' : 'Checking for old backups…';
     model.lines.push(stageSentence(operation.stage, operation.count));
     if (operation.action === 'apply') model.lines.push('A backup that’s due while old backups are being removed is skipped; you can back up again as soon as this finishes.');
+    return model;
+  }
+  if (state.mode === 'unknown' && (state.problem === 'not_read' || state.problem === 'plan_unavailable')) {
+    // The first read after the page opens, or the backup plan is still loading: nothing is wrong yet.
+    model.main = 'Checking the clean-up setting…';
     return model;
   }
   if (state.mode === 'unknown') {
@@ -249,12 +282,8 @@ export function cardModel(state: RetentionState, locale?: string): CardModel {
     const oldest = formatDay(preview.oldestRemoveAt, locale), newest = formatDay(preview.newestRemoveAt, locale);
     const span = oldest && newest ? (oldest === newest ? `, from ${oldest}` : `, from ${oldest} to ${newest}`) : '';
     model.lines.push(`${plural(preview.removeCount, 'old backup', 'old backups')} can be removed${span}. ${plural(preview.keepCount, 'backup stays', 'backups stay')}.`);
-    if (preview.earlierChangeAt || preview.earlierChangesUnknown) {
-      const day = formatDay(preview.earlierChangeAt, locale);
-      model.lines.push(day
-        ? `A backup on ${day} changed far more files than usual. Before anything is removed, you’ll be asked to check that your files look right.`
-        : 'Before anything is removed, you’ll be asked to check that your files look right.');
-    }
+    const check = filesCheckSentence(preview.earlierChanges, preview.earlierChangesUnknown, 'card', locale);
+    if (check) model.lines.push(check);
     reviewButton = { command: 'review', label: 'Review and remove…', primary: true, ability: state.canReview };
   } else if (preview.prunePending) {
     model.lines.push('The backups removed last time still take up space. Choose Finish freeing space.');
@@ -298,7 +327,7 @@ export function resultScreen(review: RetentionReviewState): { title: string; tex
     };
     case 'partial': return result.reason === 'unverified' ? {
       title: 'Clean-up stopped', tone: 'warning',
-      text: 'Some backups on the list were removed, then Rewindle couldn’t read back what is left on your backup location. Nothing outside the list you confirmed was removed. Choose Check now later to see what’s there.',
+      text: 'Some backups on the list may have been removed, then Rewindle couldn’t read back what is left on your backup location. Nothing outside the list you confirmed was removed. Choose Check now later to see what’s there.',
     } : {
       title: 'Clean-up stopped', tone: 'warning',
       text: `Removed ${removed.toLocaleString('en-US')} of ${plural(confirmed, 'backup', 'backups')}, then stopped. The other ${(confirmed - removed).toLocaleString('en-US')} are still there, and nothing else was touched. Choose Review and remove later to try again.`,

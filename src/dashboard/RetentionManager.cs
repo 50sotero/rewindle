@@ -544,6 +544,21 @@ namespace ResticBackuper.Dashboard
         internal List<string> Reasons = new List<string>();
     }
 
+    // An earlier checked backup the person is asked to look over before old backups go, and why. "hold": it changed far
+    // more files than usual and nobody confirmed it. "not_compared": it could not be compared with the backup before it
+    // (the first backup, or the first after a folder, exclusion or location change). "unknown": its record does not say,
+    // as an older backup service's does not. Only "hold" is worded as unusual changes.
+    internal sealed class RetentionEarlierChange
+    {
+        internal string FinishedUtc;
+        internal string Kind;
+
+        internal static string KindOf(string value)
+        {
+            return value == "hold" || value == "not_compared" ? value : "unknown";
+        }
+    }
+
     internal sealed class RetentionHistoryEntryView
     {
         internal string Nonce;
@@ -584,7 +599,7 @@ namespace ResticBackuper.Dashboard
         internal int KeepCount;
         internal List<RetentionItemView> Remove = new List<RetentionItemView>();
         internal List<RetentionItemView> Keep = new List<RetentionItemView>();
-        internal List<string> EarlierChanges = new List<string>();
+        internal List<RetentionEarlierChange> EarlierChanges = new List<RetentionEarlierChange>();
         internal bool EarlierChangesUnknown;
         internal bool NeedsFilesConfirmed;
         internal bool PrunePending;
@@ -938,8 +953,13 @@ namespace ResticBackuper.Dashboard
             {
                 foreach (object item in changes)
                 {
-                    string finished = RetentionJson.String(item as IDictionary<string, object>, "finished_utc");
-                    view.EarlierChanges.Add(finished ?? string.Empty);
+                    IDictionary<string, object> entry = item as IDictionary<string, object>;
+                    RetentionEarlierChange change = new RetentionEarlierChange();
+                    change.FinishedUtc = RetentionJson.String(entry, "finished_utc") ?? string.Empty;
+                    // A kind this dashboard does not know is read as "unknown": the person is still asked to check their
+                    // files, and nothing claims a change it cannot vouch for.
+                    change.Kind = RetentionEarlierChange.KindOf(RetentionJson.String(entry, "kind"));
+                    view.EarlierChanges.Add(change);
                 }
             }
             view.EarlierChangesUnknown = RetentionJson.Boolean(preview, "earlier_changes_unknown") != false;

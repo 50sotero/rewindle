@@ -3,7 +3,7 @@ import { Archive, CircleAlert, LockKeyhole, X } from 'lucide-react';
 import { Button } from '@/components/atoms/Button';
 import type { CommandName, RetentionState } from '@/src/native-types';
 import {
-  countError, formatDay, formatMoment, groupByMonth, historySummary, monthLabel, parseCount, reasonsLabel, reasonTag, resultScreen,
+  countError, filesCheckSentence, formatDay, formatMoment, groupByMonth, historySummary, monthLabel, parseCount, reasonsLabel, reasonTag, resultScreen,
   type CountKind,
 } from '@/src/retention';
 import { usePendingCommand } from '@/src/pendingCommands';
@@ -158,7 +158,6 @@ export function RetentionReviewDialog({ retention, send, locale }: { retention: 
     send('retentionApply', { removeCount: String(count), confirmList: true, confirmEarlierChanges: filesChecked });
   };
   const page = review.page;
-  const earlier = review.earlierChanges.find(Boolean) ?? '';
   const newestKept = formatDay(review.newestKeptAt, locale);
   const groups = page.list === 'remove' ? groupByMonth(page.rows, locale) : [];
   const monthTotals = new Map(review.months.map(month => [month.month, month.count]));
@@ -184,11 +183,7 @@ export function RetentionReviewDialog({ retention, send, locale }: { retention: 
         {!review.pruneOnly && <p className="old-backups-overview">{count.toLocaleString('en-US')} to remove · {review.keepCount.toLocaleString('en-US')} stay{newestKept ? ` · your newest backup, from ${newestKept}, stays` : ''}</p>}
         {review.needsFilesConfirmed && <section className="old-backups-check" aria-label="Check your files first">
           <h3>Check your files first</h3>
-          <p>{earlier
-            ? `A backup on ${formatDay(earlier, locale)} changed far more files than usual, and those changes weren’t confirmed. If you didn’t expect them, some files may be missing or damaged, and these old backups may hold the only good copies. Open your folders and check them before you continue.`
-            : review.earlierChangesUnknown
-              ? 'Rewindle couldn’t read its record of earlier unusual changes, so check that your files look right before you continue.'
-              : 'This is the first clean-up, so check that your files look right before you continue: these old backups may hold the only copies of files that changed or were deleted since.'}</p>
+          <p>{filesCheckSentence(review.earlierChanges, review.earlierChangesUnknown, 'list', locale)}</p>
           <label className="old-backups-tick"><input type="checkbox" checked={filesChecked} disabled={running} onChange={event => setFilesChecked(event.target.checked)} />I’ve checked my files and they look right.</label>
         </section>}
         {!review.pruneOnly && <div className="old-backups-tabs" role="group" aria-label="Which list to show">

@@ -3190,6 +3190,33 @@ namespace RewindleRegression {
         Set-PrivateField $retention 'retentionReviewCapture' $null
         Set-PrivateField $retention 'retentionReviewResult' $null
 
+        # Each earlier backup to look over reaches the page with its kind, so only one that changed far more files than usual is
+        # worded that way (retention.ts filesCheckSentence). A kind this dashboard does not know arrives as 'unknown'.
+        $earlierType = $assembly.GetType('ResticBackuper.Dashboard.RetentionEarlierChange', $true)
+        $kindsView = [Activator]::CreateInstance($retentionViewType, $true)
+        Set-ObjectField $kindsView 'Mode' 'on'
+        Set-ObjectField $kindsView 'PreviewStatus' 'ready'
+        $earlierList = Get-ObjectField $kindsView 'EarlierChanges'
+        foreach ($pair in @(@('2026-09-29T00:30:00Z', 'unknown'), @('2026-09-28T00:30:00Z', 'not_compared'), @('2026-09-27T00:30:00Z', 'hold'), @('2026-09-26T00:30:00Z', 'something_new'))) {
+            $change = [Activator]::CreateInstance($earlierType, $true)
+            Set-ObjectField $change 'FinishedUtc' $pair[0]
+            Set-ObjectField $change 'Kind' $pair[1]
+            [void]$earlierList.GetType().GetMethod('Add').Invoke($earlierList, [object[]]@($change))
+        }
+        $webPreview = Invoke-Private $retention 'BuildWebRetentionPreview' @($kindsView)
+        $previewChanges = @($webPreview['earlierChanges'])
+        $previewKinds = @($previewChanges | ForEach-Object { [string]$_['kind'] }) -join ','
+        Assert-True ($previewKinds -eq 'unknown,not_compared,hold,unknown' -and [string]$previewChanges[2]['at'] -eq '2026-09-27T00:30:00Z') ('the card was not given each earlier backup with its kind: ' + $previewKinds)
+        Set-PrivateField $retention 'retentionReviewCapture' $kindsView
+        Set-PrivateField $retention 'retentionReviewOpen' $true
+        $webReview = Invoke-Private $retention 'BuildWebRetentionReview'
+        $reviewKinds = @(@($webReview['earlierChanges']) | ForEach-Object { [string]$_['kind'] }) -join ','
+        Assert-True ($reviewKinds -eq 'unknown,not_compared,hold,unknown') ('the list of old backups was not given each earlier backup with its kind: ' + $reviewKinds)
+        Set-ObjectField $kindsView 'PreviewStatus' 'error'
+        Assert-True (@((Invoke-Private $retention 'BuildWebRetentionPreview' @($kindsView))['earlierChanges']).Count -eq 0) 'a list that could not be made still named earlier backups'
+        Set-PrivateField $retention 'retentionReviewOpen' $false
+        Set-PrivateField $retention 'retentionReviewCapture' $null
+
         # The launch itself, with a stand-in for Windows: the approval prompt is asked for (runas) with the manager from the install
         # folder and only the arguments of the action, and a result is believed only when it matches the request, the exit code and
         # a fresh read of the records.

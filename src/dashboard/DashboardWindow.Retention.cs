@@ -965,11 +965,29 @@ namespace ResticBackuper.Dashboard
             }
             preview["oldestRemoveAt"] = oldest;
             preview["newestRemoveAt"] = newest;
-            preview["earlierChangeAt"] = status == "ready" && view.EarlierChanges.Count > 0 ? view.EarlierChanges[0] : string.Empty;
+            preview["earlierChanges"] = status == "ready" ? BuildWebRetentionEarlierChanges(view.EarlierChanges) : new object[0];
             preview["earlierChangesUnknown"] = status == "ready" && view.EarlierChangesUnknown;
             preview["futureDatedAt"] = status == "blocked" && blocked == "future_dated_backup" ? view.FutureDatedUtc ?? string.Empty : string.Empty;
             preview["prunePending"] = status == "ready" && view.PrunePending;
             return preview;
+        }
+
+        // Each earlier backup to look over with its kind, newest first as the engine lists them. The page words a "hold" as
+        // unusual changes and the other kinds as backups that could not be compared (retention.ts filesCheckSentence).
+        private static object[] BuildWebRetentionEarlierChanges(List<RetentionEarlierChange> changes)
+        {
+            List<object> list = new List<object>();
+            if (changes != null)
+            {
+                foreach (RetentionEarlierChange change in changes)
+                {
+                    Dictionary<string, object> item = new Dictionary<string, object>();
+                    item["at"] = change.FinishedUtc ?? string.Empty;
+                    item["kind"] = RetentionEarlierChange.KindOf(change.Kind);
+                    list.Add(item);
+                }
+            }
+            return list.ToArray();
         }
 
         private static Dictionary<string, object> BuildWebRetentionLastRun(RetentionHistoryEntryView entry)
@@ -1007,7 +1025,7 @@ namespace ResticBackuper.Dashboard
                 if (newestKept.Length == 0 || string.CompareOrdinal(item.Time, newestKept) > 0) newestKept = item.Time;
             }
             review["newestKeptAt"] = newestKept;
-            review["earlierChanges"] = capture.EarlierChanges.ToArray();
+            review["earlierChanges"] = BuildWebRetentionEarlierChanges(capture.EarlierChanges);
             review["earlierChangesUnknown"] = capture.EarlierChangesUnknown;
             review["needsFilesConfirmed"] = capture.NeedsFilesConfirmed;
             review["pruneOnly"] = capture.RemoveCount == 0 && capture.PrunePending;

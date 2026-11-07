@@ -379,13 +379,20 @@ export interface RetentionPreviewState {
   removeCount: number; keepCount: number;
   /** ISO 8601 times of the oldest and newest backup that would go. */
   oldestRemoveAt: string; newestRemoveAt: string;
-  /** The newest earlier backup with unusual changes nobody confirmed, or empty. */
-  earlierChangeAt: string;
+  /** Earlier backups to look over before anything is removed, newest first (see RetentionEarlierChange). */
+  earlierChanges: RetentionEarlierChange[];
   earlierChangesUnknown: boolean;
   futureDatedAt: string;
   /** Backups were removed earlier and their space is not freed yet. */
   prunePending: boolean;
 }
+/**
+ * An earlier checked backup the person is asked to look over before old backups go, and why. `hold`: it changed far more files than
+ * usual and nobody confirmed it. `not_compared`: it couldn't be compared with the backup before it (the first backup, or the first
+ * after a folder, exclusion or location change). `unknown`: its record doesn't say (an older backup service). Only `hold` is worded as
+ * unusual changes.
+ */
+export interface RetentionEarlierChange { at: string; kind: 'hold' | 'not_compared' | 'unknown' }
 export interface RetentionLastRun { finishedAt: string; outcome: RetentionOutcome; removedCount: number; confirmedCount: number; freedDisplay: string }
 export interface RetentionOperationState {
   active: boolean;
@@ -405,7 +412,7 @@ export type RetentionResultStatus = 'removed' | 'nothing_to_remove' | 'declined'
  */
 export interface RetentionReviewState {
   removeCount: number; keepCount: number; newestKeptAt: string;
-  earlierChanges: string[]; earlierChangesUnknown: boolean; needsFilesConfirmed: boolean;
+  earlierChanges: RetentionEarlierChange[]; earlierChangesUnknown: boolean; needsFilesConfirmed: boolean;
   pruneOnly: boolean; changed: boolean; running: boolean;
   /** Changes whenever a different list is shown, so ticked boxes are cleared. */
   captureKey: string;

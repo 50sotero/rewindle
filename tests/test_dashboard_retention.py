@@ -72,6 +72,13 @@ namespace {namespace}
             result["prune_pending"] = view.PrunePending;
             result["preview_sha"] = view.PreviewSha256;
             result["last_outcome"] = view.LastRun == null ? null : view.LastRun.Outcome;
+            List<object> earlier = new List<object>();
+            foreach (RetentionEarlierChange change in view.EarlierChanges)
+            {{
+                earlier.Add(new object[] {{ change.FinishedUtc, change.Kind }});
+            }}
+            result["earlier"] = earlier.ToArray();
+            result["earlier_unknown"] = view.EarlierChangesUnknown;
             return result;
         }}
 
@@ -438,6 +445,29 @@ class DashboardRetentionHarnessTests(unittest.TestCase):
         # A setting whose digest does not match its counts is not on.
         self.assertEqual(forged_view["mode"], "off")
 
+    def test_each_earlier_backup_is_read_with_its_kind(self) -> None:
+        fixture = self.fixture("earlier-kinds")
+        fixture.policy()
+        fixture.preview(earlier_changes=[
+            {"finished_utc": "2026-09-29T00:30:00Z", "kind": "unknown"},
+            {"finished_utc": "2026-09-28T00:30:00Z", "kind": "not_compared"},
+            {"finished_utc": "2026-09-27T00:30:00Z", "kind": "hold"},
+            {"finished_utc": "2026-09-26T00:30:00Z", "kind": "something_new"},
+            {"finished_utc": "2026-09-25T00:30:00Z"},
+        ], earlier_changes_unknown=True, first_cleanup=False)
+        none = self.fixture("earlier-none")
+        none.policy()
+        none.preview()
+        view, none_view = self.run_cases([fixture.read(), none.read()])
+        # A kind this dashboard does not know, or none at all, is read as "unknown": never as a backup that held.
+        self.assertEqual(view["earlier"], [
+            ["2026-09-29T00:30:00Z", "unknown"], ["2026-09-28T00:30:00Z", "not_compared"], ["2026-09-27T00:30:00Z", "hold"],
+            ["2026-09-26T00:30:00Z", "unknown"], ["2026-09-25T00:30:00Z", "unknown"],
+        ])
+        self.assertTrue(view["earlier_unknown"])
+        self.assertTrue(view["needs_files"])
+        self.assertEqual((none_view["earlier"], none_view["earlier_unknown"]), ([], False))
+
     def test_blocked_lists_and_unreadable_settings(self) -> None:
         blocked = self.fixture("blocked")
         blocked.policy()
@@ -535,6 +565,10 @@ for (const code of data.codes) { out.refusals[code] = mod.refusalReason(code) + 
 for (const code of ['records_unprotected', 'listing_failed', 'latest_backup_missing', 'failed', 'anything']) out.errors[code] = mod.errorSentence(code);
 for (const stage of ['approval', 'listing', 'checking', 'freeing', 'verifying']) out.stages[stage] = mod.stageSentence(stage, 3);
 for (const [name, run] of Object.entries(data.lastRuns)) out.lastRuns[name] = mod.lastRunSentence(run, 'en-GB');
+out.filesChecks = {};
+for (const [name, [changes, unknown]] of Object.entries(data.filesChecks)) {
+  out.filesChecks[name] = { card: mod.filesCheckSentence(changes, unknown, 'card', 'en-GB'), list: mod.filesCheckSentence(changes, unknown, 'list', 'en-GB') };
+}
 const limits = data.states.off.limits;
 out.misc.parse = [mod.parseCount('daily', '14', limits), mod.parseCount('daily', '6', limits), mod.parseCount('daily', '91', limits), mod.parseCount('daily', '1.5', limits), mod.parseCount('monthly', '120', limits), mod.parseCount('weekly', '', limits)];
 out.misc.clamp = [mod.clampCount('daily', 3, limits), mod.clampCount('weekly', 500, limits), mod.clampCount('monthly', 24.4, limits)];
@@ -557,7 +591,7 @@ def web_state(**overrides) -> dict:
         "resetByReinstall": False, "problem": "",
         "preview": {"status": "ready", "blocked": "", "errorCode": "", "checkedAt": "2026-09-30T10:00:00Z", "removeCount": 12,
                     "keepCount": 40, "oldestRemoveAt": "2025-09-03T02:00:00+02:00", "newestRemoveAt": "2026-08-01T02:00:00+02:00",
-                    "earlierChangeAt": "", "earlierChangesUnknown": False, "futureDatedAt": "", "prunePending": False},
+                    "earlierChanges": [], "earlierChangesUnknown": False, "futureDatedAt": "", "prunePending": False},
         "lastRun": None, "operation": {"active": False, "action": "", "stage": "", "count": 0, "percent": None}, "notice": None,
         "canConfigure": {"enabled": True, "help": ""}, "canTurnOff": {"enabled": True, "help": ""},
         "canReview": {"enabled": True, "help": ""}, "canCheckNow": {"enabled": True, "help": ""}, "review": None,
@@ -593,7 +627,19 @@ class RetentionWordingTests(unittest.TestCase):
             "reset": web_state(mode="off", resetByReinstall=True),
             "ready": web_state(),
             "ready_one": web_state(preview={"removeCount": 1, "keepCount": 1, "newestRemoveAt": "2025-09-03T02:00:00+02:00"}),
-            "ready_earlier": web_state(preview={"earlierChangeAt": "2026-09-20T00:30:00Z"}),
+            "ready_earlier": web_state(preview={"earlierChanges": [{"at": "2026-09-20T00:30:00Z", "kind": "hold"}]}),
+            # An updated install: its earlier backups were logged by an older backup service that did not say whether they were
+            # compared, and one was the first after a folder change. Neither changed far more files than usual.
+            "ready_unknown_kind": web_state(preview={"earlierChanges": [{"at": "2026-09-29T00:30:00Z", "kind": "unknown"}],
+                                                     "earlierChangesUnknown": True}),
+            "ready_not_compared": web_state(preview={"earlierChanges": [{"at": "2026-09-28T00:30:00Z", "kind": "not_compared"}]}),
+            # A hold among others is the one the card names, with its own date.
+            "ready_mixed": web_state(preview={"earlierChanges": [{"at": "2026-09-29T00:30:00Z", "kind": "unknown"},
+                                                                 {"at": "2026-09-21T00:30:00Z", "kind": "hold"}],
+                                              "earlierChangesUnknown": True}),
+            "ready_record_unknown": web_state(preview={"earlierChangesUnknown": True}),
+            "first_read": web_state(mode="unknown", problem="not_read", preview=None),
+            "plan_loading": web_state(mode="unknown", problem="plan_unavailable", preview=None),
             "nothing": web_state(preview={"removeCount": 0}),
             "prune_only": web_state(preview={"removeCount": 0, "prunePending": True}),
             "stale": web_state(preview={"status": "stale"}),
@@ -613,7 +659,16 @@ class RetentionWordingTests(unittest.TestCase):
         last_runs = {outcome: {"finishedAt": "2026-09-01T03:00:00Z", "outcome": outcome, "removedCount": 3, "confirmedCount": 5, "freedDisplay": ""}
                      for outcome in ["removed", "nothing_to_remove", "partial", "space_pending", "check_failed", "failed"]}
         last_runs["removed_freed"] = {**last_runs["removed"], "freedDisplay": "4.1 GiB"}
-        data = {"states": states, "reviews": reviews, "codes": REFUSALS,
+        files_checks = {
+            "hold": [[{"at": "2026-09-20T00:30:00Z", "kind": "hold"}], False],
+            "hold_no_date": [[{"at": "", "kind": "hold"}], False],
+            "not_compared": [[{"at": "2026-09-28T00:30:00Z", "kind": "not_compared"}], False],
+            "unknown": [[{"at": "2026-09-29T00:30:00Z", "kind": "unknown"}, {"at": "2026-09-28T00:30:00Z", "kind": "unknown"}], True],
+            "mixed": [[{"at": "2026-09-29T00:30:00Z", "kind": "not_compared"}, {"at": "2026-09-21T00:30:00Z", "kind": "hold"}], True],
+            "record_unknown": [[], True],
+            "first": [[], False],
+        }
+        data = {"states": states, "reviews": reviews, "codes": REFUSALS, "filesChecks": files_checks,
                 "counts": [[14, 8, 24], [7, 4, 6], [90, 104, 120], [13, 7, 23], [21, 12, 36], [15, 9, 30]], "lastRuns": last_runs}
         with tempfile.TemporaryDirectory(prefix="rw-retention-wording-") as folder:
             input_path = Path(folder) / "input.json"
@@ -644,6 +699,8 @@ class RetentionWordingTests(unittest.TestCase):
         for group in ("summaries", "refusals", "blocked", "errors", "stages", "lastRuns"):
             texts += list(self.report[group].values())
         texts += [self.report["misc"]["countError"], self.report["misc"]["reasons"], *[x for x in self.report["misc"]["busy"] if x]]
+        for check in self.report["filesChecks"].values():
+            texts += [x for x in (check["card"], check["list"]) if x]
         for text in texts:
             with self.subTest(text=text):
                 self.assertTrue(text)
@@ -673,7 +730,9 @@ class RetentionWordingTests(unittest.TestCase):
         self.assertRegex(self.card("ready")["lines"][0], r"^12 old backups can be removed, from .+ to .+\. 40 backups stay\.$")
         self.assertEqual(self.buttons("ready"), ["Review and remove…", "Change…", "Turn off"])
         self.assertRegex(self.card("ready_one")["lines"][0], r"^1 old backup can be removed, from [^.]+\. 1 backup stays\.$")
-        self.assertIn("changed far more files than usual", self.card("ready_earlier")["lines"][1])
+        self.assertRegex(self.card("ready_earlier")["lines"][1],
+                         r"^A backup on 20 Sept? 2026 changed far more files than usual\. Before anything is removed, you’ll be asked "
+                         r"to check that your files look right\.$")
         self.assertEqual(self.card("nothing")["lines"][0], "Nothing to remove right now. Rewindle offers to check again after your next backup.")
         self.assertEqual(self.buttons("nothing"), ["Change…", "Turn off"])
         self.assertEqual(self.buttons("prune_only")[0], "Finish freeing space")
@@ -691,6 +750,53 @@ class RetentionWordingTests(unittest.TestCase):
                 self.assertRegex(sentence, r"Choose|Look at|Correct|shows what to do|starts after|stay where they are|save a problem report")
         self.assertIn("2031", self.report["blocked"]["future_dated_backup"])
         self.assertEqual(self.card("busy_review")["buttons"][0]["ability"]["enabled"], False)
+
+    def test_only_a_backup_that_held_is_called_unusual(self) -> None:
+        checks = self.report["filesChecks"]
+        alarm = re.compile(r"far more files|unusual|missing or damaged|only good copies", re.IGNORECASE)
+        ask = "Before anything is removed, you’ll be asked to check that your files look right."
+        not_compared_card = f"Rewindle couldn’t compare some recent backups with the ones before them. {ask}"
+        not_compared_list = ("Rewindle couldn’t compare some recent backups with the ones before them, so check that your files look "
+                             "right before you continue.")
+        # A backup whose changes held clean-up back is named with its own date, on the card and in the list.
+        self.assertRegex(checks["hold"]["card"], r"^A backup on 20 Sept? 2026 changed far more files than usual\. Before anything")
+        self.assertRegex(checks["hold"]["list"], r"^A backup on 20 Sept? 2026 changed far more files than usual, and those changes weren’t confirmed\.")
+        self.assertTrue(checks["hold_no_date"]["card"].startswith("A recent backup changed far more files than usual."))
+        self.assertRegex(checks["mixed"]["card"], r"^A backup on 21 Sept? 2026 changed far more files than usual\.")
+        # One that could not be compared, or whose record does not say (an older backup service), is never called unusual.
+        for name in ("not_compared", "unknown"):
+            with self.subTest(kind=name):
+                self.assertEqual(checks[name]["card"], not_compared_card)
+                self.assertEqual(checks[name]["list"], not_compared_list)
+                self.assertIsNone(alarm.search(checks[name]["card"] + " " + checks[name]["list"]))
+        self.assertEqual(checks["record_unknown"]["card"], ask)
+        self.assertEqual(checks["record_unknown"]["list"],
+                         "Rewindle couldn’t read all its records of earlier backups, so check that your files look right before you continue.")
+        self.assertEqual(checks["first"]["card"], "")
+        self.assertTrue(checks["first"]["list"].startswith("This is the first clean-up, so check that your files look right"))
+        for name in ("record_unknown", "first"):
+            with self.subTest(case=name):
+                self.assertIsNone(alarm.search(checks[name]["card"] + " " + checks[name]["list"]))
+        # The same on the card, for an updated install and for a backup after a folder change.
+        for name in ("ready_unknown_kind", "ready_not_compared"):
+            with self.subTest(card=name):
+                lines = self.card(name)["lines"]
+                self.assertEqual(lines[1], not_compared_card)
+                for line in lines:
+                    self.assertIsNone(alarm.search(line))
+        self.assertRegex(self.card("ready_mixed")["lines"][1], r"^A backup on 21 Sept? 2026 changed far more files than usual\.")
+        self.assertEqual(self.card("ready_record_unknown")["lines"][1], ask)
+        self.assertEqual(len(self.card("ready")["lines"]), 1)
+
+    def test_the_first_read_is_neutral(self) -> None:
+        for name in ("first_read", "plan_loading"):
+            with self.subTest(name=name):
+                card = self.card(name)
+                self.assertEqual((card["main"], card["tone"], card["buttons"], card["lines"]),
+                                 ("Checking the clean-up setting…", "neutral", [], []))
+        # A setting that was read and could not be trusted still says so, with what to do.
+        self.assertEqual((self.card("unknown")["main"], self.card("unknown")["tone"]),
+                         ("Rewindle couldn’t read the clean-up setting.", "warning"))
 
     def test_running_steps_and_the_busy_note(self) -> None:
         running = self.card("running")
@@ -714,6 +820,8 @@ class RetentionWordingTests(unittest.TestCase):
         self.assertIn("Nothing outside the list you confirmed was removed", results["partial_unverified"]["text"])
         self.assertIn("Check recovery readiness", results["check_failed"]["text"])
         self.assertIn("can only remove backups on the list you saw", results["unconfirmed"]["text"])
+        # When the list could not be read back, nobody knows how many went: it never says that some did.
+        self.assertIn("Some backups on the list may have been removed", results["partial_unverified"]["text"])
         for code in REFUSALS:
             with self.subTest(code=code):
                 self.assertTrue(results[f"refused_{code}"]["text"].startswith("Nothing was removed because "))
