@@ -45,6 +45,27 @@ def shared_users() -> set[str]:
     }
 
 
+def stored_blob(path: Path) -> bytes:
+    """The file as git stores it (its staged copy, the same as HEAD on a clean checkout).
+
+    A checkout may rewrite line endings (core.autocrlf=true writes CR LF), so the line endings a
+    file is published with can only be read from the stored copy, not from the working tree.
+    """
+    relative = path.relative_to(PROJECT).as_posix()
+    result = subprocess.run(
+        ["git", "cat-file", "blob", f":{relative}"],
+        cwd=PROJECT,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            f"git has no stored copy of {relative}: " + result.stderr.decode("utf-8", "replace").strip()
+        )
+    return result.stdout
+
+
 class ElevatedRequestSecurityBehaviorTests(unittest.TestCase):
     def test_shared_checks_quote_strictly_and_require_full_control(self) -> None:
         if os.name != "nt":
@@ -164,8 +185,9 @@ class ElevatedRequestSecuritySourceTests(unittest.TestCase):
         for path in (SHARED, HARNESS):
             data = path.read_bytes()
             self.assertFalse(data.startswith(b"\xef\xbb\xbf"), path.name)
-            self.assertNotIn(b"\r", data, path.name)
             data.decode("ascii")
+            # LF only, in the copy git publishes; the working copy's line endings follow the checkout's settings.
+            self.assertEqual(0, stored_blob(path).count(b"\r"), f"{path.name} is stored with a carriage return")
 
 
 if __name__ == "__main__":
