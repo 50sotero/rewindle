@@ -184,13 +184,37 @@ class BackupRangeSourceTests(unittest.TestCase):
             body[publish:],
             r"try\s*\{\s*RecordRestoreFlowBackupRange\(freshAfterRead, listedSnapshots\);\s*\}\s*catch \(Exception\)\s*\{",
         )
-        # On the window's thread it only keeps the count in memory: the file is written by the next refresh.
+        # On the window's thread it only keeps the count in memory: the file is written by the background refresh.
         telemetry = read(DASHBOARD / "Telemetry.cs")
         start = telemetry.index("internal void RecordListedBackupRange(")
         record = telemetry[start:telemetry.index("\n        }\n", start)]
         for io in ("TryAtomicWriteJson", "File.", "Directory.", "lock (syncRoot)"):
             self.assertNotIn(io, record)
         self.assertIn("lock (listedBackupRangeGate)", record)
+
+    def test_the_restore_lists_count_is_written_only_by_the_background_refresh(self) -> None:
+        telemetry = read(DASHBOARD / "Telemetry.cs")
+        # Load also runs on the window's thread (startup, F5, after an action), so it only reads the count kept in memory.
+        start = telemetry.index("public TelemetrySnapshot Load()")
+        load = telemetry[start:telemetry.index("\n        }\n", start)]
+        self.assertIn("snapshot.ListedBackupRange = listedBackupRange;", load)
+        for write in ("backupRangePath", "SerializeListedBackupRange", "listedBackupRangeWriteDue"):
+            self.assertNotIn(write, load)
+        start = telemetry.index("internal void WriteListedBackupRange()")
+        write = telemetry[start:telemetry.index("\n        }\n", start)]
+        self.assertIn("TryAtomicWriteJson(backupRangePath, SerializeListedBackupRange(", write)
+        self.assertEqual(telemetry.count("TryAtomicWriteJson(backupRangePath"), 1)
+        # The dashboard writes it in one place: inside the background refresh's Task.Run, after the Load there.
+        callers = sorted(path.name for path in DASHBOARD.glob("*.cs") if ".WriteListedBackupRange(" in read(path))
+        self.assertEqual(callers, ["DashboardWindow.cs"])
+        window = read(DASHBOARD / "DashboardWindow.cs")
+        self.assertEqual(window.count(".WriteListedBackupRange("), 1)
+        start = window.index("private async void OnRefreshTick(")
+        tick = window[start:window.index("\n        }\n", start)]
+        self.assertRegex(
+            tick,
+            r"await Task\.Run\(delegate\s*\{[^{}]*reader\.Load\(\);[^{}]*reader\.WriteListedBackupRange\(\);[^{}]*\}\);",
+        )
 
     def test_the_words_are_a_home_users(self) -> None:
         # The literal text these additions show: the range line, the run-details tooltip and the host's count sentence.

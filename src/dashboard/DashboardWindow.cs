@@ -3529,7 +3529,14 @@ namespace ResticBackuper.Dashboard
             Exception loadFailure = null;
             try
             {
-                snapshot = await Task.Run(delegate { return reader.Load(); });
+                snapshot = await Task.Run(delegate
+                {
+                    TelemetrySnapshot loaded = reader.Load();
+                    // The count the Restore list kept on the window's thread is written here, and only here, so that
+                    // backup-range.json is never written on the window's thread. It cannot fail this refresh.
+                    reader.WriteListedBackupRange();
+                    return loaded;
+                });
             }
             catch (Exception error)
             {

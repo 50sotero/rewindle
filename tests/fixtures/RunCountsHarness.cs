@@ -280,7 +280,9 @@ namespace ResticBackuper.Dashboard
             choose["neither"] = Describe(TelemetryReader.ChooseBackupRange(null, null, PlanId, repository));
             result["choose"] = choose;
 
-            // 8. The Restore list's count: kept in memory when recorded, written by the next Load, read back by a new reader.
+            // 8. The Restore list's count: kept in memory when recorded. Load only reads it (the dashboard also loads on the
+            // window's thread); WriteListedBackupRange, which only the background refresh calls, writes it once, and a new reader
+            // reads it back.
             string listedState = NewFolder("state");
             string rangeFile = Path.Combine(EngineProfile.Current.DashboardDataDirectory(), "backup-range.json");
             TelemetryReader listedReader = new TelemetryReader(listedState, true);
@@ -288,10 +290,17 @@ namespace ResticBackuper.Dashboard
                 new DateTime(2026, 10, 1, 2, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 5, 2, 0, 0, DateTimeKind.Utc));
             result["fileBeforeLoad"] = File.Exists(rangeFile);
             result["listedInMemory"] = Describe(listedReader.Load().ListedBackupRange);
-            result["fileAfterLoad"] = File.Exists(rangeFile) ? Document(File.ReadAllText(rangeFile)) : null;
+            result["fileAfterLoad"] = File.Exists(rangeFile);
+            listedReader.WriteListedBackupRange();
+            result["fileAfterBackgroundWrite"] = File.Exists(rangeFile) ? Document(File.ReadAllText(rangeFile)) : null;
             result["listedReadBack"] = Describe(new TelemetryReader(NewFolder("state"), false).Load().ListedBackupRange);
+            File.Delete(rangeFile);
+            listedReader.Load();
+            listedReader.WriteListedBackupRange();
+            result["rewrittenWithNothingNew"] = File.Exists(rangeFile);
             listedReader.RecordListedBackupRange(PlanId, repository, 0, DateTime.MinValue, DateTime.MinValue);
             listedReader.Load();
+            listedReader.WriteListedBackupRange();
             result["emptyFile"] = File.Exists(rangeFile) ? Document(File.ReadAllText(rangeFile)) : null;
             BackupRangeView emptyBack = new TelemetryReader(NewFolder("state"), false).Load().ListedBackupRange;
             result["emptyReadBack"] = Describe(emptyBack);
@@ -304,6 +313,7 @@ namespace ResticBackuper.Dashboard
             quietReader.RecordListedBackupRange(PlanId, repository, 3,
                 new DateTime(2026, 10, 1, 2, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 5, 2, 0, 0, DateTimeKind.Utc));
             result["noPersistenceInMemory"] = Describe(quietReader.Load().ListedBackupRange);
+            quietReader.WriteListedBackupRange();
             result["noPersistenceFile"] = File.Exists(rangeFile);
             Dictionary<string, object> recordRefused = new Dictionary<string, object>();
             DateTime early = new DateTime(2026, 10, 1, 2, 0, 0, DateTimeKind.Utc);
@@ -336,6 +346,7 @@ namespace ResticBackuper.Dashboard
             legacyReader.RecordListedBackupRange(PlanId, repository, 5,
                 new DateTime(2024, 1, 1, 12, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 5, 2, 0, 0, DateTimeKind.Utc));
             TelemetrySnapshot legacyAfter = legacyReader.Load();
+            legacyReader.WriteListedBackupRange();
             legacy["chosen"] = Describe(TelemetryReader.ChooseBackupRange(legacyAfter.EngineBackupRange, legacyAfter.ListedBackupRange, PlanId, repository));
             string legacyFolder = EngineProfile.Legacy.DashboardDataDirectory();
             legacy["folder"] = Path.GetFileName(legacyFolder);

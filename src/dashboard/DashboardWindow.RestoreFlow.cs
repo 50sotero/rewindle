@@ -450,8 +450,8 @@ namespace ResticBackuper.Dashboard
         }
 
         // What the list just read says about how far back the backups go, bound to the plan and backup location it was read for
-        // (the configuration read again after the listing). It only sets the reader's copy in memory; the next refresh writes it
-        // to the dashboard's own folder, off the window's thread. Display only.
+        // (the configuration read again after the listing). It only sets the reader's copy in memory; the background refresh writes
+        // it to the dashboard's own folder, off the window's thread. Display only.
         private void RecordRestoreFlowBackupRange(SourceConfiguration configuration, IList<RestoreSnapshot> snapshots)
         {
             long count;

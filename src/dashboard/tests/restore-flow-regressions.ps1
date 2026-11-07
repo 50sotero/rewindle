@@ -94,6 +94,14 @@ function New-GenericList([Type]$ItemType) {
     return ,([Activator]::CreateInstance([System.Collections.Generic.List``1].MakeGenericType($ItemType)))
 }
 
+# Writes the count the Restore list kept, on a thread-pool thread, as the dashboard's background refresh does inside its Task.Run.
+function Invoke-BackgroundRangeWrite([object]$Reader) {
+    $method = $readerType.GetMethod('WriteListedBackupRange', $flags)
+    if ($null -eq $method) { throw 'Missing private method: WriteListedBackupRange' }
+    $write = [Action]$method.CreateDelegate([Action], $Reader.PSObject.BaseObject)
+    [Threading.Tasks.Task]::Run($write).Wait()
+}
+
 function New-StringList([string[]]$Items) {
     $list = [System.Collections.Generic.List[string]]::new()
     foreach ($item in $Items) { [void]$list.Add($item) }
@@ -1006,10 +1014,10 @@ try {
     $runViewType.GetProperty('FilesUnmodified').SetValue($countedRun, [long]2)
     Assert-True ($historyBefore -ne (Get-HistorySignature @((New-HistoryRun 'run-a' 60.0 'aaaa1111'), $countedRun))) 'a run whose counts arrived later was not noticed'
 
-    # How far back the backups go, as the Restore list counted them. Once the list is shown the dashboard keeps the count in memory,
-    # the next refresh writes backup-range.json in the dashboard's own folder (under the fixture roots here), and the page is told it
-    # only for the plan and backup location in use and never while the status is a data error. A list whose count cannot be kept
-    # still ends ready: the count is only ever shown.
+    # How far back the backups go, as the Restore list counted them. Once the list is shown the dashboard keeps the count in memory.
+    # A Load, which the dashboard also runs on the window's thread, writes nothing; the background refresh writes backup-range.json
+    # in the dashboard's own folder (under the fixture roots here). The page is told it only for the plan and backup location in use
+    # and never while the status is a data error. A list whose count cannot be kept still ends ready: the count is only ever shown.
     $rangeState = Join-Path $telemetryRoot 'range-state'
     New-Item -ItemType Directory -Path $rangeState -Force | Out-Null
     $rangeReader = [Activator]::CreateInstance($readerType, $constructorFlags, $null, [object[]]@([string]$rangeState, $true, [string]$offsiteOverride), $null)
@@ -1030,7 +1038,10 @@ try {
         Set-PrivateField $dashboard 'restoreFlowStatus' 'loading'
         Invoke-Private $dashboard 'ShowRestoreFlowSnapshotList' $showArgs | Out-Null
         Assert-True ((Get-FieldValue $dashboard 'restoreFlowStatus') -eq 'ready' -and (Get-FieldValue $dashboard 'restoreFlowMessageTitle') -eq 'Choose a backup') ('a list of backups whose count could not be kept did not end ready (' + $keeper + ')')
-        if ($null -ne $keeper) { [void]$quietReader.Load() }
+        if ($null -ne $keeper) {
+            [void]$quietReader.Load()
+            Invoke-BackgroundRangeWrite $quietReader
+        }
         Assert-True (-not (Test-Path -LiteralPath $rangeFile)) 'a count that could not be kept was written'
     }
     Set-PrivateField $dashboard 'reader' $rangeReader
@@ -1038,8 +1049,11 @@ try {
     Invoke-Private $dashboard 'ShowRestoreFlowSnapshotList' $showArgs | Out-Null
     Assert-True ((Get-FieldValue $dashboard 'restoreFlowStatus') -eq 'ready') 'a list of backups did not end ready'
     Assert-True (-not (Test-Path -LiteralPath $rangeFile)) 'the count was written on the window''s thread'
+    # The refresh the dashboard runs on the window's thread (startup, F5, after an action) only reads the count.
     $rangeSnapshot = $rangeReader.Load()
-    Assert-True (Test-Path -LiteralPath $rangeFile) 'the refresh after a listing did not write the count'
+    Assert-True (-not (Test-Path -LiteralPath $rangeFile)) 'a refresh on the window''s thread wrote the count'
+    Invoke-BackgroundRangeWrite $rangeReader
+    Assert-True (Test-Path -LiteralPath $rangeFile) 'the background refresh after a listing did not write the count'
     Assert-True ($null -ne $rangeSnapshot.ListedBackupRange -and $rangeSnapshot.ListedBackupRange.Count -eq 1 -and $rangeSnapshot.ListedBackupRange.Source -eq 'restore') 'the count of the list was not kept'
     Assert-True ($null -eq $rangeSnapshot.EngineBackupRange) 'a count was read from a state folder with no verified backup'
     $rangeArgs = New-Object object[] 1

@@ -420,7 +420,8 @@ namespace ResticBackuper.Dashboard
         private readonly object syncRoot = new object();
         // How far back the backups go, as this dashboard's Restore list last read them (RecordListedBackupRange), and whether that
         // still has to be written to backup-range.json. The Restore list records it on the window's thread, which must never wait
-        // for a refresh, so it has its own lock and the file is written by the next Load (off the window's thread).
+        // for a refresh, so it has its own lock. Load only reads it, since the dashboard also loads on the window's thread; the file
+        // is written by WriteListedBackupRange, which only the background refresh calls (off the window's thread).
         private readonly object listedBackupRangeGate = new object();
         private BackupRangeView listedBackupRange;
         private bool listedBackupRangeWriteDue;
@@ -567,18 +568,10 @@ namespace ResticBackuper.Dashboard
                     TryPersistHistory();
                 }
 
-                BackupRangeView listed;
-                bool listedWriteDue;
+                // Only read here: Load also runs on the window's thread, and the file is written by WriteListedBackupRange.
                 lock (listedBackupRangeGate)
                 {
-                    listed = listedBackupRange;
-                    listedWriteDue = listedBackupRangeWriteDue;
-                    listedBackupRangeWriteDue = false;
-                }
-                snapshot.ListedBackupRange = listed;
-                if (listedWriteDue && listed != null)
-                {
-                    TryAtomicWriteJson(backupRangePath, SerializeListedBackupRange(listed));
+                    snapshot.ListedBackupRange = listedBackupRange;
                 }
 
                 return snapshot;
@@ -3712,8 +3705,8 @@ namespace ResticBackuper.Dashboard
         }
 
         // What the Restore list just read says about how far back the backups go, for the plan and backup location it was read
-        // for. Called on the window's thread, so it only keeps the count in memory: the next Load writes backup-range.json (when
-        // this reader may write at all). Anything out of range is not recorded. Display only.
+        // for. Called on the window's thread, so it only keeps the count in memory: the background refresh writes backup-range.json
+        // (WriteListedBackupRange, when this reader may write at all). Anything out of range is not recorded. Display only.
         internal void RecordListedBackupRange(
             string planId,
             string repositoryPath,
@@ -3743,6 +3736,34 @@ namespace ResticBackuper.Dashboard
             {
                 listedBackupRange = range;
                 listedBackupRangeWriteDue = true;
+            }
+        }
+
+        // Writes the count the Restore list last kept to backup-range.json, once per listing. Only the dashboard's background
+        // refresh calls this, inside its Task.Run after Load, so the file is never written on the window's thread. The count is
+        // only ever shown, so nothing here may stop that refresh: a count that cannot be written is not kept, and the next
+        // listing records it again.
+        internal void WriteListedBackupRange()
+        {
+            try
+            {
+                lock (syncRoot)
+                {
+                    BackupRangeView listed;
+                    lock (listedBackupRangeGate)
+                    {
+                        listed = listedBackupRangeWriteDue ? listedBackupRange : null;
+                        listedBackupRangeWriteDue = false;
+                    }
+                    if (listed != null)
+                    {
+                        TryAtomicWriteJson(backupRangePath, SerializeListedBackupRange(listed));
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // Not kept this time; the refresh goes on without it.
             }
         }
 

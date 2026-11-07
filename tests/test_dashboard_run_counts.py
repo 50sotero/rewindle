@@ -161,11 +161,13 @@ class DashboardRunCountsTests(unittest.TestCase):
         self.assertIsNone(choose["neither"])
 
     def test_the_restore_lists_count_is_written_off_the_windows_thread(self) -> None:
-        # Recording does no file work (it runs on the window's thread); the next Load writes it.
+        # Recording does no file work (it runs on the window's thread), and neither does Load, which the dashboard also runs
+        # on the window's thread (startup, F5, after an action). Only the background refresh's write puts it in the file.
         self.assertFalse(self.result["fileBeforeLoad"])
         listed = self.result["listedInMemory"]
         self.assertEqual((listed["source"], listed["count"]), ("restore", 14))
-        written = self.result["fileAfterLoad"]
+        self.assertFalse(self.result["fileAfterLoad"])
+        written = self.result["fileAfterBackgroundWrite"]
         self.assertEqual(written["schema_version"], 1)
         self.assertEqual(written["source"], "restore")
         self.assertEqual(written["plan_id"], PLAN_ID)
@@ -175,6 +177,8 @@ class DashboardRunCountsTests(unittest.TestCase):
         back = self.result["listedReadBack"]
         self.assertEqual((back["source"], back["count"], back["oldest"]), ("restore", 14, "2026-10-01T02:00:00.0000000Z"))
         self.assertEqual(back["counted"], listed["counted"])
+        # Written once per listing, not on every refresh.
+        self.assertFalse(self.result["rewrittenWithNothingNew"])
 
     def test_an_empty_list_is_a_count_that_shows_nothing(self) -> None:
         self.assertEqual(self.result["emptyFile"]["count"], 0)

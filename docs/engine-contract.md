@@ -216,7 +216,7 @@ A backup record in `run-history.json` may carry `files_new`, `files_changed` and
 optional keys, so the schema stays 1 and an older build reads and rewrites the file, dropping only them).
 `backup-range.json` (schema 1, `source` `restore`, `plan_id`, `repository`, `count` 0 to 1,000,000, `oldest_utc` and
 `newest_utc` when `count` > 0, `counted_utc`) is how far back the backups went when the Restore list was last read, for the
-plan and location named; it is written by the refresh after a listing, and with either engine. The page shows whichever of
+plan and location named; it is written by the dashboard's background refresh after a listing, and with either engine. The page shows whichever of
 it and `snapshot_inventory` belongs to the plan and location in use and was counted later, or nothing. Both files can be
 written by anything running as the user, so they are display-only: parsed defensively, never used to allow, refuse, keep or
 delete anything, and never read by the anomaly review or by anything that removes backups.
