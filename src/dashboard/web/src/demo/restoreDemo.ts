@@ -248,10 +248,12 @@ export function createRestoreDemo(getState: () => DashboardState, notify: () => 
       return;
     }
     if (/slow|broad/i.test(text)) {
+      const slow = /slow/i.test(text);
+      // A page that ran out of time looked through no backup: Try again goes on from the same one (here it runs out of time again).
       Object.assign(search, {
-        status: 'done', outcome: /slow/i.test(text) ? 'tooSlow' : 'tooBroad', canContinue: false, nothingSearched: false,
-        message: /slow/i.test(text)
-          ? 'One of your backups is too large to search in the time allowed. Choose a backup by date, then open its folders to find your file.'
+        status: 'done', outcome: slow ? 'tooSlow' : 'tooBroad', canContinue: slow, nothingSearched: slow,
+        message: slow
+          ? `Rewindle ran out of time before it could look through ${from === 0 ? 'a backup' : 'an older backup'}. Your backups may be large or slow to reach right now. Nothing was changed. Choose Try again, or choose a backup by date and open its folders to find your file.`
           : `So many files are in folders whose names contain “${text}” that Rewindle stopped looking. Type more of the file’s name, for example Budget 2026.xlsx.`,
       });
       say('Search finished', search.message);

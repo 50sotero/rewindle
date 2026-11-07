@@ -2238,11 +2238,12 @@ namespace RewindleRegression {
     Assert-True ([bool](Get-FieldValue $dashboard 'restoreFlowBusy') -and (Get-SearchWeb)['resultsTotal'] -eq 0) 'the answer to a search the flow had moved on from was used'
 
     # Outcomes that end a search: too many matches (also when the last batch reached the oldest backup), names so common that the
-    # search stopped, a backup too large to search in time, and a page whose time went on opening the list (Try again).
+    # search stopped, a page that could look through no backup in its time (too_slow: Try again, or choose by date), and a page
+    # from an engine that still ends such a page as more (Try again).
     foreach ($ending in @(
         @{ Status = 'too_many'; Next = $null; Searched = 3; Outcome = 'tooMany'; Pattern = '^More than 100 files and folders match'; Continue = $false },
         @{ Status = 'too_broad'; Next = $findMiddle; Searched = 1; Outcome = 'tooBroad'; Pattern = '^So many files are in folders whose names contain'; Continue = $false },
-        @{ Status = 'too_slow'; Next = $findNewest; Searched = 0; Outcome = 'tooSlow'; Pattern = '^One of your backups is too large to search'; Continue = $false },
+        @{ Status = 'too_slow'; Next = $findNewest; Searched = 0; Outcome = 'tooSlow'; Pattern = '^Rewindle ran out of time before it could look through a backup\..+Choose Try again, or choose a backup by date'; Continue = $true },
         @{ Status = 'more'; Next = $findNewest; Searched = 0; Outcome = 'more'; Pattern = 'ran out of time before it could look through a backup.+Try again'; Continue = $true })) {
         Set-SearchFlow
         Set-SearchValue 'Text' 'Budget'
@@ -2251,9 +2252,18 @@ namespace RewindleRegression {
         $web = Get-SearchWeb
         Assert-True ($web['status'] -eq 'done' -and $web['outcome'] -eq $ending.Outcome -and $web['message'] -match $ending.Pattern -and $web['canContinue'] -eq $ending.Continue -and
             $web['nothingSearched'] -eq ($ending.Searched -eq 0)) ('a search that ended ' + $ending.Status + ' was not described as expected: ' + $web['message'])
+        $goOn = Invoke-FindMoreCheck
+        Assert-True ($goOn.Accepted -eq $ending.Continue) ('going on after a search that ended ' + $ending.Status + ' was ' + $(if ($goOn.Accepted) { 'accepted' } else { 'refused: ' + $goOn.Error }))
     }
-    $narrow = Invoke-FindMoreCheck
-    Assert-True ($narrow.Accepted) 'Try again was refused after a page that looked through nothing'
+    # A later page that ran out of time keeps what the earlier pages found, and Try again goes on from where they ended.
+    Set-SearchFlow
+    Set-SearchValue 'Text' 'Budget'
+    Invoke-FindAnswer (New-FoundResult $firstPage)
+    Invoke-FindAnswer (New-FoundResult (New-FindPage 'too_slow' $findOldest $findOldest 0 $null $null @())) $true
+    $web = Get-SearchWeb
+    Assert-True ($web['outcome'] -eq 'tooSlow' -and $web['resultsTotal'] -eq 2 -and $web['searched'] -eq 2 -and $web['canContinue'] -eq $true -and
+        $web['message'] -match '^Rewindle ran out of time before it could look through an older backup\.') ('a later page that ran out of time lost the results or did not offer Try again: ' + $web['message'])
+    Assert-True ((Invoke-FindMoreCheck).Accepted -and (Get-SearchValue 'NextFromSnapshotId') -eq $findOldest) 'Try again after a later page that ran out of time did not go on from the same backup'
     Set-SearchFlow
     Set-SearchValue 'Text' 'Budget'
     Invoke-FindAnswer (New-FoundResult (New-FindPage 'too_many' $findNewest $null 3 $newestTime $oldestTime @()))

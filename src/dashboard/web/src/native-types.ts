@@ -467,7 +467,8 @@ export interface RetentionState {
  * The host looks for a name in the backups of the list, newest first, a page at a time (each about 20 seconds), and keeps what it
  * found while Restore is open. `status` is where the search stands; with `done`, `outcome` says how the last page ended: every
  * backup looked through (`complete`), older ones left (`more`: Look further back, or Try again when `nothingSearched`), more than
- * 100 matches (`tooMany`), a name so common the search stopped (`tooBroad`), or one backup too large to search in time (`tooSlow`).
+ * 100 matches (`tooMany`), a name so common the search stopped (`tooBroad`), or no backup looked through in the page's time, because
+ * opening the list or the next backup took it all (`tooSlow`: Try again, which `canContinue` offers, or choose by date).
  * `message` is the host's summary and `error` its sentence for a search that failed. `blocked` says why Find cannot start now (a
  * backup running or about to start), or is empty. `results` travel only on the first step; `resultsTotal` always.
  * Unknown values are read as `idle` and `''` (fileSearch.ts), so a newer host does not break the page.

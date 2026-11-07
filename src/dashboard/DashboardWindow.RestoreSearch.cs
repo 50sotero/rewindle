@@ -43,7 +43,8 @@ namespace ResticBackuper.Dashboard
             internal string Message = string.Empty;
             internal string Error = string.Empty;
             internal bool ListChanged;
-            // The last page looked through no backup (its time went on opening the list): the page offers Try again.
+            // The last page looked through no backup (tooSlow: the list or the next backup took its time): the page offers Try
+            // again, which goes on from the same backup, rather than Look further back.
             internal bool NothingSearched;
             internal int Searched;
             internal string NewestTime;
@@ -237,7 +238,8 @@ namespace ResticBackuper.Dashboard
             return true;
         }
 
-        // "Look further back" (and Try again after a page that looked through nothing): the next page, from where the last ended.
+        // "Look further back" (and Try again after a page that looked through nothing, tooSlow): the next page, from where the last
+        // ended.
         private bool ContinueRestoreFlowFind(out string error)
         {
             SourceConfiguration fresh;
@@ -263,7 +265,7 @@ namespace ResticBackuper.Dashboard
                 error = RestoreFlowSearchNarrowFirstMessage;
                 return false;
             }
-            if (state.Status != "done" || state.Outcome != "more" || string.IsNullOrEmpty(state.NextFromSnapshotId))
+            if (!RestoreFlowSearchCanGoOn(state))
             {
                 error = RestoreFlowSearchNothingOlderMessage;
                 return false;
@@ -274,6 +276,14 @@ namespace ResticBackuper.Dashboard
                 return false;
             }
             return TryGetFreshRestoreFlowConfiguration(out fresh, out error) && CheckRestoreFlowSearchGuards(out error);
+        }
+
+        // Whether the last page left somewhere to go on from: older backups not yet searched (more), or the same backup again
+        // after a page that could look through none in its time (tooSlow).
+        private static bool RestoreFlowSearchCanGoOn(RestoreFlowSearchState state)
+        {
+            return state.Status == "done" && (state.Outcome == "more" || state.Outcome == "tooSlow") &&
+                !string.IsNullOrEmpty(state.NextFromSnapshotId);
         }
 
         private bool ClearRestoreFlowFind(out string error)
@@ -660,7 +670,7 @@ namespace ResticBackuper.Dashboard
                 { "total", restoreFlowSnapshots == null ? 0 : restoreFlowSnapshots.Count },
                 { "searchedOldest", state.OldestSearchedTime ?? string.Empty },
                 { "searchedOldestDisplay", RestoreFlowSearchTimeDisplay(state.OldestSearchedTime) },
-                { "canContinue", state.Status == "done" && state.Outcome == "more" && !state.Overflow &&
+                { "canContinue", RestoreFlowSearchCanGoOn(state) && !state.Overflow &&
                     FindRestoreFlowSnapshot(state.NextFromSnapshotId) != null },
                 { "overflow", state.Overflow },
                 { "blocked", blocked ?? string.Empty },
@@ -861,7 +871,10 @@ namespace ResticBackuper.Dashboard
                     return "So many files are in folders whose names contain " + quoted +
                         " that Rewindle stopped looking. Type more of the file\u2019s name, for example Budget 2026.xlsx.";
                 case "tooSlow":
-                    return "One of your backups is too large to search in the time allowed. Choose a backup by date, then open its folders to find your file.";
+                    // Opening the list, or the next backup, took the whole time. Try again goes on from the same backup.
+                    return "Rewindle ran out of time before it could look through " + (state.Searched == 0 ? "a backup" : "an older backup") +
+                        ". Your backups may be large or slow to reach right now. Nothing was changed. " +
+                        "Choose Try again, or choose a backup by date and open its folders to find your file.";
             }
             if (state.NothingSearched)
             {

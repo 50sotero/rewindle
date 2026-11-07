@@ -61,9 +61,14 @@ console.log(JSON.stringify({
     searching: search.footerHint(state({ status: 'searching' })),
     found: search.footerHint(state({ status: 'done', resultsTotal: 2 })),
     none: search.footerHint(state({ status: 'done' })),
+    slow: search.footerHint(state({ status: 'done', outcome: 'tooSlow', nothingSearched: true })),
+    slowAfterFinds: search.footerHint(state({ status: 'done', outcome: 'tooSlow', nothingSearched: true, resultsTotal: 2 })),
+    notSearched: search.footerHint(state({ status: 'done', outcome: 'more', nothingSearched: true })),
+    broad: search.footerHint(state({ status: 'done', outcome: 'tooBroad' })),
     failed: search.footerHint(state({ status: 'failed' })),
   },
-  goOn: [search.continueLabel(state({})), search.continueLabel(state({ nothingSearched: true }))],
+  goOn: [search.continueLabel(state({})), search.continueLabel(state({ nothingSearched: true })),
+    search.continueLabel(state({ outcome: 'tooSlow' }))],
   filled: search.fill(search.FIND_TEXT.suggest, { query: 'Budget' }),
   oneShot: ['restoreFlowFindFiles', 'restoreFlowFindMore', 'restoreFlowPickFound', 'restoreFlowFindClear'].map(command => once.ONE_SHOT_COMMANDS.has(command)),
 }));
@@ -142,8 +147,16 @@ class FileSearchPageTests(unittest.TestCase):
         self.assertIn("Nothing is changed", footer["searching"])
         self.assertEqual(footer["found"], "Choose Restore this next to the version you want.")
         self.assertIn("Check the spelling", footer["none"])
+        # A page that looked through no backup found nothing because it could not look: Try again or choose by date, never
+        # "check the spelling"; a name too common to finish asks for more of it, as the summary above it does.
+        for key in ("slow", "notSearched"):
+            with self.subTest(footer=key):
+                self.assertEqual(footer[key], "No backup could be looked through in the time allowed. Try again, or choose a backup by date.")
+        self.assertEqual(footer["slowAfterFinds"], footer["found"])
+        self.assertEqual(footer["broad"], "Type more of the name, or choose a backup by date.")
         self.assertIn("Nothing was changed", footer["failed"])
-        self.assertEqual(self.report["goOn"], ["Look further back", "Try again"])
+        # Going on after a page that looked through nothing (always so for tooSlow) repeats that page: Try again.
+        self.assertEqual(self.report["goOn"], ["Look further back", "Try again", "Try again"])
         self.assertEqual(self.report["filled"], "Find a file named \u201cBudget\u201d")
 
     def test_find_look_further_back_and_restore_this_ask_once_per_press(self) -> None:

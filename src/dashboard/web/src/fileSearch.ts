@@ -62,6 +62,8 @@ export const FIND_TEXT = {
     searching: 'Searching your backups… Nothing is changed.',
     results: 'Choose Restore this next to the version you want.',
     none: 'Nothing found. Check the spelling, or type a shorter part of the name.',
+    slow: 'No backup could be looked through in the time allowed. Try again, or choose a backup by date.',
+    broad: 'Type more of the name, or choose a backup by date.',
     failed: 'Nothing was changed. Try again, or choose a backup by date.',
   },
 } as const;
@@ -171,12 +173,20 @@ export function footerHint(search: RestoreFileSearch): string {
   const status = statusFrom(search.status);
   if (status === 'searching') return FIND_TEXT.hints.searching;
   if (status === 'failed') return FIND_TEXT.hints.failed;
-  if (status === 'done') return search.resultsTotal > 0 ? FIND_TEXT.hints.results : FIND_TEXT.hints.none;
+  if (status === 'done') {
+    if (search.resultsTotal > 0) return FIND_TEXT.hints.results;
+    // "Nothing found" only when something was looked through and the name was not too common to finish.
+    const outcome = outcomeFrom(search.outcome);
+    if (outcome === 'tooSlow' || search.nothingSearched) return FIND_TEXT.hints.slow;
+    if (outcome === 'tooBroad') return FIND_TEXT.hints.broad;
+    return FIND_TEXT.hints.none;
+  }
   if (search.blocked) return search.blocked;
   return FIND_TEXT.hints.idle;
 }
 
-/** The button that goes on from the last page: Try again when that page looked through nothing, else Look further back. */
+/** The button that goes on from the last page: Try again when that page looked through nothing (always so for `tooSlow`), else
+ * Look further back. */
 export function continueLabel(search: RestoreFileSearch): string {
-  return search.nothingSearched ? FIND_TEXT.tryAgain : FIND_TEXT.lookFurther;
+  return search.nothingSearched || outcomeFrom(search.outcome) === 'tooSlow' ? FIND_TEXT.tryAgain : FIND_TEXT.lookFurther;
 }
