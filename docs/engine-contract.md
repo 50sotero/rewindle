@@ -350,8 +350,13 @@ so, and nothing is removed. Turning it off (`-Enabled 0`) needs neither the back
 its card says clean-up isn't available, every clean-up command is refused and nothing is read) and `engine-capabilities.json`
 has a `retention` block with the same manager, request domain and schemas (otherwise the card asks for Reinstall or repair).
 Only for a local NTFS backup location: a Google Drive location is refused (`google_drive_not_supported`). The dashboard believes
-a record only when only Administrators or SYSTEM can change it (the same rule as `secret_store.admin_only_writable_problem`,
-with an owner limited by an OWNER RIGHTS entry), and a list only when its IDs give its `remove_set_sha256`.
+a record only when only Administrators or SYSTEM can change it and the state folder that holds it (the same rule as
+`secret_store.admin_only_writable_problem`, with an owner limited by an OWNER RIGHTS entry, which is safe only while nobody
+else can create files in that folder; `retention.py` checks the folder too), and a list only when its IDs give its
+`remove_set_sha256`. Each `earlier_changes` entry carries its `kind`: `hold` (the run's unusual changes held clean-up back),
+`not_compared` (`change_anomaly_status` `not_comparable` or `disabled`: the first backup, or the first after a folder,
+exclusion or location change) or `unknown` (an older backup service's log does not say). Only `hold` is worded as unusual
+changes; the others ask the person to check their files because those backups could not be compared.
 
 **Listing.** `preview` (and `configure` when it turns clean-up on) runs `restic --no-lock forget --dry-run --json --host <host>
 --tag restic-backuper-plan:<plan> --group-by host,paths --keep-daily D --keep-weekly W --keep-monthly M`; every other read
@@ -361,7 +366,9 @@ of a kept day, week or month stays; and the newest backup before each unusual ch
 (`change_anomaly`) stays until they tick "my files look right". The list is blocked, with one of these reasons, when
 `no_verified_backup`, `last_backup_not_verified`, `folders_changed`, `change_review_open`, `pending_change` (any
 `*.journal.json`), `clock_problem`, `future_dated_backup`, `backup_location_unavailable`, `google_drive_not_supported` or
-`policy_inactive`. A list is stale for the dashboard once `last-success.json` changes; the card then offers Check now.
+`policy_inactive`. A list is stale for the dashboard once `last-success.json` changes; the card then offers Check now. The
+manager refuses `preview`, `apply` and turning clean-up on with `backup_location_unavailable` before anything runs when the
+backup location's folder or its `config` file is not there (an unplugged drive).
 
 **Removing.** `apply` is refused unless the preview file's SHA-256, its remove set (`ResticBackuper.RetentionRemoveSet.v1`
 over the sorted IDs) and its count equal the request, the gates above still pass, and the earlier-changes confirmation is
@@ -370,7 +377,8 @@ run must give the identical list; otherwise a new list is written and nothing is
 batches of 50 with no keep rules, a fresh list that must show none of the removed and every kept backup, `prune --max-unused 5%`
 (`unlimited` when free space is below the plan's minimum), `check`, and a history entry. These are the only commands that take
 Restic's exclusive lock, and only this approved step runs them. If the list cannot be read back after a removal, the result
-is `partial` with `removal_unverified` and nothing more runs.
+is `partial` with `removal_unverified` and nothing more runs. A batch that fails, or that cannot be started or logged (a
+full disk), stops the removal; the fresh list then says what earlier batches removed, and that is recorded.
 
 | Exit code | State |
 | --- | --- |
