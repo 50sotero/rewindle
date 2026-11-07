@@ -19,8 +19,10 @@ namespace ResticBackuper.Dashboard
         private bool repositoryVolumeRead;
         // The person's Low space warning, in weeks (4, 8 or 12), read once at start-up and kept by DashboardSpaceWarningStore.
         private int spaceWarningWeeks = BackupSpaceEvaluator.DefaultWarnWeeks;
-        // The last answer worked out while no backup was running, and the location it was for (see BackupSpaceEvaluator.HoldDuringRun).
-        private BackupSpaceResult idleSpaceResult;
+        // What the last answer worked out while no backup was running was based on, and the location it was for (see
+        // BackupSpaceEvaluator.HoldDuringRun). The facts are kept rather than the answer, so a Low space warning chosen during a run
+        // is used at once. Each call builds new facts, so nothing else holds these.
+        private BackupSpaceFacts idleSpaceFacts;
         private string idleSpacePath;
 
         private sealed class RepositoryVolumeProbe
@@ -194,16 +196,21 @@ namespace ResticBackuper.Dashboard
             bool runActive = previewEnabled || (readable && snapshot.IsActive);
             if (runActive)
             {
-                result = BackupSpaceEvaluator.HoldDuringRun(
-                    string.Equals(idleSpacePath, path, StringComparison.OrdinalIgnoreCase) ? idleSpaceResult : null,
-                    facts);
+                BackupSpaceResult beforeRun = null;
+                if (idleSpaceFacts != null && string.Equals(idleSpacePath, path, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Judged again with the Low space warning in use now, so a choice made during the run shows at once.
+                    idleSpaceFacts.WarnWeeks = spaceWarningWeeks;
+                    beforeRun = BackupSpaceEvaluator.Evaluate(idleSpaceFacts);
+                }
+                result = BackupSpaceEvaluator.HoldDuringRun(beforeRun, facts);
             }
             else
             {
                 result = BackupSpaceEvaluator.Evaluate(facts);
                 if (facts.Reading != "checking")
                 {
-                    idleSpaceResult = result;
+                    idleSpaceFacts = facts;
                     idleSpacePath = path;
                 }
             }

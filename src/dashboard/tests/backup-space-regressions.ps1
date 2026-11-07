@@ -163,7 +163,7 @@ try {
     $legacyLow = Invoke-Private $spaceWindow 'BuildWebSpaceState'
     Assert-True ($legacyLow['level'] -eq 'low' -and $legacyLow['reason'] -eq 'percent') 'the earlier edition was not warned below 1.5 times the reserve'
     # Started while a backup runs, with nothing said before it: there is still no forecast, so Settings offers no Low space warning.
-    Set-PrivateField $spaceWindow 'idleSpaceResult' $null
+    Set-PrivateField $spaceWindow 'idleSpaceFacts' $null
     Set-PrivateField $spaceWindow 'idleSpacePath' $null
     $spaceSnapshot.IsActive = $true
     $legacyStartedDuringRun = Invoke-Private $spaceWindow 'BuildWebSpaceState'
@@ -175,12 +175,13 @@ finally {
     $spaceSnapshot.IsActive = $false
 }
 # On the Rewindle engine the same start during a run has a forecast to come, so the warning choice stays.
-Set-PrivateField $spaceWindow 'idleSpaceResult' $null
+Set-PrivateField $spaceWindow 'idleSpaceFacts' $null
 Set-PrivateField $spaceWindow 'idleSpacePath' $null
 $spaceSnapshot.IsActive = $true
 $rewindleStartedDuringRun = Invoke-Private $spaceWindow 'BuildWebSpaceState'
 Assert-True ($rewindleStartedDuringRun['forecast']['state'] -eq 'unknown' -and $rewindleStartedDuringRun['level'] -eq 'unknown') ('the Rewindle engine, started during a backup, did not wait for the run to end: ' + $rewindleStartedDuringRun['forecast']['state'] + '/' + $rewindleStartedDuringRun['level'])
 $spaceSnapshot.IsActive = $false
+Set-PrivateField $spaceWindow 'repositoryVolumeFreeBytes' ([long](5 * $spaceGiB))
 $fullBeforeRun = Invoke-Private $spaceWindow 'BuildWebSpaceState'
 Assert-True ($fullBeforeRun['level'] -eq 'full') 'a drive below the reserve was not too full'
 $spaceSnapshot.IsActive = $true
@@ -194,6 +195,17 @@ $spaceSnapshot.IsActive = $true
 Set-PrivateField $spaceWindow 'repositoryVolumeFreeBytes' ([long](2 * $spaceGiB))
 $heldLow = Invoke-Private $spaceWindow 'BuildWebSpaceState'
 Assert-True ($heldLow['level'] -eq 'low' -and $heldLow['reason'] -eq 'forecast' -and $heldLow['freeBytes'] -eq 2 * $spaceGiB) 'a running backup did not keep the warning it had, with live figures'
+# A Low space warning chosen during a run is used at once on what was said before the run: full in about 7 weeks is amber at 8
+# weeks and fine at 4.
+$spaceSnapshot.IsActive = $false
+Set-PrivateField $spaceWindow 'repositoryVolumeFreeBytes' ([long](60 * $spaceGiB))
+$sevenWeeks = Invoke-Private $spaceWindow 'BuildWebSpaceState'
+Assert-True ($sevenWeeks['level'] -eq 'low' -and $sevenWeeks['forecast']['weeksRounded'] -eq 7) ('a drive full in about 7 weeks was not low at 8 weeks: ' + $sevenWeeks['level'] + '/' + $sevenWeeks['forecast']['weeksRounded'])
+$spaceSnapshot.IsActive = $true
+Set-PrivateField $spaceWindow 'spaceWarningWeeks' 4
+$heldAtFour = Invoke-Private $spaceWindow 'BuildWebSpaceState'
+Assert-True ($heldAtFour['level'] -eq 'ok' -and $heldAtFour['warnWeeks'] -eq 4 -and $heldAtFour['forecast']['weeksRounded'] -eq 7) ('a Low space warning chosen during a backup waited for the run to end: ' + $heldAtFour['level'])
+Set-PrivateField $spaceWindow 'spaceWarningWeeks' 8
 $spaceSnapshot.IsActive = $false
 $spaceSnapshot.IsFailure = $true
 $spaceSnapshot.FailureCode = 'repository_low_space'
