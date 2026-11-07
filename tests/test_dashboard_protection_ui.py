@@ -213,6 +213,11 @@ class ProtectionUiTests(unittest.TestCase):
             "space_low_missing_folder": state(sources=[source(exists=False)], space=drive_space("low", "forecast", weeks=6.0)),
             "space_low_review": state(review=True, freshness="Overdue", space=drive_space("low", "forecast", weeks=6.0)),
             "space_full_already_failed": state(failure=True, success=False, space=drive_space("full", "reserve", stopped=True)),
+            # Backup alerts and the backup drive's space together: too full still comes right after the drive, and running low
+            # still comes last, after why a backup was missed.
+            "alert_space_low_missed": state(freshness="Overdue", alerts=alerts(level="attention", reason="overdue", missed=missed("pcOff", PC_OFF)), space=drive_space("low", "forecast", weeks=6.0)),
+            "alert_space_full_failing": state(failure=True, success=False, freshness="Overdue", run_id="run-3", alerts=alerts(level="failing", reason="failing", failed=3), space=drive_space("full", "reserve")),
+            "alert_space_full_stopped_failing": state(failure=True, success=False, freshness="Overdue", run_id="run-3", alerts=alerts(level="failing", reason="failing", failed=3), space=drive_space("full", "reserve", stopped=True)),
             "google_not_running": state(volume_ready=False, space=drive_space(kind="googleDrive"), repository="G:\\My Drive\\Rewindle"),
         }
         offsite = {
@@ -514,6 +519,19 @@ class ProtectionUiTests(unittest.TestCase):
         self.assertIsNone(self.concern("space_low_repair"))
         self.assertIsNone(self.concern("space_ok"))
         self.assertEqual("success", self.tone("space_ok"))
+
+    def test_backup_alerts_and_the_backup_drive_space_keep_their_places(self) -> None:
+        # Why the overdue backup was missed comes before space that is running low.
+        self.assertEqual({"tone": "warning", "text": PC_OFF}, self.concern("alert_space_low_missed"))
+        # Too little space for the next backup comes before the count of failed backups...
+        full = self.concern("alert_space_full_failing")
+        self.assertEqual("danger", full["tone"])
+        self.assertTrue(full["text"].startswith("The backup drive is too full for the next backup."))
+        # ...unless the latest run already stopped for lack of space: then the count is said, and the space is not said twice.
+        self.assertEqual(
+            {"tone": "danger", "text": "The last 3 backups didn’t finish. Open Activity and choose the latest failed backup to see why, then choose Back up now to try again."},
+            self.concern("alert_space_full_stopped_failing"),
+        )
 
     def test_google_drive_for_desktop_that_is_not_running_is_not_unplugged(self) -> None:
         concern = self.concern("google_not_running")
