@@ -2983,6 +2983,10 @@ def run_file_search(
     The time goes first to the list of backups and then to batches of 1, 2, 4 ... 32 backups, each made only as large
     as the time left allows at the rate of the one before it. A batch that the deadline cuts is not counted: Restic
     prints nothing for a backup without matches, so what a cut batch looked through cannot be told.
+
+    The first batch (one backup) runs with whatever time the list left. When the list or that backup takes the rest of
+    the time, nothing was searched and the page ends as too_slow; "more" always means at least one backup was searched,
+    so going on from it gets further. Otherwise a location that is always slow to list would repeat the same empty page.
     """
     tie_children_to_this_process()
     budget = float(FIND_SECONDS_DEFAULT if args.find_seconds is None else args.find_seconds)
@@ -3032,8 +3036,9 @@ def run_file_search(
     except _FindOutOfTime:
         if from_id is None:
             raise RuntimeError("the list of backups could not be read in the time the search has") from None
-        # Nothing was searched; the same request can be made again.
-        return finish("more")
+        # Nothing was searched. The same request can be made again (the next start stays this one), and the dashboard's
+        # own list still offers a backup by date.
+        return finish("too_slow")
     snapshots.sort(key=snapshot_sort_key, reverse=True)
     ids = [str(item["id"]).lower() for item in snapshots]
     payload["snapshots_total"] = len(snapshots)
@@ -3053,14 +3058,10 @@ def run_file_search(
     rate: float | None = None
     first_batch = True
     while index < len(snapshots):
-        remaining = deadline - time.monotonic()
         size = min(next_size, len(snapshots) - index)
-        if rate is None:
-            # The first batch of a request has one backup. It runs only with at least half of the time left, so a
-            # backup that is cut by the deadline then is one that cannot be searched in the time allowed at all.
-            if remaining < budget / 2:
-                return finish("more", results)
-        else:
+        # The first batch of a request has one backup and runs with whatever time is left, however little (see above).
+        if rate is not None:
+            remaining = deadline - time.monotonic()
             size = min(size, int(remaining / (rate * 1.25)) if rate > 0 else size)
             if size < 1:
                 return finish("more", results)
@@ -3073,7 +3074,7 @@ def run_file_search(
         batch_started = time.monotonic()
         run = run_restic_bounded(command, arguments, environment, deadline, FIND_MAX_BATCH_BYTES)
         if run.stopped == "deadline":
-            return finish("too_slow" if first_batch and size == 1 else "more", results)
+            return finish("too_slow" if first_batch else "more", results)
         if run.stopped == "overflow":
             return finish("too_broad", results)
         if run.returncode != 0:

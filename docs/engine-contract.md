@@ -320,7 +320,8 @@ a text that starts with `-` is never an option). restore.py puts itself in a kil
 runs `restic find --json --ignore-case --snapshot <id>… -- *<text>*` over them, newest first, in batches of 1, 2, 4 up to 32
 backups, each as large as the time left allows; Restic writes nothing to the repository. Each batch stops at 32 MiB or 100,000
 nodes of output. The page is `<P>.FileSearch.v1`: `binding` (plan), `query` (text and start), `status` (`complete`, `more`,
-`too_many` past 100 items, `too_broad` when a batch hit its cap, `too_slow` when a single backup did not fit in the time),
+`too_many` past 100 items, `too_broad` when a batch hit its cap, `too_slow` when no backup could be searched in the time because
+the list or the first backup after it took it all; `more` always means at least one backup was searched),
 `snapshots_total`, `snapshots_searched`, the newest and oldest time searched, `next_from_snapshot_id` (none for `complete`, and
 possibly none for `too_many`), and at most 100 matches of at most 10 versions (size and change time, the newest and oldest backup
 that hold it, `plan` or `legacy_unbound`). A backup cut by the deadline is not counted. The broker kills restore.py, and with it
