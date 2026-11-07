@@ -263,7 +263,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--include",
         action="append",
         default=[],
-        help="snapshot path/pattern to restore; repeatable",
+        help=(
+            "one item to restore, taken literally: its path as Restic lists it (for example "
+            "/C/Users/you/Documents/report.docx), or with --source its path inside that source "
+            "(for example /report.docx); repeatable"
+        ),
     )
     parser.add_argument(
         "--report",
@@ -2348,7 +2352,16 @@ class RestoreFolder:
         self.target_handle = None
 
 
-def validate_includes(includes: list[str]) -> list[str]:
+def validate_includes(includes: list[str], inside_source: bool = False) -> list[str]:
+    """The chosen items: each one item's path, as Restic lists it, taken literally.
+
+    That is "/" and then each name, with "/" between names. Without --source it is the path in the
+    snapshot (/C/Users/you/... for a whole snapshot, or the path inside the folder that --snapshot
+    names, so no drive letter is required); with --source the snapshot folder is the source, so it
+    is the item's path inside that source. A path names one item, so the restore can check
+    afterwards that every chosen item came back. "*" and "?" cannot occur in a Windows name, so they
+    could only be wildcards and are refused.
+    """
     if len(includes) > MAX_REPORT_INCLUDES:
         raise ValueError(f"at most {MAX_REPORT_INCLUDES} include patterns are allowed")
     result: list[str] = []
@@ -2357,8 +2370,91 @@ def validate_includes(includes: list[str]) -> list[str]:
             raise ValueError("include patterns must not be empty")
         if "\x00" in pattern or len(pattern) > MAX_REPORT_STRING:
             raise ValueError("an include pattern is invalid or too long")
+        if (
+            not pattern.startswith("/")
+            or "\\" in pattern
+            or "*" in pattern
+            or "?" in pattern
+            or any(part in {"", ".", ".."} for part in pattern.split("/")[1:])
+        ):
+            # The dashboard looks for "an include must be one item's path" to put this in plain words.
+            raise ValueError(
+                "an include must be one item's path inside the --source folder, starting with / and "
+                "with / between names, for example /Taxes/return.pdf for Taxes\\return.pdf in that folder"
+                if inside_source
+                else "an include must be one item's path as Restic lists it, starting with / and "
+                "with / between names, for example /C/Users/you/Documents/report.docx"
+            )
         result.append(pattern)
     return result
+
+
+def restic_literal_pattern(snapshot_path: str) -> str:
+    """The Restic include pattern that matches this one snapshot path, and nothing else.
+
+    Restic matches include patterns with Go's filepath.Match rules, where "[" opens a character
+    class: "Photos [2020]" would match a folder named "Photos 2" and never itself. "[[]" is a class
+    that holds only "[". A "]" outside a class is already literal, validate_includes refuses "*"
+    and "?", and on Windows a backslash is a path separator rather than an escape.
+    """
+    return snapshot_path.replace("[", "[[]")
+
+
+def _extended_length_path(path: str) -> str:
+    # Restic writes restored paths of any length; look for them the same way. Each chosen item's
+    # parts are already free of "." and "..", so nothing needs the normalization the prefix skips.
+    if os.name != "nt" or path.startswith("\\\\"):
+        return path
+    return "\\\\?\\" + path
+
+
+def missing_chosen_items(
+    target: Path, chosen: list[str], restore_folder: str = "", left: list[str] | None = None
+) -> list[str]:
+    """The chosen snapshot paths that Restic did not restore, looked for once it finished.
+
+    Restic restores a chosen item at the target plus its snapshot path (relative to the snapshot
+    folder when the selector names one), and leaves the name as it was in the backup. An item below
+    a top-level name the hand-over left in the restore folder (`left`, in `restore_folder`) came
+    back but was not moved into place, so it is looked for there and not in the target, where the
+    same name may now be someone else's. A link counts as restored even when what it points to is
+    not there. This only reads.
+    """
+    base = os.path.abspath(str(target)).rstrip("\\/")
+    left_names = {name.casefold() for name in left or ()}
+    missing: list[str] = []
+    for item in chosen:
+        parts = [part for part in item.split("/") if part]
+        folder = base
+        if restore_folder and parts and parts[0].casefold() in left_names:
+            folder = os.path.abspath(restore_folder).rstrip("\\/")
+        restored = _extended_length_path(os.sep.join([folder, *parts]))
+        if not os.path.lexists(restored):
+            missing.append(item)
+    return missing
+
+
+def missing_chosen_items_message(missing: int, chosen: int) -> str:
+    # The dashboard looks for "without restoring every chosen item" to put this in plain words, and
+    # reads the counts to tell a restore that brought back none of them from one that left some out.
+    return (
+        f"Restic finished without restoring every chosen item ({missing} of {chosen} missing); "
+        "the alternate target was retained for inspection"
+    )
+
+
+def also_not_restored_message(missing: int, chosen: int) -> str:
+    """Added to the hand-over's message, which is already in plain words and reaches the person as it is."""
+    if chosen == 1:
+        counted = "the item you chose was not restored at all"
+    elif missing == chosen:
+        counted = f"none of the {chosen} items you chose was restored at all"
+    else:
+        counted = f"{missing} of the {chosen} items you chose {'was' if missing == 1 else 'were'} not restored at all"
+    return (
+        f"Besides those, {counted}. To try again, choose the folder that holds "
+        f"{'it' if missing == 1 else 'them'} and a new empty folder to restore into."
+    )
 
 
 def validate_report_path(
@@ -2508,6 +2604,21 @@ def main(argv: list[str] | None = None) -> int:
             or path_is_reparse(args.cache_dir)
         ):
             raise ValueError("--cache-dir must name an existing local directory")
+    # The chosen items are checked before anything else. Run on its own (RECOVERY.md), with no report
+    # to bind, restore.py refuses one here, before the configuration is read or Restic is started, so
+    # nobody types the repository password only to be told an item is written wrong. A report
+    # (--report, which the protected manager passes) is accepted only once it is bound to the
+    # snapshot, so a refusal then waits until it is, below, and still comes before anything is
+    # restored; the manager gives Restic the stored password, so nobody is asked for it meanwhile.
+    includes: list[str] = []
+    include_refusal: ValueError | None = None
+    if args.target is not None:
+        try:
+            includes = validate_includes(args.include, inside_source=args.source is not None)
+        except ValueError as error:
+            if args.report is None:
+                raise
+            include_refusal = error
     report = base_report(args) if args.report is not None else None
     report_path: Path | None = None
     restore_started = False
@@ -2667,7 +2778,6 @@ def main(argv: list[str] | None = None) -> int:
                 creationflags=CREATE_NO_WINDOW,
             )
 
-        includes = validate_includes(args.include)
         requested_snapshot = args.snapshot
         if args.source is not None:
             snapshot_part, snapshot_subfolder = split_snapshot_selector(requested_snapshot)
@@ -2700,6 +2810,11 @@ def main(argv: list[str] | None = None) -> int:
                 report["plan_id"] = metadata[0]
                 report["snapshot_generation"] = metadata[1]
             _, report["snapshot_subfolder"] = split_snapshot_selector(requested_snapshot)
+        # A refused item, held until the report is bound to the snapshot (see above), so the protected
+        # manager accepts the report and passes the refusal on in these words, which the dashboard puts
+        # plainly. Nothing has been restored yet.
+        if include_refusal is not None:
+            raise include_refusal
         if args.recovery_drill:
             canary_file = Path(str(config.get("canary_file", "")))
             canary_snapshot_path = windows_snapshot_path(canary_file)
@@ -2793,8 +2908,8 @@ def main(argv: list[str] | None = None) -> int:
                 "never",
                 "--verify",
             ]
-            for pattern in includes:
-                restore_command.extend(["--include", pattern])
+            for chosen in includes:
+                restore_command.extend(["--include", restic_literal_pattern(chosen)])
             restore_started = True
             try:
                 returncode = subprocess.call(
@@ -2808,7 +2923,20 @@ def main(argv: list[str] | None = None) -> int:
             finally:
                 # Also after a failed restore, so a partial restore is still found in the chosen folder.
                 left_in_restore_folder = restore_folder.hand_over()
-        restore_succeeded = returncode == 0 and not left_in_restore_folder
+        # Restic ends a restore that matched nothing with exit code 0 and verifies the nothing it
+        # restored, so every chosen item is looked for in the chosen folder, once the restored items
+        # have been handed over to it, before the restore counts as done. A hand-over that left items
+        # in the restore folder already ends the restore as incomplete and says where they are; the
+        # items it left are looked for there, so a chosen item that Restic skipped is still named.
+        missing_items: list[str] = []
+        if returncode == 0 and includes and restore_folder is not None:
+            missing_items = missing_chosen_items(
+                target,
+                includes,
+                restore_folder.path if left_in_restore_folder else "",
+                left_in_restore_folder,
+            )
+        restore_succeeded = returncode == 0 and not left_in_restore_folder and not missing_items
         if report is not None:
             report["restic_exit_code"] = int(returncode)
             report["finished_utc"] = utc_now()
@@ -2855,13 +2983,18 @@ def main(argv: list[str] | None = None) -> int:
                 report["sample_paths_sha256"] = hashlib.sha256(path_manifest).hexdigest()
                 report["result"] = "verified"
                 report["verified"] = True
-            elif returncode == 0 and not left_in_restore_folder:
+            elif returncode == 0 and not left_in_restore_folder and not missing_items:
                 report["result"] = "verified"
                 report["verified"] = True
             elif returncode == 0:
                 report["result"] = "partial"
                 report["partial_target_retained"] = True
-                report["error"] = restore_folder.left_message()
+                if left_in_restore_folder:
+                    report["error"] = restore_folder.left_message()
+                    if missing_items:
+                        report["error"] += " " + also_not_restored_message(len(missing_items), len(includes))
+                else:
+                    report["error"] = missing_chosen_items_message(len(missing_items), len(includes))
             else:
                 report["result"] = "partial"
                 report["partial_target_retained"] = True
@@ -2883,9 +3016,19 @@ def main(argv: list[str] | None = None) -> int:
                 f"{target}; they are in {restore_folder.path}",
                 file=sys.stderr,
             )
+        elif missing_items:
+            print(
+                "RESTORE INCOMPLETE: Restic finished without restoring every chosen item; "
+                f"the alternate target was retained at {target}. Not restored:",
+                file=sys.stderr,
+            )
+        if left_in_restore_folder and missing_items:
+            print("Not restored at all:", file=sys.stderr)
+        for item in missing_items:
+            print(f"  {item}", file=sys.stderr)
         if report is not None:
             atomic_write_report(report_path, report)
-        if returncode == 0 and left_in_restore_folder:
+        if returncode == 0 and (left_in_restore_folder or missing_items):
             return 1
         return int(returncode)
     except Exception as error:

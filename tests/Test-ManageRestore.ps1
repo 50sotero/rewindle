@@ -148,10 +148,17 @@ public static class FakeRestic {
       if (Control("FAKE_RESTORE_PARTIAL") == "1") {
         File.WriteAllText(Path.Combine(target, "partial.txt"), "retained partial data"); return 23;
       }
+      // Restic finishing with exit code 0 although it restored nothing, as it does when no pattern matches.
+      if (Control("FAKE_RESTORE_NOTHING") == "1") return 0;
       int includeCount = args.Count(value => value == "--include");
-      if (includeCount > 0 && !String.IsNullOrEmpty(Environment.GetEnvironmentVariable("RESTIC_PASSWORD"))) {
+      if (includeCount > 0) {
         for (int i = 0; i < args.Length - 1; i++) if (args[i] == "--include") {
-          string include = args[i + 1]; string[] parts = include.Split(new[] {'/'}, StringSplitOptions.RemoveEmptyEntries);
+          // Like Restic, "[" opens a character class: a pattern with one matches no name that is written
+          // literally, so only "[[]" (a class that holds "[") brings such a name back.
+          string marked = args[i + 1].Replace("[[]", "\u0001");
+          if (marked.Contains("[")) continue;
+          string include = marked.Replace("\u0001", "[");
+          string[] parts = include.Split(new[] {'/'}, StringSplitOptions.RemoveEmptyEntries);
           string restored = target; foreach (string part in parts) restored = Path.Combine(restored, part);
           Directory.CreateDirectory(Path.GetDirectoryName(restored));
           string content = include.EndsWith("/canary.txt") ? "canary\n" : include.EndsWith("/live.txt") ? "live source sentinel\n" : "fixture notes\n";
@@ -170,7 +177,7 @@ Add-Type -TypeDefinition $fakeResticSource -OutputAssembly $fakeRestic -OutputTy
 
 function Write-FakeResticControl {
     # Restic gets an allow-listed environment, so this process's FAKE_* settings reach the fake through a file.
-    $lines = @(foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_LEGACY_SNAPSHOT')) {
+    $lines = @(foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_RESTORE_NOTHING','FAKE_LEGACY_SNAPSHOT')) {
         $value = [Environment]::GetEnvironmentVariable($name, 'Process')
         if ($null -ne $value) { $name + '=' + $value }
     })
@@ -452,9 +459,67 @@ try {
     $restore = Invoke-Manager -Fixture $fixture -Action restore -Snapshot $snapshotId -Target $target -Includes @('/notes.txt')
     Assert-True ($restore.ExitCode -eq 0 -and $restore.Result.ok -eq $true) 'verified restore succeeds'
     Assert-True ([string]$restore.Result.payload.result -ceq 'verified' -and $restore.Result.payload.verified -eq $true) 'verified restore report accepted'
-    Assert-True (Test-Path -LiteralPath (Join-Path $target 'restored.txt') -PathType Leaf) 'verified restore target created'
+    Assert-True (Test-Path -LiteralPath (Join-Path $target 'notes.txt') -PathType Leaf) 'verified restore target created'
     $verifiedHistory = Get-Content -LiteralPath (Join-Path $fixture.State 'restore-history.json') -Raw | ConvertFrom-Json
     Assert-True ($restore.Result.history_recorded -eq $true -and @($verifiedHistory.entries).Count -eq 1 -and $verifiedHistory.entries[0].verified -eq $true) 'verified restore is recorded in bounded protected history'
+
+    # Names with square brackets come back as themselves: the fake, like Restic, reads "[" as the start of a character class.
+    $bracketFixture = New-Fixture
+    $bracketTarget = Join-Path $bracketFixture.Root 'Restored\Brackets'
+    # Its history is full of recovery drills' entries, so this restore's entry takes the place of the oldest of them.
+    $drillEntries = [Collections.Generic.List[object]]::new()
+    foreach ($number in 1..50) {
+        $drillEntries.Add([ordered]@{ finished_utc = '2026-03-01T00:00:00.0000000Z'; kind = 'recovery_key_representative_drill'; result = 'verified'; verified = $true; target = ('drill-' + $number) })
+    }
+    Write-Json -Path (Join-Path $bracketFixture.State 'restore-history.json') -Value ([ordered]@{
+        schema_version = 2; plan_id = $planId; updated_utc = '2026-03-01T00:00:00.0000000Z'; entries = $drillEntries.ToArray()
+    })
+    $bracketRestore = Invoke-Manager -Fixture $bracketFixture -Action restore -Snapshot $snapshotId -Target $bracketTarget -Includes @('/Photos [2020]/a.txt', '/Notes[1].txt')
+    Assert-True ($bracketRestore.ExitCode -eq 0 -and $bracketRestore.Result.ok -eq $true -and [string]$bracketRestore.Result.payload.result -ceq 'verified') 'a restore of names with square brackets was not verified'
+    Assert-True ((Test-Path -LiteralPath (Join-Path $bracketTarget 'Photos [2020]\a.txt') -PathType Leaf) -and
+        (Test-Path -LiteralPath (Join-Path $bracketTarget 'Notes[1].txt') -PathType Leaf)) 'names with square brackets were not restored'
+    Assert-True ((Get-Content -LiteralPath $bracketFixture.Log -Raw).Contains("--include`t/Photos [[]2020]/a.txt")) 'a chosen name with "[" reached Restic as a pattern instead of literally'
+    $bracketEntries = @((Get-Content -LiteralPath (Join-Path $bracketFixture.State 'restore-history.json') -Raw | ConvertFrom-Json).entries)
+    Assert-True ($bracketEntries.Count -eq 50 -and [string]$bracketEntries[0].target -ceq 'drill-2' -and
+        [string]$bracketEntries[49].kind -ceq 'manual_restore' -and $bracketEntries[49].verified -eq $true) 'a history of only drill entries did not make room by its oldest one'
+
+    # Restic can finish with exit code 0 having restored nothing; a chosen item that is not there ends as an incomplete restore.
+    $nothingFixture = New-Fixture
+    $nothingTarget = Join-Path $nothingFixture.Root 'Restored\Nothing'
+    $env:FAKE_RESTORE_NOTHING = '1'
+    try { $nothing = Invoke-Manager -Fixture $nothingFixture -Action restore -Snapshot $snapshotId -Target $nothingTarget -Includes @('/notes.txt') }
+    finally { Remove-Item Env:FAKE_RESTORE_NOTHING -ErrorAction SilentlyContinue }
+    Assert-True ($nothing.ExitCode -ne 0 -and $nothing.Result.ok -eq $false -and [int]$nothing.Result.backend_exit_code -eq 1) 'a restore that brought back no chosen item was reported as done'
+    Assert-True ([string]$nothing.Result.payload.result -ceq 'partial' -and $nothing.Result.payload.verified -eq $false -and
+        [int]$nothing.Result.payload.restic_exit_code -eq 0 -and
+        [string]$nothing.Result.error -match 'without restoring every chosen item') 'a missing chosen item was not reported in its own words'
+    $nothingHistory = Get-Content -LiteralPath (Join-Path $nothingFixture.State 'restore-history.json') -Raw | ConvertFrom-Json
+    Assert-True (@($nothingHistory.entries).Count -eq 1 -and $nothingHistory.entries[0].verified -eq $false) 'a restore missing a chosen item was recorded as verified'
+
+    # An item that is not one path as the backup lists it is refused before anything is restored, once the report is bound to the
+    # snapshot, so the manager accepts the report and the refusal reaches the dashboard in restore.py's words, which it puts plainly.
+    $refusedFixture = New-Fixture
+    $refusedTarget = Join-Path $refusedFixture.Root 'Restored\Refused'
+    # The history is already full (50 entries, all that recovery_health.py reads), and its oldest entry is a recovery drill's.
+    $seededEntries = [Collections.Generic.List[object]]::new()
+    $seededEntries.Add([ordered]@{ finished_utc = '2026-01-01T00:00:00.0000000Z'; kind = 'recovery_key_representative_drill'; result = 'verified'; verified = $true })
+    foreach ($number in 1..49) {
+        $seededEntries.Add([ordered]@{ finished_utc = ('2026-02-{0:D2}T00:00:00.0000000Z' -f [Math]::Min($number, 28)); kind = 'manual_restore'; result = 'verified'; verified = $true; target = ('seeded-' + $number) })
+    }
+    Write-Json -Path (Join-Path $refusedFixture.State 'restore-history.json') -Value ([ordered]@{
+        schema_version = 2; plan_id = $planId; updated_utc = '2026-02-28T00:00:00.0000000Z'; entries = $seededEntries.ToArray()
+    })
+    $refused = Invoke-Manager -Fixture $refusedFixture -Action restore -Snapshot $snapshotId -Target $refusedTarget -Includes @('C:\notes.txt')
+    Assert-True ($refused.ExitCode -ne 0 -and $refused.Result.ok -eq $false -and
+        [string]$refused.Result.error -match "^an include must be one item's path as Restic lists it") ('a refused item did not reach the dashboard in restore.py''s words: ' + [string]$refused.Result.error)
+    Assert-True ([string]$refused.Result.payload.result -ceq 'error' -and $refused.Result.payload.verified -eq $false) 'a refused item was not reported as a restore that did not run'
+    Assert-True (-not (Test-Path -LiteralPath $refusedTarget) -or @(Get-ChildItem -LiteralPath $refusedTarget -Force).Count -eq 0) 'a refused item still restored something'
+    Assert-True (-not (@(Get-Content -LiteralPath $refusedFixture.Log) | Where-Object { ($_ -split "`t") -contains 'restore' })) 'Restic was asked to restore a refused item'
+    # The refused restore is recorded, in the place of the oldest manual restore's entry, never the drill's.
+    $refusedEntries = @((Get-Content -LiteralPath (Join-Path $refusedFixture.State 'restore-history.json') -Raw | ConvertFrom-Json).entries)
+    Assert-True ($refusedEntries.Count -eq 50 -and [string]$refusedEntries[49].kind -ceq 'manual_restore' -and [string]$refusedEntries[49].result -ceq 'error') 'a refused restore was not recorded at the end of a history of 50 entries'
+    Assert-True ([string]$refusedEntries[0].kind -ceq 'recovery_key_representative_drill' -and [string]$refusedEntries[1].target -ceq 'seeded-2' -and
+        @($refusedEntries | Where-Object { [string]$_.kind -ceq 'recovery_key_representative_drill' }).Count -eq 1) 'a refused restore pushed the recovery drill out of the history that readiness reads'
 
     $drillFixture = New-Fixture
     $drill = Invoke-Manager -Fixture $drillFixture -Action restore_drill
@@ -1136,7 +1201,7 @@ namespace RestoreManagerTests {
     } | ConvertTo-Json -Depth 3
 }
 finally {
-    foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_LEGACY_SNAPSHOT')) {
+    foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_RESTORE_NOTHING','FAKE_LEGACY_SNAPSHOT')) {
         Remove-Item "Env:$name" -ErrorAction SilentlyContinue
     }
     foreach ($name in $plantedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $null, 'Process') }

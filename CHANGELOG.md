@@ -163,6 +163,16 @@ ones a home user reads without a glossary.
   through all of them. Review restore and Restore now check the restore folder
   without freezing the window while a sleeping drive wakes up, and the restore
   still starts only if that check passes.
+- **Restoring a file or folder with square brackets in its name works.**
+  Choosing something like `Photos [2020]` or `Notes[1].txt` restored nothing,
+  or a different item with a similar name (`Photos 2`, `Notes1.txt`), and the
+  restore still said it was complete and verified, because the backup service
+  reads `[` in a name as the start of a pattern. Rewindle now hands over every
+  chosen name exactly as it is written. After the restore it also looks for
+  each item you chose in the folder you restored to; if one is not there, the
+  restore ends as incomplete and says what to try next, instead of reporting
+  success. However many restores you run, **Check recovery readiness** still
+  finds your last restore drill.
 
 ### Security
 

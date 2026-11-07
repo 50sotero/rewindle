@@ -728,6 +728,16 @@ namespace ResticBackuper.Dashboard
             {
                 result = RestoreManagerResult.Failure(error.Message, -1);
             }
+            ShowRestoreResult(result);
+        }
+
+        // How a restore ended, and whether "Open restored folder" is offered: only when the folder holds restored files, after a
+        // verified restore or an incomplete one that copied some. A restore that brought back none of the chosen items copied
+        // nothing there, so, as on the restore page, there is no folder to open.
+        private void ShowRestoreResult(RestoreManagerResult result)
+        {
+            completedTarget = string.Empty;
+            openTargetButton.Visibility = Visibility.Collapsed;
             if (result.UserCancelled)
             {
                 SetBusy(false, "Windows approval cancelled", "No restore was started.", false);
@@ -746,6 +756,16 @@ namespace ResticBackuper.Dashboard
             }
             if (result.Partial && result.Report != null)
             {
+                // Restic brought back none of the chosen items, so there are no partial files to look at.
+                if (RestoreManagerLauncher.NoChosenItemRestored(result.Report))
+                {
+                    SetBusy(
+                        false,
+                        "Restore incomplete — nothing restored",
+                        result.ErrorMessage + " Nothing was copied to the alternate destination; live files were not changed.",
+                        false);
+                    return;
+                }
                 completedTarget = result.Report.Target;
                 openTargetButton.Visibility = Directory.Exists(completedTarget)
                     ? Visibility.Visible

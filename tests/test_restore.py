@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import redirect_stderr, redirect_stdout
 import ctypes
 from ctypes import wintypes
+import fnmatch
 import hashlib
 import io
 import json
@@ -25,6 +26,8 @@ sys.path.insert(0, str(SOURCE_ROOT))
 import restore
 
 
+RESTIC = PROJECT_ROOT / "build" / "build-output" / "ResticBackuper" / "payload" / "restic.exe"
+
 OLD_ID = "a" * 64
 NEW_ID = "b" * 64
 WRONG_HOST_ID = "c" * 64
@@ -37,6 +40,7 @@ OTHER_PLAN_ID = "87654321-4321-4abc-8def-ba0987654321"
 
 
 FAKE_RESTIC = r'''from __future__ import annotations
+import fnmatch
 import json
 import os
 from pathlib import Path
@@ -112,6 +116,37 @@ if "restore" in args:
         Path(control["swap_log"]).write_text(json.dumps(outcomes), encoding="utf-8")
     target.mkdir(parents=True, exist_ok=True)
     Path(control["log"]).with_suffix(".target.txt").write_text(str(target), encoding="utf-8")
+    patterns = [args[index + 1] for index, value in enumerate(args[:-1]) if value == "--include"]
+    if mode == "nothing":
+        # Restic ends a restore that restored nothing with exit code 0.
+        raise SystemExit(0)
+    if mode == "success" and patterns:
+        # Like Restic: each pattern is matched part by part with glob rules, where "[" opens a
+        # character class, and a matched folder comes back with everything inside it.
+        selector = args[args.index("restore") + 1]
+        subfolder = selector.split(":", 1)[1].rstrip("/") if ":" in selector else ""
+        wanted = [[part for part in pattern.split("/") if part] for pattern in patterns]
+        for node in control.get("tree", []):
+            path = str(node.get("path") or "")
+            if node.get("struct_type") != "node" or not path.startswith(subfolder + "/"):
+                continue
+            parts = [part for part in path[len(subfolder):].split("/") if part]
+            if not any(
+                len(parts) >= len(pattern)
+                and all(fnmatch.fnmatchcase(name, rule) for name, rule in zip(parts, pattern))
+                for pattern in wanted
+            ):
+                continue
+            destination = os.sep.join([os.path.abspath(str(target)), *parts])
+            if os.name == "nt":
+                destination = "\\\\?\\" + destination
+            if node.get("type") == "dir":
+                os.makedirs(destination, exist_ok=True)
+            else:
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+                with open(destination, "w", encoding="utf-8") as handle:
+                    handle.write("verified fake data")
+        raise SystemExit(0)
     if mode == "tree":
         (target / "nested").mkdir()
         (target / "nested" / "inner.txt").write_text("nested fake data", encoding="utf-8")
@@ -986,14 +1021,14 @@ class RestoreBackendTests(unittest.TestCase):
                 "--target",
                 str(target),
                 "--include",
-                r"C:\\Users\\you\\file.txt",
+                "/C/Users/file.txt",
                 "--report",
                 str(report),
             ]
         )
         self.assertEqual(result, 0)
         self.assertEqual(stderr, "")
-        self.assertTrue((target / "restored.txt").is_file())
+        self.assertTrue((target / "C" / "Users" / "file.txt").is_file())
         payload = json.loads(report.read_text(encoding="utf-8"))
         self.assertEqual(payload["schema"], restore.REPORT_SCHEMA)
         self.assertEqual(payload["repository"], str(self.repository.resolve()))
@@ -1588,6 +1623,504 @@ class RestoreBackendTests(unittest.TestCase):
                 self.assertNotIn("same names appeared there", payload["error"])
                 self.assertIn("another program may have been using them", payload["error"])
                 self.assertEqual("verified fake data", (folders[0] / "restored.txt").read_text(encoding="utf-8"))
+
+    def bracket_tree(self) -> list[dict[str, object]]:
+        def node(path: str, kind: str = "file") -> dict[str, object]:
+            return {
+                "struct_type": "node",
+                "name": path.rsplit("/", 1)[-1],
+                "type": kind,
+                "path": path,
+                "size": 7,
+            }
+
+        return [
+            node("/C/Users", "dir"),
+            node("/C/Users/Photos [2020]", "dir"),
+            node("/C/Users/Photos [2020]/a.txt"),
+            # What "Photos [2020]" and "Notes[1].txt" match when Restic reads them as patterns.
+            node("/C/Users/Photos 2", "dir"),
+            node("/C/Users/Photos 2/decoy.txt"),
+            node("/C/Users/Notes[1].txt"),
+            node("/C/Users/Notes1.txt"),
+            node("/C/Users/plain.txt"),
+        ]
+
+    def restore_selection(
+        self, label: str, chosen: list[str], *extra: str, **control: object
+    ) -> tuple[int, str, dict, Path]:
+        self.write_control(**{"tree": self.bracket_tree(), **control})
+        target = self.root / label
+        report = self.state / f"{label}-report.json"
+        arguments = ["--snapshot", "latest", *extra, "--target", str(target), "--report", str(report)]
+        for item in chosen:
+            arguments.extend(["--include", item])
+        result, _, stderr = self.invoke(arguments)
+        return result, stderr, json.loads(report.read_text(encoding="utf-8")), target
+
+    @staticmethod
+    def restored_files(target: Path) -> list[str]:
+        return sorted(item.relative_to(target).as_posix() for item in target.rglob("*") if item.is_file())
+
+    def test_names_with_square_brackets_restore_as_themselves(self) -> None:
+        result, stderr, payload, target = self.restore_selection(
+            "brackets", ["/C/Users/Photos [2020]", "/C/Users/Notes[1].txt"]
+        )
+        self.assertEqual((0, ""), (result, stderr))
+        self.assertEqual("verified", payload["result"])
+        self.assertTrue(payload["verified"])
+        self.assertEqual(
+            ["C/Users/Notes[1].txt", "C/Users/Photos [2020]/a.txt"], self.restored_files(target)
+        )
+        command = [args for args in self.read_log() if "restore" in args][0]
+        self.assertEqual(
+            ["/C/Users/Photos [[]2020]", "/C/Users/Notes[[]1].txt"],
+            [command[index + 1] for index, value in enumerate(command) if value == "--include"],
+        )
+        # The report names the items as they were chosen.
+        self.assertEqual(["/C/Users/Photos [2020]", "/C/Users/Notes[1].txt"], payload["includes"])
+
+    def test_restic_restoring_no_chosen_item_ends_the_restore_incomplete(self) -> None:
+        result, stderr, payload, target = self.restore_selection(
+            "nothing", ["/C/Users/plain.txt", "/C/Users/Photos [2020]"], restore_mode="nothing"
+        )
+        self.assertEqual(1, result)
+        self.assertEqual("partial", payload["result"])
+        self.assertFalse(payload["verified"])
+        self.assertTrue(payload["partial_target_retained"])
+        self.assertEqual(0, payload["restic_exit_code"])
+        self.assertEqual(
+            "Restic finished without restoring every chosen item (2 of 2 missing); "
+            "the alternate target was retained for inspection",
+            payload["error"],
+        )
+        self.assertIn("RESTORE INCOMPLETE", stderr)
+        self.assertIn("  /C/Users/Photos [2020]\n", stderr)
+        self.assertTrue(target.is_dir())
+
+    def test_only_the_chosen_items_that_did_not_come_back_are_missing(self) -> None:
+        # The dashboard only offers what the backup lists; a name the backup does not hold stands in for
+        # any item Restic leaves out while it restores the rest.
+        result, stderr, payload, target = self.restore_selection(
+            "one-missing", ["/C/Users/plain.txt", "/C/Users/gone [old].txt"]
+        )
+        self.assertEqual(1, result)
+        self.assertEqual("partial", payload["result"])
+        self.assertIn("(1 of 2 missing)", payload["error"])
+        self.assertIn("  /C/Users/gone [old].txt\n", stderr)
+        self.assertNotIn("  /C/Users/plain.txt", stderr)
+        self.assertEqual(["C/Users/plain.txt"], self.restored_files(target))
+
+    def test_items_left_in_the_restore_folder_are_not_also_called_missing(self) -> None:
+        # The chosen items are looked for in the chosen folder after the hand-over. When the hand-over left them in the
+        # restore folder, the restore already ends as incomplete with a message that says where they are, and that
+        # message is the one the report keeps.
+        busy, calls = self.busy_rename(-1, 32)
+        with mock.patch.object(restore, "_rename_into", side_effect=busy), mock.patch.object(
+            restore, "_MOVE_RETRY_DELAYS", (0.0, 0.0)
+        ):
+            result, stderr, payload, target = self.restore_selection("left-behind", ["/C/Users/plain.txt"])
+        self.assertEqual(1, result)
+        self.assertEqual(3, len(calls))
+        self.assertEqual(("partial", False, 0), (payload["result"], payload["verified"], payload["restic_exit_code"]))
+        self.assertIn("another program may have been using them", payload["error"])
+        self.assertNotIn("without restoring every chosen item", payload["error"])
+        self.assertIn("could not be moved into", stderr)
+        self.assertNotIn("Not restored", stderr)
+        folders = [item for item in target.iterdir() if item.is_dir()]
+        self.assertEqual(1, len(folders))
+        self.assertIn(folders[0].name, payload["error"])
+        self.assertEqual(["C/Users/plain.txt"], self.restored_files(folders[0]))
+
+    def test_a_skipped_item_is_still_named_when_the_hand_over_left_others_behind(self) -> None:
+        # The items the hand-over left are looked for in the restore folder, where they are; a chosen item that Restic
+        # skipped is in neither place, and the hand-over's message, which says where the others are, also names it.
+        busy, _ = self.busy_rename(-1, 32)
+        with mock.patch.object(restore, "_rename_into", side_effect=busy), mock.patch.object(
+            restore, "_MOVE_RETRY_DELAYS", (0.0, 0.0)
+        ):
+            result, stderr, payload, target = self.restore_selection(
+                "left-and-skipped", ["/C/Users/plain.txt", "/C/Users/gone [old].txt"]
+            )
+        self.assertEqual(1, result)
+        self.assertEqual(("partial", False, 0), (payload["result"], payload["verified"], payload["restic_exit_code"]))
+        folders = [item for item in target.iterdir() if item.is_dir()]
+        self.assertEqual(1, len(folders))
+        self.assertTrue(payload["error"].startswith("Some restored files could not be moved into the folder you chose"))
+        self.assertIn(folders[0].name, payload["error"])
+        self.assertTrue(
+            payload["error"].endswith(
+                " Besides those, 1 of the 2 items you chose was not restored at all. To try again, choose the folder "
+                "that holds it and a new empty folder to restore into."
+            ),
+            payload["error"],
+        )
+        self.assertNotIn("Restic", payload["error"])
+        self.assertIn("could not be moved into", stderr)
+        self.assertIn("Not restored at all:\n  /C/Users/gone [old].txt\n", stderr)
+        self.assertNotIn("  /C/Users/plain.txt", stderr)
+        self.assertEqual(["C/Users/plain.txt"], self.restored_files(folders[0]))
+
+    def test_items_the_hand_over_left_are_looked_for_in_the_restore_folder_only(self) -> None:
+        target = self.root / "looked-for"
+        restore_folder = target / ".rewindle-restore-0123456789abcdef"
+        (restore_folder / "C" / "Users").mkdir(parents=True)
+        (restore_folder / "C" / "Users" / "kept.txt").write_text("restored", encoding="utf-8")
+        # A "C" that appeared in the target while the restore ran is someone else's, so what is in it does not count.
+        (target / "C" / "Users").mkdir(parents=True)
+        (target / "C" / "Users" / "theirs.txt").write_text("not restored", encoding="utf-8")
+        (target / "D").mkdir()
+        (target / "D" / "moved.txt").write_text("restored", encoding="utf-8")
+        chosen = ["/C/Users/kept.txt", "/C/Users/theirs.txt", "/D/moved.txt", "/D/skipped.txt"]
+        self.assertEqual(
+            ["/C/Users/theirs.txt", "/D/skipped.txt"],
+            restore.missing_chosen_items(target, chosen, str(restore_folder), ["c"]),
+        )
+        # Without anything left behind, everything is looked for in the target.
+        self.assertEqual(["/C/Users/kept.txt", "/D/skipped.txt"], restore.missing_chosen_items(target, chosen))
+
+    def test_what_is_added_to_the_hand_over_message_counts_the_skipped_items(self) -> None:
+        cases = (
+            (1, 1, "the item you chose was not restored at all", "holds it"),
+            (2, 2, "none of the 2 items you chose was restored at all", "holds them"),
+            (1, 3, "1 of the 3 items you chose was not restored at all", "holds it"),
+            (2, 3, "2 of the 3 items you chose were not restored at all", "holds them"),
+        )
+        for missing, chosen, counted, holds in cases:
+            with self.subTest(missing=missing, chosen=chosen):
+                message = restore.also_not_restored_message(missing, chosen)
+                self.assertTrue(message.startswith(f"Besides those, {counted}. To try again, "), message)
+                self.assertIn(f"choose the folder that {holds} and a new empty folder", message)
+
+    def test_a_restored_item_beyond_the_windows_path_limit_counts_as_restored(self) -> None:
+        deep = "/C/Users/" + "/".join(f"a-rather-long-folder-name-{index:02d}" for index in range(9))
+        chosen = deep + "/report [final].txt"
+        self.assertGreater(len(str(self.root)) + len(chosen), 300)
+        tree = [{"struct_type": "node", "name": "report [final].txt", "type": "file", "path": chosen, "size": 7}]
+        result, stderr, payload, _ = self.restore_selection("long", [chosen], tree=tree)
+        self.assertEqual((0, ""), (result, stderr))
+        self.assertEqual("verified", payload["result"])
+
+    def test_items_chosen_inside_a_source_are_looked_for_where_restic_puts_them(self) -> None:
+        source = restore.windows_snapshot_path(self.source)
+        tree = [
+            {"struct_type": "node", "name": "Photos [2020]", "type": "dir", "path": source + "/Photos [2020]"},
+            {
+                "struct_type": "node",
+                "name": "a.txt",
+                "type": "file",
+                "path": source + "/Photos [2020]/a.txt",
+                "size": 7,
+            },
+        ]
+        result, stderr, payload, target = self.restore_selection(
+            "inside-source", ["/Photos [2020]"], "--source", str(self.source), tree=tree
+        )
+        self.assertEqual((0, ""), (result, stderr))
+        self.assertEqual("verified", payload["result"])
+        self.assertEqual(["Photos [2020]/a.txt"], self.restored_files(target))
+
+    def test_an_include_must_be_one_snapshot_path(self) -> None:
+        self.assertEqual(
+            ["/C/Users/Photos [2020]", "/C"],
+            restore.validate_includes(["/C/Users/Photos [2020]", "/C"]),
+        )
+        for value in (
+            "C:\\Users\\you\\file.txt",
+            "Users/you/file.txt",
+            "/C/Users/*.docx",
+            "/C/Users/file?.txt",
+            "/",
+            "/C//Users",
+            "/C/Users/",
+            "/C/./Users",
+            "/C/../Users",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    ValueError, "one item's path as Restic lists it, starting with / and with / between names,"
+                ):
+                    restore.validate_includes([value])
+                # With --source the same rules hold, and the refusal says what the path is then relative to.
+                with self.assertRaisesRegex(
+                    ValueError, "one item's path inside the --source folder, starting with / and with / between names,"
+                ):
+                    restore.validate_includes([value], inside_source=True)
+        # The refusal says only what is checked: a path inside the folder that --snapshot names has no
+        # drive letter, so none is asked for.
+        self.assertEqual(["/Users/you/file.txt"], restore.validate_includes(["/Users/you/file.txt"]))
+        for inside_source in (False, True):
+            with self.subTest(inside_source=inside_source):
+                with self.assertRaises(ValueError) as refused:
+                    restore.validate_includes(["Users/you/file.txt"], inside_source=inside_source)
+                self.assertNotIn("drive letter", str(refused.exception))
+                # The words the dashboard looks for to put the refusal plainly.
+                self.assertTrue(str(refused.exception).startswith("an include must be one item's path"))
+        dashboard = (SOURCE_ROOT / "dashboard" / "RestoreManager.cs").read_text(encoding="utf-8")
+        self.assertIn('text.Contains("an include must be one item\'s path")', dashboard)
+        with self.assertRaisesRegex(ValueError, r"as Restic lists it, .*for example /C/Users/you/Documents/report\.docx"):
+            self.invoke(["--target", str(self.root / "refused"), "--include", "/C/Users/*.docx"])
+        with self.assertRaisesRegex(ValueError, r"inside the --source folder, .*for example /Taxes/return\.pdf"):
+            self.invoke(
+                ["--target", str(self.root / "refused"), "--source", str(self.source), "--include", "C:\\x.txt"]
+            )
+        self.assertFalse(any("restore" in args for args in self.read_log()))
+
+    def test_the_include_help_gives_the_path_with_and_without_a_source(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit):
+            restore.parse_args(["--help"])
+        # argparse wraps the help where it likes, so the words are compared without their spacing.
+        squeezed = "".join(output.getvalue().split())
+        for expected in (
+            "one item to restore, taken literally: its path as Restic lists it",
+            "(for example /C/Users/you/Documents/report.docx)",
+            "or with --source its path inside that source (for example /report.docx)",
+        ):
+            self.assertIn("".join(expected.split()), squeezed)
+
+    def test_an_item_inside_the_folder_the_snapshot_selector_names_needs_no_drive_letter(self) -> None:
+        result, stderr, payload, target = self.restore_selection(
+            "selector-folder", ["/Photos [2020]"], "--snapshot", "latest:/C/Users"
+        )
+        self.assertEqual((0, ""), (result, stderr))
+        self.assertEqual("verified", payload["result"])
+        self.assertEqual(["Photos [2020]/a.txt"], self.restored_files(target))
+
+    def test_without_a_report_an_item_is_refused_before_restic_is_started(self) -> None:
+        # Run on its own, with no stored credential, Restic asks for the repository password; a wrong
+        # item is refused before that, and before the configuration is read.
+        target = self.root / "refused-early"
+        with mock.patch.object(
+            restore.subprocess, "Popen", side_effect=AssertionError("Restic was started")
+        ), mock.patch.object(
+            restore, "load_restore_config", side_effect=AssertionError("the configuration was read")
+        ):
+            for extra in ([], ["--source", str(self.source)]):
+                with self.subTest(extra=extra), self.assertRaisesRegex(
+                    ValueError, "^an include must be one item's path"
+                ):
+                    restore.main(
+                        [
+                            *self.base_arguments(recovery_key=False),
+                            *extra,
+                            "--target",
+                            str(target),
+                            "--include",
+                            "C:\\Users\\you\\file.txt",
+                        ]
+                    )
+        self.assertEqual([], self.read_log())
+        self.assertFalse(target.exists())
+
+    def test_with_a_report_an_item_is_refused_once_the_report_is_bound(self) -> None:
+        # The protected manager accepts only a report bound to the snapshot, so the refusal waits for
+        # that, and still comes before anything is restored.
+        target = self.root / "refused-bound"
+        report_path = self.state / "refused-bound-report.json"
+        with self.assertRaisesRegex(ValueError, "^an include must be one item's path as Restic lists it"):
+            self.invoke(
+                [
+                    "--snapshot",
+                    "latest",
+                    "--target",
+                    str(target),
+                    "--report",
+                    str(report_path),
+                    "--include",
+                    "C:\\Users\\you\\file.txt",
+                ]
+            )
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(("error", False), (payload["result"], payload["verified"]))
+        self.assertEqual((NEW_ID, REPOSITORY_ID), (payload["snapshot_id"], payload["repository_id"]))
+        self.assertTrue(payload["error"].startswith("an include must be one item's path as Restic lists it"))
+        self.assertFalse(any("restore" in args for args in self.read_log()))
+        self.assertFalse(target.exists())
+
+
+class ExtendedLengthPathTests(unittest.TestCase):
+    """Chosen items are looked for through the \\\\?\\ prefix, which lifts the Windows path length limit.
+
+    A restore test cannot pin this on a computer where long paths are switched on, so the helper is tested itself.
+    """
+
+    @unittest.skipUnless(os.name == "nt", "Windows paths")
+    def test_a_drive_path_gets_the_prefix_and_a_prefixed_path_keeps_its_own(self) -> None:
+        self.assertEqual("\\\\?\\C:\\Restored\\a [1].txt", restore._extended_length_path("C:\\Restored\\a [1].txt"))
+        self.assertEqual("\\\\?\\C:\\Restored", restore._extended_length_path("\\\\?\\C:\\Restored"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows paths")
+    def test_each_chosen_item_is_looked_for_through_the_prefix(self) -> None:
+        looked_for: list[str] = []
+
+        def lexists(path: str) -> bool:
+            looked_for.append(path)
+            return True
+
+        with mock.patch.object(restore.os.path, "lexists", side_effect=lexists):
+            missing = restore.missing_chosen_items(
+                Path("C:\\Restored"),
+                ["/C/Users/a [1].txt", "/kept/b.txt"],
+                "C:\\Restored\\.rewindle-restore-0123456789abcdef",
+                ["kept"],
+            )
+        self.assertEqual([], missing)
+        self.assertEqual(
+            [
+                "\\\\?\\C:\\Restored\\C\\Users\\a [1].txt",
+                "\\\\?\\C:\\Restored\\.rewindle-restore-0123456789abcdef\\kept\\b.txt",
+            ],
+            looked_for,
+        )
+
+
+class ResticLiteralPatternTests(unittest.TestCase):
+    """The include pattern for a chosen path, checked with fnmatch, which reads "[" as Restic does."""
+
+    def test_each_opening_bracket_becomes_a_class_that_holds_only_itself(self) -> None:
+        cases = (
+            ("/C/Users/Photos [2020]", "/C/Users/Photos [[]2020]"),
+            ("/C/[draft] notes.txt", "/C/[[]draft] notes.txt"),
+            ("/C/a]b.txt", "/C/a]b.txt"),
+            ("/C/x[1][2]/[[y]].txt", "/C/x[[]1][[]2]/[[][[]y]].txt"),
+            ("/C/Users/plain report (2).txt", "/C/Users/plain report (2).txt"),
+        )
+        for chosen, expected in cases:
+            with self.subTest(chosen=chosen):
+                self.assertEqual(expected, restore.restic_literal_pattern(chosen))
+
+    def test_the_pattern_matches_the_chosen_name_and_no_other(self) -> None:
+        for name, other in (
+            ("Photos [2020]", "Photos 2"),
+            ("[draft] notes.txt", "d notes.txt"),
+            ("Notes[1].txt", "Notes1.txt"),
+            ("a]b.txt", "ab.txt"),
+            ("x[1][2]", "x12"),
+        ):
+            with self.subTest(name=name):
+                pattern = restore.restic_literal_pattern(name)
+                self.assertTrue(fnmatch.fnmatchcase(name, pattern))
+                self.assertFalse(fnmatch.fnmatchcase(other, pattern))
+                if "[" in name:
+                    # Unescaped, the name is a pattern for another name and never for itself.
+                    self.assertFalse(fnmatch.fnmatchcase(name, name))
+                    self.assertTrue(fnmatch.fnmatchcase(other, name))
+
+
+def pinned_restic_present() -> bool:
+    if not RESTIC.is_file():
+        return False
+    release = json.loads((SOURCE_ROOT / "restic-release.json").read_text(encoding="utf-8"))
+    return hashlib.sha256(RESTIC.read_bytes()).hexdigest() == release["executable_sha256"]
+
+
+@unittest.skipUnless(
+    os.name == "nt" and pinned_restic_present(),
+    "needs the release build's pinned restic.exe (run build\\Build-Release.ps1)",
+)
+class PinnedResticRestoreTests(unittest.TestCase):
+    """Chosen items through restore.py and the pinned Restic, in a throwaway backup."""
+
+    def test_names_with_square_brackets_come_back_and_nothing_else(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rewindle-brackets-") as root_text:
+            root = Path(root_text)
+            source = root / "source"
+            for relative in ("Photos [2020]/a.txt", "Photos 2/decoy.txt", "Notes[1].txt", "Notes1.txt", "plain.txt"):
+                path = source / Path(relative)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fixture\n", encoding="ascii")
+            password = "pinned-restic-restore-test-only-" + "x" * 40
+            key = root / "recovery-key.txt"
+            key.write_text(f"Password: {password}\n", encoding="ascii")
+            repository = root / "repository"
+            # Only what Restic needs: no inherited RESTIC_* settings can point it at any other backup.
+            environment = {
+                name: os.environ[name] for name in ("SYSTEMROOT", "TEMP", "TMP") if name in os.environ
+            }
+            environment["RESTIC_PASSWORD"] = password
+            common = [str(RESTIC), "--repo", str(repository), "--no-cache"]
+            for arguments in (["init"], ["backup", str(source), "--host", "TESTHOST", "--tag", "scheduled"]):
+                finished = subprocess.run(
+                    [*common, *arguments],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=120,
+                    env=environment,
+                )
+                self.assertEqual(0, finished.returncode, finished.stderr)
+            state = root / "state"
+            state.mkdir()
+            cache = root / "cache"
+            cache.mkdir()
+            config_path = root / "backup-config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "repository": str(repository),
+                        "repository_volume_serial": "00000000",
+                        "restic_executable": str(RESTIC),
+                        "state_directory": str(state),
+                        "recovery_key_file": str(key),
+                        "hostname": "TESTHOST",
+                        "scheduled_tag": "scheduled",
+                        "sources": [str(source)],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            quiet_call = subprocess.call
+
+            def restore_selection(label: str, chosen: list[str]) -> tuple[int, dict, list[str]]:
+                target = root / label
+                report = state / f"{label}.json"
+                # Restored relative to the source, as --source does, so no folder above it (with the
+                # permissions of the profile folders) is recreated in the target.
+                arguments = [
+                    "--config", str(config_path),
+                    "--repository", str(repository),
+                    "--restic", str(RESTIC),
+                    "--recovery-key-file", str(key),
+                    "--cache-dir", str(cache),
+                    "--snapshot", "latest",
+                    "--source", str(source),
+                    "--target", str(target),
+                    "--report", str(report),
+                ]
+                for item in chosen:
+                    arguments.extend(["--include", item])
+                inherited = {
+                    name: value for name, value in os.environ.items() if not name.upper().startswith("RESTIC_")
+                }
+                with mock.patch.dict(os.environ, inherited, clear=True), mock.patch.object(
+                    restore, "ensure_local_volume"
+                ), mock.patch.object(
+                    restore.subprocess,
+                    "call",
+                    side_effect=lambda command, **options: quiet_call(
+                        command, **{**options, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+                    ),
+                ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    result = restore.main(arguments)
+                files = sorted(item.relative_to(target).as_posix() for item in target.rglob("*") if item.is_file())
+                return result, json.loads(report.read_text(encoding="utf-8")), files
+
+            result, payload, files = restore_selection("escaped", ["/Photos [2020]", "/Notes[1].txt"])
+            self.assertEqual(0, result, payload)
+            self.assertEqual(("verified", True), (payload["result"], payload["verified"]))
+            self.assertEqual(["Notes[1].txt", "Photos [2020]/a.txt"], files)
+
+            # Without the escaping, Restic reads "[2020]" as one of "2" or "0": it brings back "Photos 2"
+            # instead and exits 0, and only the check for the chosen item stops this counting as done.
+            with mock.patch.object(restore, "restic_literal_pattern", side_effect=lambda path: path):
+                result, payload, files = restore_selection("unescaped", ["/Photos [2020]"])
+            self.assertEqual(["Photos 2/decoy.txt"], files)
+            self.assertEqual((1, 0), (result, payload["restic_exit_code"]))
+            self.assertEqual(("partial", False), (payload["result"], payload["verified"]))
+            self.assertIn("without restoring every chosen item (1 of 1 missing)", payload["error"])
 
 
 if __name__ == "__main__":
