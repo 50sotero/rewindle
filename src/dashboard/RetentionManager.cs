@@ -637,6 +637,14 @@ namespace ResticBackuper.Dashboard
                     view.Problem = "state_unavailable";
                     return view;
                 }
+                // Each record may be a file the user owns when OWNER RIGHTS limits the owner to reading, which is only safe
+                // while nobody but Administrators and SYSTEM can create files in the folder: so the folder is checked too.
+                if (!RetentionFiles.IsTrustedTestPath(stateDirectory) && !RetentionAcl.AdminOnlyWritable(
+                    state.GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access)))
+                {
+                    view.Problem = "state_unprotected";
+                    return view;
+                }
                 ReadConfiguration(Path.Combine(installRoot, EngineProfile.ConfigurationFileName), view);
 
                 RetentionFileRead evidence = RetentionFiles.ReadProtected(

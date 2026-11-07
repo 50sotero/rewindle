@@ -331,6 +331,16 @@ class OffByDefaultTests(RetentionTestCase):
         self.assertEqual(policy["install_id"], retention.install_identity(self.h.install))
         self.assertEqual(self.h.fake.streamed, [], "turning it on removed something")
 
+    def test_it_is_not_turned_on_in_a_state_folder_others_can_change_but_can_still_be_turned_off(self) -> None:
+        standard_history(self.h)
+        self.h.acl_failures.add(self.h.state.name)
+        with self.assertRaises(retention.RetentionError) as failed:
+            retention.configure(self.h.ctx, enabled=True, counts=(7, 4, 6))
+        self.assertEqual(failed.exception.code, "records_unprotected")
+        self.assertFalse((self.h.state / retention.POLICY_NAME).exists())
+        self.assertEqual(retention.configure(self.h.ctx, enabled=False, counts=None)["state"], "disabled")
+        self.assertEqual(self.h.fake.streamed, [])
+
     def test_turning_it_off_keeps_the_counts_removes_nothing_and_works_with_a_pending_journal(self) -> None:
         standard_history(self.h)
         self.h.policy(counts=(30, 10, 36))
@@ -753,6 +763,15 @@ class ApplyTests(RetentionTestCase):
         h.ctx.runner = cannot_start
         result = h.apply()
         self.assertEqual((result["state"], result["removal_unverified"], result["removed_count"]), ("partial", True, 2))
+
+    def test_a_state_folder_others_can_change_removes_nothing(self) -> None:
+        self.h.acl_failures.add(self.h.state.name)
+        with self.assertRaises(retention.RetentionError) as failed:
+            self.h.apply()
+        self.assertEqual(failed.exception.code, "records_unprotected")
+        self.assertEqual(self.forgotten(), [])
+        document, _sha = retention.compute_preview(self.h.ctx)
+        self.assertEqual((document["state"], document["error_code"]), ("error", "records_unprotected"))
 
     def test_a_kept_backup_that_disappears_stops_everything(self) -> None:
         self.h.fake.lose_on_forget = snapshot_id(4)

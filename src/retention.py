@@ -878,8 +878,24 @@ class Computed:
     plan: Plan | None
 
 
+def check_state_folder(ctx: Context) -> None:
+    """The state folder itself must be one only Administrators and SYSTEM can change.
+
+    The per-file check accepts a file the user owns when OWNER RIGHTS limits the owner to reading, which is only safe while
+    nobody else can create files in the folder. Turning clean-up off does not need it: that is the safe direction.
+    """
+    try:
+        info = os.lstat(ctx.state)
+    except FileNotFoundError as error:
+        raise RetentionError("records_unprotected", "the state folder is missing") from error
+    if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+        raise RetentionError("records_unprotected", "the state folder is not a normal folder")
+    ctx.acl_check(ctx.state)
+
+
 def compute(ctx: Context, *, require_policy: bool = True) -> Computed:
     """Everything a preview says, without writing it. Gates first; Restic only when they are all open."""
+    check_state_folder(ctx)
     evidence = read_evidence(ctx)
     try:
         policy = read_policy(ctx)
@@ -1021,6 +1037,7 @@ def configure(
     if counts is None:
         raise RetentionError("invalid_request", "turning clean-up on needs the three counts")
     daily, weekly, monthly = validate_counts(*counts)
+    check_state_folder(ctx)
     evidence = read_evidence(ctx)
     if evidence is not None and _evidence_is_verified(evidence.document):
         repository_id = evidence.document["repository_id"]
@@ -1105,6 +1122,7 @@ def apply_forget(
 ) -> dict[str, Any]:
     """Remove exactly the confirmed list, or nothing."""
     config = ctx.config
+    check_state_folder(ctx)
     if pending_journals(ctx.state):
         raise Refusal("pending_change")
     evidence = read_evidence(ctx)

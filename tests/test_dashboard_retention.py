@@ -315,6 +315,10 @@ class DashboardRetentionHarnessTests(unittest.TestCase):
             "O:BAD:NO_ACCESS_CONTROL",
             "O:BAD:",
             "O:SYD:P(A;;FA;;;SY)",
+            # The state folder as the installer protects it: owned by Administrators, the user and OWNER RIGHTS may only read.
+            "O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;" + USER + ")(A;OICI;0x1200a9;;;OW)",
+            # A folder where Users may create files and folders (as ProgramData itself allows): not admin-only.
+            "O:BAD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;0x1200a9;;;BU)(A;CIID;0x116;;;BU)",
         ]
         answers = self.run_cases([{"op": "acl", "sddl": sddl} for sddl in shapes])
         for sddl, answer in zip(shapes, answers):
@@ -322,6 +326,7 @@ class DashboardRetentionHarnessTests(unittest.TestCase):
                 expected = admin_only_writable_problem(sddl, owner_limited_by_owner_rights=True) is None
                 self.assertEqual(answer, expected)
         self.assertEqual(answers[:4], [True, True, False, False])
+        self.assertEqual(answers[-2:], [True, False])
 
     def test_files_the_user_can_change_are_not_trusted_unless_a_test_says_so(self) -> None:
         fixture = self.fixture("acl")
@@ -485,8 +490,8 @@ class DashboardRetentionHarnessTests(unittest.TestCase):
         self.assertEqual((blocked_view["preview"], blocked_view["blocked"]), ("blocked", "change_review_open"))
         self.assertEqual((unknown_view["preview"], unknown_view["blocked"]), ("blocked", "policy_inactive"))
         self.assertEqual(unreadable_view["mode"], "unknown")
-        # Without the test-only trust, the fixture's own permissions make every record untrusted: nothing is offered.
-        self.assertEqual((untrusted_view["mode"], untrusted_view["problem"]), ("unknown", "policy_unprotected"))
+        # Without the test-only trust, the fixture's own permissions make the state folder untrusted: nothing is read or offered.
+        self.assertEqual((untrusted_view["mode"], untrusted_view["problem"]), ("unknown", "state_unprotected"))
 
     # ---- What a result must say ----------------------------------------------------------------------------------------------
 
