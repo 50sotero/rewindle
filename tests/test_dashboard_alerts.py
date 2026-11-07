@@ -206,6 +206,11 @@ class BackupAlertsSourceTests(unittest.TestCase):
         ci = read(PROJECT / ".github" / "workflows" / "ci.yml")
         self.assertIn(".\\tests\\Test-BackupAlerts.ps1", ci)
         self.assertIn(".\\tests\\Test-TaskSchedule.ps1", ci)
+        # Each suite is the whole run of its own step, so each gets its own PowerShell process: both compile the same
+        # dashboard types, and a second Add-Type of a type name in one process fails with TYPE_ALREADY_EXISTS.
+        for suite in ("Test-BackupAlerts.ps1", "Test-TaskSchedule.ps1"):
+            with self.subTest(suite=suite):
+                self.assertRegex(ci, r"(?m)^ +run: \.\\tests\\" + re.escape(suite) + r"[ \t]*$")
 
     def test_a_pause_made_in_rewindle_is_kept_apart_from_the_told_problems(self) -> None:
         note = block(self.alerts, "internal void NoteUserPausedSchedule(")
