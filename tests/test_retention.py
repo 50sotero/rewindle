@@ -710,6 +710,50 @@ class ApplyTests(RetentionTestCase):
             retention.set_digest(retention.REMOVE_SET_DOMAIN, [snapshot_id(1), snapshot_id(2)]),
         )
 
+    def test_an_error_after_the_first_batch_still_lists_again_and_reports_what_is_gone(self) -> None:
+        # For example the request's log could not be written any more because the disk filled up: the batch counts as failed,
+        # and what earlier batches removed is read back and reported, so it can be recorded.
+        h = self.h
+        for index in range(10, 70):
+            h.fake.store.append(snapshot(index, f"2026-0{1 + index % 7}-{1 + index % 27:02d}T0{index % 9}:00:00Z"))
+        retention.compute_preview(h.ctx)
+        original_stream = h.fake.stream
+
+        def full_disk(command, log_handle, *args, **kwargs):
+            if "forget" in command and h.fake.batches >= 1:
+                h.fake.batches += 1
+                raise OSError(28, "No space left on device")
+            return original_stream(command, log_handle, *args, **kwargs)
+
+        h.ctx.stream = full_disk
+        result = h.apply()
+        self.assertEqual(result["state"], "partial")
+        self.assertFalse(result["removal_unverified"])
+        self.assertEqual(result["removed_count"], 50)
+        self.assertEqual(h.fake.batches, 2)
+
+    def test_an_error_on_the_first_batch_reports_nothing_removed(self) -> None:
+        def broken(command, log_handle, *args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        self.h.ctx.stream = broken
+        result = self.h.apply()
+        self.assertEqual((result["state"], result["removed_count"]), ("partial", 0))
+        self.assertEqual(len(self.h.fake.store), 5)
+
+    def test_a_listing_that_cannot_start_after_removing_is_partial_and_unverified(self) -> None:
+        h = self.h
+        original_run = h.fake.run
+
+        def cannot_start(command, **kwargs):
+            if "snapshots" in command and self.forgotten():
+                raise OSError(2, "The system cannot find the file specified")
+            return original_run(command, **kwargs)
+
+        h.ctx.runner = cannot_start
+        result = h.apply()
+        self.assertEqual((result["state"], result["removal_unverified"], result["removed_count"]), ("partial", True, 2))
+
     def test_a_kept_backup_that_disappears_stops_everything(self) -> None:
         self.h.fake.lose_on_forget = snapshot_id(4)
         result = self.h.apply()

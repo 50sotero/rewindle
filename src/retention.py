@@ -1191,8 +1191,15 @@ def apply_forget(
         # Explicit backup IDs only: no keep rules, no --prune. This and apply_prune are the only places that remove.
         command = restic_base(config) + ["forget", *batch]
         _log(ctx, {"event": "forget_batch", "count": len(batch), "command": sanitized_command(command)[:-len(batch)]})
-        with _open_log(ctx) as log_handle:
-            exit_code = ctx.stream(command, log_handle)
+        exit_code: int | None
+        try:
+            with _open_log(ctx) as log_handle:
+                exit_code = ctx.stream(command, log_handle)
+        except Exception as error:  # noqa: BLE001 - earlier batches may have removed backups: list again below
+            # The batch may or may not have run (its log could not be opened or written, for example on a full disk).
+            # It counts as a failed batch, so the fresh listing below says what was removed and it is recorded.
+            exit_code = None
+            _log(ctx, {"event": "forget_batch_error", "error": sanitize(str(error))})
         if exit_code != 0:
             failed = True
             _log(ctx, {"event": "forget_batch_failed", "exit_code": exit_code})
@@ -1201,7 +1208,7 @@ def apply_forget(
 
     try:
         listed = _relist(ctx)
-    except RetentionError:
+    except Exception:  # noqa: BLE001 - a listing that cannot start is a listing that failed
         # Some backups were removed but the list could not be read back. What the finished batches removed is reported,
         # nothing more runs, and the next clean-up lists again and frees the space.
         _log(ctx, {"event": "removal_unverified", "count": len(succeeded)})
