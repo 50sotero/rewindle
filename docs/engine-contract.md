@@ -158,7 +158,7 @@ exactly this shape.
 The read-only readiness check runs `<install>\Python\python.exe -E -S -B <install>\recovery_health.py --config …` as the
 user (60 s, 4 MiB stdout) and binds `schema` `<P>.RecoveryHealth.v1`, plan, generation, repository, and the check IDs
 `active_credential`, `recovery_key`, `rotation_rollback_key`, `pending_transaction`, `restore_drill`, `recovery_bundle`
-and `last_verification` (both engines; Rewindle adds `repository_storage`).
+and `last_verification` (both engines; Rewindle adds `repository_storage` and `data_check`).
 
 ## 6. Dashboard-owned files
 

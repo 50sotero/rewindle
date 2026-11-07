@@ -92,10 +92,11 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
   files, choose an empty destination, then review and **Restore now**. Restic
   verifies what it restores and never overwrites a file.
 - **Check recovery readiness** inspects the repository, the active credential,
-  the recovery key, the recovery-tools folder, locks and free space without a
-  prompt. From there you can **Run restore drill** (restore a sample with the
-  recovery key into a new folder and check it), repair a credential or stale
-  locks, and **Rotate keys**.
+  the recovery key, the recovery-tools folder, locks, free space and when a
+  sample of the backup data was last read back, without a prompt. From there
+  you can **Run restore drill** (restore a sample with the recovery key into a
+  new folder and check it), repair a credential or stale locks, and **Rotate
+  keys**.
 
 ### Settings
 
@@ -135,8 +136,11 @@ A backup run is only marked successful when all of these hold:
 2. `restic check` found the repository structure intact.
 3. The restore-test file (a small "canary" file the installer adds to the
    backup) was restored from the new snapshot and its SHA-256 matched.
-4. On the configured weekday (Sunday by default), one rotating part of the
-   repository data was also read back and checked.
+4. About once a week, one rotating part of the repository data was also read
+   back and checked. This happens on the first backup (scheduled or **Back up
+   now**) on or after the seventh day since the last passed check, whatever
+   the weekday, so a PC that is off on one day of the week still gets it. A
+   failed or interrupted check is tried again by the next backup.
 
 The restore test proves the repository can be found, decrypted and restored
 from. It does not prove every file is healthy, so test real restores too.
@@ -344,8 +348,12 @@ It does not start a backup. If anything fails, it removes what it created and
 keeps the repository, recovery key, recovery tools and ProgramData state.
 
 A default exclusion list skips reproducible folders such as `node_modules`,
-Python virtual environments and build-tool caches. Change the schedule later in
-**Settings > Edit schedule**, and add or remove folders on **Protection**.
+Python virtual environments, test coverage reports and build-tool caches. Its
+rules name what those tools write, not bare folder names, so a personal folder
+that shares a name with one (a `Coverage` folder of insurance papers, say) is
+still backed up. The list comes with Rewindle and changes only with an update.
+Change the schedule later in **Settings > Edit schedule**, and add or remove
+folders on **Protection**.
 
 <details>
 <summary><strong>Unattended install and options</strong></summary>

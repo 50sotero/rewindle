@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import subprocess
@@ -46,6 +47,7 @@ def config_for(root: Path, generation: int = 3) -> dict[str, object]:
         "scheduled_tag": "scheduled",
         "minimum_free_gib": 0,
         "use_vss": False,
+        "read_data_subset_parts": 30,
         "cloud_placeholder_policy": "strict",
         "sources": [source],
         "source_identities": {source: {"expected_volume_serial": "11223344"}},
@@ -73,7 +75,22 @@ def create_bundle(directory: Path, config: dict[str, object]) -> None:
     (directory / MANIFEST_NAME).write_bytes(json_bytes(manifest))
 
 
-def build_fixture(root: Path, *, history: bool = True) -> Path:
+def utc_text(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def data_check_record(age: timedelta, repository_id: str = REPOSITORY_ID) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "last_data_subset_check_utc": utc_text(datetime.now(timezone.utc) - age),
+        "subset": 7,
+        "subset_parts": 30,
+        "repository_id": repository_id,
+        "run_id": "20260101T000000-00000000",
+    }
+
+
+def build_fixture(root: Path, *, history: bool = True, data_check: bool = True) -> Path:
     config = config_for(root)
     install = Path(config["restic_executable"]).parent
     state = Path(config["state_directory"])
@@ -116,6 +133,10 @@ def build_fixture(root: Path, *, history: bool = True) -> Path:
             }
         )
     )
+    if data_check:
+        (state / "data-check.json").write_bytes(
+            json_bytes(data_check_record(timedelta(days=1)))
+        )
     if history:
         (state / "restore-history.json").write_bytes(
             json_bytes(
@@ -299,6 +320,74 @@ class RecoveryHealthTests(unittest.TestCase):
             bundle_check = next(item for item in report["checks"] if item["id"] == "recovery_bundle")
             self.assertEqual("fail", bundle_check["status"])
             self.assertEqual("blocked", report["overall_status"])
+
+    def _inspect_with_data_check(self, record: object | None) -> dict[str, object]:
+        with tempfile.TemporaryDirectory(prefix="recovery-health-data-") as root_text:
+            root = Path(root_text)
+            config_path = build_fixture(root, data_check=False)
+            if record is not None:
+                state = Path(json.loads(config_path.read_text(encoding="utf-8"))["state_directory"])
+                (state / "data-check.json").write_bytes(
+                    record if isinstance(record, bytes) else json_bytes(record)
+                )
+            return inspect(
+                config_path,
+                runner=FakeRunner(),
+                acl_verifier=lambda path: None,
+                history_acl_verifier=lambda path: None,
+            )
+
+    def test_data_check_passes_only_with_a_recent_check_of_this_backup(self) -> None:
+        recent = data_check_record(timedelta(days=3))
+        report = self._inspect_with_data_check(recent)
+        checks = {item["id"]: item for item in report["checks"]}
+        self.assertEqual("pass", checks["data_check"]["status"])
+        self.assertEqual("healthy", report["overall_status"])
+        self.assertEqual(
+            recent["last_data_subset_check_utc"], report["last_data_subset_check_utc"]
+        )
+
+        cases = {
+            "never checked": None,
+            "twenty days old": data_check_record(timedelta(days=20)),
+            "later than the clock": data_check_record(timedelta(days=-1)),
+            "another backup": data_check_record(timedelta(days=1), "e" * 64),
+            "unreadable": b"{not json",
+        }
+        for name, record in cases.items():
+            with self.subTest(record=name):
+                report = self._inspect_with_data_check(record)
+                checks = {item["id"]: item for item in report["checks"]}
+                check = checks["data_check"]
+                self.assertEqual("warn", check["status"])
+                self.assertEqual("warning", report["overall_status"])
+                # Nothing alarms without a next step, in plain words.
+                self.assertIn("choose Back up now", check["summary"])
+                for word in ("repository", "snapshot", "Restic", "canary", "engine"):
+                    self.assertNotIn(word.casefold(), check["summary"].casefold())
+
+    def test_data_check_is_not_reported_when_the_plan_has_none(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="recovery-health-no-data-") as root_text:
+            root = Path(root_text)
+            config = config_for(root)
+            config["read_data_subset_parts"] = 0
+            config_path = build_fixture(root, data_check=False)
+            config_path.write_bytes(json_bytes(config))
+            recovery = Path(config["recovery_tools_directory"])
+            for child in recovery.iterdir():
+                child.unlink()
+            recovery.rmdir()
+            create_bundle(recovery, config)
+
+            report = inspect(
+                config_path,
+                runner=FakeRunner(),
+                acl_verifier=lambda path: None,
+                history_acl_verifier=lambda path: None,
+            )
+
+            self.assertNotIn("data_check", {item["id"] for item in report["checks"]})
+            self.assertEqual("healthy", report["overall_status"])
 
 
 if __name__ == "__main__":

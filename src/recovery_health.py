@@ -38,6 +38,11 @@ SCHEMA = "ResticBackuper.RecoveryHealth.v1"
 MAX_JSON_BYTES = 4 * 1024 * 1024
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 DRIVE_REMOVABLE = 2
+# Written by backup.py after a passed check of a sample of the stored data.
+DATA_CHECK_STATE_NAME = "data-check.json"
+MAX_DATA_CHECK_BYTES = 64 * 1024
+# The check runs about once a week, so two weeks allows one missed week.
+DATA_CHECK_FRESH_DAYS = 14
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -54,14 +59,19 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def valid_utc_timestamp(value: Any) -> bool:
+def parse_utc_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.endswith("Z"):
-        return False
+        return None
     try:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError:
-        return False
-    return parsed.tzinfo is not None and parsed <= datetime.now(timezone.utc)
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def valid_utc_timestamp(value: Any) -> bool:
+    parsed = parse_utc_timestamp(value)
+    return parsed is not None and parsed <= datetime.now(timezone.utc)
 
 
 def load_object(path: Path, maximum_bytes: int = MAX_JSON_BYTES) -> dict[str, Any]:
@@ -457,6 +467,58 @@ def inspect(
             add_check(checks, "last_verification", "fail", "No fully checked backup is on record yet.")
     except Exception as error:
         add_check(checks, "last_verification", "fail", "The record of your latest checked backup isn't available.", str(error))
+
+    subset_parts = config.get("read_data_subset_parts", 0)
+    if isinstance(subset_parts, int) and not isinstance(subset_parts, bool) and subset_parts > 0:
+        data_check_path = state_directory / DATA_CHECK_STATE_NAME
+        data_check_next = (
+            "Rewindle does this about once a week during a backup; choose Back up now to do it sooner."
+        )
+        try:
+            record = None
+            if data_check_path.exists() or data_check_path.is_symlink():
+                record = load_object(data_check_path, MAX_DATA_CHECK_BYTES)
+                checked = parse_utc_timestamp(record.get("last_data_subset_check_utc"))
+                if record.get("schema_version") != 1 or checked is None:
+                    raise RuntimeError("The record of the last data check is invalid.")
+                if report["repository_id"] is not None and record.get("repository_id") != report["repository_id"]:
+                    # A record left by an earlier backup location says nothing about this one.
+                    record = None
+            if record is None:
+                add_check(
+                    checks,
+                    "data_check",
+                    "warn",
+                    "A sample of your saved backup data hasn't been read back and checked yet. " + data_check_next,
+                )
+            else:
+                report["last_data_subset_check_utc"] = record["last_data_subset_check_utc"]
+                now = datetime.now(timezone.utc)
+                if checked <= now and (now - checked).total_seconds() <= DATA_CHECK_FRESH_DAYS * 86400:
+                    add_check(
+                        checks,
+                        "data_check",
+                        "pass",
+                        "A sample of your saved backup data was read back and checked in the last two weeks.",
+                    )
+                else:
+                    add_check(
+                        checks,
+                        "data_check",
+                        "warn",
+                        "A sample of your saved backup data hasn't been read back and checked in the last two weeks. " + data_check_next,
+                        "The recorded time of the last check is later than this PC's clock."
+                        if checked > now
+                        else "Last checked " + record["last_data_subset_check_utc"] + ".",
+                    )
+        except Exception as error:
+            add_check(
+                checks,
+                "data_check",
+                "warn",
+                "Rewindle couldn't tell when a sample of your saved backup data was last read back and checked. " + data_check_next,
+                str(error),
+            )
 
     if isinstance(status, dict) and status.get("maintenance_hold") is True:
         anomaly = status.get("change_anomaly")

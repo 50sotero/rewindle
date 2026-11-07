@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import ntpath
 import os
@@ -21,7 +21,9 @@ from restic_common import (
     BackupCancelled,
     CancellationToken,
     DEFAULT_CONFIG,
+    EngineFailure,
     RunLockUnavailable,
+    SourcePreflightFailed,
     SourceUpdateJournalPresent,
     atomic_write_json,
     backup_plan_tags,
@@ -58,6 +60,12 @@ DEFAULT_CHANGE_ANOMALY_POLICY = {
     "minimum_changed_files": 1000,
 }
 MAX_AFFECTED_PATHS = 50
+# When the deeper check last read back a sample of the stored data. It sits in
+# the protected state folder next to plan-state.json and last-success.json, so
+# only administrators and SYSTEM can write it.
+DATA_CHECK_STATE_NAME = "data-check.json"
+DATA_CHECK_INTERVAL_DAYS = 7
+MAX_DATA_CHECK_STATE_BYTES = 64 * 1024
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -122,6 +130,117 @@ def load_prior_success_for_anomaly(path: Path) -> dict[str, Any] | None:
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _utc_text(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_utc_text(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.endswith("Z") or len(value) > 40:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or not 2000 <= parsed.year <= 9000:
+        return None
+    return parsed
+
+
+def _is_plain_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_repository_id(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def load_data_check_state(path: Path) -> dict[str, Any] | None:
+    """Return the record of the last passed data-sample check, if it is usable.
+
+    A missing, oversized or malformed record counts as "never checked", so the
+    next eligible run checks again instead of trusting it.
+    """
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        if path.stat().st_size > MAX_DATA_CHECK_STATE_BYTES:
+            return None
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    subset = value.get("subset")
+    subset_parts = value.get("subset_parts")
+    if (
+        not _is_plain_int(value.get("schema_version"))
+        or value["schema_version"] != 1
+        or _parse_utc_text(value.get("last_data_subset_check_utc")) is None
+        or not _is_repository_id(value.get("repository_id"))
+        or not _is_plain_int(subset)
+        or not _is_plain_int(subset_parts)
+        or not 1 <= subset <= subset_parts
+    ):
+        return None
+    return value
+
+
+def data_subset_check_due(
+    record: dict[str, Any] | None,
+    now_utc: datetime,
+    repository_id: str,
+    subset_parts: int,
+) -> bool:
+    """Decide whether this run also reads back a sample of the stored data.
+
+    It is due on the first run on or after the seventh day (by this PC's
+    calendar) since the last passed check, whatever the weekday, so a PC that
+    is off on one day of the week, or a schedule that skips that day, still
+    gets it. Counting calendar days keeps a daily backup on the same weekday
+    even when one run takes a few minutes longer than the last. No record, a
+    record for another backup or another number of parts, and a recorded time
+    later than now (the clock was moved back) all count as due.
+    """
+    if (
+        record is None
+        or record.get("repository_id") != repository_id
+        or record.get("subset_parts") != subset_parts
+    ):
+        return True
+    checked = _parse_utc_text(record.get("last_data_subset_check_utc"))
+    if checked is None or checked > now_utc:
+        return True
+    try:
+        elapsed_days = (now_utc.astimezone().date() - checked.astimezone().date()).days
+    except (OverflowError, OSError, ValueError):
+        return True
+    return elapsed_days >= DATA_CHECK_INTERVAL_DAYS
+
+
+def next_data_subset(
+    record: dict[str, Any] | None,
+    now_utc: datetime,
+    repository_id: str,
+    subset_parts: int,
+) -> int:
+    """Take the next part in turn, so each part is read once per round."""
+    if (
+        record is not None
+        and record.get("repository_id") == repository_id
+        and record.get("subset_parts") == subset_parts
+    ):
+        return int(record["subset"]) % subset_parts + 1
+    return now_utc.timetuple().tm_yday % subset_parts + 1
 
 
 def _change_anomaly_policy(config: dict[str, Any]) -> dict[str, Any]:
@@ -295,7 +414,13 @@ def classify_failure(
     error: BaseException,
     exit_code: int | None,
 ) -> tuple[str, str]:
-    """Publish stable support semantics without depending on exception wording."""
+    """Publish stable support semantics without depending on exception wording.
+
+    A problem the engine recognises where it happens (a full backup drive, a
+    different drive at the backup location's letter, a protected folder that
+    is missing or on another drive) raises an ``EngineFailure`` that carries
+    its own code. Everything else is classified by the phase it stopped in.
+    """
     phase = {
         "starting": "initialization",
         "checking_repository_storage": "repository_storage",
@@ -308,13 +433,10 @@ def classify_failure(
         "restoring_canary": "restore_canary",
         "checking_data_subset": "repository_data_check",
     }.get(phase_state, "wrapper")
-    message = str(error).casefold()
     if phase_state == "partial" or exit_code == 3:
         code = "source_data_unreadable"
-    elif "free space" in message or "free-space" in message:
-        code = "repository_low_space"
-    elif "volume serial" in message or "volume identity" in message:
-        code = "volume_identity_mismatch"
+    elif isinstance(error, EngineFailure):
+        code = error.failure_code
     elif phase == "repository_storage":
         code = "repository_storage_unavailable"
     elif phase == "source_preflight":
@@ -601,7 +723,7 @@ def _run_locked(
             status["affected_paths"] = collect_affected_paths(status)
             atomic_write_json(status_path, status)
             if source_preflight["status"] != "ready":
-                raise RuntimeError(
+                raise SourcePreflightFailed(
                     "source preflight failed: "
                     + "; ".join(source_preflight["failures"])
                 )
@@ -840,16 +962,39 @@ def _run_locked(
             )
             cancellation_checkpoint(cancellation, on_cancellation)
 
-            weekday = datetime.now().strftime("%A")
+            # About once a week (see data_subset_check_due), not on one fixed
+            # weekday: read_data_subset_weekday is still accepted but unused.
             subset_parts = int(config.get("read_data_subset_parts", 0))
+            data_check_path = state_directory / DATA_CHECK_STATE_NAME
+            data_check_record = load_data_check_state(data_check_path)
+            if (
+                data_check_record is not None
+                and data_check_record["repository_id"] != status["repository_id"]
+            ):
+                data_check_record = None
+            status["last_data_subset_check_utc"] = (
+                data_check_record["last_data_subset_check_utc"]
+                if data_check_record is not None
+                else None
+            )
+            data_check_started = _now_utc()
             if (
                 args.scheduled
                 and prior_success_exists
                 and subset_parts > 0
-                and weekday.casefold()
-                == str(config.get("read_data_subset_weekday", "")).casefold()
+                and data_subset_check_due(
+                    data_check_record,
+                    data_check_started,
+                    status["repository_id"],
+                    subset_parts,
+                )
             ):
-                subset = datetime.now().timetuple().tm_yday % subset_parts + 1
+                subset = next_data_subset(
+                    data_check_record,
+                    data_check_started,
+                    status["repository_id"],
+                    subset_parts,
+                )
                 subset_command = restic_base(config) + [
                     "check",
                     f"--read-data-subset={subset}/{subset_parts}",
@@ -865,6 +1010,22 @@ def _run_locked(
                 ) != 0:
                     raise RuntimeError("repository data-subset check failed")
                 cancellation_checkpoint(cancellation, on_cancellation)
+                # Recorded only once the check has passed: a failed or
+                # cancelled check is retried by the next run.
+                checked_utc = _utc_text(data_check_started)
+                atomic_write_json(
+                    data_check_path,
+                    {
+                        "schema_version": 1,
+                        "last_data_subset_check_utc": checked_utc,
+                        "subset": subset,
+                        "subset_parts": subset_parts,
+                        "repository_id": status["repository_id"],
+                        "run_id": run_id,
+                    },
+                )
+                status["verification"]["data_subset_checked_utc"] = checked_utc
+                status["last_data_subset_check_utc"] = checked_utc
 
             cancellation_checkpoint(cancellation, on_cancellation)
             status["change_anomaly"] = evaluate_change_anomaly(

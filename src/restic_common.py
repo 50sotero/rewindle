@@ -101,6 +101,35 @@ class WindowsVolumeMetadata:
     maximum_component_length: int
 
 
+class EngineFailure(RuntimeError):
+    """A failure whose support code is decided where it happens.
+
+    The message stays the engine's own words for logs; ``failure_code`` is the
+    stable code a backup run records (see ``backup.classify_failure``), so the
+    code never depends on how the message is worded.
+    """
+
+    failure_code = "wrapper_failed"
+
+
+class RepositoryVolumeMismatch(EngineFailure):
+    """A different drive answers at the backup location's drive letter."""
+
+    failure_code = "volume_identity_mismatch"
+
+
+class RepositoryLowSpace(EngineFailure):
+    """The backup location's drive, or Google Drive's cache, is too full."""
+
+    failure_code = "repository_low_space"
+
+
+class SourcePreflightFailed(EngineFailure):
+    """A protected folder is missing, unreadable or on another drive."""
+
+    failure_code = "source_preflight_failed"
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -1159,7 +1188,7 @@ def validate_repository_volume(config: dict[str, Any]) -> None:
 
     expected = str(config["repository_volume_serial"]).upper()
     if actual != expected:
-        raise RuntimeError(
+        raise RepositoryVolumeMismatch(
             f"repository volume mismatch: expected {expected}, observed {actual}"
         )
     if metadata is None:
@@ -1408,7 +1437,7 @@ def _validate_drivefs_provider(
     cache_free = shutil.disk_usage(cache_directory).free
     minimum_cache_free = _minimum_drivefs_cache_free_bytes(config)
     if cache_free < minimum_cache_free:
-        raise RuntimeError(
+        raise RepositoryLowSpace(
             "Google DriveFS cache free space is inadequate: "
             f"{cache_free / 1024**3:.1f} GiB available; "
             f"{minimum_cache_free / 1024**3:.1f} GiB required"
@@ -1605,7 +1634,7 @@ def ensure_free_space(config: dict[str, Any]) -> int:
     free = shutil.disk_usage(Path(config["repository"]).anchor).free
     minimum = int(float(config.get("minimum_free_gib", 0)) * 1024**3)
     if free < minimum:
-        raise RuntimeError(
+        raise RepositoryLowSpace(
             f"repository volume has {free / 1024**3:.1f} GiB free; "
             f"at least {minimum / 1024**3:.1f} GiB is required"
         )
