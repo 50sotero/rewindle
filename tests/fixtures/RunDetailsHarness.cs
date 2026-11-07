@@ -86,6 +86,21 @@ namespace ResticBackuper.Dashboard
                 SnapshotShort = snapshotId.Substring(0, 12)
             };
             RunDetails details = RunDetailsReader.Load(configuration, run);
+            // The same run once the counts of what its backup found are known.
+            RunDetails counted = RunDetailsReader.Load(
+                configuration,
+                new RunMetricView
+                {
+                    RunId = runId,
+                    TypeLabel = "Backup",
+                    StateLabel = "Incomplete",
+                    StartedLocal = new DateTime(2026, 7, 21, 13, 0, 0),
+                    DurationSeconds = 300,
+                    SnapshotShort = snapshotId.Substring(0, 12),
+                    FilesNew = 2,
+                    FilesChanged = 1,
+                    FilesUnmodified = 2
+                });
             bool traversalRejected = false;
             try
             {
@@ -113,6 +128,9 @@ namespace ResticBackuper.Dashboard
             result["has_log"] = details.HasLog;
             result["remediation"] = details.Remediation;
             result["traversal_rejected"] = traversalRejected;
+            result["copy_without_counts"] = details.CopyText();
+            result["copy_with_counts"] = counted.CopyText();
+            result["changes_display"] = counted.ChangesDisplay;
             Console.WriteLine(new JavaScriptSerializer().Serialize(result));
             return 0;
         }

@@ -90,6 +90,9 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
   time with what to do, and never by deleting anything inside the backup
   folder. With the earlier personal edition it shows the free space and says
   that the forecast isn't available with that backup program.
+- Under that, the card says how far back your backups go ("412 backups,
+  oldest 3 Mar 2025"), as counted by the last verified backup or the last time
+  Restore listed them; the Restore page says it too.
 - **Back up now**, live progress (throughput, elapsed time, estimate), and
   **Cancel backup**, which asks Restic to stop cooperatively. Existing
   snapshots are never touched.
@@ -103,6 +106,9 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
 - Every run Rewindle has observed (the newest 400), with search, date and
   result filters, and run details: an event timeline, the snapshot, and
   suggested next steps for a failure.
+- What each backup did: how many files were new, changed and unchanged
+  ("312 new, 41 changed, 12,040 unchanged"), under the run's totals and in its
+  details. Runs recorded before Rewindle kept these counts show none.
 - Duration and size trends of verified runs. Failed or cancelled runs are
   marked on the chart, never plotted as values.
 - Works from the keyboard: arrow keys, `Home`, `End`, `PageUp` and `PageDown`

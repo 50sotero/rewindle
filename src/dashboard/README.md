@@ -389,10 +389,12 @@ menu shortcut. There is no separate dashboard installer.
 The dashboard's own per-user data lives in `%LOCALAPPDATA%\ResticBackuperDashboard`
 (`ResticPersonalBackupDashboard` for the legacy profile): appearance and motion
 settings, the text size (`zoom.json`), `alerts.json` (backup alerts), the Low
-space warning (`space-warning.json`), `run-history.json` (at most 400 runs),
-`heartbeat.json`, `crash.log` and the WebView2 profile. Uninstalling Rewindle
-removes the install root, the logon task and the shortcut, and leaves that
-folder in place. A launch with
+space warning (`space-warning.json`), `run-history.json` (at most 400 runs,
+with each backup's new, changed and unchanged file counts once they are
+known), `backup-range.json` (how far back the backups went when Restore last
+listed them; only ever shown), `heartbeat.json`, `crash.log` and the WebView2
+profile. Uninstalling Rewindle removes the install root, the logon task and
+the shortcut, and leaves that folder in place. A launch with
 `--isolated-presentation-store` uses `ResticBackuperBeautifulUI` and
 `ResticBackuperDashboardBeautifulUIWebView2` in `%TEMP%` instead.
 

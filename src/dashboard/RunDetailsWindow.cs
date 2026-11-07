@@ -27,6 +27,8 @@ namespace ResticBackuper.Dashboard
         public string FilesDisplay { get; set; }
         public string ProcessedDisplay { get; set; }
         public string StoredDisplay { get; set; }
+        // "312 new, 41 changed, 12,040 unchanged", or empty when the run has no such counts (see RunMetricView.ChangesDisplay).
+        public string ChangesDisplay { get; set; }
         public string Phase { get; set; }
         public string FailureCode { get; set; }
         public string ExitCode { get; set; }
@@ -76,6 +78,7 @@ namespace ResticBackuper.Dashboard
             value.AppendLine("Files: " + DisplayOrDash(FilesDisplay));
             value.AppendLine("Processed: " + DisplayOrDash(ProcessedDisplay));
             value.AppendLine("Stored: " + DisplayOrDash(StoredDisplay));
+            value.AppendLine("Changes: " + DisplayOrDash(ChangesDisplay));
             return value.ToString().TrimEnd();
         }
 
@@ -114,6 +117,7 @@ namespace ResticBackuper.Dashboard
                 FilesDisplay = run.FilesDisplay,
                 ProcessedDisplay = run.ProcessedBytesDisplay,
                 StoredDisplay = run.StoredBytesDisplay,
+                ChangesDisplay = run.ChangesDisplay,
                 Phase = string.Empty,
                 FailureCode = string.Empty,
                 ExitCode = string.Empty,

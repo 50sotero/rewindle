@@ -30,6 +30,7 @@ import { canOpenRunDetails, describeSpace, driveOf, heroConcern, heroOffersRunDe
 import { createInFlight, sendOnceAtATime } from './oneShot';
 import { PendingCommands, usePendingCommand } from './pendingCommands';
 import { effectiveFrom, presetStart, rangeMenuValue, type ActivityDateFilter, type RangePreset } from './activityRange';
+import { backupRangeText } from './backupRange';
 
 // `onResult` hears how the host answered a command: false when it refused it, or when the page could not send it.
 type Send = (command: CommandName, payload?: Record<string, string | boolean>, onResult?: (ok: boolean) => void) => void;
@@ -403,6 +404,8 @@ function Protection({ state, send, folders, setFolders, stale, openRunDetails }:
   const reviewLabel = state.actions.reviewChanges?.label === 'Review changes' ? 'Confirm these changes' : undefined;
   const showTags = verifiedKnown || (stale && !!state.updated);
   const folderCount = state.sources.length;
+  // How far back the backups go, under the backup location: only when it is known (see backupRange.ts).
+  const range = backupRangeLine(state);
   return <>
     <Heading title="Protection" description={`${folderCount} protected ${folderCount === 1 ? 'folder' : 'folders'} · ${localClocks(state.schedule.summary, locale)}`} note={note}>
       {s.active && <Action state={state} send={send} command="cancelBackup" icon={<X size={13} />} quiet={quiet} />}
@@ -475,7 +478,9 @@ function Protection({ state, send, folders, setFolders, stale, openRunDetails }:
         <ScheduleNotice notice={state.schedule.notice} className="schedule-notice-slot" />
         <div className="info-action"><Action state={state} send={send} command="editSchedule" icon={<ArrowUpRight size={12} />} quiet={quiet} /></div></section>
       <section className="surface surface-pad"><div className="info-heading"><HardDrive size={15} className="text-ink-3" />Backup location</div>
-        <div className="info-main">{state.repository.path || 'Location unavailable'}</div><SpaceLine repository={state.repository} />
+        <div className="info-main">{state.repository.path || 'Location unavailable'}</div>
+        {/* The facts under the location share one row of the card's grid, so a line added here never moves the button beside them. */}
+        <div className="location-facts"><SpaceLine repository={state.repository} />{range && <div className="muted-copy backup-range-line">{range}</div>}</div>
         <div className="info-action"><Action state={state} send={send} command="changeRepository" icon={<ArrowUpRight size={12} />} quiet={quiet} /></div></section>
     </div>
     <ProtectionHealth state={state} send={send} quiet={quiet} />
@@ -686,6 +691,12 @@ const HISTORY_COLUMNS = { task: 'When', date: 'Time taken', status: 'Result', ow
 const verifiedBackup = (state: DashboardState): Verified | undefined =>
   lastVerified(state.freshness, formatWhen(state.freshness.verifiedAt, usableLocale(state.locale)));
 
+// How far back the backups go ("412 backups, oldest 3 Mar 2025"), for Protection and Restore, or '' when that is not known.
+const backupRangeLine = (state: DashboardState) => {
+  const locale = usableLocale(state.locale);
+  return backupRangeText(state.backupRange, locale, iso => formatWhen(iso, locale, '', { weekday: false, time: false }), verifiedBackup(state)?.at);
+};
+
 // The ranges the date menu offers, as the number of days they reach back (today counts as the first). The view keeps the choice
 // itself, so the range moves on at midnight (see activityRange.ts).
 const DATE_RANGES: [days: Exclude<RangePreset, ''>, label: string][] = [['7', 'Last 7 days'], ['30', 'Last 30 days'], ['365', 'Last year']];
@@ -749,6 +760,8 @@ function ActivityHistory({ state, send, view, setView, openRunDetails, openResto
       // A run that did not finish has no figures worth showing when it counted nothing: a dash says so, "0 B · 0 files" reads as an empty backup.
       return { id: run.id, task: `${run.startedDisplay}${run.type !== 'Backup' ? ` · ${typeLabel(run.type)}` : ''}`, date: run.durationDisplay, status: runStatus(run), statusLabel: resultLabel(run.result), statusTitle: resultHint(run.result),
         owner: run.success || run.files > 0 || run.processedBytes > 0 ? `${run.filesDisplay} files · ${run.processedDisplay}` : '—',
+        // What the backup found, under the figures; a run without the counts has no second line rather than a zero.
+        ownerNote: run.changesDisplay || undefined,
         ...(by ? { quiet: true, statusNote: 'Resolved', statusHint: `${resolvedByText(by)}, so this run needs nothing from you.` } : {}) };
     });
   }, [history, resolved, query, sort, from, to]);
@@ -873,10 +886,13 @@ function RestorePage({ state: shown, send }: { state: DashboardState; send: Send
   const permission = state.setup?.engineProfile === 'legacy'
     ? 'On this computer Windows asks for your permission each time Rewindle opens your backup: once to list your backups, once for each folder you open, and once to restore. Choose Yes each time.'
     : 'Windows asks for your permission (a shield prompt) before Rewindle reads your backup. Choose Yes.';
+  // How far back you can go: a fact about the backups, so it is shown whether or not Restore can open right now.
+  const range = backupRangeLine(state);
   return <><Heading title="Restore" description={description} note={note} />
     <Repairs state={state} send={send} />
     <div className="restore-layout"><section className="surface"><div className={`status-emblem ${tone}`}><ArchiveRestore size={24} aria-hidden="true" /></div>
       <h2>{recovery.title}</h2><p className="muted-copy">{recovery.repairNeeded ? 'Restore opens once the repair above is finished.' : recovery.detail}</p>
+      {range && <p className="muted-copy restore-range"><History size={13} aria-hidden="true" />{range}</p>}
       <div className="actions" style={{ marginTop: 22 }}><Action state={state} send={send} command="openRestore" primary size="md" icon={<ArrowUpRight size={14} />} quiet />
         {next === 'refresh' && <Button size="md" variant="secondary" onClick={() => send('refresh')}><RefreshCw size={14} aria-hidden="true" />Try again</Button>}</div>
       {ready && <p className="muted-copy restore-permission">{permission}</p>}

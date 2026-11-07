@@ -61,12 +61,19 @@ export function createSampleRuns(now: number): RunState[] {
     const success = !failed && !cancelled;
     const stamp = `${started.getFullYear()}${pad(started.getMonth() + 1)}${pad(started.getDate())}-${pad(started.getHours())}${pad(started.getMinutes())}`;
     const snapshot = success ? Math.floor(0x10000000 + random() * 0xefffffff).toString(16).slice(0, 8) : '';
+    // What each backup found, worked out from its age without another random() call (which would change every value after it).
+    // The failed and the cancelled run have none, so the sample also shows a run without them.
+    const filesNew = unchanged ? 0 : 20 + (age * 37) % 300, filesChanged = unchanged ? 0 : 5 + (age * 13) % 60;
+    const changesDisplay = success
+      ? `${numberFormat.format(filesNew)} new, ${numberFormat.format(filesChanged)} changed, ${numberFormat.format(files - filesNew - filesChanged)} unchanged`
+      : undefined;
     runs.push({
       id: `sample-run-${stamp}`, started: started.toISOString(), startedDisplay: formatWhen(started), type: 'Backup',
       result: failed ? 'Failed' : cancelled ? 'Canceled' : unchanged ? 'Unchanged' : 'Verified', success,
       durationSeconds: duration, durationDisplay: formatDuration(duration),
       files, filesDisplay: numberFormat.format(files), processedBytes: Math.round(processed), processedDisplay: formatBytes(processed),
       storedBytes: Math.round(stored), storedDisplay: formatBytes(stored), snapshot,
+      ...(changesDisplay ? { changesDisplay } : {}),
     });
   }
   const baseline = new Date(newest.getTime() - (RUN_COUNT - 1) * DAY + 5 * MINUTE);
@@ -224,6 +231,7 @@ export function createSampleRunDetails(run: RunState): RunDetailsState {
   return {
     id: run.id, type: run.type, result: run.result, success: run.success, started: run.started, startedDisplay: run.startedDisplay,
     durationDisplay: run.durationDisplay, filesDisplay: run.filesDisplay, processedDisplay: run.processedDisplay, storedDisplay: run.storedDisplay,
+    changesDisplay: run.changesDisplay ?? '',
     phase: failed ? 'Backing up files' : cancelled ? 'Backing up files' : 'Complete', failureCode: failed ? 'source_read_error' : '', exitCode: failed ? '3' : '0',
     snapshotId: run.snapshot ? `${run.snapshot}${'0'.repeat(56)}` : '',
     failure: failed ? 'Two files could not be read because another program was using them.' : '',

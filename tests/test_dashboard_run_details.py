@@ -107,6 +107,12 @@ class DashboardRunDetailsTests(unittest.TestCase):
             self.assertIn("failure", event_text)
             self.assertNotIn("must not be displayed", event_text)
             self.assertIn("affected paths", result["remediation"].casefold())
+            # The copied summary ends with what the backup found, or a dash when that is not known (never a zero).
+            without = result["copy_without_counts"].splitlines()
+            self.assertEqual(without[-1], "Changes: -")
+            self.assertEqual(without[-2].split(":")[0], "Stored")
+            self.assertEqual(result["copy_with_counts"].splitlines()[-1], "Changes: 2 new, 1 changed, 2 unchanged")
+            self.assertEqual(result["changes_display"], "2 new, 1 changed, 2 unchanged")
 
     def test_ui_supports_button_double_click_keyboard_copy_and_open(self) -> None:
         window = (DASHBOARD / "DashboardWindow.cs").read_text(encoding="utf-8")

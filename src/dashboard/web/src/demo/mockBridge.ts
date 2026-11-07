@@ -8,7 +8,7 @@
 // not contain it.
 import type { CommandName, DashboardState, NativeCommand, NativeMessage, NativeWebView } from '../native-types';
 import { applySpaceScenario, createSampleRunDetails, createSampleState, formatBytes, formatDuration, setSampleSpaceWarning } from './demoState';
-import { createRestoreDemo } from './restoreDemo';
+import { createRestoreDemo, sampleBackupRange } from './restoreDemo';
 import { applyAlertsScenario, setSampleAlerts } from './alertsDemo';
 
 const READ_ONLY = 'Sample data is read-only.';
@@ -32,6 +32,10 @@ export function installSampleBridge(): void {
   applyAlertsScenario(state);
   // `?space=low|full|google|checking` shows the Backup location card in that state (see demoState.ts).
   applySpaceScenario(state, new URLSearchParams(window.location.search).get('space'));
+  // How far back the sample's backups go. For screenshots of the other cases: `?range=none` (not known, so no line) and
+  // `?range=stale` (counted by the Restore list three days before the newest backup, so the line is dated).
+  const range = new URLSearchParams(window.location.search).get('range');
+  state.backupRange = range === 'none' ? null : sampleBackupRange(Date.now(), range === 'stale' ? 3 : 0);
   // What the host would answer to the command being handled when it says something on success.
   let answer = '';
   const idleStatus = JSON.stringify(state.status);

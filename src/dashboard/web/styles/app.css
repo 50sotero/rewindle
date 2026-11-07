@@ -413,6 +413,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .backup-destinations .info-heading, .backup-destinations .info-main, .backup-destinations .muted-copy { grid-column: 1; }
 .backup-destinations .info-action { grid-column: 2; grid-row: 1/4; align-self: center; margin: 0; }
 .backup-destinations .info-main { font-size: var(--type-md); margin: 8px 0 4px; }
+/* The lines under the backup location (how full the drive is, how far back the backups go) are one row of the card's grid. */
+.backup-destinations .location-facts { grid-column: 1; min-width: 0; }
+.backup-range-line { margin-top: 2px; font-variant-numeric: tabular-nums; }
+/* Under the space lines it keeps their spacing, also below a warning box or the "How this is worked out" disclosure. */
+.space-line + .backup-range-line { margin-top: 4px; }
+/* How far back the backups go, on the Restore page, under what Restore can do right now. */
+.restore-range { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-variant-numeric: tabular-nums; }
+.restore-range svg { flex-shrink: 0; }
 .folder-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
 .source-warning { font-size: var(--type-sm); color: var(--ink); background: var(--orange-tint); border-radius: var(--r-control); padding: 12px 14px; margin: 0 0 14px; }
 .source-notice { display: flex; align-items: flex-start; gap: 9px; font-size: var(--type-sm); line-height: 1.55; color: var(--ink); background: var(--inset); box-shadow: var(--shadow-hairline); border-radius: var(--r-control); padding: 11px 14px; margin: 0 0 14px; }
@@ -726,6 +734,8 @@ html[data-reduced-motion=true] dialog.app-dialog::backdrop { animation: none; ba
 .run-detail-stat-label { display: flex; align-items: center; gap: 6px; color: var(--ink-3); font-size: var(--type-xs); }
 .run-detail-stat-label svg { flex: 0 0 auto; }
 .run-detail-stat strong { display: block; margin-top: 6px; overflow-wrap: anywhere; color: var(--ink); font-size: var(--type-lg); font-weight: 550; font-variant-numeric: tabular-nums; line-height: 1.25; }
+/* What a backup found, under its file count ("312 new, 41 changed, 12,040 unchanged"). */
+.run-detail-stat-sub { display: block; margin-top: 2px; overflow-wrap: anywhere; color: var(--ink-3); font-size: var(--type-xs); font-variant-numeric: tabular-nums; line-height: 1.45; }
 .run-detail-events-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
 .run-detail-events-heading h3 { margin: 4px 0 0; font-size: var(--type-lg); font-weight: 550; letter-spacing: -.2px; }
 .run-detail-issue { padding: 14px 16px; margin-bottom: 14px; border: 1px solid; border-radius: var(--r-card); }

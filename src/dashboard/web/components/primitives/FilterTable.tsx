@@ -25,6 +25,8 @@ export type TableRow = {
   statusNote?: string; statusHint?: string;
   /** A sentence on what the pill's word means, as its tooltip. */
   statusTitle?: string;
+  /** A second, quieter line under `owner` ("312 new, 41 changed, 12,040 unchanged"), with itself as its tooltip. */
+  ownerNote?: string;
 };
 
 export type FilterTableLabels = {
@@ -279,8 +281,13 @@ function FilterTable({
                         </span>
                         {row.statusNote && <span className="filter-status-note truncate text-[12px] text-ink-3" title={row.statusHint}>{row.statusNote}</span>}
                       </span>
-                      <span role={cellRole} className="flex min-w-0 items-center px-3 py-2 text-ink-2">
+                      {/* A row without a note looks as it always did; the hidden separator keeps a screen reader from running the two lines together. */}
+                      <span role={cellRole} className="flex min-w-0 flex-col justify-center px-3 py-2 text-ink-2">
                         <span className="truncate tabular-nums" title={row.owner}>{row.owner}</span>
+                        {row.ownerNote && <>
+                          <span className="sr-only">; </span>
+                          <span className="filter-owner-note truncate text-[12px] text-ink-3 tabular-nums" title={row.ownerNote}>{row.ownerNote}</span>
+                        </>}
                       </span>
                       {openable && (
                         <span role={cellRole} className="flex items-center justify-center px-1">
