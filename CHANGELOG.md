@@ -52,8 +52,9 @@ labels. Releases before 0.2.0 were published under the name ResticBackuper.
   backups. Restore this picks that version, and the usual steps follow. The
   search only reads your backups, uses the Windows permission Restore already
   asked for, looks for about 20 seconds at a time (Look further back goes on),
-  and waits while a backup is running or about to start. It is not offered with
-  the earlier personal edition of the backup service.
+  and is not offered while a backup is running or about to start (the Find a
+  file tab says why). It is not available with the earlier personal edition of
+  the backup service.
 
 ### Changed
 
