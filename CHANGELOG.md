@@ -96,6 +96,14 @@ ones a home user reads without a glossary.
   backup service's other elevated steps now do it first too. The Google Drive
   check's password helper changed, so registering that check again needs
   `-ProvisionAssets`.
+- **Nothing that runs as administrator is built in your own temporary folder
+  any more.** The installer, the uninstaller and moving the backup location
+  compiled small Windows helpers in your temporary folder and then loaded them
+  as administrator, so another program running as you could have swapped them
+  in between. They are now made in memory. The installer also downloads
+  Microsoft's WebView2 installer into a folder only administrators can change
+  and keeps it locked from its signature check until it has finished, and the
+  rest of the install keeps its temporary files in such a folder too.
 
 ## [0.2.0-alpha.2] - 2026-10-08
 

@@ -536,30 +536,48 @@ function Exit-RunLock {
     try { $Stream.Unlock(0, 1) } finally { $Stream.Dispose() }
 }
 
+$script:repositoryNative = $null
+
+# GetVolumeInformationW gives the volume serial and the raw file-system flags (a Google Drive mount reports remote storage),
+# which WMI does not. The P/Invoke stub is emitted in memory (Reflection.Emit, run only), never compiled: csc.exe would work
+# through files in %TEMP%, a folder the requesting account's unelevated programs can change while this manager runs elevated
+# and loads what was compiled there. SetLastError is set, as DllImport would set it.
+function Get-RepositoryNativeMethods {
+    if ($null -ne $script:repositoryNative) { return $script:repositoryNative }
+    $assemblyName = [Reflection.AssemblyName]::new('ResticBackuper.RepositoryManager.Native.' + [Guid]::NewGuid().ToString('N'))
+    $assembly = [Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly($assemblyName, [Reflection.Emit.AssemblyBuilderAccess]::Run)
+    $module = $assembly.DefineDynamicModule($assemblyName.Name)
+    $type = $module.DefineType('ResticBackuper.RepositoryManager.NativeMethods', [Reflection.TypeAttributes]'Public, Class, Sealed, Abstract')
+    $outUInt32 = [uint32].MakeByRefType()
+    $method = $type.DefineMethod('GetVolumeInformationW', [Reflection.MethodAttributes]'Public, Static, PinvokeImpl, HideBySig', [bool],
+        [Type[]]@([string], [Text.StringBuilder], [int], $outUInt32, $outUInt32, $outUInt32, [Text.StringBuilder], [int]))
+    $dllImport = [Runtime.InteropServices.DllImportAttribute]
+    $fields = [Reflection.FieldInfo[]]@(
+        $dllImport.GetField('SetLastError'), $dllImport.GetField('CallingConvention'), $dllImport.GetField('CharSet'),
+        $dllImport.GetField('EntryPoint'), $dllImport.GetField('ExactSpelling'))
+    $method.SetCustomAttribute([Reflection.Emit.CustomAttributeBuilder]::new($dllImport.GetConstructor([Type[]]@([string])),
+        [object[]]@('kernel32.dll'), $fields,
+        [object[]]@($true, [Runtime.InteropServices.CallingConvention]::Winapi, [Runtime.InteropServices.CharSet]::Unicode, 'GetVolumeInformationW', $true)))
+    $script:repositoryNative = $type.CreateType()
+    return $script:repositoryNative
+}
+
+function Get-VolumeDetails {
+    param([string]$Root)
+    $native = Get-RepositoryNativeMethods
+    [uint32]$serial = 0
+    [uint32]$maximum = 0
+    [uint32]$flags = 0
+    if (-not $native::GetVolumeInformationW($Root, $null, 0, [ref]$serial, [ref]$maximum, [ref]$flags, $null, 0)) {
+        throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error())
+    }
+    return [pscustomobject]@{ Serial = $serial; MaximumComponentLength = $maximum; Flags = $flags }
+}
+
 function Get-VolumeSerial {
     param([string]$Path)
-    if (-not ('RepositoryRelocation.NativeVolume' -as [type])) {
-        Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-namespace RepositoryRelocation {
-  public static class NativeVolume {
-    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
-    static extern bool GetVolumeInformation(string root, System.Text.StringBuilder volume, int volumeSize,
-      out uint serial, out uint maximumComponentLength, out uint fileSystemFlags,
-      System.Text.StringBuilder fileSystemName, int fileSystemNameSize);
-    public static UInt32[] Details(string root) {
-      uint serial, maximum, flags;
-      if (!GetVolumeInformation(root, null, 0, out serial, out maximum, out flags, null, 0))
-        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-      return new UInt32[] { serial, maximum, flags };
-    }
-  }
-}
-'@
-    }
-    $details = [RepositoryRelocation.NativeVolume]::Details([IO.Path]::GetPathRoot($Path))
-    return ([uint32]$details[0]).ToString('X8')
+    $details = Get-VolumeDetails -Root ([IO.Path]::GetPathRoot($Path))
+    return ([uint32]$details.Serial).ToString('X8')
 }
 
 function Get-VolumeMetadata {
@@ -567,13 +585,12 @@ function Get-VolumeMetadata {
     $root = [IO.Path]::GetPathRoot($Path)
     $drive = [IO.DriveInfo]::new($root)
     if (-not $drive.IsReady) { throw "Volume is not ready: $root" }
-    [void](Get-VolumeSerial -Path $Path)
-    $details = [RepositoryRelocation.NativeVolume]::Details($root)
+    $details = Get-VolumeDetails -Root $root
     return [pscustomobject]@{
         Root = $root
-        Serial = ([uint32]$details[0]).ToString('X8')
-        MaximumComponentLength = [long]$details[1]
-        Flags = [long]$details[2]
+        Serial = ([uint32]$details.Serial).ToString('X8')
+        MaximumComponentLength = [long]$details.MaximumComponentLength
+        Flags = [long]$details.Flags
         FileSystem = [string]$drive.DriveFormat
         DriveType = [int]$drive.DriveType
         FreeBytes = [long]$drive.AvailableFreeSpace

@@ -304,6 +304,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File Install-ResticBackuper.p
 `-ProgressPath` along and the elevated copy writes the feed. **If the approval is declined, no feed is ever created**; the
 exit code is non-zero.
 
+Once elevated, the installer keeps its temporary files, and those of the programs it starts (Python, Restic, Microsoft's
+WebView2 installer), in a new folder `%ProgramData%\RewindleSetup-<32 hex>` that only Administrators and SYSTEM can change,
+and removes it when it exits. It opens the progress file before that, so the file is still checked against the account's own
+temporary folder (3.1). A folder an interrupted run leaves behind matches the name pattern of the Setup bootstrap's own
+folders, so a later Setup run removes it once it is over a day old.
+
 ### 3.1 The progress file
 
 The elevated script creates it. The path must satisfy all of these, or the script exits non-zero before changing anything
@@ -385,7 +391,7 @@ protected folders first, and sealing them is the last step that touches them). R
 | # | Phase | Title | What runs | `skipped` when |
 | --- | --- | --- | --- | --- |
 | 1 | `preflight` | Checking your PC and the choices you made | Elevation and account checks, every validation of section 2, the summary printed on the console, and (interactively) the confirmation | never |
-| 2 | `webview2` | Making sure Microsoft Edge WebView2 is available | Look for the runtime; if missing, download Microsoft's installer, check its signature and run it. `detail` says "Already installed" or "Installed" with the version | `-SkipDashboard` |
+| 2 | `webview2` | Making sure Microsoft Edge WebView2 is available | Look for the runtime; if missing, download Microsoft's installer into a new folder only administrators can change, check its signature and run it, holding the file open from the check until it exits. `detail` says "Already installed" or "Installed" with the version | `-SkipDashboard` |
 | 3 | `payload` | Copying Rewindle onto this PC | Create the repository's parent folder (Google Drive mode: write and rename a test file there), copy the program files to Program Files, check them against the manifest, write the engine configuration and the runtime manifest | never |
 | 4 | `canary` | Preparing the restore test file | Create the ProgramData state folder and the protected restore canary the engine backs up and restores | never |
 | 5 | `credential` | Creating the backup password and storing it for your account | Generate the repository password and protect it for the account (DPAPI) | never |
