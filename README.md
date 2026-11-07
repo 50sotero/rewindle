@@ -92,7 +92,9 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
   that the forecast isn't available with that backup program.
 - Under that, the card says how far back your backups go ("412 backups,
   oldest 3 Mar 2025"), as counted by the last verified backup or the last time
-  Restore listed them; the Restore page says it too.
+  Restore listed them; the Restore page says it too. After **Old backups**
+  removes some, it is left out until the next backup or Restore counts them
+  again.
 - **Back up now**, live progress (throughput, elapsed time, estimate), and
   **Cancel backup**, which asks Restic to stop cooperatively. Existing
   snapshots are never touched.

@@ -585,6 +585,8 @@ namespace ResticBackuper.Dashboard
     {
         internal DateTime FinishedUtc;
         internal long FreedBytes;
+        // It removed backups, or may have (nobody could confirm which), rather than only freeing the space of earlier ones.
+        internal bool RemovedBackups;
     }
 
     // Everything the dashboard knows about clean-up, from one read of the engine's records.
@@ -625,6 +627,9 @@ namespace ResticBackuper.Dashboard
         // record cannot be read it has no forecast (DashboardWindow.BackupSpace.cs).
         internal bool HistoryKnown;
         internal List<RetentionSpaceChange> SpaceChanges = new List<RetentionSpaceChange>();
+        // When a recorded clean-up last removed backups (or may have), if one did: how far back the backups go, counted before
+        // it, is out of date until a later listing counts them again (DashboardWindow.Retention.cs).
+        internal DateTime? BackupsRemovedUtc;
         // What the read was keyed on, so an unchanged set of files is not parsed again.
         internal string Stamp = string.Empty;
     }
@@ -1052,12 +1057,21 @@ namespace ResticBackuper.Dashboard
                 }
                 view.LastRun = ParseHistoryEntry(entries[entries.Length - 1] as IDictionary<string, object>);
                 view.SpaceChanges = SpaceChangesOf(entries);
+                view.BackupsRemovedUtc = null;
+                foreach (RetentionSpaceChange change in view.SpaceChanges)
+                {
+                    if (change.RemovedBackups)
+                    {
+                        view.BackupsRemovedUtc = change.FinishedUtc;
+                    }
+                }
                 view.HistoryKnown = true;
             }
             catch
             {
                 view.LastRun = null;
                 view.SpaceChanges = new List<RetentionSpaceChange>();
+                view.BackupsRemovedUtc = null;
                 view.HistoryKnown = false;
             }
         }
@@ -1082,6 +1096,7 @@ namespace ResticBackuper.Dashboard
                 }
                 RetentionSpaceChange change = new RetentionSpaceChange();
                 change.FinishedUtc = finished;
+                change.RemovedBackups = removed;
                 change.FreedBytes = entry.FreeBytesBefore.HasValue && entry.FreeBytesAfter.HasValue &&
                     entry.FreeBytesBefore.Value >= 0 && entry.FreeBytesAfter.Value >= 0
                     ? Math.Max(0, entry.FreeBytesAfter.Value - entry.FreeBytesBefore.Value)

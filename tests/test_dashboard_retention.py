@@ -88,6 +88,7 @@ namespace {namespace}
                 changes.Add(new object[] {{ change.FinishedUtc.ToString("yyyy-MM-ddTHH:mm:ssZ"), change.FreedBytes.ToString() }});
             }}
             result["space_changes"] = changes.ToArray();
+            result["removed_utc"] = view.BackupsRemovedUtc.HasValue ? view.BackupsRemovedUtc.Value.ToString("yyyy-MM-ddTHH:mm:ssZ") : null;
             return result;
         }}
 
@@ -596,7 +597,36 @@ class DashboardRetentionHarnessTests(unittest.TestCase):
         # A record that is not this engine's, cannot be read, or sits where others could change it: not known.
         for name, view in (("foreign", foreign_view), ("unreadable", broken), ("untrusted", distrusted)):
             with self.subTest(name=name):
-                self.assertEqual((False, []), (view["history_known"], view["space_changes"]))
+                self.assertEqual((False, [], None), (view["history_known"], view["space_changes"], view["removed_utc"]))
+        # How far back backups go is out of date after the newest clean-up that removed backups.
+        self.assertEqual("2026-09-20T10:00:00Z", read["removed_utc"])
+        self.assertEqual((None, None), (nothing["removed_utc"], other["removed_utc"]))
+
+    def test_how_far_back_backups_go_is_out_of_date_after_the_last_clean_up_that_removed_any(self) -> None:
+        def entry(finished: str, outcome: str, removed: int, **extra) -> dict:
+            return {"request_nonce": "1" * 64, "started_utc": finished, "finished_utc": finished, "outcome": outcome,
+                    "confirmed_count": max(removed, 1), "removed_count": removed, "removed_set_sha256": "2" * 64, "prune_mode": "none",
+                    "files_confirmed": True, "keep_daily": 7, "keep_weekly": 4, "keep_monthly": 6, "prune_completed": False,
+                    "check_completed": False, "check_unfinished": False, "removal_unverified": False,
+                    "free_bytes_before": 1, "free_bytes_after": 2, **extra}
+        cases = {
+            # Freeing the space of an earlier removal, or nothing to remove, removes no backup.
+            "freed_later": ([entry("2026-09-10T10:00:00Z", "space_pending", 4),
+                             entry("2026-09-11T10:00:00Z", "nothing_to_remove", 0, prune_completed=True)], "2026-09-10T10:00:00Z"),
+            "unverified": ([entry("2026-09-12T10:00:00Z", "partial", 0, removal_unverified=True)], "2026-09-12T10:00:00Z"),
+            "nothing_removed": ([entry("2026-09-12T10:00:00Z", "failed", 0), entry("2026-09-13T10:00:00Z", "partial", 0),
+                                 entry("2026-09-14T10:00:00Z", "nothing_to_remove", 0)], None),
+        }
+        fixtures = []
+        for name, (entries, _) in cases.items():
+            fixture = self.fixture(f"removed-{name}")
+            write_json(fixture.state / retention.HISTORY_NAME, {"schema": retention.HISTORY_SCHEMA, "schema_version": 1, "plan_id": PLAN,
+                                                                "entries": entries})
+            fixtures.append(fixture)
+        views = self.run_cases([fixture.read() for fixture in fixtures])
+        for (name, (_, expected)), view in zip(cases.items(), views):
+            with self.subTest(name=name):
+                self.assertEqual((True, expected), (view["history_known"], view["removed_utc"]))
 
     def test_each_earlier_backup_is_read_with_its_kind(self) -> None:
         fixture = self.fixture("earlier-kinds")
@@ -1183,6 +1213,19 @@ class RetentionStaticTests(unittest.TestCase):
             'internal const string RetentionUnavailableMessage =\n            "Clean-up of old backups isn\'t available for this backup service.";',
             host,
         )
+
+    def test_how_far_back_backups_go_is_unknown_after_a_clean_up_until_counted_again(self) -> None:
+        host = (DASHBOARD / "DashboardWindow.Retention.cs").read_text(encoding="utf-8")
+        web = (DASHBOARD / "DashboardWindow.Web.cs").read_text(encoding="utf-8")
+        range_state = web[web.index("private Dictionary<string, object> BuildWebBackupRangeState("):]
+        range_state = range_state[:range_state.index("\n        }\n")]
+        self.assertIn("if (range == null || RetentionMayHaveRemovedSince(range.CountedUtc))", range_state)
+        method = host[host.index("private bool RetentionMayHaveRemovedSince(DateTime countedUtc)"):]
+        method = method[:method.index("\n        }\n")]
+        # Never for a backup service without clean-up (the legacy edition reads nothing); unknown while the records are not read.
+        self.assertIn("if (!RetentionSupportedByProfile() || !retentionCapabilityKnown || !retentionCapabilitySupported)", method)
+        self.assertIn("if (view == null || !view.HistoryKnown)", method)
+        self.assertIn("view.BackupsRemovedUtc.Value > countedUtc.ToUniversalTime()", method)
 
 
 if __name__ == "__main__":

@@ -223,7 +223,10 @@ optional keys, so the schema stays 1 and an older build reads and rewrites the f
 `backup-range.json` (schema 1, `source` `restore`, `plan_id`, `repository`, `count` 0 to 1,000,000, `oldest_utc` and
 `newest_utc` when `count` > 0, `counted_utc`) is how far back the backups went when the Restore list was last read, for the
 plan and location named; it is written by the dashboard's background refresh after a listing, and with either engine. The page shows whichever of
-it and `snapshot_inventory` belongs to the plan and location in use and was counted later, or nothing. Both files can be
+it and `snapshot_inventory` belongs to the plan and location in use and was counted later, or nothing. With an engine that has
+clean-up of old backups, nothing is shown while a count is older than the newest clean-up that removed backups (or may have:
+`removal_unverified`) in `retention-history.json`, or while that record is not read yet or cannot be trusted, until the next
+backup or a Restore listing counts them again (section 10). Both files can be
 written by anything running as the user, so they are display-only: parsed defensively, never used to allow, refuse, keep or
 delete anything, and never read by the anomaly review or by anything that removes backups.
 
@@ -427,7 +430,8 @@ their space, it takes away `free_bytes_after` minus `free_bytes_before` for each
 its 8-week window. An entry in that window without both numbers leaves the forecast learning ("Old backups were removed
 lately, so Rewindle needs up to 8 more weeks of backups to tell when the drive will be full.") until it is older than the
 window; a history file that exists but cannot be trusted, or records not read yet, leave it unknown. Neither ever gives a
-"full in N weeks" from what the backups added alone.
+"full in N weeks" from what the backups added alone. How far back the backups go (section 6) is not shown once a clean-up
+removed backups after it was counted, until a later listing counts them again.
 
 **Tests.** `tests/test_retention.py` (the helper, with a fake Restic), `tests/Test-ManageRetention.ps1` (the manager in its
 disposable mode against a stand-in `restic.exe` that refuses any read without `--no-lock`), `tests/test_dashboard_retention.py`

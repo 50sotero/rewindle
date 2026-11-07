@@ -2229,7 +2229,8 @@ namespace ResticBackuper.Dashboard
                 snapshot.ListedBackupRange,
                 configuration.PlanId,
                 configuration.RepositoryPath);
-            if (range == null)
+            // A count made before clean-up of old backups removed some would name backups that are gone: unknown until counted again.
+            if (range == null || RetentionMayHaveRemovedSince(range.CountedUtc))
             {
                 return null;
             }

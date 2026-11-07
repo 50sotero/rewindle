@@ -241,7 +241,10 @@ read, the wrapper counts the snapshots the Restore list would offer (with
 oldest and newest times as `snapshot_inventory`. That step is guarded: a
 problem counting leaves the record out and never fails the backup. The
 dashboard also keeps the count the Restore list last read in its per-user
-`backup-range.json`, which is how the earlier personal edition gets one.
+`backup-range.json`, which is how the earlier personal edition gets one. Once
+clean-up of old backups (below) removes backups, a count made before it is
+out of date, so the dashboard shows none until the next backup or the Restore
+list counts them again.
 
 ## Components
 

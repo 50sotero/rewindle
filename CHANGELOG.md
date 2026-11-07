@@ -41,8 +41,10 @@ labels. Releases before 0.2.0 were published under the name ResticBackuper.
   change is unfinished. It works for a backup location on a drive of this PC
   (not yet for Google Drive), and installing, updating or reinstalling
   Rewindle turns it off until you turn it on again. If a clean-up stops
-  part-way, it says what was removed and what is left to do. The earlier
-  personal edition says clean-up isn't available.
+  part-way, it says what was removed and what is left to do. The backup drive
+  forecast takes away the space a clean-up frees, and how far back your
+  backups go is counted again after one. The earlier personal edition says
+  clean-up isn't available.
 
 ### Changed
 

@@ -225,6 +225,24 @@ namespace ResticBackuper.Dashboard
             return true;
         }
 
+        // Whether how far back the backups go, as counted at `countedUtc`, may be out of date because clean-up of old backups
+        // removed backups since then (or may have: nobody could confirm which). The count and the oldest date are then unknown
+        // until a listing made since (the next backup, or the Restore list) counts them again, as they are while the engine's
+        // clean-up records are not read yet or cannot be read. Never for a backup service without clean-up.
+        private bool RetentionMayHaveRemovedSince(DateTime countedUtc)
+        {
+            if (!RetentionSupportedByProfile() || !retentionCapabilityKnown || !retentionCapabilitySupported)
+            {
+                return false;
+            }
+            RetentionView view = retentionView;
+            if (view == null || !view.HistoryKnown)
+            {
+                return true;
+            }
+            return view.BackupsRemovedUtc.HasValue && view.BackupsRemovedUtc.Value > countedUtc.ToUniversalTime();
+        }
+
         // Try again on a clean-up setting that couldn't be read reads it again at once, even when none of its files changed
         // since (a read that failed for a moment would otherwise be kept until one does).
         internal void ForgetUnreadableRetentionView()
