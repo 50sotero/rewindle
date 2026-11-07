@@ -1050,8 +1050,9 @@ def _run_locked(
                 )
             # How much space the backups now take, for the dashboard's Backup
             # location card. Measured before the finish time is taken, so the
-            # recorded run includes it. The walk is read-only and time-boxed, and
-            # whatever happens in it, a verified backup stays verified.
+            # recorded run includes it. The walk is read-only and time-boxed (also
+            # when a folder listing hangs), and whatever happens in it, a verified
+            # backup stays verified.
             try:
                 repository_bytes_after = measure_repository_bytes(
                     Path(config["repository"])

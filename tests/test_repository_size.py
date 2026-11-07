@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import functools
 import json
 import os
 from pathlib import Path
@@ -10,6 +12,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -48,6 +52,36 @@ def fill_repository(repository: Path) -> int:
     total += write_bytes(repository / "snapshots" / ("5" * 64), 301)
     (repository / "locks").mkdir()
     return total
+
+
+@contextlib.contextmanager
+def hung_listing(repository: Path, *, longest: float = 8.0):
+    """Listing any folder of the backup location blocks, as on a Google Drive for desktop that hangs; other folders list as usual.
+
+    The listing gives up by itself after `longest` seconds, so a measurement that waits for it (no hard limit) is slow rather
+    than stuck forever. On the way out the listing is let go and the walk left behind is waited for, so the temporary folder
+    can be removed.
+    """
+    real_scandir = os.scandir
+    root = os.path.normcase(os.path.abspath(repository))
+    listing = SimpleNamespace(entered=threading.Event(), release=threading.Event())
+
+    def scandir(path=None):
+        target = os.path.normcase(os.path.abspath(os.fspath(path if path is not None else ".")))
+        if target == root or target.startswith(root + os.sep):
+            listing.entered.set()
+            listing.release.wait(longest)
+            raise OSError("the folder listing did not come back")
+        return real_scandir(path) if path is not None else real_scandir()
+
+    try:
+        with mock.patch.object(restic_common.os, "scandir", side_effect=scandir):
+            yield listing
+    finally:
+        listing.release.set()
+        for thread in threading.enumerate():
+            if thread.name == "repository-size-walk":
+                thread.join(10)
 
 
 class MeasureRepositoryBytesTests(unittest.TestCase):
@@ -132,6 +166,20 @@ class MeasureRepositoryBytesTests(unittest.TestCase):
                 expected, measure_repository_bytes(repository, clock=lambda: float(next(slow)))
             )
             self.assertLessEqual(restic_common.REPOSITORY_SIZE_TIME_LIMIT_SECONDS, 15.0)
+
+    def test_a_folder_listing_that_never_returns_gives_no_size_at_the_limit(self) -> None:
+        # A Google Drive for desktop that hangs: one listing does not come back. The limit still holds, so the end of a
+        # verified backup is never held up by it.
+        with tempfile.TemporaryDirectory(prefix="repository-size-") as root_text:
+            repository = Path(root_text) / "repository"
+            fill_repository(repository)
+            with hung_listing(repository) as listing:
+                started = time.monotonic()
+                measured = measure_repository_bytes(repository, time_limit_seconds=0.5)
+                waited = time.monotonic() - started
+            self.assertTrue(listing.entered.is_set())
+            self.assertIsNone(measured)
+            self.assertLess(waited, 4.0)
 
     def test_a_missing_location_or_a_file_gives_no_size(self) -> None:
         with tempfile.TemporaryDirectory(prefix="repository-size-") as root_text:
@@ -336,6 +384,23 @@ class VerifiedBackupRecordsSizeTests(unittest.TestCase):
             status = fixture.document("status.json")
             self.assertEqual("success", status["state"])
             self.assertIn("repository_bytes_after", status)
+            self.assertIsNone(status["repository_bytes_after"])
+            self.assertIsNone(fixture.document("last-success.json")["repository_bytes_after"])
+
+    def test_a_backup_folder_that_hangs_does_not_hold_up_the_end_of_a_verified_backup(self) -> None:
+        # The scheduled task ignores a new start while a run is still going, so a run held up here would cost the next backups.
+        with tempfile.TemporaryDirectory(prefix="repository-size-run-") as root_text:
+            fixture = RunFixture(Path(root_text))
+            quick = functools.partial(measure_repository_bytes, time_limit_seconds=0.5)
+            with hung_listing(fixture.repository) as listing:
+                started = time.monotonic()
+                code = fixture.run(mock.patch.object(backup, "measure_repository_bytes", side_effect=quick))
+                waited = time.monotonic() - started
+            self.assertEqual(0, code)
+            self.assertTrue(listing.entered.is_set())
+            self.assertLess(waited, 6.0)
+            status = fixture.document("status.json")
+            self.assertEqual("success", status["state"])
             self.assertIsNone(status["repository_bytes_after"])
             self.assertIsNone(fixture.document("last-success.json")["repository_bytes_after"])
 

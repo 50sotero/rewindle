@@ -178,8 +178,10 @@ exclusion set. After a run is verified, and before its finish time is taken,
 it adds up the size of the repository folder and records it as
 `repository_bytes_after` in `status.json` and `last-success.json`, for the
 dashboard. That walk is read-only, never enters a link, junction or other
-reparse point (it gives up instead), stops after 15 seconds, and leaves the
-field empty rather than ever failing a verified backup. When configured,
+reparse point (it gives up instead), and leaves the field empty rather than
+ever failing a verified backup. It runs on its own thread, and the run waits
+for it at most 15 seconds, so even a folder listing that never returns (a
+Google Drive for desktop that hangs) cannot hold up the end of the run. When configured,
 Restic asks Windows VSS for filesystem snapshots of local fixed NTFS sources
 so open files can be read from a consistent view.
 

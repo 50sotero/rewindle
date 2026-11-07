@@ -1369,30 +1369,25 @@ def _repository_entry_kind(metadata: Any) -> str:
     return "other"
 
 
-def measure_repository_bytes(
+def _walk_repository_bytes(
     repository: Path,
-    *,
-    time_limit_seconds: float = REPOSITORY_SIZE_TIME_LIMIT_SECONDS,
-    clock: Callable[[], float] = time.monotonic,
+    deadline: float,
+    clock: Callable[[], float],
+    abandoned: threading.Event,
 ) -> int | None:
-    """Total size of the regular files under the backup location, for the dashboard.
+    """The walk itself (see measure_repository_bytes), on its own thread.
 
-    Read-only and best effort: nothing is opened, written or followed, and no
-    name or path is recorded. It returns None, and never raises for these, when
-    the location is not a plain folder, when any folder inside it is a link,
-    junction or other reparse point (the total would leave out what is behind
-    it, and Restic never makes one), on any OSError or ValueError, or once the
-    walk passes the time limit. A verified backup must never fail because its
-    size could not be measured, so the caller guards the call as well.
+    Between folders it stops once its time is up or the caller has stopped
+    waiting for it, so a walk left behind ends as soon as the listing it was
+    stuck in returns.
     """
     try:
-        deadline = clock() + time_limit_seconds
         if _repository_entry_kind(os.stat(repository, follow_symlinks=False)) != "folder":
             return None
         total = 0
         pending = [os.fspath(repository)]
         while pending:
-            if clock() > deadline:
+            if abandoned.is_set() or clock() > deadline:
                 return None
             folder = pending.pop()
             with os.scandir(folder) as entries:
@@ -1408,6 +1403,56 @@ def measure_repository_bytes(
         return total
     except (OSError, ValueError):
         return None
+
+
+def measure_repository_bytes(
+    repository: Path,
+    *,
+    time_limit_seconds: float = REPOSITORY_SIZE_TIME_LIMIT_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
+) -> int | None:
+    """Total size of the regular files under the backup location, for the dashboard.
+
+    Read-only and best effort: nothing is opened, written or followed, and no
+    name or path is recorded. It returns None, and never raises for these, when
+    the location is not a plain folder, when any folder inside it is a link,
+    junction or other reparse point (the total would leave out what is behind
+    it, and Restic never makes one), on any OSError or ValueError, or once the
+    walk passes the time limit. A verified backup must never fail because its
+    size could not be measured, so the caller guards the call as well.
+
+    The time limit holds even when one folder listing never returns (a Google
+    Drive for desktop that hangs): the walk runs on a daemon thread, and once
+    the limit passes the caller stops waiting, gives no size and leaves that
+    thread behind. The thread holds no lock and writes nothing, and it ends by
+    itself when the listing returns, or with the process.
+    """
+    outcome: list[int | None] = []
+    abandoned = threading.Event()
+
+    def walk() -> None:
+        try:
+            outcome.append(
+                _walk_repository_bytes(
+                    repository, clock() + time_limit_seconds, clock, abandoned
+                )
+            )
+        except Exception:
+            outcome.append(None)
+
+    try:
+        worker = threading.Thread(
+            target=walk, name="repository-size-walk", daemon=True
+        )
+        worker.start()
+        worker.join(max(0.0, time_limit_seconds))
+    except Exception:
+        abandoned.set()
+        return None
+    if worker.is_alive() or not outcome:
+        abandoned.set()
+        return None
+    return outcome[0]
 
 
 def _validate_drivefs_provider(
