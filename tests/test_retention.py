@@ -205,12 +205,9 @@ class Harness:
         document.update(overrides)
         write_json(self.state / retention.POLICY_NAME, document)
 
-    def confirmed_cleanup(self, started: str) -> None:
-        write_json(self.state / retention.HISTORY_NAME, {
-            "schema": retention.HISTORY_SCHEMA, "schema_version": 1, "plan_id": PLAN, "updated_utc": started,
-            "entries": [{"started_utc": started, "outcome": "removed", "files_confirmed": True, "removed_count": 1,
-                         "prune_completed": True}],
-        })
+    def confirmed_cleanup(self) -> None:
+        """A clean-up where the person ticked that their files looked right, with the backup runs logged so far."""
+        retention.record_confirmation(self.ctx, REPO, "c" * 64)
 
     def preview_sha(self) -> str:
         return hashlib.sha256((self.state / retention.PREVIEW_NAME).read_bytes()).hexdigest()
@@ -547,18 +544,87 @@ class EarlierChangesTests(RetentionTestCase):
         self.assertTrue(document["first_cleanup"])
         self.assertTrue(document["needs_files_confirmed"])
 
-    def test_a_confirmed_clean_up_clears_what_came_before_it(self) -> None:
-        standard_history(self.h)
-        self.h.confirmed_cleanup("2026-09-29T12:00:00Z")
-        self.h.policy()
-        document, _sha = retention.compute_preview(self.h.ctx)
-        self.assertFalse(document["needs_files_confirmed"])
-        self.assertEqual(document["earlier_changes"], [])
+    def test_a_confirmed_clean_up_clears_the_changes_that_were_there_then(self) -> None:
+        h = self.h
+        standard_history(h)
+        # Backup 3 changed far more files than usual, and backup 4 could not be compared with the one before it.
+        h.verified(3, "2026-09-27T00:30:00Z", hold=True, latest=False)
+        h.verified(4, "2026-09-28T00:30:00Z", status="not_comparable", latest=False)
+        h.policy()
+        document, _sha = retention.compute_preview(h.ctx)
+        self.assertEqual(sorted(change["kind"] for change in document["earlier_changes"]), ["hold", "not_compared"])
+        # Backup 2, the last one before the change nobody has looked at, stays.
+        self.assertEqual([item["id"] for item in document["remove"]], [snapshot_id(1)])
+        h.confirmed_cleanup()
+        document, _sha = retention.compute_preview(h.ctx)
+        self.assertEqual(
+            (document["earlier_changes"], document["needs_files_confirmed"], document["first_cleanup"]), ([], False, False)
+        )
+        self.assertEqual([item["id"] for item in document["remove"]], [snapshot_id(1), snapshot_id(2)])
+
+    def test_a_change_after_the_confirmation_counts_even_when_the_clock_was_set_back(self) -> None:
+        h = self.h
+        standard_history(h)
+        h.policy()
+        h.confirmed_cleanup()
+        # The PC's clock was set back after the confirmed clean-up. The next backup changed far more files than usual and is
+        # recorded with a time before every backup the person looked over. Nobody looked at it, so it still counts.
+        h.verified(3, "2026-09-20T00:30:00Z", hold=True, latest=False)
+        document, _sha = retention.compute_preview(h.ctx)
+        self.assertTrue(document["needs_files_confirmed"])
+        self.assertEqual(
+            [(change["kind"], change["finished_utc"]) for change in document["earlier_changes"]],
+            [("hold", "2026-09-20T00:30:00Z")],
+        )
+        kept = {item["id"]: item["reasons"] for item in document["keep"]}
+        self.assertEqual(kept[snapshot_id(2)], ["before_change"])
+        self.assertEqual([item["id"] for item in document["remove"]], [snapshot_id(1)])
+
+    def test_only_a_confirmed_removal_records_the_backups_looked_over(self) -> None:
+        h = self.h
+        standard_history(h)
+        h.verified(3, "2026-09-27T00:30:00Z", hold=True, latest=False)
+        h.policy()
+        record = {
+            "outcome": "removed", "request_nonce": "1" * 64, "started_utc": "2026-09-30T10:00:00Z", "confirmed_count": 1,
+            "removed_count": 1, "removed_set_sha256": "2" * 64, "prune_completed": True, "check_completed": True,
+            "prune_mode": "standard", "free_bytes_before": 1,
+        }
+        retention.apply_record(h.ctx, **record, files_confirmed=False)
+        self.assertFalse((h.state / retention.CONFIRMED_NAME).exists())
+        self.assertTrue(h.preview()["needs_files_confirmed"])
+        retention.apply_record(h.ctx, **record, files_confirmed=True)
+        confirmed = json.loads((h.state / retention.CONFIRMED_NAME).read_text(encoding="utf-8"))
+        self.assertEqual((confirmed["schema"], confirmed["plan_id"], confirmed["repository_id"]),
+                         (retention.CONFIRMED_SCHEMA, PLAN, REPO))
+        self.assertEqual(len(confirmed["runs"]), 1)
+        self.assertRegex(confirmed["runs"][0], r"^[0-9]{8}T[0-9]{6}-[0-9a-f]{8}$")
+        self.assertEqual((h.preview()["needs_files_confirmed"], h.preview()["earlier_changes"]), (False, []))
+
+    def test_a_confirmation_that_cannot_be_trusted_or_names_another_location_asks_again(self) -> None:
+        h = self.h
+        standard_history(h)
+        h.policy()
+        h.confirmed_cleanup()
+        path = h.state / retention.CONFIRMED_NAME
+        document = json.loads(path.read_text(encoding="utf-8"))
+        self.assertFalse(retention.compute_preview(h.ctx)[0]["needs_files_confirmed"])
+        write_json(path, {**document, "repository_id": "f" * 64})
+        preview, _sha = retention.compute_preview(h.ctx)
+        self.assertEqual((preview["first_cleanup"], preview["needs_files_confirmed"], preview["earlier_changes_unknown"]),
+                         (True, True, False))
+        write_json(path, {**document, "runs": ["yesterday"]})
+        preview, _sha = retention.compute_preview(h.ctx)
+        self.assertEqual((preview["needs_files_confirmed"], preview["earlier_changes_unknown"]), (True, True))
+        write_json(path, document)
+        h.acl_failures.add(retention.CONFIRMED_NAME)
+        preview, _sha = retention.compute_preview(h.ctx)
+        self.assertEqual((preview["needs_files_confirmed"], preview["earlier_changes_unknown"]), (True, True))
 
     def test_a_hold_stays_recorded_through_blocked_and_error_previews_and_off_then_on(self) -> None:
         h = self.h
         standard_history(h)
-        h.confirmed_cleanup("2026-09-24T12:00:00Z")
+        h.confirmed_cleanup()
         h.policy()
         h.verified(4, "2026-09-28T00:30:00Z", hold=True)
         document, _sha = retention.compute_preview(h.ctx)
@@ -577,7 +643,7 @@ class EarlierChangesTests(RetentionTestCase):
 
     def test_a_backup_that_could_not_be_compared_needs_a_look(self) -> None:
         standard_history(self.h)
-        self.h.confirmed_cleanup("2026-09-24T12:00:00Z")
+        self.h.confirmed_cleanup()
         self.h.verified(5, "2026-09-29T00:30:00Z", status="not_comparable")
         self.h.policy()
         document, _sha = retention.compute_preview(self.h.ctx)
@@ -586,7 +652,7 @@ class EarlierChangesTests(RetentionTestCase):
 
     def test_an_older_log_that_does_not_say_counts_as_unknown(self) -> None:
         standard_history(self.h)
-        self.h.confirmed_cleanup("2026-09-24T12:00:00Z")
+        self.h.confirmed_cleanup()
         self.h.verified(5, "2026-09-29T00:30:00Z", status=None)
         self.h.policy()
         document, _sha = retention.compute_preview(self.h.ctx)
@@ -595,7 +661,7 @@ class EarlierChangesTests(RetentionTestCase):
 
     def test_an_approval_in_the_users_review_history_does_not_clear_a_change(self) -> None:
         standard_history(self.h)
-        self.h.confirmed_cleanup("2026-09-24T12:00:00Z")
+        self.h.confirmed_cleanup()
         self.h.verified(4, "2026-09-28T00:30:00Z", hold=True, latest=False)
         write_json(self.h.state / "anomaly-review-history.json", {"schema_version": 1, "reviews": [
             {"plan_id": PLAN, "snapshot_id": snapshot_id(4), "approved": True}]})
@@ -605,7 +671,7 @@ class EarlierChangesTests(RetentionTestCase):
 
     def test_unprotected_logs_are_an_error_not_a_clean_record(self) -> None:
         standard_history(self.h)
-        self.h.confirmed_cleanup("2026-09-24T12:00:00Z")
+        self.h.confirmed_cleanup()
         self.h.policy()
         self.h.acl_failures.add("logs")
         document, _sha = retention.compute_preview(self.h.ctx)

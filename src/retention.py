@@ -62,12 +62,14 @@ from secret_store import _security_sddl, admin_only_writable_problem  # noqa: E4
 POLICY_SCHEMA = "ResticBackuper.RetentionPolicy.v1"
 PREVIEW_SCHEMA = "ResticBackuper.RetentionPreview.v1"
 HISTORY_SCHEMA = "ResticBackuper.RetentionHistory.v1"
+CONFIRMED_SCHEMA = "ResticBackuper.RetentionConfirmed.v1"
 REMOVE_SET_DOMAIN = "ResticBackuper.RetentionRemoveSet.v1"
 KEEP_SET_DOMAIN = "ResticBackuper.RetentionKeepSet.v1"
 INSTALL_DOMAIN = "ResticBackuper.RetentionInstall.v1"
 POLICY_NAME = "retention-policy.json"
 PREVIEW_NAME = "retention-preview.json"
 HISTORY_NAME = "retention-history.json"
+CONFIRMED_NAME = "retention-confirmed.json"
 GROUP_BY = "host,paths"
 DEFAULT_COUNTS = (14, 8, 24)
 COUNT_BOUNDS = {"daily": (7, 90), "weekly": (4, 104), "monthly": (6, 120)}
@@ -78,6 +80,7 @@ MAX_POLICY_BYTES = 16 * 1024
 MAX_PREVIEW_BYTES = 8 * 1024 * 1024
 MAX_HISTORY_BYTES = 1024 * 1024
 MAX_HISTORY = 50
+MAX_CONFIRMED_BYTES = 2 * 1024 * 1024
 MAX_EVIDENCE_BYTES = 4 * 1024 * 1024
 MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 MAX_EARLIER_CHANGES = 20
@@ -88,7 +91,8 @@ MAX_LOGS = 20_000
 CLOCK_SLACK = timedelta(days=1)
 SUCCESS_STATES = frozenset({"success", "success_unchanged"})
 LOCAL_NTFS = "local_ntfs"
-BACKUP_LOG_NAME = re.compile(r"^backup-[0-9]{8}T[0-9]{6}-[0-9a-f]{8}\.jsonl\.log$")
+BACKUP_LOG_NAME = re.compile(r"^backup-([0-9]{8}T[0-9]{6}-[0-9a-f]{8})\.jsonl\.log$")
+RUN_KEY = re.compile(r"^[0-9]{8}T[0-9]{6}-[0-9a-f]{8}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 
@@ -690,14 +694,16 @@ def _tail_events(path: Path) -> list[dict[str, Any]]:
 
 
 def read_backup_records(
-    ctx: Context, repository_id: str, since: datetime | None
+    ctx: Context, repository_id: str, confirmed: frozenset[str] | None
 ) -> BackupRecords:
-    """Which backups of this plan were verified, and which verified runs since `since` need the person to check their files.
+    """Which backups of this plan were verified, and which verified runs the person still has to look over.
 
     Read from the tail of each backup's own log in the protected logs folder, which the backup writes and nothing else
     changes: a run that ended with backup_verified made a checked backup. A run whose unusual changes held clean-up back
     (change_anomaly_hold), or that could not be compared with the run before it, is a change to confirm; so is one whose
-    log does not say (an older engine). Nothing here is ever cleared except by a clean-up the person confirmed.
+    log does not say (an older engine). Nothing here is ever cleared except by a clean-up the person confirmed: a change
+    is left out only when its run is one of `confirmed`, the runs that were there when they did (read_confirmed). That is
+    a list of runs, not a time, so a clock that was wrong or was set back cannot clear a change nobody looked at.
     """
     logs = ctx.state / "logs"
     try:
@@ -715,6 +721,7 @@ def read_backup_records(
     changes: list[dict[str, Any]] = []
     plan_id = ctx.config["plan_id"]
     for name in names:
+        run = name[len("backup-"):-len(".jsonl.log")]
         events = _tail_events(logs / name)
         verified = [event for event in events if event.get("wrapper_event") == "backup_verified"]
         if not verified:
@@ -743,18 +750,72 @@ def read_backup_records(
             kind = "not_compared"
         else:
             kind = "unknown"
-        if since is not None and finished is not None and finished <= since:
+        if confirmed is not None and run in confirmed:
             continue
         changes.append(
             {
+                "run": run,
                 "run_id": run_id if isinstance(run_id, str) else None,
                 "snapshot_id": snapshot_id,
                 "finished_utc": event.get("utc") if finished is not None else None,
                 "kind": kind,
             }
         )
+    # Newest first, only for how the list names them: which change counts never depends on these times.
     changes.sort(key=lambda change: change.get("finished_utc") or "", reverse=True)
     return BackupRecords(checked, changes, complete)
+
+
+def read_confirmed(ctx: Context, repository_id: str) -> tuple[frozenset[str] | None, bool]:
+    """The backup runs the person had in front of them when they last confirmed that their files looked right, and
+    whether that record could be read. None when they never did for this plan and backup location (the first clean-up).
+
+    Each run is named by its log (backup-<run>.jsonl.log). An unreadable record is treated as no confirmation, so every
+    change is asked about again.
+    """
+    try:
+        loaded = _read_protected_object(ctx, CONFIRMED_NAME, MAX_CONFIRMED_BYTES)
+    except RetentionError:
+        return None, False
+    if loaded is None:
+        return None, True
+    document = loaded[0]
+    runs = document.get("runs")
+    if (
+        document.get("schema") != CONFIRMED_SCHEMA
+        or document.get("schema_version") != 1
+        or document.get("plan_id") != ctx.config["plan_id"]
+        or not isinstance(runs, list)
+        or len(runs) > MAX_LOGS
+        or any(not isinstance(run, str) or RUN_KEY.fullmatch(run) is None for run in runs)
+    ):
+        return None, False
+    if document.get("repository_id") != repository_id:
+        return None, True
+    return frozenset(runs), True
+
+
+def record_confirmation(ctx: Context, repository_id: str, request_nonce: str) -> None:
+    """Remember that the person confirmed their files looked right with every backup run that is there now.
+
+    Called only for a removal they confirmed, while the manager holds the run lock, so no backup can run between the
+    list they saw and this record. Later runs are not on it, whatever their recorded times say.
+    """
+    records = read_backup_records(ctx, repository_id, None)
+    path = ctx.state / CONFIRMED_NAME
+    atomic_write_json(
+        path,
+        {
+            "schema": CONFIRMED_SCHEMA,
+            "schema_version": 1,
+            "plan_id": ctx.config["plan_id"],
+            "repository_id": repository_id,
+            "request_nonce": request_nonce,
+            "recorded_utc": utc_now(),
+            "runs": sorted({change["run"] for change in records.changes}),
+        },
+    )
+    ctx.acl_check(path)
 
 
 # ---- History --------------------------------------------------------------------------------------------------------
@@ -779,18 +840,6 @@ def read_history(ctx: Context) -> tuple[list[dict[str, Any]], bool]:
     ):
         return [], False
     return entries, True
-
-
-def last_confirmed_cleanup(entries: list[dict[str, Any]], readable: bool) -> datetime | None:
-    """When the person last confirmed that their files looked right before a clean-up, or None."""
-    if not readable:
-        return None
-    for entry in reversed(entries):
-        if entry.get("files_confirmed") is True:
-            started = parse_time(entry.get("started_utc"))
-            if started is not None:
-                return started
-    return None
 
 
 def prune_pending(entries: list[dict[str, Any]]) -> bool:
@@ -937,14 +986,14 @@ def compute(ctx: Context, *, require_policy: bool = True) -> Computed:
         return blocked("future_dated_backup")
 
     entries, history_readable = read_history(ctx)
-    since = last_confirmed_cleanup(entries, history_readable)
-    records = read_backup_records(ctx, repository_id, since)
+    confirmed, confirmed_readable = read_confirmed(ctx, repository_id)
+    records = read_backup_records(ctx, repository_id, confirmed)
     holds = [change for change in records.changes if change["kind"] == "hold"]
     plan = make_safer(plan, checked=records.checked, latest_id=evidence.document["snapshot_id"], holds=holds)
 
     remove_ids = [item.id for item in plan.remove]
     keep_ids = [item.id for item in plan.keep]
-    unknown = (not records.complete) or (not history_readable) or any(
+    unknown = (not records.complete) or (not confirmed_readable) or any(
         change["kind"] == "unknown" for change in records.changes
     )
     document.update(
@@ -962,8 +1011,8 @@ def compute(ctx: Context, *, require_policy: bool = True) -> Computed:
                 for change in records.changes[:MAX_EARLIER_CHANGES]
             ],
             "earlier_changes_unknown": unknown,
-            "first_cleanup": since is None,
-            "needs_files_confirmed": since is None or unknown or bool(records.changes),
+            "first_cleanup": confirmed is None,
+            "needs_files_confirmed": confirmed is None or unknown or bool(records.changes),
             "prune_pending": prune_pending(entries) if history_readable else False,
         }
     )
@@ -1367,6 +1416,15 @@ def apply_record(
         },
     )
     ctx.acl_check(path)
+    if files_confirmed:
+        # The person said their files looked right: the backup runs there now are the ones they looked over. If this
+        # cannot be recorded, the next list simply asks again.
+        evidence = read_evidence(ctx)
+        if evidence is not None and _evidence_is_verified(evidence.document):
+            try:
+                record_confirmation(ctx, evidence.document["repository_id"], request_nonce)
+            except (OSError, RetentionError) as error:
+                _log(ctx, {"event": "confirmation_unrecorded", "error": sanitize(str(error))})
     preview, preview_sha = compute_preview(ctx)
     return {
         "state": "recorded",

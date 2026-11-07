@@ -614,7 +614,11 @@ try {
     Assert-True ((Get-StoreIds -Fixture $fixture).Count -eq 3) 'three backups are left'
     $history = Get-Content -LiteralPath (Join-Path $fixture.State 'retention-history.json') -Raw | ConvertFrom-Json
     Assert-True (@($history.entries).Count -eq 1 -and $history.entries[0].outcome -ceq 'removed' -and $history.entries[0].files_confirmed) 'the clean-up is recorded'
-    Assert-True ((Get-Preview -Fixture $fixture).Document.remove_count -eq 0) 'the fresh list has nothing more to remove'
+    $confirmedRecord = Get-Content -LiteralPath (Join-Path $fixture.State 'retention-confirmed.json') -Raw | ConvertFrom-Json
+    Assert-True ($confirmedRecord.schema -ceq 'ResticBackuper.RetentionConfirmed.v1' -and $confirmedRecord.request_nonce -ceq $removed.Nonce) 'the files the person checked are recorded with the clean-up'
+    $fresh = (Get-Preview -Fixture $fixture).Document
+    Assert-True ($fresh.remove_count -eq 0) 'the fresh list has nothing more to remove'
+    Assert-True (-not $fresh.first_cleanup -and -not $fresh.needs_files_confirmed) 'after a confirmed clean-up the next list does not ask again for the same backups'
     Assert-True ($removed.Progress.stage -ceq 'complete') 'the progress file says it finished'
 
     # --- An unmanifested file in the program folder ---

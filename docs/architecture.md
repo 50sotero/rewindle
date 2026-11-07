@@ -276,9 +276,10 @@ record, local metrics history, Restic's cache, and the `temp` folder for
 Restic's temporary pack files. During protected changes it may also contain
 source-update, repository-relocation, or credential-rotation journals plus
 bounded result/evidence records. Once the person turns on clean-up of old
-backups it also holds `retention-policy.json`, `retention-preview.json` and
-`retention-history.json`. Writers run from the protected scheduled task
-or narrowly scoped elevated managers; the dashboard receives read access.
+backups it also holds `retention-policy.json`, `retention-preview.json`,
+`retention-history.json` and `retention-confirmed.json`. Writers run from the
+protected scheduled task or narrowly scoped elevated managers; the dashboard
+receives read access.
 
 ### User-selected repository
 
