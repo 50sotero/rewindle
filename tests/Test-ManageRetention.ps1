@@ -538,6 +538,24 @@ try {
     $offPolicy = Get-Content -LiteralPath (Join-Path $offFixture.State 'retention-policy.json') -Raw | ConvertFrom-Json
     Assert-True ($offPolicy.enabled -eq $false -and $offPolicy.keep_daily -eq 7) 'turning it off keeps the counts for next time'
     Assert-True ((Get-StoreIds -Fixture $offFixture).Count -eq 5) 'turning it off removes nothing'
+
+    # --- An unplugged backup drive is a reason to wait, refused with that reason before anything runs ---
+    $unpluggedFixture = New-Fixture
+    [void](Enable-Retention -Fixture $unpluggedFixture)
+    $unpluggedSeen = Get-Preview -Fixture $unpluggedFixture
+    Rename-Item -LiteralPath $unpluggedFixture.Repository -NewName 'Personal-unplugged'
+    $unplugged = Invoke-Manager -Fixture $unpluggedFixture -Action preview
+    Assert-True ($unplugged.ExitCode -eq 2 -and $unplugged.Result.state -ceq 'refused' -and $unplugged.Result.refusal_code -ceq 'backup_location_unavailable') "Check now with the backup drive unplugged is refused with that reason: $($unplugged.Output -join ' | ')"
+    Assert-True ($unplugged.Log.Count -eq 0) 'nothing runs while the backup drive is unplugged'
+    $unplugged = Invoke-Apply -Fixture $unpluggedFixture
+    Assert-True ($unplugged.ExitCode -eq 2 -and $unplugged.Result.refusal_code -ceq 'backup_location_unavailable' -and $unplugged.Log.Count -eq 0) "a removal with the backup drive unplugged is refused with that reason: $($unplugged.Output -join ' | ')"
+    $unplugged = Invoke-Manager -Fixture $unpluggedFixture -Action configure -Arguments @{ Enabled = '1'; KeepDaily = '14'; KeepWeekly = '8'; KeepMonthly = '24' }
+    Assert-True ($unplugged.ExitCode -eq 2 -and $unplugged.Result.refusal_code -ceq 'backup_location_unavailable') 'changing the setting with the backup drive unplugged is refused with that reason'
+    Assert-True ((Get-Preview -Fixture $unpluggedFixture).Sha256 -ceq $unpluggedSeen.Sha256) 'a refused request leaves the list as it was'
+    Rename-Item -LiteralPath (Join-Path (Split-Path -Parent $unpluggedFixture.Repository) 'Personal-unplugged') -NewName 'Personal'
+    Remove-Item -LiteralPath (Join-Path $unpluggedFixture.Repository 'config')
+    $unplugged = Invoke-Manager -Fixture $unpluggedFixture -Action preview
+    Assert-True ($unplugged.ExitCode -eq 2 -and $unplugged.Result.refusal_code -ceq 'backup_location_unavailable') 'a drive without the backup location on it is refused with the same reason'
     Remove-Item -LiteralPath $journal
 
     # --- The run lock held elsewhere: busy, and nothing runs ---

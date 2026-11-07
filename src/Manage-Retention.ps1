@@ -567,16 +567,35 @@ function Get-ValidatedConfiguration {
         [void](Assert-NormalFile -File $file)
     }
     $repository = Get-CanonicalLocalPath -Value ([string]$config.repository)
+    $locationAvailable = $true
     if (-not $Light -and $mode -eq $localNtfsMode) {
         if ((Test-IsWithin -Candidate $repository -Parent $stateRoot) -or (Test-IsWithin -Candidate $stateRoot -Parent $repository) -or
             (Test-IsWithin -Candidate $repository -Parent $installRoot) -or (Test-IsWithin -Candidate $installRoot -Parent $repository)) {
             throw 'The backup location overlaps the protected runtime or state.'
         }
-        Assert-NormalDirectoryChain -Directory $repository
-        Assert-NtfsLocalPath -Path $repository -Label 'The backup location'
-        [void](Assert-NormalFile -File (Join-Path $repository 'config'))
+        # An unplugged or missing backup drive is a reason to wait, not a failure: the request is refused before anything runs.
+        # A location that is there is checked in full, and anything unusual about it still stops the request.
+        $locationAvailable = (Test-BackupLocationPresent -Repository $repository)
+        if ($locationAvailable) {
+            Assert-NormalDirectoryChain -Directory $repository
+            Assert-NtfsLocalPath -Path $repository -Label 'The backup location'
+            [void](Assert-NormalFile -File (Join-Path $repository 'config'))
+        }
     }
-    return [pscustomobject]@{ Json = $config; Repository = $repository; RepositoryStorageMode = $mode }
+    return [pscustomobject]@{
+        Json = $config; Repository = $repository; RepositoryStorageMode = $mode; LocationAvailable = $locationAvailable
+    }
+}
+
+function Test-BackupLocationPresent {
+    # The backup location's folder and its config file exist. Never throws: a drive that is not there answers false.
+    param([string]$Repository)
+    try {
+        return ([IO.Directory]::Exists($Repository) -and [IO.File]::Exists((Join-Path $Repository 'config')))
+    }
+    catch {
+        return $false
+    }
 }
 
 function Assert-RuntimeManifest {
@@ -922,6 +941,10 @@ function Invoke-RetentionOperation {
             }
             if (Test-PendingJournal) {
                 Set-Outcome -State 'refused' -ExitCode 2 -RefusalCode 'pending_change'
+                return
+            }
+            if (-not $configuration.LocationAvailable) {
+                Set-Outcome -State 'refused' -ExitCode 2 -RefusalCode 'backup_location_unavailable'
                 return
             }
         }
