@@ -1161,6 +1161,10 @@ def _run_locked(
                         "app_name": status["app_name"],
                         "app_version": status["app_version"],
                         "restic_version": status["restic_version"],
+                        # Whether this run was compared with the one before it ("clear" or "hold"), or could not be
+                        # ("not_comparable", "disabled"). Clean-up of old backups reads it, read-only, to know which
+                        # runs the person should look over before old backups are removed.
+                        "change_anomaly_status": status["change_anomaly"]["status"],
                     }
                 )
                 + "\n"

@@ -92,7 +92,9 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
   that the forecast isn't available with that backup program.
 - Under that, the card says how far back your backups go ("412 backups,
   oldest 3 Mar 2025"), as counted by the last verified backup or the last time
-  Restore listed them; the Restore page says it too.
+  Restore listed them; the Restore page says it too. After **Old backups**
+  removes some, it is left out until the next backup or Restore counts them
+  again.
 - **Back up now**, live progress (throughput, elapsed time, estimate), and
   **Cancel backup**, which asks Restic to stop cooperatively. Existing
   snapshots are never touched.
@@ -140,6 +142,13 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
   **Edit schedule** sets daily or selected-day backups and their run conditions.
 - **Backup alerts** (under Backup plan) turns the Windows notifications on or
   off. The mark on the icon in the notification area stays either way.
+- **Old backups** is off until you turn it on. It then keeps the last backup of
+  each of the last days, weeks and months you choose (14, 8 and 24 are
+  suggested), shows exactly which backups would go and which stay, and
+  removes them only after you confirm the list and Windows asks for your
+  permission. It works with a local backup location; the earlier personal
+  edition and Google Drive locations keep every backup. Reinstalling or
+  updating Rewindle turns it off until you turn it on again.
 - Under **Help and about**: **Save problem report** (a redacted support bundle) and
   **About Rewindle**: version, backup service, MIT License, **Open licenses folder** and the keyboard shortcuts.
 
@@ -150,8 +159,12 @@ running there. `Ctrl+1` to `Ctrl+4` switch pages, `F5` refreshes, and
 by color alone, and a screen reader is told when a backup starts, finishes,
 fails or is cancelled.
 
-Rewindle does **not** prune snapshots or delete repository data. The repository
-grows until you deliberately set up and test a retention policy yourself.
+Rewindle never removes a backup on its own. Until you turn on **Old backups**,
+the repository keeps every snapshot and grows with each backup. With it on,
+a snapshot is forgotten and pruned only after a verified backup, when no
+change review is open and no change is unfinished, and only when it is on the
+list you confirmed; see
+[docs/engine-contract.md](docs/engine-contract.md#10-clean-up-of-old-backups).
 
 ## How it works
 

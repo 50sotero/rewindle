@@ -449,6 +449,7 @@ function New-Fixture {
     $manifestFiles = @(Get-ChildItem -LiteralPath $installRoot -Recurse -File -Force | Sort-Object FullName)
     $runtimeManifest = [ordered]@{
         schema_version = 1; created_utc = [DateTime]::UtcNow.ToString('o'); fixture_marker = 'preserve-me'
+        installation_id = ('5' * 64)
         file_count = $manifestFiles.Count
         files = @($manifestFiles | ForEach-Object {
             New-FileRecord -Name $_.FullName.Substring($installRoot.Length + 1) -Path $_.FullName -Property relative_path
@@ -735,6 +736,8 @@ try {
     $runtimeManifest = Get-Content -LiteralPath $fixture.ManifestPath -Raw | ConvertFrom-Json
     $configRecord = @($runtimeManifest.files | Where-Object relative_path -eq 'backup-config.json')
     Assert-True ($configRecord.Count -eq 1 -and [string]$configRecord[0].sha256 -eq (Get-Hash -Path $fixture.ConfigPath)) 'runtime manifest rebound'
+    # Clean-up of old backups is bound to the installer's installation_id: a move keeps it, so a saved setting stays on.
+    Assert-True ([string]$runtimeManifest.installation_id -ceq ('5' * 64) -and [string]$runtimeManifest.fixture_marker -ceq 'preserve-me') 'runtime manifest keeps the installer''s installation_id'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixture.StateRoot 'repository-relocation.journal.json'))) 'success journal removed'
     $logText = Get-Content -LiteralPath $fixture.Log -Raw
     Assert-True ($logText -match '\tcat\tconfig' -and $logText -match '\tsnapshots\t--json' -and $logText -match '\tcheck') 'fake Restic verification commands used'

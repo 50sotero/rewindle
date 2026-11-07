@@ -66,6 +66,14 @@ namespace ResticBackuper.Dashboard
             rawConfig["recovery_key_file"] = Path.Combine(root, "recovery-secret.txt");
             rawConfig["support_contact"] = FixtureEmail;
             WriteJson(configPath, rawConfig);
+            // The installer's random value for this installation: an identifier, so it is pseudonymized like the plan ID.
+            Dictionary<string, object> runtimeManifest = new Dictionary<string, object>();
+            runtimeManifest["schema_version"] = 1;
+            runtimeManifest["version"] = "0.0.0-fixture";
+            runtimeManifest["installation_id"] = new string('7', 64);
+            runtimeManifest["file_count"] = 0;
+            runtimeManifest["files"] = new object[0];
+            WriteJson(Path.Combine(install, "runtime-manifest.json"), runtimeManifest);
 
             Dictionary<string, object> status = new Dictionary<string, object>();
             status["schema_version"] = 1;

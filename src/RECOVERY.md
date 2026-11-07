@@ -88,3 +88,17 @@ and still ends without an error, so check the target afterwards.
 Restores never need to modify or delete the repository. Prefer a new empty
 target on a different path, inspect the restored files, and only then decide
 how to put individual files back into service.
+
+## If clean-up of old backups was on
+
+When someone turned on clean-up of old backups, it removed only backups on a
+list they confirmed. Those backups can't be restored; `snapshots` lists the
+ones that are left, which include the last backup of each recent day, week
+and month that was kept. A clean-up that was interrupted (for example by a
+power cut) may have removed only part of its list, or not yet freed the
+space; that does not affect restoring what is left.
+
+If Restic says the repository is locked, a clean-up may have stopped part-way.
+Add `--no-lock` to `snapshots` and `restore`: both only read, and the option
+lets them run without touching the lock. Do not run `forget`, `prune` or
+`unlock` while you are recovering files.
