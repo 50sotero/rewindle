@@ -221,7 +221,7 @@ export default function RunDetailsModal({
   // What a backup found (new, changed, unchanged files), only when the host knows it: a check-only run and an older run have none.
   const changes = result?.isBackup ? activeDetails?.changesDisplay?.trim() || undefined : undefined;
 
-  const copy =(command: CommandName, extra?: Record<string, string | boolean>) => {
+  const copy = (command: CommandName, extra?: Record<string, string | boolean>) => {
     if (!activeDetails) return;
     send(command, { runId: activeDetails.id, ...extra });
   };
