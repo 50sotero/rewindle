@@ -11,11 +11,16 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
 PROJECT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT / "src"))
+
+from restic_common import canonical_windows_path  # noqa: E402
+
 DASHBOARD = PROJECT / "src" / "dashboard"
 HARNESS = PROJECT / "tests" / "fixtures" / "RunCountsHarness.cs"
 PLAN_ID = "4e1b8c0a-5f27-4d3a-9b61-0c7d2a9e5f31"
@@ -127,7 +132,12 @@ class DashboardRunCountsTests(unittest.TestCase):
         self.assertEqual(engine["source"], "backup")
         self.assertEqual(engine["count"], 412)
         self.assertEqual(engine["plan"], PLAN_ID)
-        self.assertEqual(engine["repository"].casefold(), self.repository.casefold())
+        # The dashboard reports the backup location in its long form, while a temporary folder with a short (8.3) name, as on
+        # GitHub's runners, reaches the fixture in its short form. Both sides are compared as the same canonical long path.
+        self.assertEqual(
+            canonical_windows_path(engine["repository"]).casefold(),
+            canonical_windows_path(self.repository).casefold(),
+        )
         self.assertEqual(engine["oldest"], "2025-03-03T12:00:04.0000000Z")
         self.assertEqual(engine["newest"], "2026-11-06T01:00:03.0000000Z")
         self.assertTrue(engine["counted"].startswith("2026-11-06T01:02:41.512") and engine["counted"].endswith("Z"))
