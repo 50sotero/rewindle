@@ -15,13 +15,13 @@ export type CommandName = 'ready' | 'refresh' | 'navigate' | 'setTheme' | 'toggl
   | 'restoreFlowOpenDestination' | 'restoreFlowCopyDestination'
   // Settings > About: opens the licenses folder beside the app. The host builds the path itself; the page sends none.
   | 'openLicensesFolder'
+  // Settings > Old backups (clean-up of old backups). Only the dialogs' own buttons send retentionConfigure and retentionApply.
+  | 'retentionConfigure' | 'retentionCheckNow' | 'retentionOpenReview' | 'retentionReviewPage' | 'retentionApply'
+  | 'retentionCloseReview'
   // Settings > Backup alerts: notifications on or off ({ notify: 'on' | 'off' }). A per-user preference like the theme, not protected.
   | 'setAlerts'
   // Settings > Backup location > Low space warning: { weeks: '4' | '8' | '12' }. Only changes when the page warns, so it is not protected.
-  | 'setSpaceWarning'
-  // Settings > Old backups (clean-up of old backups). Only the dialogs' own buttons send retentionConfigure and retentionApply.
-  | 'retentionConfigure' | 'retentionCheckNow' | 'retentionOpenReview' | 'retentionReviewPage' | 'retentionApply'
-  | 'retentionCloseReview';
+  | 'setSpaceWarning';
 /**
  * The commands that change the backup plan, the schedule, the repository or a restore, or ask the host to read them.
  * They need a live link and readable backup status, and the animation preview pauses them. Everything else (moving
