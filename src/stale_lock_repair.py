@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
@@ -18,7 +17,7 @@ from credential_repair import (
     validate_runtime_manifest,
 )
 from recovery_health import authenticate, command_result, lock_count, password_command, utc_now
-from restic_common import load_config_under_lock
+from restic_common import load_config_under_lock, windows_directory
 from secret_store import _current_user_sid
 
 
@@ -38,7 +37,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def running_restic_processes(
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> list[int]:
-    tasklist = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "tasklist.exe"
+    # The elevated helper's SystemRoot comes from the user's profile; the
+    # Windows API names the real system folder.
+    tasklist = windows_directory() / "System32" / "tasklist.exe"
     result = runner(
         [str(tasklist), "/FI", "IMAGENAME eq restic.exe", "/FO", "CSV", "/NH"],
         check=False,

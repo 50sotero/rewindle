@@ -98,12 +98,28 @@ public static class FakeRestic {
   static string Escape(string value) {
     return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
   }
+  // restore.py gives Restic an allow-listed environment, so the fixture settings come from a control file.
+  static string Control(string name) {
+    string path = @"__FAKE_RESTIC_CONTROL__";
+    if (!File.Exists(path)) return null;
+    foreach (string line in File.ReadAllLines(path)) {
+      int separator = line.IndexOf('=');
+      if (separator > 0 && line.Substring(0, separator) == name) return line.Substring(separator + 1);
+    }
+    return null;
+  }
   public static int Main(string[] args) {
-    string log = Environment.GetEnvironmentVariable("FAKE_RESTIC_LOG");
+    foreach (System.Collections.DictionaryEntry item in Environment.GetEnvironmentVariables()) {
+      string name = ((string)item.Key).ToUpperInvariant();
+      if (name.StartsWith("RCLONE_") || name == "RESTIC_PASSWORD_COMMAND" || name == "RESTIC_PASSWORD_FILE" || name == "RESTIC_REPOSITORY_FILE") {
+        Console.Error.WriteLine("inherited " + name); return 92;
+      }
+    }
+    string log = Control("FAKE_RESTIC_LOG");
     if (!String.IsNullOrEmpty(log)) File.AppendAllText(log, String.Join("\t", args) + Environment.NewLine);
-    string plan = Environment.GetEnvironmentVariable("FAKE_PLAN_ID");
-    string source = Environment.GetEnvironmentVariable("FAKE_SOURCE");
-    bool legacy = Environment.GetEnvironmentVariable("FAKE_LEGACY_SNAPSHOT") == "1";
+    string plan = Control("FAKE_PLAN_ID");
+    string source = Control("FAKE_SOURCE");
+    bool legacy = Control("FAKE_LEGACY_SNAPSHOT") == "1";
     string snapshot = new String(legacy ? 'f' : 'b', 64);
     if (args.Contains("cat") && args.Contains("config")) {
       Console.WriteLine("{\"id\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"version\":2}"); return 0;
@@ -129,7 +145,7 @@ public static class FakeRestic {
     }
     if (args.Contains("restore")) {
       string target = After(args, "--target"); Directory.CreateDirectory(target);
-      if (Environment.GetEnvironmentVariable("FAKE_RESTORE_PARTIAL") == "1") {
+      if (Control("FAKE_RESTORE_PARTIAL") == "1") {
         File.WriteAllText(Path.Combine(target, "partial.txt"), "retained partial data"); return 23;
       }
       int includeCount = args.Count(value => value == "--include");
@@ -148,15 +164,37 @@ public static class FakeRestic {
   }
 }
 '@
+$fakeResticControl = Join-Path $compilerRoot 'fake-restic-control.txt'
+$fakeResticSource = $fakeResticSource.Replace('__FAKE_RESTIC_CONTROL__', $fakeResticControl)
 Add-Type -TypeDefinition $fakeResticSource -OutputAssembly $fakeRestic -OutputType ConsoleApplication
+
+function Write-FakeResticControl {
+    # Restic gets an allow-listed environment, so this process's FAKE_* settings reach the fake through a file.
+    $lines = @(foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_LEGACY_SNAPSHOT')) {
+        $value = [Environment]::GetEnvironmentVariable($name, 'Process')
+        if ($null -ne $value) { $name + '=' + $value }
+    })
+    [IO.File]::WriteAllLines($fakeResticControl, [string[]]$lines, $encoding)
+}
 
 $pythonWrapper = Join-Path $compilerRoot 'python.exe'
 $escapedPython = $realPython.Replace('\', '\\').Replace('"', '\"')
+# Manage-Restore starts restore.py with an allow-listed environment. The stand-in refuses (exit 93) any other variable
+# and records what it got, for the exact check after the first listing.
+$pythonEnvironmentLog = Join-Path $compilerRoot 'python-environment.txt'
+$escapedPythonEnvironmentLog = $pythonEnvironmentLog.Replace('\', '\\').Replace('"', '\"')
 $pythonWrapperSource = @"
 using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Text;
 public static class PythonWrapper {
+  static readonly string[] Allowed = {
+    "SystemRoot", "windir", "SystemDrive", "ComSpec", "PATH", "PATHEXT", "OS", "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE", "LOCALAPPDATA"
+  };
   static string Quote(string value) {
     if (value.Length > 0 && value.IndexOfAny(new[] {' ', '\t', '"'}) < 0) return value;
     StringBuilder result = new StringBuilder("\""); int slashes = 0;
@@ -170,6 +208,14 @@ public static class PythonWrapper {
     return result.Append('"').ToString();
   }
   public static int Main(string[] args) {
+    List<string> received = new List<string>();
+    foreach (DictionaryEntry item in Environment.GetEnvironmentVariables()) {
+      string name = (string)item.Key;
+      if (Array.IndexOf(Allowed, name) < 0) { Console.Error.WriteLine("inherited " + name); return 93; }
+      received.Add(name + "=" + (string)item.Value);
+    }
+    received.Sort(StringComparer.Ordinal);
+    File.WriteAllLines("$escapedPythonEnvironmentLog", received.ToArray(), new UTF8Encoding(false));
     ProcessStartInfo start = new ProcessStartInfo(); start.FileName = "$escapedPython";
     start.Arguments = String.Join(" ", Array.ConvertAll(args, Quote)); start.UseShellExecute = false;
     using (Process process = Process.Start(start)) { process.WaitForExit(); return process.ExitCode; }
@@ -303,6 +349,7 @@ function Invoke-Manager {
     $env:FAKE_SOURCE = $Fixture.Source
     if ($LegacyFixture) { $env:FAKE_LEGACY_SNAPSHOT = '1' }
     else { Remove-Item Env:FAKE_LEGACY_SNAPSHOT -ErrorAction SilentlyContinue }
+    Write-FakeResticControl
     $priorPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
@@ -328,6 +375,16 @@ if (-not $SkipInstalledChecks) {
     $taskXmlBefore = try { (Export-ScheduledTask -TaskName 'ResticBackuper' -ErrorAction Stop).Replace("`r`n", "`n") } catch { $null }
 }
 
+# Settings a user could plant in their own environment. Manage-Restore must not pass them to restore.py (the Python
+# stand-in exits 93 on any variable outside its allow-list), and restore.py must not pass them to Restic (the fake exits 92).
+$plantedEnvironment = @{
+    RESTIC_PASSWORD_COMMAND = 'C:\planted\evil.cmd'
+    RESTIC_PASSWORD_FILE = 'C:\planted\password.txt'
+    RESTIC_REPOSITORY_FILE = 'C:\planted\repository.txt'
+    RCLONE_CONFIG_PLANTED_TYPE = 'sftp'
+}
+foreach ($name in $plantedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $plantedEnvironment[$name], 'Process') }
+
 try {
     $fixture = New-Fixture
     $repositoryBefore = Get-Hash -Path (Join-Path $fixture.Repository 'pack')
@@ -339,6 +396,28 @@ try {
         if ($null -ne $list.Result) { Write-Output ("snapshot-list result: " + ($list.Result | ConvertTo-Json -Compress -Depth 20)) }
     }
     Assert-True ($list.ExitCode -eq 0 -and $list.Result.ok -eq $true) 'snapshot listing succeeds'
+    # restore.py got the Windows values from the Windows API and the user's local application-data folder, nothing else.
+    $systemFolder = [Environment]::SystemDirectory
+    $windowsFolder = [IO.Directory]::GetParent($systemFolder).FullName
+    $expectedPythonEnvironment = [ordered]@{
+        ComSpec = (Join-Path $systemFolder 'cmd.exe')
+        LOCALAPPDATA = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+        NUMBER_OF_PROCESSORS = [string][Environment]::ProcessorCount
+        OS = 'Windows_NT'
+        PATH = (@($systemFolder, $windowsFolder, (Join-Path $systemFolder 'Wbem'), (Join-Path $systemFolder 'WindowsPowerShell\v1.0')) -join ';')
+        PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC'
+        SystemDrive = [IO.Path]::GetPathRoot($windowsFolder).TrimEnd('\')
+        SystemRoot = $windowsFolder
+        windir = $windowsFolder
+    }
+    if ($env:PROCESSOR_ARCHITECTURE -cin @('AMD64', 'x86', 'ARM64')) {
+        $expectedPythonEnvironment['PROCESSOR_ARCHITECTURE'] = $env:PROCESSOR_ARCHITECTURE
+    }
+    $expectedPythonLines = [string[]]@($expectedPythonEnvironment.Keys | ForEach-Object { $_ + '=' + $expectedPythonEnvironment[$_] })
+    [Array]::Sort($expectedPythonLines, [StringComparer]::Ordinal)
+    $receivedPythonLines = [IO.File]::ReadAllLines($pythonEnvironmentLog, $encoding)
+    Assert-True (($receivedPythonLines -join "`n") -ceq ($expectedPythonLines -join "`n")) (
+        'restore.py gets only the allow-listed environment: ' + ($receivedPythonLines -join '; '))
     Assert-True ([string]$list.Result.request_digest -ceq $list.Digest -and [string]$list.Result.expected_config_sha256 -ceq $list.ConfigHash) 'snapshot result request/config binding'
     Assert-True ([string]$list.Result.plan_id -ceq $planId -and [long]$list.Result.config_generation -eq $generation) 'snapshot result plan binding'
     Assert-True ($list.Result.allow_legacy_unbound -eq $false) 'snapshot result binds legacy opt-in off'
@@ -654,6 +733,7 @@ try {
         $env:FAKE_PLAN_ID = $planId
         $env:FAKE_SOURCE = $Fixture.Source
         if ($LegacyFixture) { $env:FAKE_LEGACY_SNAPSHOT = '1' } else { Remove-Item Env:FAKE_LEGACY_SNAPSHOT -ErrorAction SilentlyContinue }
+        Write-FakeResticControl
         $start = [Diagnostics.ProcessStartInfo]::new()
         $start.FileName = $powershellPath
         $start.Arguments = (($arguments | ForEach-Object { ConvertTo-CommandLineArgument ([string]$_) }) -join ' ')
@@ -984,6 +1064,7 @@ namespace RestoreManagerTests {
         $env:FAKE_PLAN_ID = $planId
         $env:FAKE_SOURCE = $interopFixture.Source
         Remove-Item Env:FAKE_LEGACY_SNAPSHOT -ErrorAction SilentlyContinue
+        Write-FakeResticControl
         $profileType.GetMethod('UseFolderRootsForTesting', $memberFlags).Invoke($null, [object[]]@([string]$interopFixture.Root)) | Out-Null
         $profileType.GetMethod('Activate', $memberFlags).Invoke($null, [object[]]@($profileType.GetProperty('Rewindle', $memberFlags).GetValue($null))) | Out-Null
         try {
@@ -1058,6 +1139,7 @@ finally {
     foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_LEGACY_SNAPSHOT')) {
         Remove-Item "Env:$name" -ErrorAction SilentlyContinue
     }
+    foreach ($name in $plantedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $null, 'Process') }
     foreach ($root in $roots) {
         $full = [IO.Path]::GetFullPath($root).TrimEnd('\')
         $temp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')

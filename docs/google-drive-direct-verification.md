@@ -51,6 +51,19 @@ execute access only when not elevated. Reparse points and unmanifested asset
 names fail closed. Rclone receives a protected per-run configuration copy so an
 OAuth token refresh cannot alter the immutable master configuration.
 
+The task runs elevated, but Windows gives it the signed-in user's environment
+variables, which any program the user runs can change. Rclone and Restic read
+settings from them (an `RCLONE_CONFIG_<remote>_TYPE` can replace the backend
+and run a program, a token variable can point the check at another account), so
+the verifier passes none of them on. Every rclone, Restic and Python child gets
+a fixed list: the Windows folders and processor values as Windows reports them,
+Windows' own PowerShell module folder, temporary and rclone cache folders inside
+the protected run folder (removed when the run ends), and, for rclone and
+Restic only, the settings the verifier sets itself. The `drive.readonly` scope
+and the My Drive root travel in rclone's connection string,
+`ResticBackuperGoogleReadOnly,scope=drive.readonly,root_folder_id=root:<path>`,
+which outranks both the configuration file and any `RCLONE_*` variable.
+
 ## What a successful verification proves
 
 `verify_my_drive_cloud_repository.ps1` derives the API path from the exact live
@@ -194,6 +207,10 @@ restore bound to the latest successful backup.
   rclone credentials use CurrentUser DPAPI and an interactive token.
 - This verifier supports the explicit My Drive streaming repository mode only.
   A `local_ntfs` repository needs a separately designed off-site system.
+- Rclone and Restic ignore your own `RCLONE_*`, `RESTIC_*` and proxy
+  variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) during the check. A PC
+  that reaches Google only through a proxy set in those variables cannot run
+  it.
 - Updating rclone, changing its encrypted configuration, rotating the
   configuration password, changing accounts, or changing the remote requires a
   reviewed reprovisioning procedure. Existing protected assets are never

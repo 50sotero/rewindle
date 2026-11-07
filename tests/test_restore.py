@@ -40,7 +40,10 @@ script = Path(__file__)
 control = json.loads(script.with_suffix(".control.json").read_text(encoding="utf-8"))
 args = sys.argv[1:]
 with Path(control["log"]).open("a", encoding="utf-8") as handle:
-    handle.write(json.dumps({"args": args}, separators=(",", ":")) + "\n")
+    handle.write(
+        json.dumps({"args": args, "environment": sorted(os.environ)}, separators=(",", ":"))
+        + "\n"
+    )
 
 expected_password = control.get("expected_password")
 if expected_password is not None and os.environ.get("RESTIC_PASSWORD") != expected_password:
@@ -787,6 +790,51 @@ class RestoreBackendTests(unittest.TestCase):
         self.assertEqual(command[command.index("--overwrite") + 1], "never")
         self.assertIn("--verify", command)
         self.assertEqual(self.immutable_state(), before)
+
+    def test_restic_sees_only_an_allow_listed_environment(self) -> None:
+        planted = {
+            "RESTIC_PASSWORD_COMMAND": r"C:\planted\evil.cmd",
+            "RESTIC_PASSWORD_FILE": r"C:\planted\password.txt",
+            "RESTIC_REPOSITORY_FILE": r"C:\planted\repository.txt",
+            "RESTIC_CACHE_DIR": r"C:\planted\cache",
+            "RCLONE_CONFIG_PLANTED_TYPE": "sftp",
+            "RCLONE_LOG_FILE": r"C:\planted\rclone.log",
+            "PYTHONPATH": r"C:\planted",
+            "COR_PROFILER": "{00000000-0000-0000-0000-000000000000}",
+            "PATH": r"C:\planted",
+            "SystemRoot": r"C:\planted",
+        }
+        allowed = {
+            "SYSTEMROOT",
+            "WINDIR",
+            "SYSTEMDRIVE",
+            "COMSPEC",
+            "PATH",
+            "PATHEXT",
+            "OS",
+            "NUMBER_OF_PROCESSORS",
+            "PROCESSOR_ARCHITECTURE",
+            "LOCALAPPDATA",
+            "RESTIC_PASSWORD",
+        }
+        target = self.root / "clean-environment-restore"
+        with mock.patch.dict(os.environ, planted):
+            listing, _, listing_errors = self.invoke(["--list-snapshots-json"])
+            restored, _, restore_errors = self.invoke(
+                ["--snapshot", "latest", "--target", str(target)]
+            )
+        self.assertEqual(0, listing, listing_errors)
+        self.assertEqual(0, restored, restore_errors)
+        self.assertTrue((target / "restored.txt").is_file())
+        calls = [
+            json.loads(line)
+            for line in self.fake_log.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertTrue(any("restore" in call["args"] for call in calls))
+        for call in calls:
+            names = set(call["environment"])
+            self.assertLessEqual(names, allowed, call["args"])
+            self.assertIn("RESTIC_PASSWORD", names)
 
     def test_exact_configured_source_uses_immutable_subfolder_selector(self) -> None:
         target = self.root / "source-restore"

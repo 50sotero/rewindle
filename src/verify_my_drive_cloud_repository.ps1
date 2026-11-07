@@ -559,12 +559,85 @@ function ConvertTo-NativeArgument {
     return $builder.ToString()
 }
 
+function New-NativeChildEnvironment {
+    # The complete environment of every rclone, Restic and Python child. This
+    # task runs elevated, but Windows builds its environment from the user's
+    # profile (HKCU\Environment included), which the user can change without
+    # approval, and all three read settings from it: an inherited
+    # RCLONE_CONFIG_<remote>_TYPE replaces the backend (and can run a program),
+    # a token variable points the check at another account, and
+    # RESTIC_PASSWORD_FILE stops every check. So nothing is inherited: the
+    # Windows values come from the Windows API, TEMP and TMP point at this
+    # run's protected folder, and only the settings this script chose are
+    # added. PSModulePath is Windows' own module folder, for the rclone
+    # password helper's Windows PowerShell.
+    param(
+        [Parameter(Mandatory)] [string]$TemporaryDirectory,
+        [System.Collections.IDictionary]$Settings = @{}
+    )
+
+    $system = [Environment]::SystemDirectory
+    $windows = [System.IO.Directory]::GetParent($system).FullName
+    $environment = [ordered]@{
+        SystemRoot = $windows
+        windir = $windows
+        SystemDrive = [System.IO.Path]::GetPathRoot($windows).TrimEnd('\')
+        ComSpec = (Join-Path $system 'cmd.exe')
+        PATH = (@(
+            $system,
+            $windows,
+            (Join-Path $system 'Wbem'),
+            (Join-Path $system 'WindowsPowerShell\v1.0')
+        ) -join ';')
+        PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC'
+        OS = 'Windows_NT'
+        NUMBER_OF_PROCESSORS = [string][Environment]::ProcessorCount
+        PSModulePath = (Join-Path $system 'WindowsPowerShell\v1.0\Modules')
+        TEMP = $TemporaryDirectory
+        TMP = $TemporaryDirectory
+    }
+    $architecture = [Environment]::GetEnvironmentVariable(
+        'PROCESSOR_ARCHITECTURE',
+        'Process'
+    )
+    if ($architecture -cin @('AMD64', 'x86', 'ARM64')) {
+        $environment['PROCESSOR_ARCHITECTURE'] = $architecture
+    }
+    foreach ($name in @($Settings.Keys)) {
+        if ([string]$name -cnotmatch '^(RCLONE|RESTIC)_[A-Z_]{1,64}\z') {
+            throw 'A native child setting has an unexpected name.'
+        }
+        $environment[[string]$name] = [string]$Settings[$name]
+    }
+    return $environment
+}
+
+function Get-ReadOnlyRemoteSpec {
+    # The remote as an rclone connection string. Its options outrank the
+    # configuration file and every RCLONE_* variable, so the read-only scope
+    # and the My Drive root hold whatever the configuration or the
+    # environment says.
+    param(
+        [Parameter(Mandatory)] [string]$RemoteName,
+        [Parameter(Mandatory)] [string]$RootFolderId
+    )
+
+    if ($RemoteName -cnotmatch '^[A-Za-z0-9._-]{1,80}\z') {
+        throw 'The read-only rclone remote name is invalid.'
+    }
+    if ($RootFolderId -cnotmatch '^[A-Za-z0-9_-]{1,128}\z') {
+        throw 'The Google Drive root folder ID is invalid.'
+    }
+    return $RemoteName + ',scope=drive.readonly,root_folder_id=' + $RootFolderId
+}
+
 function Invoke-NativeToFiles {
     param(
         [Parameter(Mandatory)] [string]$Executable,
         [Parameter(Mandatory)] [string[]]$Arguments,
         [Parameter(Mandatory)] [string]$StdoutPath,
-        [Parameter(Mandatory)] [string]$StderrPath
+        [Parameter(Mandatory)] [string]$StderrPath,
+        [Parameter(Mandatory)] [System.Collections.IDictionary]$Environment
     )
 
     foreach ($path in @($StdoutPath, $StderrPath)) {
@@ -580,6 +653,11 @@ function Invoke-NativeToFiles {
         }
     ) -join ' ')
     $start.WorkingDirectory = Split-Path -Parent $start.FileName
+    # Nothing is inherited from this process (see New-NativeChildEnvironment).
+    $start.EnvironmentVariables.Clear()
+    foreach ($name in @($Environment.Keys)) {
+        $start.EnvironmentVariables[[string]$name] = [string]$Environment[$name]
+    }
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
@@ -625,6 +703,7 @@ function Invoke-RequiredNative {
         [Parameter(Mandatory)] [string[]]$Arguments,
         [Parameter(Mandatory)] [string]$StdoutPath,
         [Parameter(Mandatory)] [string]$StderrPath,
+        [Parameter(Mandatory)] [System.Collections.IDictionary]$Environment,
         [Parameter(Mandatory)] [string]$Operation
     )
 
@@ -632,7 +711,8 @@ function Invoke-RequiredNative {
         -Executable $Executable `
         -Arguments $Arguments `
         -StdoutPath $StdoutPath `
-        -StderrPath $StderrPath
+        -StderrPath $StderrPath `
+        -Environment $Environment
     if ($exitCode -ne 0) {
         throw "$Operation failed closed with exit code $exitCode. Review its private run log."
     }
@@ -909,6 +989,16 @@ Assert-ProtectedAcl `
 Assert-ProtectedAcl `
     -Path $restoreTarget `
     -CurrentUserSid $currentUserSid
+# The children's temporary and rclone cache folders, inside this protected
+# run instead of the user's own folders. Removed when the run ends.
+$nativeTemporaryDirectory = Join-Path $runDirectory 'temp'
+$rcloneCacheDirectory = Join-Path $runDirectory 'rclone-cache'
+foreach ($directory in @($nativeTemporaryDirectory, $rcloneCacheDirectory)) {
+    [System.IO.Directory]::CreateDirectory($directory) | Out-Null
+    Assert-ProtectedAcl `
+        -Path $directory `
+        -CurrentUserSid $currentUserSid
+}
 $rcloneRunConfig = Join-Path $runDirectory 'rclone-readonly.conf'
 [System.IO.File]::Copy($rcloneConfigMaster, $rcloneRunConfig, $false)
 if ((Get-Sha256Hex -Path $rcloneRunConfig) -cne
@@ -933,22 +1023,6 @@ $snapshotStdout = Join-Path $runDirectory 'restic-cloud-snapshots.stdout.json'
 $snapshotStderr = Join-Path $runDirectory 'restic-cloud-snapshots.stderr.log'
 $restoreStdout = Join-Path $runDirectory 'restic-cloud-restore.stdout.log'
 $restoreStderr = Join-Path $runDirectory 'restic-cloud-restore.stderr.log'
-
-$environmentNames = @(
-    'RCLONE_CONFIG',
-    'RCLONE_PASSWORD_COMMAND',
-    'RCLONE_ASK_PASSWORD',
-    'RCLONE_DRIVE_SCOPE',
-    'RCLONE_DRIVE_ROOT_FOLDER_ID',
-    'RESTIC_PASSWORD_COMMAND'
-)
-$priorEnvironment = @{}
-foreach ($name in $environmentNames) {
-    $priorEnvironment[$name] = [Environment]::GetEnvironmentVariable(
-        $name,
-        'Process'
-    )
-}
 
 $runLock = $null
 try {
@@ -1012,36 +1086,22 @@ try {
         $secretStore,
         $secretFile
     )
-    [Environment]::SetEnvironmentVariable(
-        'RCLONE_CONFIG',
-        [System.IO.Path]::GetFullPath($rcloneRunConfig),
-        'Process'
-    )
-    [Environment]::SetEnvironmentVariable(
-        'RCLONE_PASSWORD_COMMAND',
-        $rclonePasswordCommand,
-        'Process'
-    )
-    [Environment]::SetEnvironmentVariable(
-        'RCLONE_ASK_PASSWORD',
-        'false',
-        'Process'
-    )
-    [Environment]::SetEnvironmentVariable(
-        'RCLONE_DRIVE_SCOPE',
-        'drive.readonly',
-        'Process'
-    )
-    [Environment]::SetEnvironmentVariable(
-        'RCLONE_DRIVE_ROOT_FOLDER_ID',
-        $CloudRootFolderId,
-        'Process'
-    )
-    [Environment]::SetEnvironmentVariable(
-        'RESTIC_PASSWORD_COMMAND',
-        $resticPasswordCommand,
-        'Process'
-    )
+    # Restic and rclone (which Restic starts) get the settings below on top of
+    # the fixed list; the inventory helper gets the fixed list alone.
+    $cloudEnvironment = New-NativeChildEnvironment `
+        -TemporaryDirectory $nativeTemporaryDirectory `
+        -Settings ([ordered]@{
+            RCLONE_CONFIG = [System.IO.Path]::GetFullPath($rcloneRunConfig)
+            RCLONE_PASSWORD_COMMAND = $rclonePasswordCommand
+            RCLONE_ASK_PASSWORD = 'false'
+            RCLONE_CACHE_DIR = $rcloneCacheDirectory
+            RESTIC_PASSWORD_COMMAND = $resticPasswordCommand
+        })
+    $helperEnvironment = New-NativeChildEnvironment `
+        -TemporaryDirectory $nativeTemporaryDirectory
+    $readOnlyRemote = Get-ReadOnlyRemoteSpec `
+        -RemoteName $RemoteName `
+        -RootFolderId $CloudRootFolderId
 
     Invoke-RequiredNative `
         -Executable $resticExecutable `
@@ -1054,10 +1114,11 @@ try {
         ) `
         -StdoutPath $localCatStdout `
         -StderrPath $localCatStderr `
+        -Environment $cloudEnvironment `
         -Operation 'Local Restic repository authentication'
     $localConfig = Read-Utf8Json -Path $localCatStdout
 
-    $remoteRepository = 'rclone:' + $RemoteName + ':' + $CloudRepositoryPath
+    $remoteRepository = 'rclone:' + $readOnlyRemote + ':' + $CloudRepositoryPath
     $resticCloudCommon = @(
         '--repo', $remoteRepository,
         '--no-lock',
@@ -1070,6 +1131,7 @@ try {
         -Arguments ($resticCloudCommon + @('cat', 'config')) `
         -StdoutPath $cloudCatStdout `
         -StderrPath $cloudCatStderr `
+        -Environment $cloudEnvironment `
         -Operation 'Direct-cloud Restic repository authentication'
     $cloudConfig = Read-Utf8Json -Path $cloudCatStdout
 
@@ -1092,7 +1154,7 @@ try {
         -Executable $rcloneExecutable `
         -Arguments @(
             'lsjson',
-            ($RemoteName + ':' + $CloudRepositoryPath),
+            ($readOnlyRemote + ':' + $CloudRepositoryPath),
             '--recursive',
             '--files-only',
             '--hash-type', 'MD5',
@@ -1100,6 +1162,7 @@ try {
         ) `
         -StdoutPath $cloudInventoryPath `
         -StderrPath $rcloneStderr `
+        -Environment $cloudEnvironment `
         -Operation 'Direct Google Drive inventory'
 
     $inventoryHelperExit = Invoke-NativeToFiles `
@@ -1114,7 +1177,8 @@ try {
             '--proof', $inventoryProofPath
         ) `
         -StdoutPath $inventoryHelperStdout `
-        -StderrPath $inventoryHelperStderr
+        -StderrPath $inventoryHelperStderr `
+        -Environment $helperEnvironment
     if ($inventoryHelperExit -ne 0) {
         $category = 'inventory_verification_failed_closed'
         try {
@@ -1138,6 +1202,7 @@ try {
         -Arguments ($resticCloudCommon + @('snapshots', '--json')) `
         -StdoutPath $snapshotStdout `
         -StderrPath $snapshotStderr `
+        -Environment $cloudEnvironment `
         -Operation 'Direct-cloud Restic snapshot listing'
     $snapshotItem = Assert-NormalFile -Path $snapshotStdout
     if ($snapshotItem.Length -lt 2 -or $snapshotItem.Length -gt 64MB) {
@@ -1180,6 +1245,7 @@ try {
         )) `
         -StdoutPath $restoreStdout `
         -StderrPath $restoreStderr `
+        -Environment $cloudEnvironment `
         -Operation 'Independent direct-cloud Restic restore'
 
     $relativeCanary = $CanarySnapshotPath.TrimStart('/').Replace('/', '\')
@@ -1281,12 +1347,9 @@ try {
     Write-Output $latestProofPath
 }
 finally {
-    foreach ($name in $environmentNames) {
-        [Environment]::SetEnvironmentVariable(
-            $name,
-            $priorEnvironment[$name],
-            'Process'
-        )
+    # Restic and rclone keep nothing there that the proof needs.
+    foreach ($directory in @($nativeTemporaryDirectory, $rcloneCacheDirectory)) {
+        try { [System.IO.Directory]::Delete($directory, $true) } catch { }
     }
     Exit-ProtectedRunLock -Stream $runLock
 }

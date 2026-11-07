@@ -104,6 +104,19 @@ ones a home user reads without a glossary.
   Microsoft's WebView2 installer into a folder only administrators can change
   and keeps it locked from its signature check until it has finished, and the
   rest of the install keeps its temporary files in such a folder too.
+- **Protected tasks no longer take backup settings from your account's
+  environment variables.** The scheduled backup, restores, the repair helpers,
+  the nightly Google Drive check and Setup run with administrator rights, but
+  Windows gives them the user's own environment variables, which any program
+  the user runs can change without asking. A Restic or rclone setting planted
+  there (a password command, a password or repository file, a pack size, a
+  replacement for the Google Drive connection) could run a program with
+  administrator rights, check the wrong account or make every backup fail.
+  Every Python, Restic and rclone process they start now gets a short fixed
+  list of variables taken from Windows itself, the Google Drive check keeps its
+  read-only access and My Drive root in the connection itself, and Restic keeps
+  its temporary files in Rewindle's protected data folder instead of the user's
+  temp folder.
 
 ## [0.2.0-alpha.2] - 2026-10-08
 

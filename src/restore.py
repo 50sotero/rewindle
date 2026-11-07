@@ -479,6 +479,58 @@ def password_command(config: dict[str, Any]) -> str | None:
     return subprocess.list2cmdline(arguments)
 
 
+def windows_directory() -> Path:
+    """Return the shared Windows folder as Windows reports it, not SystemRoot."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetSystemWindowsDirectoryW.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+    kernel32.GetSystemWindowsDirectoryW.restype = wintypes.UINT
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = kernel32.GetSystemWindowsDirectoryW(buffer, len(buffer))
+    if length == 0 or length >= len(buffer):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return Path(buffer.value)
+
+
+def restic_child_environment() -> dict[str, str]:
+    """Build Restic's complete environment from an allow-list.
+
+    This bundle cannot import restic_common, so it carries its own copy of the
+    engine's list. Nothing else is inherited: an inherited
+    RESTIC_PASSWORD_COMMAND, RESTIC_PASSWORD_FILE, RESTIC_REPOSITORY_FILE or
+    RCLONE_* value would run a command with the restore's rights or point
+    Restic somewhere else. LOCALAPPDATA stays because Restic's default cache
+    lives there when no --cache-dir is given. A recovery key's RESTIC_PASSWORD
+    is added by the caller.
+    """
+    windows = windows_directory()
+    system = windows / "System32"
+    environment = {
+        "SystemRoot": str(windows),
+        "windir": str(windows),
+        "SystemDrive": windows.drive,
+        "ComSpec": str(system / "cmd.exe"),
+        "PATH": ";".join(
+            str(path)
+            for path in (
+                system,
+                windows,
+                system / "Wbem",
+                system / "WindowsPowerShell" / "v1.0",
+            )
+        ),
+        "PATHEXT": ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC",
+        "OS": "Windows_NT",
+        "NUMBER_OF_PROCESSORS": str(os.cpu_count() or 1),
+    }
+    architecture = os.environ.get("PROCESSOR_ARCHITECTURE")
+    if architecture in {"AMD64", "x86", "ARM64"}:
+        environment["PROCESSOR_ARCHITECTURE"] = architecture
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    if re.match(r"^[A-Za-z]:\\", local_app_data):
+        environment["LOCALAPPDATA"] = local_app_data
+    return environment
+
+
 def restic_executable_prefix(restic: Path) -> list[str]:
     # A Python fake is useful for the fully disposable test suite.  Production
     # recovery bundles continue to use the unchanged restic.exe form.
@@ -1474,7 +1526,7 @@ def main(argv: list[str] | None = None) -> int:
     report_path: Path | None = None
     restore_started = False
     restore_succeeded = False
-    environment = os.environ.copy()
+    environment = restic_child_environment()
     try:
         config_path = args.config.resolve(strict=True)
         config = load_restore_config(config_path)
