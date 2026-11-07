@@ -191,13 +191,30 @@ function Write-FakeResticControl {
 
 $pythonWrapper = Join-Path $compilerRoot 'python.exe'
 $escapedPython = $realPython.Replace('\', '\\').Replace('"', '\"')
+$fakePythonControl = Join-Path $compilerRoot 'fake-python-control.txt'
 # Manage-Retention starts retention.py with an allow-listed environment. The stand-in refuses (exit 93) any other variable.
+# Its control file can make one step hang (with a child process of its own, as Restic would be), print something that is
+# not JSON, or turn the progress file into a folder after the step, so that the next progress write fails.
 $pythonWrapperSource = @"
 using System;
 using System.Collections;
 using System.Diagnostics;
+using System.IO;
 using System.Text;
 public static class PythonWrapper {
+  static string Control(string name) {
+    string path = @"__FAKE_PYTHON_CONTROL__";
+    if (!File.Exists(path)) return null;
+    foreach (string line in File.ReadAllLines(path)) {
+      int separator = line.IndexOf('=');
+      if (separator > 0 && line.Substring(0, separator) == name) return line.Substring(separator + 1);
+    }
+    return null;
+  }
+  static string Argument(string[] args, string name) {
+    int index = Array.IndexOf(args, name);
+    return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
+  }
   static readonly string[] Allowed = {
     "SystemRoot", "windir", "SystemDrive", "ComSpec", "PATH", "PATHEXT", "OS", "NUMBER_OF_PROCESSORS",
     "PROCESSOR_ARCHITECTURE", "TEMP", "TMP"
@@ -219,12 +236,31 @@ public static class PythonWrapper {
       string name = (string)item.Key;
       if (Array.IndexOf(Allowed, name) < 0) { Console.Error.WriteLine("inherited " + name); return 93; }
     }
+    string step = Argument(args, "--step");
+    if (step != null && step == Control("GARBLE_STEP")) { Console.Out.Write("this is not JSON"); return 0; }
+    if (step != null && step == Control("HANG_STEP")) {
+      ProcessStartInfo sleeper = new ProcessStartInfo(); sleeper.FileName = "$escapedPython";
+      sleeper.Arguments = "-I -c \"import time; time.sleep(600)\""; sleeper.UseShellExecute = false;
+      using (Process child = Process.Start(sleeper)) {
+        File.WriteAllText(Control("PID_FILE"), Process.GetCurrentProcess().Id.ToString() + " " + child.Id.ToString());
+        child.WaitForExit();
+      }
+      return 0;
+    }
     ProcessStartInfo start = new ProcessStartInfo(); start.FileName = "$escapedPython";
     start.Arguments = String.Join(" ", Array.ConvertAll(args, Quote)); start.UseShellExecute = false;
-    using (Process process = Process.Start(start)) { process.WaitForExit(); return process.ExitCode; }
+    int exitCode;
+    using (Process process = Process.Start(start)) { process.WaitForExit(); exitCode = process.ExitCode; }
+    if (step != null && step == Control("BLOCK_PROGRESS_AFTER")) {
+      string progress = Path.Combine(Control("RESULT_ROOT"), Argument(args, "--request-nonce") + ".json.progress.json");
+      if (File.Exists(progress)) File.Delete(progress);
+      Directory.CreateDirectory(progress);
+    }
+    return exitCode;
   }
 }
 "@
+$pythonWrapperSource = $pythonWrapperSource.Replace('__FAKE_PYTHON_CONTROL__', $fakePythonControl)
 Add-Type -TypeDefinition $pythonWrapperSource -OutputAssembly $pythonWrapper -OutputType ConsoleApplication
 
 function Write-BackupLog {
@@ -353,7 +389,9 @@ function Invoke-Manager {
         [string]$UserSid = $sid,
         [string]$ResultPathOverride = '',
         [string]$ScriptPath = '',
-        [string]$TestRootOverride = ''
+        [string]$TestRootOverride = '',
+        [hashtable]$Python = @{},
+        [hashtable]$Limits = @{}
     )
     $nonce = ([Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')).ToLowerInvariant()
     $configHash = Get-Hash -Path $Fixture.ConfigPath
@@ -376,6 +414,10 @@ function Invoke-Manager {
         if ($Arguments.ContainsKey($name)) { $argumentList += @("-$name", [string]$Arguments[$name]) }
     }
     Write-FakeResticControl -Fixture $Fixture -Settings $Fake
+    $pythonLines = @(foreach ($name in $Python.Keys) { $name + '=' + [string]$Python[$name] })
+    [IO.File]::WriteAllLines($fakePythonControl, [string[]]$pythonLines, $encoding)
+    $limitLines = @(foreach ($name in $Limits.Keys) { $name + '=' + [string]$Limits[$name] })
+    [IO.File]::WriteAllLines((Join-Path $Fixture.Root 'step-time-limits.txt'), [string[]]$limitLines, $encoding)
     if (Test-Path -LiteralPath $Fixture.Log) { Remove-Item -LiteralPath $Fixture.Log }
     $priorPreference = $ErrorActionPreference
     try {
@@ -385,7 +427,7 @@ function Invoke-Manager {
     }
     finally { $ErrorActionPreference = $priorPreference }
     $result = if (Test-Path -LiteralPath $resultPath) { Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json } else { $null }
-    $progress = if (Test-Path -LiteralPath ($resultPath + '.progress.json')) {
+    $progress = if (Test-Path -LiteralPath ($resultPath + '.progress.json') -PathType Leaf) {
         Get-Content -LiteralPath ($resultPath + '.progress.json') -Raw | ConvertFrom-Json
     } else { $null }
     $log = [string[]]@()
@@ -403,9 +445,10 @@ function Get-Preview {
 }
 
 function Invoke-Apply {
-    param([pscustomobject]$Fixture, [hashtable]$Fake = @{}, [string]$Confirm = '1', [string]$PreviewSha = '', [string]$Count = '')
+    param([pscustomobject]$Fixture, [hashtable]$Fake = @{}, [string]$Confirm = '1', [string]$PreviewSha = '', [string]$Count = '',
+        [hashtable]$Python = @{}, [hashtable]$Limits = @{})
     $preview = Get-Preview -Fixture $Fixture
-    return Invoke-Manager -Fixture $Fixture -Action apply -Fake $Fake -Arguments @{
+    return Invoke-Manager -Fixture $Fixture -Action apply -Fake $Fake -Python $Python -Limits $Limits -Arguments @{
         ExpectedPreviewSha256 = $(if ($PreviewSha) { $PreviewSha } else { $preview.Sha256 })
         ExpectedRemoveSetSha256 = $preview.Document.remove_set_sha256
         ExpectedRemoveCount = $(if ($Count) { $Count } else { [string]$preview.Document.remove_count })
@@ -428,6 +471,35 @@ function Test-RemovalCalls {
             (($words -contains 'forget') -and ($words -notcontains '--dry-run')) -or ($words -contains 'prune') -or ($words -contains 'check')
         )
     })
+}
+
+function Test-StoppedTree {
+    # The stand-in's hung step wrote its own process id and its child's; both must be gone.
+    param([string]$PidFile)
+    if (-not (Test-Path -LiteralPath $PidFile -PathType Leaf)) { return $false }
+    $ids = @(([IO.File]::ReadAllText($PidFile)).Trim().Split(' ') | ForEach-Object { [int]$_ })
+    if ($ids.Count -ne 2) { return $false }
+    foreach ($id in $ids) {
+        if ($null -ne (Get-Process -Id $id -ErrorAction SilentlyContinue)) { return $false }
+    }
+    return $true
+}
+
+function Test-RunLockFree {
+    param([pscustomobject]$Fixture)
+    $stream = [IO.File]::Open((Join-Path $Fixture.State 'run.lock'), [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite)
+    try {
+        try { $stream.Lock(0, 1) } catch { return $false }
+        $stream.Unlock(0, 1)
+        return $true
+    }
+    finally { $stream.Dispose() }
+}
+
+function Get-LastHistoryEntry {
+    param([pscustomobject]$Fixture)
+    $history = Get-Content -LiteralPath (Join-Path $Fixture.State 'retention-history.json') -Raw | ConvertFrom-Json
+    return @($history.entries)[-1]
 }
 
 $productionConfig = Join-Path $env:ProgramFiles 'ResticBackuper\backup-config.json'
@@ -663,6 +735,74 @@ try {
     $relist = Invoke-Apply -Fixture $relistFixture -Fake @{ FAKE_SNAPSHOTS_CODE = 1 }
     Assert-True ($relist.ExitCode -eq 4 -and $relist.Result.state -ceq 'partial' -and $relist.Result.removal_unverified) "an unverified removal is partial: $($relist.Output -join ' | ')"
     Assert-True (@($relist.Log | Where-Object { $_.Split("`t") -contains 'prune' }).Count -eq 0) 'nothing more runs after an unverified removal'
+
+    # --- A step that runs past its time limit is stopped with every process it started, and the run lock is let go ---
+    $hangFixture = New-Fixture
+    [void](Enable-Retention -Fixture $hangFixture)
+    $pidFile = Join-Path $hangFixture.Root 'hang.pid'
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $hung = Invoke-Manager -Fixture $hangFixture -Action preview -Python @{ HANG_STEP = 'preview'; PID_FILE = $pidFile } -Limits @{ preview = 3 }
+    $clock.Stop()
+    Assert-True ($hung.ExitCode -eq 1 -and $hung.Result.state -ceq 'failed') "a listing past its time limit fails: $($hung.Output -join ' | ')"
+    Assert-True ([string]$hung.Result.error -match 'time limit') 'the result says the listing ran past its time limit'
+    Assert-True ($clock.Elapsed.TotalSeconds -lt 120) "the stalled listing is stopped at its limit, not after it ends: $($clock.Elapsed.TotalSeconds) s"
+    Assert-True (Test-StoppedTree -PidFile $pidFile) 'the stalled helper and the process it started are both stopped'
+    Assert-True (Test-RunLockFree -Fixture $hangFixture) 'the run lock is free after a stalled listing'
+
+    # --- Freeing the space stalls after the backups were removed: it says so, and freeing the space is offered again ---
+    $pruneHangFixture = New-Fixture
+    [void](Enable-Retention -Fixture $pruneHangFixture)
+    $pidFile = Join-Path $pruneHangFixture.Root 'hang.pid'
+    $stalled = Invoke-Apply -Fixture $pruneHangFixture -Python @{ HANG_STEP = 'apply-prune'; PID_FILE = $pidFile } -Limits @{ 'apply-prune' = 3 }
+    Assert-True ($stalled.ExitCode -eq 5 -and $stalled.Result.state -ceq 'space_pending' -and $stalled.Result.removed_count -eq 2) "a stalled freeing of space says the backups were removed and the space is not free yet: $($stalled.Output -join ' | ')"
+    Assert-True (-not $stalled.Result.prune_completed -and $stalled.Result.history_recorded -eq $true) 'the removal is recorded even though freeing the space stalled'
+    Assert-True ([string]$stalled.Result.error -match 'time limit') 'the result says freeing the space ran past its time limit'
+    Assert-True (Test-StoppedTree -PidFile $pidFile) 'the stalled freeing of space is stopped with everything it started'
+    Assert-True (Test-RunLockFree -Fixture $pruneHangFixture) 'the run lock is free after a stalled freeing of space'
+    Assert-True ((Get-StoreIds -Fixture $pruneHangFixture).Count -eq 3) 'the two confirmed backups were removed'
+    Assert-True ((Get-Preview -Fixture $pruneHangFixture).Document.prune_pending -eq $true) 'freeing the space is offered again after it stalled'
+    Assert-True ((Get-LastHistoryEntry -Fixture $pruneHangFixture).outcome -ceq 'space_pending') 'the history says the space is still to be freed'
+    Assert-True ($stalled.Progress.stage -ceq 'failed') 'the progress file does not say it finished'
+
+    # --- The removal itself stalls: some backups may have gone, and nobody claims a count ---
+    $forgetHangFixture = New-Fixture
+    [void](Enable-Retention -Fixture $forgetHangFixture)
+    $pidFile = Join-Path $forgetHangFixture.Root 'hang.pid'
+    $unknown = Invoke-Apply -Fixture $forgetHangFixture -Python @{ HANG_STEP = 'apply-forget'; PID_FILE = $pidFile } -Limits @{ 'apply-forget' = 3 }
+    Assert-True ($unknown.ExitCode -eq 4 -and $unknown.Result.state -ceq 'partial' -and $unknown.Result.removal_unverified -eq $true) "a stalled removal is partial and unverified: $($unknown.Output -join ' | ')"
+    Assert-True ($unknown.Result.removed_count -eq 0 -and $unknown.Result.history_recorded -eq $true) 'a stalled removal claims no count and is recorded'
+    Assert-True (Test-StoppedTree -PidFile $pidFile) 'the stalled removal is stopped with everything it started'
+    Assert-True (Test-RunLockFree -Fixture $forgetHangFixture) 'the run lock is free after a stalled removal'
+    $entry = Get-LastHistoryEntry -Fixture $forgetHangFixture
+    Assert-True ($entry.outcome -ceq 'partial' -and $entry.removal_unverified -eq $true) 'the history says the removal could not be confirmed'
+    Assert-True ((Get-Preview -Fixture $forgetHangFixture).Document.prune_pending -eq $true) 'freeing the space is offered after a removal nobody could confirm'
+
+    # --- Answers that cannot be read, from each step after the removal started ---
+    $garbledFixture = New-Fixture
+    [void](Enable-Retention -Fixture $garbledFixture)
+    $garbled = Invoke-Apply -Fixture $garbledFixture -Python @{ GARBLE_STEP = 'apply-forget' }
+    Assert-True ($garbled.ExitCode -eq 4 -and $garbled.Result.state -ceq 'partial' -and $garbled.Result.removal_unverified -eq $true -and $garbled.Result.removed_count -eq 0) "an unreadable answer from the removal is partial and unverified: $($garbled.Output -join ' | ')"
+    $garbledFixture = New-Fixture
+    [void](Enable-Retention -Fixture $garbledFixture)
+    $garbled = Invoke-Apply -Fixture $garbledFixture -Python @{ GARBLE_STEP = 'apply-prune' }
+    Assert-True ($garbled.ExitCode -eq 5 -and $garbled.Result.state -ceq 'space_pending' -and $garbled.Result.removed_count -eq 2) "an unreadable answer from freeing the space is space pending: $($garbled.Output -join ' | ')"
+    Assert-True ($garbled.Result.history_recorded -eq $true -and (Get-LastHistoryEntry -Fixture $garbledFixture).outcome -ceq 'space_pending') 'it is recorded as space pending'
+    $garbledFixture = New-Fixture
+    [void](Enable-Retention -Fixture $garbledFixture)
+    $garbled = Invoke-Apply -Fixture $garbledFixture -Python @{ GARBLE_STEP = 'apply-check' }
+    Assert-True ($garbled.ExitCode -eq 6 -and $garbled.Result.state -ceq 'check_failed' -and $garbled.Result.check_unfinished -eq $true) "an unreadable answer from the check says the check did not finish: $($garbled.Output -join ' | ')"
+    Assert-True ($garbled.Result.prune_completed -eq $true -and $garbled.Result.removed_count -eq 2) 'the space was freed before the check'
+    Assert-True ((Get-LastHistoryEntry -Fixture $garbledFixture).check_unfinished -eq $true) 'the history says the check did not finish'
+
+    # --- The progress note cannot be written after the removal: the rest is still reported as what it is ---
+    $blockedFixture = New-Fixture
+    [void](Enable-Retention -Fixture $blockedFixture)
+    $blockedProgress = Invoke-Apply -Fixture $blockedFixture -Python @{
+        BLOCK_PROGRESS_AFTER = 'apply-forget'; RESULT_ROOT = (Join-Path $blockedFixture.State 'RetentionManagerResults')
+    }
+    Assert-True ($blockedProgress.ExitCode -eq 5 -and $blockedProgress.Result.state -ceq 'space_pending' -and $blockedProgress.Result.removed_count -eq 2) "a progress note that cannot be written after the removal ends as space pending: $($blockedProgress.Output -join ' | ')"
+    Assert-True ($blockedProgress.Result.history_recorded -eq $true) 'the removal is recorded'
+    Assert-True ((Get-StoreIds -Fixture $blockedFixture).Count -eq 3) 'the two confirmed backups were removed'
 
     # --- The manager refuses to run from a copy outside the fixture's program folder ---
     $copy = Join-Path $fixture.Root 'Manage-Retention.ps1'

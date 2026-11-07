@@ -921,6 +921,44 @@ class SpaceAndRecordTests(RetentionTestCase):
         self.assertTrue(retention.prune_pending(entries))
         self.assertTrue(h.preview()["prune_pending"])
 
+    def test_a_removal_nobody_could_confirm_is_recorded_as_such_and_offers_to_free_the_space(self) -> None:
+        # The manager stopped the removal step at its time limit (or could not read its answer): it records no count,
+        # says the removal could not be confirmed, and the next list offers to free whatever space it took.
+        h = self.h
+        standard_history(h)
+        h.policy()
+        args = retention.parse_args([
+            "--config", "x", "--expected-config-sha256", "0" * 64, "--request-nonce", "1" * 64,
+            "--step", "apply-record", "--outcome", "partial", "--started-utc", "2026-09-30T10:00:00Z",
+            "--confirmed-count", "2", "--removed-count", "0", "--removed-set-sha256", "2" * 64,
+            "--removal-unverified", "1",
+        ])
+        self.assertEqual(retention.run_step(args, h.ctx)["state"], "recorded")
+        entries, _readable = retention.read_history(h.ctx)
+        self.assertIs(entries[-1]["removal_unverified"], True)
+        self.assertIs(entries[-1]["check_unfinished"], False)
+        self.assertEqual(entries[-1]["removed_count"], 0)
+        self.assertTrue(retention.prune_pending(entries))
+        self.assertTrue(h.preview()["prune_pending"])
+        # Freeing the space later settles it.
+        self.assertFalse(retention.prune_pending(entries + [{"prune_completed": True, "removed_count": 0}]))
+        self.assertFalse(retention.prune_pending([{"removed_count": 0, "removal_unverified": False}]))
+
+    def test_a_check_that_did_not_finish_is_recorded_apart_from_a_check_that_found_a_problem(self) -> None:
+        h = self.h
+        standard_history(h)
+        h.policy()
+        retention.apply_record(
+            h.ctx, outcome="check_failed", request_nonce="1" * 64, started_utc="2026-09-30T10:00:00Z",
+            confirmed_count=2, removed_count=2, removed_set_sha256="2" * 64, prune_completed=True,
+            check_completed=False, prune_mode="standard", free_bytes_before=1, files_confirmed=False,
+            check_unfinished=True,
+        )
+        entries, _readable = retention.read_history(h.ctx)
+        self.assertIs(entries[-1]["check_unfinished"], True)
+        self.assertIs(entries[-1]["removal_unverified"], False)
+        self.assertFalse(retention.prune_pending(entries))
+
     def test_history_keeps_the_newest_fifty(self) -> None:
         h = self.h
         standard_history(h)

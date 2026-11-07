@@ -82,6 +82,28 @@ else {
     $stateRoot = [IO.Path]::GetFullPath((Join-Path $programDataRoot $productName)).TrimEnd('\')
 }
 $localNtfsMode = 'local_ntfs'
+$removeSetDomain = 'ResticBackuper.RetentionRemoveSet.v1'
+
+# How long each step of retention.py may run while this manager holds the run lock. A step still running then is
+# stopped with every process it started, so a stalled Restic can never keep the run lock, and with it every scheduled
+# backup, for good. Listing what would go is quick; removing, freeing space and checking get far longer, because stopping
+# them half-way is worse than waiting.
+$stepTimeLimits = @{
+    'configure' = [TimeSpan]::FromMinutes(8); 'preview' = [TimeSpan]::FromMinutes(8); 'apply-record' = [TimeSpan]::FromMinutes(8)
+    'apply-forget' = [TimeSpan]::FromHours(2); 'apply-prune' = [TimeSpan]::FromHours(24); 'apply-check' = [TimeSpan]::FromHours(24)
+}
+if ($isTestMode) {
+    # Only the disposable test mode: lines "step=seconds" in the test root shorten a step's limit.
+    $limitFile = Join-Path $testContainer 'step-time-limits.txt'
+    if ([IO.File]::Exists($limitFile)) {
+        foreach ($line in [IO.File]::ReadAllLines($limitFile)) {
+            if ($line -cmatch '^([a-z-]+)=([1-9][0-9]{0,4})$' -and $stepTimeLimits.ContainsKey($Matches[1])) {
+                $stepTimeLimits[$Matches[1]] = [TimeSpan]::FromSeconds([int]$Matches[2])
+            }
+        }
+    }
+}
+$stepStarted = $false
 
 $managerPath = Join-Path $installRoot 'Manage-Retention.ps1'
 $configPath = Join-Path $installRoot 'backup-config.json'
@@ -419,6 +441,7 @@ function New-FinalResultDocument {
         kept_count = Get-OutcomeValue -Name 'kept_count'
         prune_completed = Get-OutcomeValue -Name 'prune_completed'
         check_completed = Get-OutcomeValue -Name 'check_completed'
+        check_unfinished = Get-OutcomeValue -Name 'check_unfinished'
         prune_mode = Get-OutcomeValue -Name 'prune_mode'
         history_recorded = Get-OutcomeValue -Name 'history_recorded'
         backend_exit_code = if ($null -eq $outcome) { -1 } else { $outcome.BackendExitCode }
@@ -692,9 +715,40 @@ function New-RetentionBackendEnvironment {
     return $environment
 }
 
+function Stop-ProcessTree {
+    # Ends a helper that ran past its time limit and every process it started (Restic among them): taskkill /T follows the
+    # parent links. retention.py also runs Restic in a job that Windows ends with it.
+    param([Diagnostics.Process]$Process)
+    try {
+        $start = [Diagnostics.ProcessStartInfo]::new()
+        $start.FileName = Join-Path ([Environment]::SystemDirectory) 'taskkill.exe'
+        $start.Arguments = '/PID ' + $Process.Id.ToString([Globalization.CultureInfo]::InvariantCulture) + ' /T /F'
+        $start.UseShellExecute = $false
+        $start.CreateNoWindow = $true
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        $killer = [Diagnostics.Process]::Start($start)
+        try {
+            $killerOutput = $killer.StandardOutput.ReadToEndAsync()
+            $killerErrors = $killer.StandardError.ReadToEndAsync()
+            [void]$killer.WaitForExit(30000)
+            [void]$killerOutput.Wait(5000); [void]$killerErrors.Wait(5000)
+        }
+        finally { $killer.Dispose() }
+    }
+    catch { }
+    try { if (-not $Process.HasExited) { $Process.Kill() } } catch { }
+    [void]$Process.WaitForExit(30000)
+}
+
 function Invoke-RetentionStep {
-    # One step of retention.py, which prints one JSON object. Its exit code must agree with the state it reports.
+    # One step of retention.py, which prints one JSON object. Its exit code must agree with the state it reports. A step
+    # that runs past its time limit is stopped, with everything it started, and reported as a failure; $stepStarted then
+    # says whether the helper had started at all.
     param([string]$Step, [string[]]$Extra = @())
+    $script:stepStarted = $false
+    $limit = $stepTimeLimits[$Step]
+    if ($null -eq $limit) { throw "The clean-up step $Step has no time limit." }
     foreach ($value in $Extra) {
         if ([string]::IsNullOrEmpty($value)) { throw 'The clean-up step was prepared with an empty argument.' }
     }
@@ -717,9 +771,17 @@ function Invoke-RetentionStep {
     $process = [Diagnostics.Process]::new(); $process.StartInfo = $start
     try {
         if (-not $process.Start()) { throw 'Windows did not start the protected clean-up helper.' }
+        $script:stepStarted = $true
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit([int]$limit.TotalMilliseconds)) {
+            Stop-ProcessTree -Process $process
+            throw "The clean-up step $Step did not finish within its time limit, so it was stopped."
+        }
         $process.WaitForExit()
+        if (-not $stdoutTask.Wait(30000) -or -not $stderrTask.Wait(30000)) {
+            throw "The clean-up step $Step did not close its output."
+        }
         $stdout = $stdoutTask.Result
         $stderr = $stderrTask.Result
         if ($isTestMode -and $stderr) { [Console]::Error.WriteLine($stderr) }
@@ -828,96 +890,173 @@ function Get-StepValue {
     return Get-OptionalProperty -Object $Step.Value -Name $Name
 }
 
+function Save-RetentionRecord {
+    # The history entry of this removal, then a fresh list. It runs whatever happened after the removal step, so the next
+    # list knows what was removed and offers to finish freeing the space; if it fails, the result says so.
+    param(
+        [Collections.IDictionary]$Values,
+        [string]$Outcome,
+        [string]$StartedUtc,
+        [int]$RemovedCount,
+        [string]$RemovedSet,
+        [object]$FreeBefore
+    )
+    $bit = { param([object]$Flag) if ([bool]$Flag) { '1' } else { '0' } }
+    $arguments = @('--outcome', $Outcome, '--started-utc', $StartedUtc,
+        '--confirmed-count', $ExpectedRemoveCount, '--removed-count', [string]$RemovedCount,
+        '--removed-set-sha256', $RemovedSet,
+        '--prune-completed', (& $bit $Values.prune_completed), '--check-completed', (& $bit $Values.check_completed),
+        '--check-unfinished', (& $bit $Values.check_unfinished), '--removal-unverified', (& $bit $Values.removal_unverified),
+        '--prune-mode', $(if ($Values.prune_mode -cin @('standard', 'unused_only')) { $Values.prune_mode } else { 'none' }),
+        '--files-confirmed', $(if ($ConfirmEarlierChanges -ceq '1') { '1' } else { '0' }))
+    if ($null -ne $FreeBefore) { $arguments += @('--free-bytes-before', [string][long]$FreeBefore) }
+    try {
+        $record = Invoke-RetentionStep -Step 'apply-record' -Extra $arguments
+        $Values.history_recorded = $record.State -ceq 'recorded'
+        if ($Values.history_recorded) {
+            $previewSha = Get-StepValue -Step $record -Name 'preview_sha256'
+            if ($previewSha -is [string] -and $previewSha -cmatch '^[0-9a-f]{64}$') { $Values.preview_sha256 = $previewSha }
+            $Values.preview_state = [string](Get-StepValue -Step $record -Name 'preview_state')
+        }
+    }
+    catch {
+        if ($isTestMode) { [Console]::Error.WriteLine($_.Exception.Message) }
+        $Values.history_recorded = $false
+    }
+}
+
+function Complete-UnconfirmedRemoval {
+    # The removal step started but gave no answer this manager can trust: it was stopped at its time limit, or what it
+    # printed could not be read. Some backups on the list may have been removed, and nobody knows which. The result says
+    # exactly that; the history records it without claiming a count, nothing more runs, and the next list shows what is
+    # there (and offers to free the space).
+    param([int]$Count, [string]$StartedUtc, [string]$Failure)
+    if ($isTestMode) { [Console]::Error.WriteLine($Failure) }
+    $emptySet = Get-Sha256Hex -Bytes $utf8.GetBytes($removeSetDomain)
+    $values = [ordered]@{
+        removed_count = 0; removed_set_sha256 = $emptySet; remove_count = $Count; kept_count = $null
+        removal_unverified = $true; prune_completed = $false; check_completed = $false; check_unfinished = $false
+        prune_mode = 'none'; history_recorded = $false; preview_sha256 = $null; preview_state = $null; policy_sha256 = $null
+    }
+    Save-RetentionRecord -Values $values -Outcome 'partial' -StartedUtc $StartedUtc -RemovedCount 0 -RemovedSet $emptySet -FreeBefore $null
+    try { Write-ProgressResult -Stage 'failed' -Message 'Clean-up stopped.' -Percent 0 -Count $Count } catch { }
+    Set-Outcome -State 'partial' -ExitCode 4 -Values $values -ErrorMessage $Failure -BackendExitCode -1
+}
+
 function Invoke-RetentionApply {
     $startedUtc = [DateTime]::UtcNow.ToString('o')
     $count = [int]$ExpectedRemoveCount
+    # Until the removal step starts, nothing can have been removed: a failure up to there is reported as a plain failure.
     Write-ProgressResult -Stage 'checking' -Message 'Checking the list against the backups that are there now.' -Percent 15 -Count $count
-    $forget = Invoke-RetentionStep -Step 'apply-forget' -Extra @(
-        '--expected-preview-sha256', $ExpectedPreviewSha256, '--expected-remove-set-sha256', $ExpectedRemoveSetSha256,
-        '--expected-remove-count', $ExpectedRemoveCount, '--confirm-earlier-changes', $ConfirmEarlierChanges)
+    try {
+        $forget = Invoke-RetentionStep -Step 'apply-forget' -Extra @(
+            '--expected-preview-sha256', $ExpectedPreviewSha256, '--expected-remove-set-sha256', $ExpectedRemoveSetSha256,
+            '--expected-remove-count', $ExpectedRemoveCount, '--confirm-earlier-changes', $ConfirmEarlierChanges)
+    }
+    catch {
+        if (-not $stepStarted) { throw }
+        Complete-UnconfirmedRemoval -Count $count -StartedUtc $startedUtc -Failure $_.Exception.Message
+        return
+    }
     switch ($forget.State) {
         'refused' {
             $code = [string](Get-StepValue -Step $forget -Name 'refusal_code')
             if ($code -cnotin $refusalCodes) { throw 'The clean-up helper refused for an unknown reason.' }
-            Write-ProgressResult -Stage 'failed' -Message 'Nothing was removed.' -Percent 0 -Count $count
+            try { Write-ProgressResult -Stage 'failed' -Message 'Nothing was removed.' -Percent 0 -Count $count } catch { }
             Set-Outcome -State 'refused' -ExitCode 2 -RefusalCode $code -BackendExitCode $forget.ExitCode
             return
         }
         'preview_changed' {
-            Write-ProgressResult -Stage 'failed' -Message 'The list changed. Nothing was removed.' -Percent 0 -Count $count
+            try { Write-ProgressResult -Stage 'failed' -Message 'The list changed. Nothing was removed.' -Percent 0 -Count $count } catch { }
             Set-Outcome -State 'preview_changed' -ExitCode 3 -Values $forget.Value -BackendExitCode $forget.ExitCode
             return
         }
         'failed' {
+            # The helper answers "failed" only for a stop before its first removal (after that it lists again and says
+            # what went, as "partial").
             throw ('The clean-up helper stopped before removing anything: ' + [string](Get-StepValue -Step $forget -Name 'error'))
         }
     }
-    if ($forget.State -cnotin @('removed', 'partial', 'nothing_to_remove', 'kept_backup_missing')) {
-        throw "The clean-up helper answered an unknown state: $($forget.State)"
-    }
-    $removedCount = [int](Get-StepValue -Step $forget -Name 'removed_count')
-    $removedSet = [string](Get-StepValue -Step $forget -Name 'removed_set_sha256')
-    if ($removedSet -cnotmatch '^[0-9a-f]{64}$' -or $removedCount -lt 0 -or $removedCount -gt $count) {
-        throw 'The clean-up helper reported an invalid removed list.'
-    }
-    $freeBefore = Get-StepValue -Step $forget -Name 'free_bytes_before'
-    $values = [ordered]@{
-        removed_count = $removedCount; removed_set_sha256 = $removedSet; remove_count = $count
-        kept_count = Get-StepValue -Step $forget -Name 'kept_count'
-        prune_completed = $false; check_completed = $false; prune_mode = 'none'; history_recorded = $false
-        preview_sha256 = $null; preview_state = $null; policy_sha256 = $null
-    }
-    $unverified = [bool](Get-StepValue -Step $forget -Name 'removal_unverified')
-    $values.removal_unverified = $unverified
-    $needsPrune = -not $unverified -and ($removedCount -gt 0 -or ($forget.State -ceq 'nothing_to_remove' -and
-        [bool](Get-StepValue -Step $forget -Name 'prune_pending')))
-    $finalState = $forget.State
-    if ($unverified) {
-        # The backups could not be listed again after removing: nothing more runs; the next clean-up frees the space.
-        $finalState = 'partial'
-    }
-    elseif ($forget.State -ceq 'kept_backup_missing') {
-        # A backup that should have stayed is gone: nothing more is done, and the person is sent to the recovery check.
-        $finalState = 'check_failed'
-    }
-    elseif ($needsPrune) {
-        Write-ProgressResult -Stage 'freeing' -Message 'Freeing space on the backup location.' -Percent $null -Count $removedCount
-        $prune = Invoke-RetentionStep -Step 'apply-prune'
-        $values.prune_completed = [bool](Get-StepValue -Step $prune -Name 'prune_completed')
-        $values.prune_mode = [string](Get-StepValue -Step $prune -Name 'prune_mode')
-        if ($values.prune_completed) {
-            Write-ProgressResult -Stage 'verifying' -Message 'Checking the remaining backups.' -Percent 90 -Count $removedCount
-            $check = Invoke-RetentionStep -Step 'apply-check'
-            $values.check_completed = [bool](Get-StepValue -Step $check -Name 'check_completed')
+
+    # From here on backups on the list were removed, or may have been: every failure is reported as what it is, never as
+    # a clean-up that removed nothing.
+    try {
+        if ($forget.State -cnotin @('removed', 'partial', 'nothing_to_remove', 'kept_backup_missing')) {
+            throw "The clean-up helper answered an unknown state: $($forget.State)"
         }
+        $removedCount = [int](Get-StepValue -Step $forget -Name 'removed_count')
+        $removedSet = [string](Get-StepValue -Step $forget -Name 'removed_set_sha256')
+        if ($removedSet -cnotmatch '^[0-9a-f]{64}$' -or $removedCount -lt 0 -or $removedCount -gt $count) {
+            throw 'The clean-up helper reported an invalid removed list.'
+        }
+        $freeBefore = Get-StepValue -Step $forget -Name 'free_bytes_before'
+        if ($null -ne $freeBefore) { $freeBefore = [long]$freeBefore }
+        $unverified = [bool](Get-StepValue -Step $forget -Name 'removal_unverified')
+        $prunePending = [bool](Get-StepValue -Step $forget -Name 'prune_pending')
+        $values = [ordered]@{
+            removed_count = $removedCount; removed_set_sha256 = $removedSet; remove_count = $count
+            kept_count = Get-StepValue -Step $forget -Name 'kept_count'; removal_unverified = $unverified
+            prune_completed = $false; check_completed = $false; check_unfinished = $false; prune_mode = 'none'
+            history_recorded = $false; preview_sha256 = $null; preview_state = $null; policy_sha256 = $null
+        }
+    }
+    catch {
+        Complete-UnconfirmedRemoval -Count $count -StartedUtc $startedUtc -Failure $_.Exception.Message
+        return
+    }
+    $needsPrune = -not $unverified -and ($removedCount -gt 0 -or ($forget.State -ceq 'nothing_to_remove' -and $prunePending))
+    $finalState = $forget.State
+    $failure = $null
+    try {
+        if ($unverified) {
+            # The backups could not be listed again after removing: nothing more runs; the next clean-up frees the space.
+            $finalState = 'partial'
+        }
+        elseif ($forget.State -ceq 'kept_backup_missing') {
+            # A backup that should have stayed is gone: nothing more is done, and the person is sent to the recovery check.
+            $finalState = 'check_failed'
+        }
+        elseif ($needsPrune) {
+            Write-ProgressResult -Stage 'freeing' -Message 'Freeing space on the backup location.' -Percent $null -Count $removedCount
+            $prune = Invoke-RetentionStep -Step 'apply-prune'
+            $values.prune_completed = [bool](Get-StepValue -Step $prune -Name 'prune_completed')
+            $values.prune_mode = [string](Get-StepValue -Step $prune -Name 'prune_mode')
+            if ($values.prune_completed) {
+                Write-ProgressResult -Stage 'verifying' -Message 'Checking the remaining backups.' -Percent 90 -Count $removedCount
+                $check = Invoke-RetentionStep -Step 'apply-check'
+                $values.check_completed = [bool](Get-StepValue -Step $check -Name 'check_completed')
+            }
+            if ($forget.State -ceq 'partial') { $finalState = 'partial' }
+            elseif (-not $values.prune_completed) { $finalState = 'space_pending' }
+            elseif (-not $values.check_completed) { $finalState = 'check_failed' }
+            elseif ($forget.State -ceq 'nothing_to_remove') { $finalState = 'nothing_to_remove' }
+            else { $finalState = 'removed' }
+        }
+    }
+    catch {
+        # The backups were removed, then freeing their space or checking the rest stopped (it ran past its time limit, its
+        # answer could not be read, or the progress for the dashboard could not be written). Say exactly how far it got.
+        $failure = $_.Exception.Message
+        if ($isTestMode) { [Console]::Error.WriteLine($failure) }
         if ($forget.State -ceq 'partial') { $finalState = 'partial' }
         elseif (-not $values.prune_completed) { $finalState = 'space_pending' }
-        elseif (-not $values.check_completed) { $finalState = 'check_failed' }
-        elseif ($forget.State -ceq 'nothing_to_remove') { $finalState = 'nothing_to_remove' }
-        else { $finalState = 'removed' }
+        else {
+            $values.check_completed = $false
+            $values.check_unfinished = $true
+            $finalState = 'check_failed'
+        }
     }
-    $filesConfirmed = if ($ConfirmEarlierChanges -ceq '1') { '1' } else { '0' }
-    $recordArguments = @('--outcome', $finalState, '--started-utc', $startedUtc,
-        '--confirmed-count', $ExpectedRemoveCount, '--removed-count', [string]$removedCount,
-        '--removed-set-sha256', $removedSet,
-        '--prune-completed', $(if ($values.prune_completed) { '1' } else { '0' }),
-        '--check-completed', $(if ($values.check_completed) { '1' } else { '0' }),
-        '--prune-mode', $(if ($values.prune_mode -cin @('standard', 'unused_only')) { $values.prune_mode } else { 'none' }),
-        '--files-confirmed', $filesConfirmed)
-    if ($null -ne $freeBefore) { $recordArguments += @('--free-bytes-before', [string][long]$freeBefore) }
-    try {
-        $record = Invoke-RetentionStep -Step 'apply-record' -Extra $recordArguments
-        $values.history_recorded = $record.State -ceq 'recorded'
-        $values.preview_sha256 = Get-StepValue -Step $record -Name 'preview_sha256'
-        $values.preview_state = Get-StepValue -Step $record -Name 'preview_state'
-    }
-    catch { $values.history_recorded = $false }
+    Save-RetentionRecord -Values $values -Outcome $finalState -StartedUtc $startedUtc -RemovedCount $removedCount `
+        -RemovedSet $removedSet -FreeBefore $freeBefore
     $exitCode = switch ($finalState) {
         'removed' { 0 } 'nothing_to_remove' { 0 } 'partial' { 4 } 'space_pending' { 5 } 'check_failed' { 6 } default { 1 }
     }
-    Write-ProgressResult -Stage $(if ($exitCode -eq 0) { 'complete' } else { 'failed' }) -Message 'Clean-up finished.' `
-        -Percent $(if ($exitCode -eq 0) { 100 } else { 0 }) -Count $removedCount
-    Set-Outcome -State $finalState -ExitCode $exitCode -Values $values -BackendExitCode $forget.ExitCode
+    try {
+        Write-ProgressResult -Stage $(if ($exitCode -eq 0) { 'complete' } else { 'failed' }) -Message 'Clean-up finished.' `
+            -Percent $(if ($exitCode -eq 0) { 100 } else { 0 }) -Count $removedCount
+    }
+    catch { }
+    Set-Outcome -State $finalState -ExitCode $exitCode -Values $values -ErrorMessage $failure -BackendExitCode $forget.ExitCode
 }
 
 function Invoke-RetentionOperation {
@@ -970,7 +1109,8 @@ function Invoke-RetentionOperation {
         if ($step.State -cne $expected) {
             throw ('The clean-up helper did not finish: ' + [string](Get-StepValue -Step $step -Name 'error'))
         }
-        Write-ProgressResult -Stage 'complete' -Message 'Done.' -Percent 100 -Count $null
+        # The step is done; the dashboard's progress note is only a convenience.
+        try { Write-ProgressResult -Stage 'complete' -Message 'Done.' -Percent 100 -Count $null } catch { }
         Set-Outcome -State $expected -ExitCode 0 -Values $step.Value -BackendExitCode $step.ExitCode
     }
     catch {

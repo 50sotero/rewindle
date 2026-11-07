@@ -849,11 +849,12 @@ def read_history(ctx: Context) -> tuple[list[dict[str, Any]], bool]:
 
 
 def prune_pending(entries: list[dict[str, Any]]) -> bool:
+    """Whether a clean-up since space was last freed removed backups, or may have, and left their space taken."""
     for entry in reversed(entries):
         if entry.get("prune_completed") is True:
             return False
         removed = entry.get("removed_count")
-        if _plain_int(removed) and removed > 0:
+        if (_plain_int(removed) and removed > 0) or entry.get("removal_unverified") is True:
             return True
     return False
 
@@ -1381,8 +1382,15 @@ def apply_record(
     prune_mode: str,
     free_bytes_before: int | None,
     files_confirmed: bool,
+    check_unfinished: bool = False,
+    removal_unverified: bool = False,
 ) -> dict[str, Any]:
-    """Record how the clean-up went, then list again what is there now."""
+    """Record how the clean-up went, then list again what is there now.
+
+    `removal_unverified`: some backups on the list may have been removed, but nobody knows which (the removal step was
+    stopped, or its answer could not be read), so `removed_count` is only what is known for certain. `check_unfinished`:
+    the space was freed, then the check of the remaining backups did not finish (as opposed to finding a problem).
+    """
     if outcome not in OUTCOMES:
         raise RetentionError("invalid_request", "unknown clean-up outcome")
     entries, readable = read_history(ctx)
@@ -1401,6 +1409,8 @@ def apply_record(
         "removed_set_sha256": removed_set_sha256,
         "prune_completed": prune_completed,
         "check_completed": check_completed,
+        "check_unfinished": check_unfinished,
+        "removal_unverified": removal_unverified,
         "prune_mode": prune_mode,
         "files_confirmed": files_confirmed,
         "keep_daily": daily,
@@ -1472,6 +1482,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--prune-mode", choices=("standard", "unused_only", "none"), default="none")
     parser.add_argument("--free-bytes-before", type=int)
     parser.add_argument("--files-confirmed", choices=("0", "1"), default="0")
+    parser.add_argument("--check-unfinished", choices=("0", "1"), default="0")
+    parser.add_argument("--removal-unverified", choices=("0", "1"), default="0")
     parser.add_argument("--test-root", type=Path)
     return parser.parse_args(argv)
 
@@ -1552,6 +1564,8 @@ def run_step(args: argparse.Namespace, ctx: Context) -> dict[str, Any]:
         prune_mode=args.prune_mode,
         free_bytes_before=args.free_bytes_before,
         files_confirmed=args.files_confirmed == "1",
+        check_unfinished=args.check_unfinished == "1",
+        removal_unverified=args.removal_unverified == "1",
     )
 
 
