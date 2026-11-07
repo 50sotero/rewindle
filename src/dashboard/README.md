@@ -102,7 +102,7 @@ in Edit schedule are kept in `alerts.json` beside `settings.json`. The classic
 `--native` presentation has no switch and follows `alerts.json` (On by
 default). A dashboard started with `--isolated-presentation-store`, or with a
 `--state-dir` other than the engine's own, shows the mark but never notifies or
-writes `alerts.json`.
+writes `alerts.json`; its switch says so and changes nothing.
 
 Alerts come only from a running dashboard. The installer's logon task starts
 it at sign-in; the earlier personal edition's own deployment decides whether

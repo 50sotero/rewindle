@@ -2135,6 +2135,15 @@ namespace RewindleRegression {
         Set-PrivateField $alertMonitor 'current' ($alertType.GetField('Quiet', $flags).GetValue($null))
         $quietHover = [string](Invoke-Private $alertDashboard 'DescribeTrayStatus' @($settledSnapshot))
         Assert-True ($quietHover -eq 'Rewindle - verified 5 days ago') ('without the mark the tray did not say when the backup was verified: ' + $quietHover)
+
+        # A second dashboard (an isolated store, or another state folder) never notifies: its switch says so and changes nothing,
+        # and it does not claim that a choice could not be saved.
+        $secondStore = [Activator]::CreateInstance($alertStoreType, $constructorFlags, $null, @([string]''), $null)
+        Set-PrivateField $alertDashboard 'backupAlerts' ([Activator]::CreateInstance($alertMonitorType, $constructorFlags, $null, @($secondStore, $false), $null))
+        $second = Invoke-AlertCommand 'off'
+        Assert-True ($second[0] -and $second[1].StartsWith('This Rewindle window was started in a separate mode and doesn') -and $second[1].EndsWith('Open Rewindle the usual way to change it.')) ('a second dashboard did not say that it sends no notifications: ' + $second[1])
+        Assert-True ([bool](Invoke-Private $alertDashboard 'BuildWebAlertsState')['notify']) 'the switch of a second dashboard changed'
+        Set-PrivateField $alertDashboard 'backupAlerts' $alertMonitor
     }
     finally {
         Invoke-Private $alertDashboard 'DisposeBackupAlerts' | Out-Null

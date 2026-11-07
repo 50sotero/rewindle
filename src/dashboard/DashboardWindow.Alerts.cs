@@ -423,6 +423,14 @@ namespace ResticBackuper.Dashboard
                 message = "Backup alerts are still starting. Try again in a moment.";
                 return false;
             }
+            if (!backupAlerts.NotificationsAllowed)
+            {
+                // A second dashboard (an isolated presentation store, or another state folder) never notifies, so the choice
+                // would change nothing here: it is left as it is, and the person is told where it is made.
+                message = "This Rewindle window was started in a separate mode and doesn’t send notifications, so this " +
+                    "setting isn’t used here. Open Rewindle the usual way to change it.";
+                return true;
+            }
             bool on = value == "on";
             bool saved = backupAlerts.SetNotifications(on);
             if (!saved)
