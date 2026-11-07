@@ -579,6 +579,14 @@ namespace ResticBackuper.Dashboard
         internal long? FreeBytesAfter;
     }
 
+    // A recorded clean-up that removed backups (or may have) or freed their space, for the Backup location card's forecast: when it
+    // finished, and how much free space it made (after minus before, never below 0), or -1 when that was not measured.
+    internal sealed class RetentionSpaceChange
+    {
+        internal DateTime FinishedUtc;
+        internal long FreedBytes;
+    }
+
     // Everything the dashboard knows about clean-up, from one read of the engine's records.
     internal sealed class RetentionView
     {
@@ -612,6 +620,11 @@ namespace ResticBackuper.Dashboard
         internal bool PrunePending;
         internal string FutureDatedUtc = string.Empty;
         internal RetentionHistoryEntryView LastRun;
+        // Whether the record of earlier clean-ups was read (or there is none), and, from every entry in it, oldest first, each
+        // clean-up that removed backups or freed their space. The Backup location card's forecast takes that space away; while the
+        // record cannot be read it has no forecast (DashboardWindow.BackupSpace.cs).
+        internal bool HistoryKnown;
+        internal List<RetentionSpaceChange> SpaceChanges = new List<RetentionSpaceChange>();
         // What the read was keyed on, so an unchanged set of files is not parsed again.
         internal string Stamp = string.Empty;
     }
@@ -1019,6 +1032,8 @@ namespace ResticBackuper.Dashboard
                 Path.Combine(stateDirectory, RetentionNames.HistoryFileName), RetentionNames.MaximumHistoryBytes);
             if (read.Bytes == null)
             {
+                // No clean-up was ever recorded; one that exists but cannot be trusted leaves it unknown.
+                view.HistoryKnown = !read.Exists;
                 return;
             }
             try
@@ -1026,17 +1041,73 @@ namespace ResticBackuper.Dashboard
                 IDictionary<string, object> history = RetentionJson.ParseObject(read.Bytes, RetentionNames.MaximumHistoryBytes);
                 object[] entries = RetentionJson.Array(history, "entries");
                 if (!string.Equals(RetentionJson.String(history, "schema"), profile.RetentionHistorySchema, StringComparison.Ordinal) ||
-                    !string.Equals(RetentionJson.String(history, "plan_id"), planId, StringComparison.Ordinal) ||
-                    entries == null || entries.Length == 0)
+                    entries == null)
                 {
                     return;
                 }
+                if (!string.Equals(RetentionJson.String(history, "plan_id"), planId, StringComparison.Ordinal) || entries.Length == 0)
+                {
+                    view.HistoryKnown = true;
+                    return;
+                }
                 view.LastRun = ParseHistoryEntry(entries[entries.Length - 1] as IDictionary<string, object>);
+                view.SpaceChanges = SpaceChangesOf(entries);
+                view.HistoryKnown = true;
             }
             catch
             {
                 view.LastRun = null;
+                view.SpaceChanges = new List<RetentionSpaceChange>();
+                view.HistoryKnown = false;
             }
+        }
+
+        // Each recorded clean-up that removed backups, may have (nobody could confirm which), or ran the step that frees their
+        // space, oldest first. An entry this build cannot read, or whose finish time is not a time, is left out.
+        internal static List<RetentionSpaceChange> SpaceChangesOf(object[] entries)
+        {
+            List<RetentionSpaceChange> changes = new List<RetentionSpaceChange>();
+            foreach (object item in entries ?? new object[0])
+            {
+                RetentionHistoryEntryView entry = ParseHistoryEntry(item as IDictionary<string, object>);
+                DateTime finished;
+                if (entry == null || !TryParseUtc(entry.FinishedUtc, out finished))
+                {
+                    continue;
+                }
+                bool removed = entry.RemovedCount > 0 || entry.RemovalUnverified;
+                if (!removed && !entry.PruneCompleted && entry.Outcome != "space_pending")
+                {
+                    continue;
+                }
+                RetentionSpaceChange change = new RetentionSpaceChange();
+                change.FinishedUtc = finished;
+                change.FreedBytes = entry.FreeBytesBefore.HasValue && entry.FreeBytesAfter.HasValue &&
+                    entry.FreeBytesBefore.Value >= 0 && entry.FreeBytesAfter.Value >= 0
+                    ? Math.Max(0, entry.FreeBytesAfter.Value - entry.FreeBytesBefore.Value)
+                    : -1;
+                changes.Add(change);
+            }
+            changes.Sort(delegate(RetentionSpaceChange left, RetentionSpaceChange right)
+            {
+                return left.FinishedUtc.CompareTo(right.FinishedUtc);
+            });
+            return changes;
+        }
+
+        // An ISO 8601 time as the engine writes it ("2026-09-30T10:05:00.123456Z"), in UTC.
+        internal static bool TryParseUtc(string text, out DateTime value)
+        {
+            value = DateTime.MinValue;
+            if (string.IsNullOrEmpty(text) || text.Length > 64 ||
+                !DateTime.TryParse(text, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out value))
+            {
+                value = DateTime.MinValue;
+                return false;
+            }
+            value = DateTime.SpecifyKind(value, DateTimeKind.Utc);
+            return true;
         }
 
         internal static RetentionHistoryEntryView ParseHistoryEntry(IDictionary<string, object> entry)

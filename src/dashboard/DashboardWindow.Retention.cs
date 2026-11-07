@@ -202,6 +202,29 @@ namespace ResticBackuper.Dashboard
             retentionNextReadAt = MonotonicAfter(RetentionReadInterval);
         }
 
+        // What clean-up of old backups freed, for the Backup location card's forecast (BackupSpaceEvaluator). False while it is not
+        // known: the engine keeps clean-up records that have not been read yet, or that could not be read, so the card waits rather
+        // than forecast from what the backups added alone. A backup service without clean-up (the earlier personal edition, or an
+        // older Rewindle engine) has freed nothing.
+        private bool TryGetRetentionSpaceChanges(out IList<BackupSpaceCleanUp> cleanUps)
+        {
+            cleanUps = new List<BackupSpaceCleanUp>();
+            if (!RetentionSupportedByProfile() || !retentionCapabilityKnown || !retentionCapabilitySupported)
+            {
+                return true;
+            }
+            RetentionView view = retentionView;
+            if (view == null || !view.HistoryKnown)
+            {
+                return false;
+            }
+            foreach (RetentionSpaceChange change in view.SpaceChanges)
+            {
+                cleanUps.Add(new BackupSpaceCleanUp(change.FinishedUtc, change.FreedBytes));
+            }
+            return true;
+        }
+
         // Try again on a clean-up setting that couldn't be read reads it again at once, even when none of its files changed
         // since (a read that failed for a moment would otherwise be kept until one does).
         internal void ForgetUnreadableRetentionView()

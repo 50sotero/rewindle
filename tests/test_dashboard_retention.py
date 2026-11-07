@@ -81,6 +81,13 @@ namespace {namespace}
             }}
             result["earlier"] = earlier.ToArray();
             result["earlier_unknown"] = view.EarlierChangesUnknown;
+            result["history_known"] = view.HistoryKnown;
+            List<object> changes = new List<object>();
+            foreach (RetentionSpaceChange change in view.SpaceChanges)
+            {{
+                changes.Add(new object[] {{ change.FinishedUtc.ToString("yyyy-MM-ddTHH:mm:ssZ"), change.FreedBytes.ToString() }});
+            }}
+            result["space_changes"] = changes.ToArray();
             return result;
         }}
 
@@ -532,6 +539,64 @@ class DashboardRetentionHarnessTests(unittest.TestCase):
         self.assertEqual((unfinished["last_outcome"], unfinished["last_unverified"], unfinished["last_check_unfinished"]),
                          ("check_failed", False, True))
         self.assertEqual((older["last_outcome"], older["last_unverified"], older["last_check_unfinished"]), ("check_failed", False, False))
+
+    def test_every_clean_up_that_freed_space_reaches_the_backup_drive_forecast(self) -> None:
+        def entry(finished: str, outcome: str, removed: int, before, after, **extra) -> dict:
+            return {"request_nonce": "1" * 64, "started_utc": finished, "finished_utc": finished, "outcome": outcome,
+                    "confirmed_count": max(removed, 1), "removed_count": removed, "removed_set_sha256": "2" * 64, "prune_mode": "none",
+                    "files_confirmed": True, "keep_daily": 7, "keep_weekly": 4, "keep_monthly": 6, "prune_completed": False,
+                    "check_completed": False, "check_unfinished": False, "removal_unverified": False,
+                    "free_bytes_before": before, "free_bytes_after": after, **extra}
+        entries = [
+            # Out of order on purpose: the dashboard sorts by finish time.
+            entry("2026-09-20T10:00:00Z", "removed", 3, 1000, 5000, prune_completed=True, check_completed=True),
+            entry("2026-09-01T10:00:00.123456Z", "removed", 2, 1000, 3000, prune_completed=True, check_completed=True),
+            # Nothing removed or freed: left out.
+            entry("2026-09-05T10:00:00Z", "failed", 0, None, 7),
+            entry("2026-09-06T10:00:00Z", "nothing_to_remove", 0, None, 7),
+            # Removed, space not freed yet: in, with what it measured (other files may have grown: never below 0).
+            entry("2026-09-10T10:00:00Z", "space_pending", 4, 5000, 4000),
+            # Freeing the space of an earlier removal: nothing measured before it.
+            entry("2026-09-11T10:00:00Z", "nothing_to_remove", 0, None, 9000, prune_completed=True, check_completed=True),
+            # Nobody could confirm what went.
+            entry("2026-09-12T10:00:00Z", "partial", 0, 2000, 2100, removal_unverified=True),
+            # A finish time that is not a time is left out.
+            entry("not a time", "removed", 1, 1, 2, prune_completed=True),
+        ]
+        history = self.fixture("space-history")
+        history.policy()
+        history.preview()
+        write_json(history.state / retention.HISTORY_NAME, {"schema": retention.HISTORY_SCHEMA, "schema_version": 1, "plan_id": PLAN,
+                                                             "updated_utc": "2026-09-20T10:00:00Z", "entries": entries})
+        none = self.fixture("space-no-history")
+        none.policy()
+        other_plan = self.fixture("space-other-plan")
+        write_json(other_plan.state / retention.HISTORY_NAME, {"schema": retention.HISTORY_SCHEMA, "schema_version": 1,
+                                                                "plan_id": "87654321-4321-4abc-8def-1234567890ab", "entries": entries})
+        foreign = self.fixture("space-foreign-history")
+        write_json(foreign.state / retention.HISTORY_NAME, {"schema": "Another.History.v1", "schema_version": 1, "plan_id": PLAN,
+                                                             "entries": entries})
+        unreadable = self.fixture("space-unreadable-history")
+        (unreadable.state / retention.HISTORY_NAME).write_text("{ not json", encoding="utf-8")
+        untrusted = self.fixture("space-untrusted")
+        write_json(untrusted.state / retention.HISTORY_NAME, {"schema": retention.HISTORY_SCHEMA, "schema_version": 1, "plan_id": PLAN,
+                                                               "entries": entries})
+        views = self.run_cases([history.read(), none.read(), other_plan.read(), foreign.read(), unreadable.read(),
+                                untrusted.read(trust="False")])
+        read, nothing, other, foreign_view, broken, distrusted = views
+        self.assertTrue(read["history_known"])
+        self.assertEqual(
+            [["2026-09-01T10:00:00Z", "2000"], ["2026-09-10T10:00:00Z", "0"], ["2026-09-11T10:00:00Z", "-1"],
+             ["2026-09-12T10:00:00Z", "100"], ["2026-09-20T10:00:00Z", "4000"]],
+            read["space_changes"],
+        )
+        # No clean-up was ever recorded, or only for another plan: nothing freed, and that is known.
+        self.assertEqual((True, []), (nothing["history_known"], nothing["space_changes"]))
+        self.assertEqual((True, []), (other["history_known"], other["space_changes"]))
+        # A record that is not this engine's, cannot be read, or sits where others could change it: not known.
+        for name, view in (("foreign", foreign_view), ("unreadable", broken), ("untrusted", distrusted)):
+            with self.subTest(name=name):
+                self.assertEqual((False, []), (view["history_known"], view["space_changes"]))
 
     def test_each_earlier_backup_is_read_with_its_kind(self) -> None:
         fixture = self.fixture("earlier-kinds")

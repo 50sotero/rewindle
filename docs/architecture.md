@@ -80,10 +80,17 @@ forecast isn't available with that backup program
 (`EngineProfile.ForecastsBackupSpace`) and offers no Low space warning. It
 keeps only the reserve rules: red below the reserve and amber below 1.5 times
 it. The tenth-of-the-drive rule is left out there, since on a drive mostly full
-of other files it would stay amber for good with nothing to tune. The forecast counts
-only what backups add: once a retention feature removes old data, it must
-switch to the measured size over time, or it would keep warning about a backup
-whose size is steady.
+of other files it would stay amber for good with nothing to tune. The forecast is
+net growth: clean-up of old backups (below) is the only thing that takes data
+out of the backup location, so the forecast takes away the space each clean-up
+in those 8 weeks freed (the free space after it minus before it, from
+`retention-history.json`). Backups that the person keeps at a steady size by
+removing old ones are then flat, not filling the drive. A clean-up in those
+weeks whose freed space was not measured leaves the forecast learning ("Old
+backups were removed lately, so Rewindle needs up to 8 more weeks of backups to
+tell when the drive will be full.") until it is 8 weeks back, and while the
+clean-up records cannot be read there is no forecast at all: it never says
+"full in N weeks" from what the backups added alone.
 
 ### Engine profiles
 

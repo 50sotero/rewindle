@@ -180,7 +180,11 @@ namespace ResticBackuper.Dashboard
             facts.ReserveBytes = configuration.MinimumFreeBytes;
             facts.BackupsBytes = readable ? snapshot.BackupsBytes : -1;
             facts.BackupsEstimated = readable && snapshot.BackupsBytesEstimated;
-            facts.HistoryReadable = readable;
+            // The forecast takes away what clean-up of old backups freed; until that is known there is none.
+            IList<BackupSpaceCleanUp> cleanUps;
+            bool cleanUpsKnown = TryGetRetentionSpaceChanges(out cleanUps);
+            facts.HistoryReadable = readable && cleanUpsKnown;
+            facts.CleanUps = cleanUps;
             facts.ForecastAvailable = EngineProfile.Current.ForecastsBackupSpace;
             facts.Samples = readable && snapshot.History != null
                 ? snapshot.History
@@ -237,6 +241,9 @@ namespace ResticBackuper.Dashboard
             forecast["weeksLeft"] = judged.WeeksLeft.HasValue ? (object)judged.WeeksLeft.Value : null;
             forecast["weeksRounded"] = judged.WeeksRounded.HasValue ? (object)judged.WeeksRounded.Value : null;
             AddWebBytes(forecast, "weekly", judged.WeeklyBytes);
+            // "counted": what clean-up of old backups freed was taken away; "unmeasured": it freed space nobody measured, so there is
+            // no forecast yet; empty otherwise.
+            forecast["cleanUp"] = CleanUpEffectName(judged.CleanUp);
             space["forecast"] = forecast;
             space["level"] = LevelName(judged.Level);
             space["reason"] = ReasonName(judged.Reason);
@@ -272,6 +279,16 @@ namespace ResticBackuper.Dashboard
                 case BackupSpaceReason.Forecast: return "forecast";
                 case BackupSpaceReason.Percent: return "percent";
                 case BackupSpaceReason.Reserve: return "reserve";
+                default: return string.Empty;
+            }
+        }
+
+        private static string CleanUpEffectName(BackupSpaceCleanUpEffect effect)
+        {
+            switch (effect)
+            {
+                case BackupSpaceCleanUpEffect.Counted: return "counted";
+                case BackupSpaceCleanUpEffect.Unmeasured: return "unmeasured";
                 default: return string.Empty;
             }
         }

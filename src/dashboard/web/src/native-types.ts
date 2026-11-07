@@ -238,6 +238,12 @@ export interface BackupSpaceState {
     /** `weeksLeft` in whole weeks: the number the words use and the host judged `level` on, so the page never rounds it again. */
     weeksRounded: number | null;
     weeklyBytes: number; weeklyDisplay: string;
+    /**
+     * Clean-up of old backups in the forecast's weeks. 'counted': the space it freed was taken away, so this is how much the backups
+     * grew, net. 'unmeasured': it freed space nobody measured, so the forecast is learning until that clean-up is 8 weeks back.
+     * Missing from an older host.
+     */
+    cleanUp?: '' | 'counted' | 'unmeasured';
   };
   level: 'unknown' | 'ok' | 'low' | 'full';
   /** 'percent': little room now (under 1.5 times the reserve, or, while the forecast is learning or unknown, under a tenth of the drive above it). */

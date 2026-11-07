@@ -3252,6 +3252,77 @@ namespace RewindleRegression {
         Set-PrivateField $retention 'retentionReviewOpen' $false
         Set-PrivateField $retention 'retentionReviewCapture' $null
 
+        # Clean-up and the Backup location card: its forecast takes away the space each recorded clean-up freed, so backups kept at a
+        # steady size by removing old ones are not "full in N weeks"; a clean-up whose freed space was not measured leaves it
+        # learning, and until the clean-up records are read there is no forecast at all. Daily backups add 1 GiB each here, and
+        # 50 GiB are free above the reserve: about 7 weeks, amber, when nothing was removed.
+        $cleanGiB = [long]1073741824
+        $cleanRunType = $assembly.GetType('ResticBackuper.Dashboard.RunMetricView', $true)
+        $cleanSnapshotType = $assembly.GetType('ResticBackuper.Dashboard.TelemetrySnapshot', $true)
+        $spaceChangeType = $assembly.GetType('ResticBackuper.Dashboard.RetentionSpaceChange', $true)
+        $cleanStart = [DateTime]::SpecifyKind([DateTime]'2026-10-01T02:10:00', [DateTimeKind]::Utc)
+        $cleanRuns = New-GenericList $cleanRunType
+        foreach ($day in 0..14) {
+            $run = [Activator]::CreateInstance($cleanRunType)
+            $run.RunId = 'clean-run-' + $day
+            $run.TypeKey = 'backup'
+            $run.Success = $true
+            $run.FinishedUtc = $cleanStart.AddDays($day)
+            $run.StoredBytes = $cleanGiB
+            [void]$cleanRuns.Add($run)
+        }
+        $cleanSnapshot = [Activator]::CreateInstance($cleanSnapshotType)
+        $cleanSnapshot.History = $cleanRuns
+        $cleanSnapshot.BackupsBytes = 212 * $cleanGiB
+        $cleanConfig = New-SyntheticConfiguration $installRoot $planConfigurationFile $repositoryRoot $stateRoot @($sourceRoot)
+        $configurationType.GetField('<MinimumFreeBytes>k__BackingField', $flags).SetValue($cleanConfig, [long](10 * $cleanGiB))
+        $configurationType.GetField('<RepositoryStorageMode>k__BackingField', $flags).SetValue($cleanConfig, 'local_ntfs')
+        $cleanSpace = New-RetentionDashboard
+        Set-PrivateField $cleanSpace 'currentSourceConfiguration' $cleanConfig
+        Set-PrivateField $cleanSpace 'lastSnapshot' $cleanSnapshot
+        Set-PrivateField $cleanSpace 'repositoryVolumePath' ([string]$repositoryRoot)
+        Set-PrivateField $cleanSpace 'repositoryVolumeReady' $true
+        Set-PrivateField $cleanSpace 'repositoryVolumeRead' $true
+        Set-PrivateField $cleanSpace 'repositoryVolumeFreeBytes' ([long](60 * $cleanGiB))
+        Set-PrivateField $cleanSpace 'repositoryVolumeTotalBytes' ([long](931 * $cleanGiB))
+        Set-PrivateField $cleanSpace 'spaceWarningWeeks' 8
+        function Get-CleanForecast {
+            $built = Invoke-Private $cleanSpace 'BuildWebSpaceState'
+            return [string]$built['forecast']['state'] + '/' + [string]$built['forecast']['cleanUp'] + '/' + [string]$built['level'] + '/' + [string]$built['reason']
+        }
+        Assert-True ((Get-CleanForecast) -eq 'growing//low/forecast') ('backups growing 7 GiB a week were not amber before any clean-up: ' + (Get-CleanForecast))
+        Set-PrivateField $cleanSpace 'retentionCapabilityKnown' $true
+        Set-PrivateField $cleanSpace 'retentionCapabilitySupported' $true
+        Assert-True ((Get-CleanForecast) -eq 'unknown//low/percent') ('the forecast did not wait for the clean-up records: ' + (Get-CleanForecast))
+        $cleanView = [Activator]::CreateInstance($retentionViewType, $true)
+        Set-ObjectField $cleanView 'HistoryKnown' $true
+        Set-PrivateField $cleanSpace 'retentionView' $cleanView
+        Assert-True ((Get-CleanForecast) -eq 'growing//low/forecast') ('with no clean-up recorded the forecast changed: ' + (Get-CleanForecast))
+        $cleanChange = [Activator]::CreateInstance($spaceChangeType, $true)
+        Set-ObjectField $cleanChange 'FinishedUtc' $cleanStart.AddDays(7.5)
+        Set-ObjectField $cleanChange 'FreedBytes' ([long](14 * $cleanGiB))
+        # Read straight from the field: a function's empty list would reach the caller as nothing.
+        [void]$cleanView.GetType().GetField('SpaceChanges', $flags).GetValue($cleanView).Add($cleanChange)
+        Assert-True ((Get-CleanForecast) -eq 'flat/counted/ok/') ('backups kept the same size by clean-up were still filling the drive: ' + (Get-CleanForecast))
+        Set-ObjectField $cleanChange 'FreedBytes' ([long](7 * $cleanGiB))
+        $halfGrowth = Invoke-Private $cleanSpace 'BuildWebSpaceState'
+        Assert-True ([string]$halfGrowth['forecast']['state'] -eq 'growing' -and [long]$halfGrowth['forecast']['weeklyBytes'] -eq [long](3.5 * $cleanGiB) -and [int]$halfGrowth['forecast']['weeksRounded'] -eq 14 -and [string]$halfGrowth['level'] -eq 'ok') ('the forecast did not take away half the growth: ' + $halfGrowth['forecast']['weeklyBytes'])
+        Set-ObjectField $cleanChange 'FreedBytes' ([long]-1)
+        Assert-True ((Get-CleanForecast) -eq 'learning/unmeasured/low/percent') ('a clean-up that freed space nobody measured gave a forecast: ' + (Get-CleanForecast))
+        Set-ObjectField $cleanView 'HistoryKnown' $false
+        Assert-True ((Get-CleanForecast) -eq 'unknown//low/percent') ('a record of clean-ups that could not be read gave a forecast: ' + (Get-CleanForecast))
+        Set-ObjectField $cleanView 'HistoryKnown' $true
+        Set-PrivateField $cleanSpace 'retentionCapabilitySupported' $false
+        Assert-True ((Get-CleanForecast) -eq 'growing//low/forecast') ('an engine without clean-up had its forecast changed: ' + (Get-CleanForecast))
+        Set-PrivateField $cleanSpace 'retentionCapabilitySupported' $true
+        [void]$engineProfileType.GetMethod('Activate', $flags).Invoke($null, [object[]]@($legacyProfile))
+        try {
+            Assert-True ((Get-CleanForecast) -eq 'unavailable//ok/') ('the legacy edition was given a clean-up forecast: ' + (Get-CleanForecast))
+        }
+        finally {
+            [void]$engineProfileType.GetMethod('Activate', $flags).Invoke($null, [object[]]@($rewindleProfile))
+        }
+
         # The launch itself, with a stand-in for Windows: the approval prompt is asked for (runas) with the manager from the install
         # folder and only the arguments of the action, and a result is believed only when it matches the request, the exit code and
         # a fresh read of the records.
@@ -3345,4 +3416,4 @@ finally {
 }
 
 foreach ($note in $skipped) { Write-Output $note }
-Write-Output 'Regressions passed: snapshot scope reset, explicit whole-snapshot validation, observed-path enforcement, review invalidation, reload, retry routing, inline folder-read failures, launch guards, the restore folder looked at again before Review and Restore now and acted on only while that look is current and passes, honest cancellation, UNC/reparse/no-overwrite/overlap destination guards and their plain-language refusals, diagnostics redaction of object keys, of whole paths (either slash, any root) and of account IDs, capped run history that is not rewritten for an evicted baseline, no live samples written and the old file removed, readable run-details timelines from long and odd logs, the restore approval wait, one Windows approval per restore session (every listing and one restore, a new session only after one ended, closed with the flow and a changed plan, a declined approval, a pipe served by another process, oversized and foreign frames), no folder read on choosing a backup or restoring all of it, folder listings kept per snapshot and bounded, the session-or-per-step choice from the installed engine, the published reason a restore cannot start, Open and Copy on a restore result acting only on the folder the restore reported once it has finished, an unreadable schedule and the outcome of a schedule change, schedule summaries for every day and lenient schedule times, capped automatic web view reloads, missing-runtime detection, a configuration check that could not complete ending the read it followed, cut-short folder listings and the published path limit, history lists bound again only when a run differs, one not-responding notice per stuck web view, backup freshness across a change of the clocks and of the run times, a missed backup Windows catches up on after a sign-in or a wake, an off-site check that is overdue, the tray balloon for a backup starting once per run, the not-started note for an accepted backup request that started nothing, timers on a clock that setting the time does not move, the window hiding to the tray again after a cancelled sign-out, the bounded crash log and its redacted copy in a diagnostic bundle, the installed plan read without keeping its writer out (and still refused when cut short, not an object or too large) with an install root that follows Program Files, the backup-location window''s done/current/failed steps and refused folders, the recovery-readiness window''s explained actions, the folder picker''s cloud-only walk (bounded by entries and time, skipping excluded folders and links), OneDrive paths and wording, the free-space warning for a whole snapshot that will not fit (a warning and never an error), the history limit the page is told, the schedule, location and readiness dialogs sharing the page tokens and the schedule wording, a status that cannot be read for a moment, a missing state folder, the retired legacy cloud file, a run history that is never written over while it is unreadable, the tray hover text and first-close hint, backup alerts (the tray mark, a failing streak told in place of the run balloon, the Settings switch), the setup state the page is told, diagnostics that say what they left out and read a log cut inside a character, the backup drive''s space (the size the engine records, the reserve, the forecast, the earlier edition without one, a running backup that keeps what the card said, and the Low space warning file), and clean-up of old backups (nothing offered or read for the legacy edition, nothing else run while the list is open, protected actions waiting while a step runs, a removal bound to the list on disk with the count seen and both confirmations, each ending shown on the list, and a launch result believed only when it matches the request, the exit code and the records).'
+Write-Output 'Regressions passed: snapshot scope reset, explicit whole-snapshot validation, observed-path enforcement, review invalidation, reload, retry routing, inline folder-read failures, launch guards, the restore folder looked at again before Review and Restore now and acted on only while that look is current and passes, honest cancellation, UNC/reparse/no-overwrite/overlap destination guards and their plain-language refusals, diagnostics redaction of object keys, of whole paths (either slash, any root) and of account IDs, capped run history that is not rewritten for an evicted baseline, no live samples written and the old file removed, readable run-details timelines from long and odd logs, the restore approval wait, one Windows approval per restore session (every listing and one restore, a new session only after one ended, closed with the flow and a changed plan, a declined approval, a pipe served by another process, oversized and foreign frames), no folder read on choosing a backup or restoring all of it, folder listings kept per snapshot and bounded, the session-or-per-step choice from the installed engine, the published reason a restore cannot start, Open and Copy on a restore result acting only on the folder the restore reported once it has finished, an unreadable schedule and the outcome of a schedule change, schedule summaries for every day and lenient schedule times, capped automatic web view reloads, missing-runtime detection, a configuration check that could not complete ending the read it followed, cut-short folder listings and the published path limit, history lists bound again only when a run differs, one not-responding notice per stuck web view, backup freshness across a change of the clocks and of the run times, a missed backup Windows catches up on after a sign-in or a wake, an off-site check that is overdue, the tray balloon for a backup starting once per run, the not-started note for an accepted backup request that started nothing, timers on a clock that setting the time does not move, the window hiding to the tray again after a cancelled sign-out, the bounded crash log and its redacted copy in a diagnostic bundle, the installed plan read without keeping its writer out (and still refused when cut short, not an object or too large) with an install root that follows Program Files, the backup-location window''s done/current/failed steps and refused folders, the recovery-readiness window''s explained actions, the folder picker''s cloud-only walk (bounded by entries and time, skipping excluded folders and links), OneDrive paths and wording, the free-space warning for a whole snapshot that will not fit (a warning and never an error), the history limit the page is told, the schedule, location and readiness dialogs sharing the page tokens and the schedule wording, a status that cannot be read for a moment, a missing state folder, the retired legacy cloud file, a run history that is never written over while it is unreadable, the tray hover text and first-close hint, backup alerts (the tray mark, a failing streak told in place of the run balloon, the Settings switch), the setup state the page is told, diagnostics that say what they left out and read a log cut inside a character, the backup drive''s space (the size the engine records, the reserve, the forecast, the earlier edition without one, a running backup that keeps what the card said, and the Low space warning file), and clean-up of old backups (nothing offered or read for the legacy edition, nothing else run while the list is open, protected actions waiting while a step runs, a removal bound to the list on disk with the count seen and both confirmations, each ending shown on the list, and a launch result believed only when it matches the request, the exit code and the records, and the backup drive forecast net of the space a clean-up freed).'

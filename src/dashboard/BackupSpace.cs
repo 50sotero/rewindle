@@ -56,6 +56,31 @@ namespace ResticBackuper.Dashboard
         public long AddedBytes { get; private set; }
     }
 
+    // One clean-up of old backups that removed backups or freed their space: when it finished, and how much it freed (the free space
+    // on the backup location after it minus before it, never below 0), or -1 when that was not measured.
+    internal sealed class BackupSpaceCleanUp
+    {
+        internal BackupSpaceCleanUp(DateTime finishedUtc, long freedBytes)
+        {
+            FinishedUtc = finishedUtc;
+            FreedBytes = freedBytes;
+        }
+
+        public DateTime FinishedUtc { get; private set; }
+        public long FreedBytes { get; private set; }
+    }
+
+    // What clean-up of old backups did to the forecast.
+    internal enum BackupSpaceCleanUpEffect
+    {
+        // No clean-up freed space within the forecast's weeks.
+        None = 0,
+        // The forecast is net growth: what the backups added, less what clean-up freed in the same weeks.
+        Counted = 1,
+        // A clean-up within the forecast's weeks freed space that was not measured, so there is no forecast until it is further back.
+        Unmeasured = 2
+    }
+
     // Everything the evaluator and the page's state need. -1 means unknown for every byte count.
     internal sealed class BackupSpaceFacts
     {
@@ -70,6 +95,7 @@ namespace ResticBackuper.Dashboard
             BackupsBytes = -1;
             ForecastAvailable = true;
             Samples = new List<BackupSpaceSample>();
+            CleanUps = new List<BackupSpaceCleanUp>();
             WarnWeeks = BackupSpaceEvaluator.DefaultWarnWeeks;
         }
 
@@ -88,6 +114,9 @@ namespace ResticBackuper.Dashboard
         public bool HistoryReadable { get; set; }
         public bool ForecastAvailable { get; set; }
         public IList<BackupSpaceSample> Samples { get; set; }
+        // Every recorded clean-up of old backups that removed backups or freed their space (the only thing that takes data out of the
+        // backup location, and only when the person confirms a list). Empty for a backup service without clean-up.
+        public IList<BackupSpaceCleanUp> CleanUps { get; set; }
         public int WarnWeeks { get; set; }
         // The latest run failed because the drive was too full, so the Protection hero already says it.
         public bool RunStoppedForSpace { get; set; }
@@ -113,6 +142,7 @@ namespace ResticBackuper.Dashboard
         public int? WeeksRounded { get; internal set; }
         // Growing: more than 0. Flat: 0. Otherwise -1.
         public long WeeklyBytes { get; internal set; }
+        public BackupSpaceCleanUpEffect CleanUp { get; internal set; }
 
         internal BackupSpaceResult Copy()
         {
@@ -123,6 +153,7 @@ namespace ResticBackuper.Dashboard
             copy.WeeksLeft = WeeksLeft;
             copy.WeeksRounded = WeeksRounded;
             copy.WeeklyBytes = WeeklyBytes;
+            copy.CleanUp = CleanUp;
             return copy;
         }
     }
@@ -146,6 +177,7 @@ namespace ResticBackuper.Dashboard
         {
             BackupSpaceFacts known = facts ?? new BackupSpaceFacts();
             BackupSpaceForecastState state;
+            BackupSpaceCleanUpEffect cleanUp = BackupSpaceCleanUpEffect.None;
             long weekly;
             if (!known.ForecastAvailable)
             {
@@ -159,9 +191,11 @@ namespace ResticBackuper.Dashboard
             }
             else
             {
-                weekly = EstimateWeeklyGrowth(known.Samples, out state);
+                weekly = EstimateWeeklyGrowth(known.Samples, known.CleanUps, out state, out cleanUp);
             }
-            return Judge(known, state, weekly);
+            BackupSpaceResult result = Judge(known, state, weekly);
+            result.CleanUp = cleanUp;
+            return result;
         }
 
         // The level and reason for a forecast already worked out, in this order: too full for the next backup; full within the warning
@@ -243,6 +277,7 @@ namespace ResticBackuper.Dashboard
                 held.WeeksLeft = null;
                 held.WeeksRounded = null;
                 held.WeeklyBytes = -1;
+                held.CleanUp = BackupSpaceCleanUpEffect.None;
             }
             return held;
         }
@@ -252,6 +287,23 @@ namespace ResticBackuper.Dashboard
         // before it (a PC clock that was far ahead for one run) is set aside first, so one bad time cannot hide every real run.
         internal static long EstimateWeeklyGrowth(IList<BackupSpaceSample> samples, out BackupSpaceForecastState state)
         {
+            BackupSpaceCleanUpEffect cleanUp;
+            return EstimateWeeklyGrowth(samples, null, out state, out cleanUp);
+        }
+
+        // The same, net of clean-up of old backups. What the backups added is all they grow by, except where clean-up removed old
+        // backups and freed their space, so the forecast takes away what each clean-up freed after the oldest backup in the window
+        // opened it (one after the newest backup included: its space is already free). Backups that stay about the same size because
+        // the person keeps removing old ones are then flat, not filling the drive. A clean-up in those weeks whose freed space was not
+        // measured leaves nothing to take away, so the forecast is still learning until that clean-up is older than the window: it
+        // never says "full in N weeks" from what was added alone.
+        internal static long EstimateWeeklyGrowth(
+            IList<BackupSpaceSample> samples,
+            IList<BackupSpaceCleanUp> cleanUps,
+            out BackupSpaceForecastState state,
+            out BackupSpaceCleanUpEffect cleanUp)
+        {
+            cleanUp = BackupSpaceCleanUpEffect.None;
             List<BackupSpaceSample> ordered = (samples ?? new List<BackupSpaceSample>())
                 .Where(sample => sample != null && sample.AddedBytes >= 0)
                 .OrderBy(sample => sample.FinishedUtc)
@@ -281,17 +333,31 @@ namespace ResticBackuper.Dashboard
                 state = BackupSpaceForecastState.Learning;
                 return -1;
             }
+            DateTime opened = window[0].FinishedUtc;
+            double freed = 0;
+            foreach (BackupSpaceCleanUp done in (cleanUps ?? new List<BackupSpaceCleanUp>())
+                .Where(item => item != null && item.FinishedUtc > opened))
+            {
+                if (done.FreedBytes < 0)
+                {
+                    state = BackupSpaceForecastState.Learning;
+                    cleanUp = BackupSpaceCleanUpEffect.Unmeasured;
+                    return -1;
+                }
+                freed += done.FreedBytes;
+                cleanUp = BackupSpaceCleanUpEffect.Counted;
+            }
             // The oldest backup in the window opens the span: what it saved was made before the span began.
             List<double> added = window.Skip(1).Select(sample => (double)sample.AddedBytes).ToList();
             double kept = added.Sum() - added.Max();
-            if (kept <= 0)
+            double gross = 0;
+            if (kept > 0)
             {
-                state = BackupSpaceForecastState.Flat;
-                return 0;
+                double perRun = kept / (added.Count - 1);
+                double runsPerWeek = added.Count / span.TotalDays * 7.0;
+                gross = perRun * runsPerWeek;
             }
-            double perRun = kept / (added.Count - 1);
-            double runsPerWeek = added.Count / span.TotalDays * 7.0;
-            double weekly = Math.Round(perRun * runsPerWeek, MidpointRounding.AwayFromZero);
+            double weekly = Math.Round(gross - freed / span.TotalDays * 7.0, MidpointRounding.AwayFromZero);
             if (double.IsNaN(weekly) || weekly <= 0)
             {
                 state = BackupSpaceForecastState.Flat;
