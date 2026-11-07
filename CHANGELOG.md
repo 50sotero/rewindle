@@ -38,8 +38,11 @@ labels. Releases before 0.2.0 were published under the name ResticBackuper.
   which backups would go and which stay, and confirm before anything is
   removed. Windows asks for your permission each time. Nothing is removed
   while the last backup didn't finish or needs a look, or while another
-  change is unfinished, and the earlier personal edition says clean-up isn't
-  available.
+  change is unfinished. It works for a backup location on a drive of this PC
+  (not yet for Google Drive), and installing, updating or reinstalling
+  Rewindle turns it off until you turn it on again. If a clean-up stops
+  part-way, it says what was removed and what is left to do. The earlier
+  personal edition says clean-up isn't available.
 
 ### Changed
 
