@@ -175,8 +175,11 @@ class ElevatedRequestSecuritySourceTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8-sig")
             if "Add-Type" not in text:
                 continue
-            if any(f"src\\dashboard\\{name}'" in text for name in users) and (
-                "src\\dashboard\\ElevatedRequestSecurity.cs'" not in text
+            # A suite names a dashboard file by its path, or by its bare name through a helper that reads it from
+            # src\dashboard (Read-DashboardSource 'RepositoryManager.cs').
+            prefixes = ("src\\dashboard\\", "Read-DashboardSource '")
+            if any(f"{prefix}{name}'" in text for name in users for prefix in prefixes) and not any(
+                f"{prefix}ElevatedRequestSecurity.cs'" in text for prefix in prefixes
             ):
                 missing.append(path.name)
         self.assertEqual([], missing)

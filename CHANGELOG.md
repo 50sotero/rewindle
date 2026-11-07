@@ -84,6 +84,20 @@ ones a home user reads without a glossary.
   permissions of its folder, where only Administrators and Windows can make
   changes. The review now accepts either, as long as nobody else can change the
   record or its folder.
+- **Changing the backup location works.** Every move stopped at its first check
+  and put everything back, because Windows PowerShell handed the backup service
+  the command that unlocks the backup cut in pieces at the space in "Program
+  Files". The move now starts the backup service with correctly quoted words
+  and only the few Windows settings it needs, so nothing left in your own
+  environment can change where it reads its password from, and it runs
+  Windows' permissions tool only if Microsoft itself signed it. Once a move is
+  complete, Rewindle's record of the backup location names the new folder too,
+  so later backups can still compare their changes with earlier ones and the
+  Google Drive check can be set up there. While a move runs, the dashboard now
+  says "Moving your backup location" instead of "Backups paused: moving the
+  backup location didn't finish", and it offers **Repair interrupted move**
+  only once the move has really stopped, also after the dashboard was closed
+  and opened again during the move.
 
 ### Security
 

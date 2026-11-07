@@ -135,8 +135,9 @@ PowerShell launchers follow the same rule: `Manage-Restore.ps1` starts
 `restore.py`, and the installer starts `initialize_repository.py`, with the
 Windows values and the user's local application-data folder only (the
 installer adds `TEMP`/`TMP` set to its own administrators-only temporary
-folder), and the Google Drive verifier starts rclone, Restic and its inventory
-helper as described below.
+folder), `Manage-Repository.ps1` starts Restic during a move of the backup
+location with the engine's Restic list, and the Google Drive verifier starts
+rclone, Restic and its inventory helper as described below.
 
 `backup.py` obtains a single-run lock, validates the configured repository
 volume and available space, and invokes Restic with the exact source and
@@ -179,7 +180,7 @@ branded Rewindle release.
 | `Manage-Sources.ps1` | Validates and transactionally adds/removes future backup sources while holding the run lock; a durable undo journal coordinates atomic per-file replacements | Protected configuration, protected journal, and recovery-tools metadata |
 | `Manage-Schedule.ps1` | Applies a reviewed daily or selected-day trigger and supported task settings with fingerprint binding, verification, and rollback | Exact backup task definition only |
 | `Manage-Backup.ps1` | Revalidates the exact active run and protected task, then signals only that run's protected cancellation event | Per-run event signal and bound result file only |
-| `Manage-Repository.ps1` | Copies Restic's own files into held stages, manifest-checks, and atomically activates a reviewed local or explicit DriveFS repository destination; resumes or rolls back interrupted relocation | New repository, separate protected-NTFS recovery-tools destination, protected configuration, and journal |
+| `Manage-Repository.ps1` | Copies Restic's own files into held stages, manifest-checks, and atomically activates a reviewed local or explicit DriveFS repository destination; resumes or rolls back interrupted relocation | New repository, separate protected-NTFS recovery-tools destination, protected configuration, the repository record (`repository.json`), and journal |
 | `Manage-Restore.ps1` and `restore.py` | Bind browsing and restore requests to the current plan, generation, repository, and immutable snapshot ID; restore to a non-overlapping new or empty target outside Windows and program folders, held open while an administrator-only folder inside it receives the files | Explicit restore target and protected restore report only |
 | Recovery helpers | Inspect independent recovery paths and perform explicitly approved credential repair, stale-lock cleanup, key rotation, and anomaly acknowledgement | Narrow protected records or Restic credential/lock commands for the selected action |
 | `DiagnosticExporter.cs` | Builds a bounded support ZIP after removing secrets, identities, host names, command lines, and personal paths | User-selected diagnostic ZIP only |
@@ -449,10 +450,28 @@ and commit-manifest digest because its synthetic FAT32 ACL cannot carry that
 policy; the recovery stage still uses protected NTFS. The manager copies
 without deleting the old tree, checks every path/size/hash plus repository
 identity/history/structure, and revalidates final trees immediately before
-publishing configuration and manifest metadata. A flushed journal records
-destination ownership and every publication phase. If the process stops, the
-manager can return to the exact pre-change metadata while removing only a
-destination it proves through the journal, marker, and manifest.
+publishing configuration and manifest metadata. Restic runs with an argument
+string built by the Windows quoting rules and an allow-listed environment
+(`SystemRoot`, `windir`, `SystemDrive`, `ComSpec`, `PATH`, `PATHEXT`, `OS`,
+`NUMBER_OF_PROCESSORS` and `PROCESSOR_ARCHITECTURE` taken from Windows itself,
+and `TEMP`/`TMP` = the protected `<state>\temp` next to the cache), so nothing
+from the user's own environment reaches it or the password helper it starts.
+Just before committing, the manager rewrites
+`<state>\repository.json` (same repository ID, new location, volume, storage
+mode and recovery tools, other fields kept) with the owner and inherited
+permissions the installer gives it, so the backup keeps reading its repository
+ID and the change check stays comparable from the second backup after the move
+(the move itself starts a new plan generation). A flushed journal records
+destination ownership, every publication phase, the original record and the
+hash of its rewrite, and the process ID and creation time of the manager running
+the move. If the process stops, the manager can return to the exact pre-change
+metadata, record included, while removing only a destination it proves through
+the journal, marker, and manifest. The journal exists for the whole move, so its
+presence alone keeps every other protected change blocked, but the dashboard
+calls the move interrupted, and offers Repair, only once the move has stopped:
+while it waits for the manager it started, or while the recorded process is
+still that same running process (checked with `OpenProcess` and
+`GetProcessTimes`, never through `run.lock`), it says the move is running.
 
 Restore requests are reviewed in the limited dashboard and executed through a
 separate elevated manager. Snapshot browsing returns bounded JSON. Plan-bound

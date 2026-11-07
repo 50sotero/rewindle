@@ -20,7 +20,7 @@ export const reinstallAdvice = (state: Pick<DashboardState, 'setup'>): string =>
 
 /** Something that stops the next backup, or leaves the page unable to judge it, that the host's title does not say. At most one: the most urgent. */
 export function heroConcern(state: DashboardState): HeroConcern | null {
-  if (state.status.active || state.recovery.repairNeeded) return null;
+  if (state.status.active || state.recovery.repairNeeded || state.recovery.moveRunning) return null;
   const { repository, sources, freshness } = state;
   if (repository.volumeReady === false) {
     const drive = driveOf(repository.path);
@@ -45,13 +45,14 @@ export function heroConcern(state: DashboardState): HeroConcern | null {
 }
 
 /**
- * One tone for the whole hero. The host overrides the title for an overdue or paused schedule, a repair, or a pending change review,
- * but status.success still describes the last run, so the emblem, tag icon and step rows derive their look from everything the page
- * knows. A backup the person stopped, with the backups still on time, is `neutral`: nothing is wrong and nothing is asked.
+ * One tone for the whole hero. The host overrides the title for an overdue or paused schedule, a repair, a running move of the backup
+ * location, or a pending change review, but status.success still describes the last run, so the emblem, tag icon and step rows derive
+ * their look from everything the page knows. A running move is `active` like a running backup: things are happening and nothing is
+ * wrong. A backup the person stopped, with the backups still on time, is `neutral`: nothing is wrong and nothing is asked.
  */
 export function heroTone(state: DashboardState): HeroTone {
   const s = state.status, freshness = state.freshness.state, concern = heroConcern(state);
-  if (s.active || state.recovery.repairBusy) return 'active';
+  if (s.active || state.recovery.repairBusy || state.recovery.moveRunning) return 'active';
   if (s.failure || state.recovery.repairNeeded || freshness === 'Overdue' || freshness === 'ClockAnomaly' || concern?.tone === 'danger') return 'danger';
   const warning = freshness !== 'Healthy' || !!state.actions.reviewChanges?.visible || !!state.dataError || !!concern || !!s.unavailable;
   if (s.cancelled && !warning) return 'neutral';

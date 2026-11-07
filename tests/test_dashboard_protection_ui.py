@@ -61,6 +61,7 @@ def state(
     repository: str = "D:\\Backups\\Rewindle",
     repair_needed: bool = False,
     repair_busy: bool = False,
+    move_running: bool | None = None,
     review: bool = False,
     setup_problem: str = "",
     data_error: str = "",
@@ -68,7 +69,7 @@ def state(
 ) -> dict:
     return {
         "status": {"active": active, "success": success, "failure": failure, "cancelled": cancelled, "unavailable": unavailable},
-        "recovery": {"repairNeeded": repair_needed, "repairBusy": repair_busy},
+        "recovery": {"repairNeeded": repair_needed, "repairBusy": repair_busy, **({} if move_running is None else {"moveRunning": move_running})},
         "repository": {"path": repository, "volume": "", **({} if volume_ready is None else {"volumeReady": volume_ready})},
         "sources": [source()] if sources is None else sources,
         "freshness": {"state": freshness},
@@ -114,6 +115,10 @@ class ProtectionUiTests(unittest.TestCase):
             "review": state(review=True),
             "repair_needed": state(repair_needed=True, volume_ready=False),
             "repair_busy": state(repair_busy=True),
+            # A move of the backup location that is still running, while the schedule says a backup is due and the drive of the
+            # new location is not answering yet: things are happening and nothing is wrong.
+            "move_running": state(move_running=True, freshness="Overdue", volume_ready=False),
+            "move_not_running": state(move_running=False),
             "stopped_on_time": state(cancelled=True, success=False),
             "stopped_overdue": state(cancelled=True, success=False, freshness="Overdue"),
             "stopped_paused": state(cancelled=True, success=False, freshness="Paused"),
@@ -213,6 +218,12 @@ class ProtectionUiTests(unittest.TestCase):
         # A repair that is needed is red whatever else is true, and the repair banner says why, so there is no second sentence.
         self.assertEqual(self.tone("repair_needed"), "danger")
         self.assertIsNone(self.concern("repair_needed"))
+
+    def test_a_move_of_the_backup_location_that_is_still_running_is_not_an_alarm(self) -> None:
+        # The host's title says the move is running; the page adds no concern and no red while it runs.
+        self.assertEqual(self.tone("move_running"), "active")
+        self.assertIsNone(self.concern("move_running"))
+        self.assertEqual(self.tone("move_not_running"), "success")
 
     def test_the_colour_is_never_louder_or_quieter_than_the_words(self) -> None:
         self.assertEqual(self.tone("failed"), "danger")

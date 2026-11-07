@@ -7,6 +7,7 @@ install, hosted CI runner only). These checks need no PowerShell: they read the 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import re
 import unittest
@@ -307,11 +308,25 @@ class MicrosoftSignerTests(unittest.TestCase):
     """Windows' own tools and the WebView2 installer must be signed by Microsoft itself, not by a name that contains it."""
 
     ROOTS = {"3B1EFD3A66EA28B16697394703A72CA340A05BD5", "8F43288AD272F3103B6FB1428485EA3014C0BCFE"}
+    # The repository manager runs System32's icacls.exe as administrator when it moves the backup location.
+    MANAGER = PROJECT / "src" / "Manage-Repository.ps1"
+    # A comparison that is true when "Microsoft" merely appears in a name, against a literal that holds the word: PowerShell's
+    # -like and -match in each case and negated form, .NET's Contains, IndexOf, StartsWith, EndsWith and Regex.IsMatch, and
+    # Python's `in`.
+    SUBSTRING = re.compile(
+        r"""-[ci]?(?:not)?(?:like|match)\s+@?["'][^"'\n]*microsoft"""
+        r"""|(?:\.|::)(?:Contains|IndexOf|StartsWith|EndsWith|IsMatch)\s*\([^)"'\n]*@?["'][^"'\n]*microsoft"""
+        r"""|["'][^"'\n]*microsoft[^"'\n]*["']\s+(?:not\s+)?in\b""",
+        re.I,
+    )
+    # Folders the builds fill; nothing in them is a source script.
+    GENERATED = {"node_modules", "dist", "build-output", "bin", "obj", ".packages", "__pycache__"}
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.installer = functions(read(INSTALLER))
         cls.uninstaller = functions(read(UNINSTALLER))
+        cls.manager = functions(read(cls.MANAGER))
 
     def test_no_script_accepts_a_signer_name_that_merely_contains_microsoft(self) -> None:
         for path, defined in ((INSTALLER, self.installer), (UNINSTALLER, self.uninstaller)):
@@ -321,10 +336,53 @@ class MicrosoftSignerTests(unittest.TestCase):
                 self.assertLess(check.index("Get-AuthenticodeSignerFacts -Path $Path"), check.index("Get-MicrosoftSignerProblem"))
                 self.assertNotIn("Get-AuthenticodeSignature", check)
 
-    def test_the_installer_and_the_uninstaller_apply_the_same_rule(self) -> None:
-        for name in ("Get-MicrosoftSignerProblem", "Get-AuthenticodeSignerFacts"):
-            with self.subTest(function=name):
-                self.assertEqual(self.installer[name], self.uninstaller[name])
+    def test_no_script_under_src_or_installer_accepts_a_signer_by_a_microsoft_substring(self) -> None:
+        # The pattern sees each form such a check has taken here, so a pass below means something.
+        for old in (
+            "$signature.SignerCertificate.Subject -notlike '*Microsoft*'",
+            'subject.IndexOf("Microsoft Corporation", StringComparison.OrdinalIgnoreCase) >= 0',
+            "[regex]::IsMatch($subject, 'Microsoft')",
+            '"Microsoft" in signer',
+        ):
+            with self.subTest(pattern=old):
+                self.assertRegex(old, self.SUBSTRING)
+        scanned, found = set(), []
+        for folder in ("src", "installer"):
+            for root, directories, files in os.walk(PROJECT / folder):
+                directories[:] = [name for name in directories if name not in self.GENERATED]
+                for name in files:
+                    if not name.lower().endswith((".ps1", ".psm1", ".cs", ".py")):
+                        continue
+                    path = Path(root) / name
+                    relative = path.relative_to(PROJECT).as_posix()
+                    scanned.add(relative)
+                    for number, line in enumerate(read(path).splitlines(), 1):
+                        if self.SUBSTRING.search(line):
+                            found.append(f"{relative}:{number}: {line.strip()}")
+        for expected in ("src/Manage-Repository.ps1", "installer/Install-ResticBackuper.ps1", "installer/setup/WebViewRuntime.cs"):
+            self.assertIn(expected, scanned)
+        self.assertEqual([], found, "check the signer with Get-MicrosoftSignerProblem (Setup: MicrosoftSignerProblem)")
+
+    def test_the_installer_the_uninstaller_and_the_repository_manager_apply_the_same_rule(self) -> None:
+        for copy, defined in (("uninstaller", self.uninstaller), ("repository manager", self.manager)):
+            for name in ("Get-MicrosoftSignerProblem", "Get-AuthenticodeSignerFacts"):
+                with self.subTest(copy=copy, function=name):
+                    self.assertTrue(name in defined, f"the {copy} has no {name}")
+                    self.assertEqual(self.installer[name], defined[name])
+
+    def test_the_repository_manager_checks_icacls_with_the_rule(self) -> None:
+        trusted = self.manager["Get-TrustedIcacls"]
+        self.assertNotIn("Get-AuthenticodeSignature", trusted)
+        self.assertIn("Get-AuthenticodeSignerFacts -Path $icacls", trusted)
+        self.assertIn("Get-MicrosoftSignerProblem", trusted)
+        self.assertLess(trusted.index("Get-AuthenticodeSignerFacts -Path $icacls"), trusted.index("Get-MicrosoftSignerProblem"))
+        for caller in ("Set-ProtectedTreeAcl", "Set-RepositoryRecordBytes"):
+            with self.subTest(caller=caller):
+                self.assertIn("$icacls = Get-TrustedIcacls\n", self.manager[caller])
+        # Nothing else in the manager finds icacls.exe or reads a signature its own way.
+        text = read(self.MANAGER)
+        self.assertEqual(1, text.count("'icacls.exe'"))
+        self.assertEqual(1, len(re.findall(r"\bGet-AuthenticodeSignature\b", text)))
 
     def test_only_microsofts_own_roots_and_its_exact_name_are_trusted(self) -> None:
         rule = self.installer["Get-MicrosoftSignerProblem"]

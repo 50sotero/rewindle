@@ -2236,13 +2236,19 @@ namespace ResticBackuper.Dashboard
             string readinessDetail = restoreReadinessDetail == null
                 ? string.Empty
                 : restoreReadinessDetail.Text ?? string.Empty;
+            // A move that is still running keeps every protected change blocked (status.Exists), but it is not an
+            // interrupted move: nothing needs repairing, and the page says so without an alarm.
+            bool moveRunning = status.IsMoveRunning && !repositoryRecoveryInProgress;
             recovery["title"] = string.IsNullOrWhiteSpace(readinessTitle)
-                ? (status.Exists ? "Backups paused: backup-location move unfinished" : "Backup location is fine")
+                ? (moveRunning
+                    ? "Moving your backup location"
+                    : status.Exists ? "Backups paused: backup-location move unfinished" : "Backup location is fine")
                 : readinessTitle;
             recovery["detail"] = string.IsNullOrWhiteSpace(readinessDetail)
                 ? status.Message ?? string.Empty
                 : readinessDetail;
-            recovery["repairNeeded"] = status.Exists;
+            recovery["repairNeeded"] = status.Exists && !moveRunning;
+            recovery["moveRunning"] = moveRunning;
             // What the Restore page offers while restoring is unavailable ("refresh", "setup", "wait" or empty).
             recovery["next"] = restoreReadinessNext ?? string.Empty;
             recovery["repairMessage"] = protectionRepositoryRecoveryMessage == null

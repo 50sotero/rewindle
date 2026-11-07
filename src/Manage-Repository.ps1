@@ -21,9 +21,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$RequestDigest,
     [string]$TestRoot,
-    [ValidateRange(0, 4)]
+    [ValidateRange(0, 5)]
     [int]$TestFailAfterPublish = 0,
-    [ValidateRange(0, 4)]
+    [ValidateRange(0, 5)]
     [int]$TestCrashAfterPublish = 0,
     [ValidateRange(0, 1000000)]
     [int]$TestCrashDuringCopyAfterFiles = 0,
@@ -87,6 +87,7 @@ $configPath = Join-Path $installRoot 'backup-config.json'
 $runtimeManifestPath = Join-Path $installRoot 'runtime-manifest.json'
 $lockPath = Join-Path $stateRoot 'run.lock'
 $journalPath = Join-Path $stateRoot 'repository-relocation.journal.json'
+$repositoryRecordPath = Join-Path $stateRoot 'repository.json'
 $resultRoot = Join-Path $stateRoot 'RepositoryManagerResults'
 $Action = $PSCmdlet.ParameterSetName
 $currentSid = $null
@@ -120,6 +121,8 @@ $destinationOriginalAttributes = 0
 $recoveryOriginalAttributes = 0
 $originalConfigBytes = $null
 $originalManifestBytes = $null
+$originalRepositoryRecordBytes = $null
+$newRepositoryRecordBytes = $null
 $filesTotal = 0L
 $bytesTotal = 0L
 $filesCopied = 0L
@@ -1342,6 +1345,122 @@ function Assert-ProtectedTreeAcl {
     }
 }
 
+# Whether a file's signer is Microsoft itself, from facts Get-AuthenticodeSignerFacts reads. Returns $null when it is, or a
+# short reason. A name that merely contains "Microsoft" is not enough: the signature must be valid, the signer's subject must
+# hold exactly one organization (O), "Microsoft Corporation" exactly, and its certificate chain must end at one of Microsoft's
+# own root certificates. Windows' own files, which Windows signs through its catalogs and reports as such (IsOSBinary), pass
+# without the chain, so an offline PC that can't fetch a missing intermediate certificate still passes them.
+# Microsoft Identity Verification Root Certificate Authority 2020 (F40042E2E5F7E8EF8189FED15519AECE42C3BFA2) is left out on
+# purpose: it anchors certificates that Microsoft issues to other publishers.
+function Get-MicrosoftSignerProblem {
+    param(
+        [string]$Status,
+        [string]$Subject,
+        [string[]]$ChainThumbprints = @(),
+        [bool]$ChainValid,
+        [bool]$IsOSBinary
+    )
+    $microsoftRoots = @(
+        '3B1EFD3A66EA28B16697394703A72CA340A05BD5', # Microsoft Root Certificate Authority 2010
+        '8F43288AD272F3103B6FB1428485EA3014C0BCFE'  # Microsoft Root Certificate Authority 2011
+    )
+    if ($Status -cne 'Valid') {
+        return "the signature is not valid ($Status)"
+    }
+    # The subject as X500DistinguishedName.Decode('UseNewLines') writes it: one attribute per line, and ' + ' between the
+    # attributes of a multi-valued part. A value holding a line break or ' + ' is quoted and would be split, so every piece must
+    # be a whole TYPE=value with balanced quotes.
+    $organizations = @()
+    foreach ($line in @([string]$Subject -split "`r?`n")) {
+        if ($line.Length -eq 0) { continue }
+        foreach ($attribute in @($line -split ' \+ ')) {
+            $quotes = $attribute.Length - $attribute.Replace('"', '').Length
+            if ($attribute -cnotmatch '^(?:[A-Za-z][A-Za-z0-9.-]*|[0-9]+(?:\.[0-9]+)+)=' -or ($quotes % 2) -ne 0) {
+                return "the signer's name could not be read"
+            }
+            if ($attribute -match '^O=') { $organizations += $attribute }
+        }
+    }
+    if ($organizations.Count -ne 1 -or $organizations[0] -cne 'O=Microsoft Corporation') {
+        return 'the signer is not Microsoft Corporation'
+    }
+    if ($IsOSBinary) {
+        return $null
+    }
+    $chain = @($ChainThumbprints | ForEach-Object { ([string]$_ -replace '\s', '').ToUpperInvariant() })
+    if (-not $ChainValid -or $chain.Count -lt 2) {
+        return 'its certificate chain could not be verified'
+    }
+    if ($microsoftRoots -cnotcontains $chain[-1]) {
+        return "its certificate chain ends at a root that is not Microsoft's ($($chain[-1]))"
+    }
+    return $null
+}
+
+# What Get-MicrosoftSignerProblem decides on, read from the file: the signature's status, the signer's subject, whether Windows
+# reports the file as its own, and the signer's certificate chain, leaf first. The chain is built with the certificates the
+# file carries (Windows keeps those of its catalogs), without revocation checks (the signature check made them) and ignoring
+# expired certificates, since a time stamp keeps a signature valid after its certificate expires.
+function Get-AuthenticodeSignerFacts {
+    param([string]$Path)
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    $facts = [pscustomobject][ordered]@{
+        status = [string]$signature.Status
+        subject = $null
+        chain = @()
+        chain_valid = $false
+        os_binary = [bool]$signature.IsOSBinary
+    }
+    $signer = $signature.SignerCertificate
+    if ($null -eq $signer) {
+        return $facts
+    }
+    $facts.subject = $signer.SubjectName.Decode([Security.Cryptography.X509Certificates.X500DistinguishedNameFlags]::UseNewLines)
+    $chain = [Security.Cryptography.X509Certificates.X509Chain]::new()
+    try {
+        $chain.ChainPolicy.RevocationMode = [Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+        $chain.ChainPolicy.VerificationFlags = [Security.Cryptography.X509Certificates.X509VerificationFlags]::IgnoreNotTimeValid
+        $chain.ChainPolicy.UrlRetrievalTimeout = [TimeSpan]::FromSeconds(15)
+        if ([string]$signature.SignatureType -eq 'Authenticode') {
+            try {
+                $carried = [Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
+                $carried.Import($Path)
+                $chain.ChainPolicy.ExtraStore.AddRange($carried)
+            }
+            catch {
+                # The chain is then built from Windows' own certificate stores alone.
+            }
+        }
+        try {
+            $facts.chain_valid = [bool]$chain.Build($signer)
+        }
+        catch {
+            $facts.chain_valid = $false
+        }
+        $facts.chain = @($chain.ChainElements | ForEach-Object { [string]$_.Certificate.Thumbprint })
+    }
+    finally {
+        $chain.Reset()
+    }
+    return $facts
+}
+
+# System32's icacls.exe, which Set-ProtectedTreeAcl and Set-RepositoryRecordBytes run as administrator, once it is a normal
+# file that Microsoft itself signed. The rule is the installer's: the two functions above are exact copies of its own, and
+# tests/test_setup_contract.py keeps them so.
+function Get-TrustedIcacls {
+    $icacls = Join-Path ([Environment]::SystemDirectory) 'icacls.exe'
+    [void](Assert-NormalFile -File $icacls)
+    $facts = Get-AuthenticodeSignerFacts -Path $icacls
+    $problem = Get-MicrosoftSignerProblem -Status $facts.status -Subject $facts.subject -ChainThumbprints $facts.chain `
+        -ChainValid $facts.chain_valid -IsOSBinary $facts.os_binary
+    if ($null -ne $problem) {
+        throw ("Windows' permissions tool didn't pass Microsoft's signature check ($problem), so Rewindle didn't use it. " +
+            'Choose Save problem report in Settings and ask for help.')
+    }
+    return $icacls
+}
+
 function Set-ProtectedTreeAcl {
     # icacls /T follows a junction planted inside the tree, and Set-Acl and icacls both work by path. So this runs only on
     # a held stage (nothing can swap it or a folder above it) whose contents only Administrators and SYSTEM can change
@@ -1358,12 +1477,7 @@ function Set-ProtectedTreeAcl {
     $policy = New-ProtectedDirectorySecurity
     Assert-ProtectedAclDescriptor -Acl $policy
     if ($isTestMode) { return }
-    $icacls = Join-Path ([Environment]::SystemDirectory) 'icacls.exe'
-    $icaclsItem = Assert-NormalFile -File $icacls
-    $signature = Get-AuthenticodeSignature -LiteralPath $icacls
-    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notlike '*Microsoft*') {
-        throw 'System32 icacls.exe did not pass Microsoft signature verification.'
-    }
+    $icacls = Get-TrustedIcacls
     Set-Acl -LiteralPath $Path -AclObject $policy
     & $icacls (Join-Path $Path '*') /reset /T /C /L | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Resetting protected relocation child ACLs failed: $LASTEXITCODE" }
@@ -1874,27 +1988,101 @@ function ConvertTo-PasswordCommand {
     return (($arguments | ForEach-Object { '"' + ([string]$_).Replace('"', '\"') + '"' }) -join ' ')
 }
 
+function ConvertTo-WindowsArgument {
+    param([string]$Value)
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') { return $Value }
+    $builder = [Text.StringBuilder]::new(); [void]$builder.Append('"')
+    $slashes = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq '\') { $slashes++; continue }
+        if ($character -eq '"') {
+            [void]$builder.Append(('\' * ($slashes * 2 + 1))); [void]$builder.Append('"'); $slashes = 0; continue
+        }
+        if ($slashes -gt 0) { [void]$builder.Append(('\' * $slashes)); $slashes = 0 }
+        [void]$builder.Append($character)
+    }
+    if ($slashes -gt 0) { [void]$builder.Append(('\' * ($slashes * 2))) }
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
+function Set-AllowListedChildEnvironment {
+    param([Diagnostics.ProcessStartInfo]$StartInfo, [string]$TemporaryDirectory)
+    # The elevated child, and the password helper Restic starts from it, get only what a Windows
+    # program needs, with the Windows values taken from Windows itself. Nothing from the user's
+    # own environment (HKCU\Environment) reaches them, so no RESTIC_* or RCLONE_* setting can
+    # replace the password source or redirect a file.
+    $system = [Environment]::SystemDirectory
+    $windows = [IO.Directory]::GetParent($system).FullName
+    $StartInfo.EnvironmentVariables.Clear()
+    $StartInfo.EnvironmentVariables['SystemRoot'] = $windows
+    $StartInfo.EnvironmentVariables['windir'] = $windows
+    $StartInfo.EnvironmentVariables['SystemDrive'] = [IO.Path]::GetPathRoot($windows).TrimEnd('\')
+    $StartInfo.EnvironmentVariables['ComSpec'] = Join-Path $system 'cmd.exe'
+    $StartInfo.EnvironmentVariables['PATH'] = (@(
+        $system, $windows, (Join-Path $system 'Wbem'), (Join-Path $system 'WindowsPowerShell\v1.0')
+    ) -join ';')
+    $StartInfo.EnvironmentVariables['PATHEXT'] = '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC'
+    $StartInfo.EnvironmentVariables['OS'] = 'Windows_NT'
+    $StartInfo.EnvironmentVariables['NUMBER_OF_PROCESSORS'] = [string][Environment]::ProcessorCount
+    $architecture = [Environment]::GetEnvironmentVariable('PROCESSOR_ARCHITECTURE', 'Process')
+    if ($architecture -cin @('AMD64', 'x86', 'ARM64')) {
+        $StartInfo.EnvironmentVariables['PROCESSOR_ARCHITECTURE'] = $architecture
+    }
+    $StartInfo.EnvironmentVariables['TEMP'] = $TemporaryDirectory
+    $StartInfo.EnvironmentVariables['TMP'] = $TemporaryDirectory
+}
+
 function Invoke-ResticCapture {
     param([pscustomobject]$Validated, [string]$Repository, [string[]]$CommandArguments)
     $cache = Join-Path $stateRoot 'cache'
-    if (-not (Test-Path -LiteralPath $cache)) { [void][IO.Directory]::CreateDirectory($cache) }
+    # Restic's temporary files get their own protected folder next to its cache, so they never
+    # mix with cached backup data.
+    $temporary = Join-Path $stateRoot 'temp'
+    foreach ($directory in @($cache, $temporary)) {
+        if (-not (Test-Path -LiteralPath $directory)) { [void][IO.Directory]::CreateDirectory($directory) }
+        Assert-NormalDirectoryChain -Directory $directory
+    }
     $arguments = @(
         '--repo', $Repository, '--password-command', (ConvertTo-PasswordCommand -Validated $Validated),
         '--cache-dir', $cache, '--retry-lock', '0s'
     ) + $CommandArguments
-    $priorPreference = $ErrorActionPreference
+    # Windows PowerShell 5.1 does not escape the quotes inside a native argument, so the password
+    # command (quoted paths under "Program Files") reached Restic split into stray words. Build
+    # the command line with the Windows quoting rules instead.
+    $utf8 = [Text.UTF8Encoding]::new($false)
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $Validated.ResticExecutable
+    $start.Arguments = (($arguments | ForEach-Object { ConvertTo-WindowsArgument -Value ([string]$_) }) -join ' ')
+    $start.WorkingDirectory = $installRoot
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.StandardOutputEncoding = $utf8
+    $start.StandardErrorEncoding = $utf8
+    Set-AllowListedChildEnvironment -StartInfo $start -TemporaryDirectory $temporary
+    $process = [Diagnostics.Process]::new(); $process.StartInfo = $start
     try {
-        $ErrorActionPreference = 'Continue'
-        $lines = @(& $Validated.ResticExecutable @arguments 2>&1 | ForEach-Object { [string]$_ })
-        $exitCode = $LASTEXITCODE
+        if (-not $process.Start()) { throw 'Windows did not start the backup service to check the backup.' }
+        # Read both pipes at once so a long check output cannot block Restic.
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $stdout = $stdoutTask.Result
+        $stderr = $stderrTask.Result
+        $exitCode = $process.ExitCode
     }
-    finally { $ErrorActionPreference = $priorPreference }
+    finally { $process.Dispose() }
+    if ($utf8.GetByteCount($stdout) -gt 32MB -or $utf8.GetByteCount($stderr) -gt 4MB) {
+        throw 'The backup service returned more output than the move accepts.'
+    }
     if ($exitCode -ne 0) {
-        $message = ($lines -join ' ').Trim()
+        $message = (($stderr.Trim() + ' ' + $stdout.Trim()).Trim()) -replace '\s+', ' '
         if ($message.Length -gt 1000) { $message = $message.Substring(0, 1000) }
         throw "Restic verification failed with exit code $exitCode`: $message"
     }
-    return ($lines -join "`n")
+    return $stdout
 }
 
 function Get-ResticIdentity {
@@ -2049,6 +2237,95 @@ function Set-AtomicFileBytes {
         if ($null -ne $stream) { $stream.Dispose() }
         if ($null -ne $temporary -and [IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
     }
+}
+
+function Get-ValidatedRepositoryRecord {
+    # <state>\repository.json is written by initialize_repository.py. The backup reads the
+    # repository ID from it only while it names the configured repository, so a move must
+    # rewrite it. Its absence is not an error: then there is nothing to keep in step.
+    if ([IO.Directory]::Exists($repositoryRecordPath)) {
+        throw 'The record of the current backup location is a folder, so nothing was moved. Run Rewindle Setup and choose reinstall or repair, then try again.'
+    }
+    if (-not [IO.File]::Exists($repositoryRecordPath)) { return $null }
+    $damaged = 'The record of the current backup location is damaged, so nothing was moved. Run Rewindle Setup and choose reinstall or repair, then try again.'
+    $item = Assert-NormalFile -File $repositoryRecordPath
+    if ($item.Length -le 0 -or $item.Length -gt 1MB) { throw $damaged }
+    try { $loaded = Read-JsonObject -File $repositoryRecordPath }
+    catch { throw $damaged }
+    $record = $loaded.Json
+    $schema = $record.PSObject.Properties['schema_version']
+    $repository = $record.PSObject.Properties['repository']
+    $repositoryId = $record.PSObject.Properties['repository_id']
+    if ($null -eq $schema -or $null -eq $schema.Value -or
+        $schema.Value.GetType().FullName -notin @('System.Int32', 'System.Int64') -or [long]$schema.Value -ne 1 -or
+        $null -eq $repository -or $repository.Value -isnot [string] -or
+        $null -eq $repositoryId -or $repositoryId.Value -isnot [string] -or
+        [string]$repositoryId.Value -notmatch '^[0-9A-Fa-f]{64}$') {
+        throw $damaged
+    }
+    try { [void](Get-CanonicalLocalPath -Value ([string]$repository.Value)) }
+    catch { throw $damaged }
+    return [pscustomobject]@{ Json = $record; RawBytes = $loaded.RawBytes; RepositoryId = [string]$repositoryId.Value }
+}
+
+function New-RelocatedRepositoryRecordBytes {
+    param([pscustomobject]$Record, [object]$RecoveryManifest, [string]$VolumeSerial)
+    # Start from the recorded bytes so fields this manager does not know about are kept, along
+    # with the repository ID, its version, initialized_utc and the credential flags.
+    $updated = [Text.UTF8Encoding]::new($false, $true).GetString($Record.RawBytes) | ConvertFrom-Json
+    Set-JsonProperty -Object $updated -Name 'repository' -Value $canonicalNew
+    Set-JsonProperty -Object $updated -Name 'repository_volume_serial' -Value $VolumeSerial
+    Set-JsonProperty -Object $updated -Name 'repository_storage_mode' -Value $destinationStorageMode
+    Set-JsonProperty -Object $updated -Name 'recovery_tools_directory' -Value $newRecovery
+    Set-JsonProperty -Object $updated -Name 'recovery_tools_manifest' -Value $RecoveryManifest
+    if ($destinationStorageMode -eq $driveFsMode) {
+        Set-JsonProperty -Object $updated -Name 'drivefs_my_drive_root' -Value $destinationDriveFsRoot
+        Set-JsonProperty -Object $updated -Name 'drivefs_cache_directory' -Value $destinationDriveFsCache
+    }
+    else {
+        foreach ($name in @('drivefs_my_drive_root', 'drivefs_cache_directory')) {
+            if ($null -ne $updated.PSObject.Properties[$name]) { $updated.PSObject.Properties.Remove($name) }
+        }
+    }
+    Set-JsonProperty -Object $updated -Name 'relocated_utc' -Value ([DateTime]::UtcNow.ToString('o'))
+    return ConvertTo-Utf8JsonBytes -Value $updated
+}
+
+function Set-RepositoryRecordBytes {
+    param([byte[]]$Bytes)
+    Set-AtomicFileBytes -Target $repositoryRecordPath -Bytes $Bytes
+    if ($isTestMode) { return }
+    # The installer leaves the record owned by Administrators with only the permissions the state
+    # folder passes down (Set-ProtectedDirectory: icacls /reset, then /setowner). Give the
+    # rewritten record exactly that: the user can still read it and nobody else can change it.
+    # The same record is written when a move commits, when it is undone and by Repair, so the
+    # advice has to fit all three: trying again is safe in each.
+    $tryAgain = 'Try again. If it keeps failing, choose Save problem report in Settings and ask for help.'
+    $icacls = Get-TrustedIcacls
+    & $icacls $repositoryRecordPath /reset /C /L | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Windows could not set the permissions of Rewindle's record of your backup location (error code $LASTEXITCODE). $tryAgain"
+    }
+    & $icacls $repositoryRecordPath /setowner '*S-1-5-32-544' /C /L | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Windows could not make Administrators the owner of Rewindle's record of your backup location (error code $LASTEXITCODE). $tryAgain"
+    }
+    $acl = Get-Acl -LiteralPath $repositoryRecordPath
+    if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544' -or
+        $acl.AreAccessRulesProtected -or
+        @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier])).Count -ne 0) {
+        throw "Rewindle's record of your backup location did not get the right owner and permissions. $tryAgain"
+    }
+}
+
+function Get-CurrentProcessCreationFileTime {
+    # The dashboard compares this with GetProcessTimes for owner_process_id, so a dashboard opened
+    # during a move can tell a move that is still running from one that stopped. .NET reports the
+    # start in local time; ToFileTimeUtc turns it back into the exact FILETIME, also in the
+    # repeated hour when the clocks go back.
+    $process = [Diagnostics.Process]::GetCurrentProcess()
+    try { return $process.StartTime.ToFileTimeUtc().ToString([Globalization.CultureInfo]::InvariantCulture) }
+    finally { $process.Dispose() }
 }
 
 function Write-Journal {
@@ -2207,11 +2484,51 @@ function Repair-PendingRelocation {
         $currentManifestHash -notin @($savedManifestHash, [string]$journal.intended_runtime_manifest_sha256)) {
         throw 'Protected metadata changed outside the pending relocation transaction; automatic recovery is unsafe.'
     }
+    # Journals from managers that did not rewrite repository.json have no record fields; then
+    # the record was never touched and stays as it is.
+    $savedRecord = $null
+    $savedRecordHash = $null
+    $currentRecordHash = $null
+    $savedRecordProperty = $journal.PSObject.Properties['original_repository_record_base64']
+    if ($null -ne $savedRecordProperty -and $null -ne $savedRecordProperty.Value) {
+        # These checks stop Repair before it changes anything, and trying again gives the same
+        # answer, so the person is told what is safe and where to get help.
+        $askForHelp = "It stopped before changing anything, and your backups were not touched. Choose Save problem report in Settings and ask for help; don't delete anything in the backup location."
+        $damagedNotes = "Rewindle's record of the unfinished move is damaged, so it can't repair the move by itself. $askForHelp"
+        try {
+            [byte[]]$savedRecord = [Convert]::FromBase64String([string]$savedRecordProperty.Value)
+            $savedRecordJson = [Text.UTF8Encoding]::new($false, $true).GetString($savedRecord) | ConvertFrom-Json
+        }
+        catch { throw $damagedNotes }
+        if ($null -eq $savedRecordJson -or $savedRecordJson -isnot [Management.Automation.PSCustomObject] -or
+            $null -eq $savedRecordJson.PSObject.Properties['schema_version'] -or $savedRecordJson.schema_version -ne 1) {
+            throw $damagedNotes
+        }
+        $savedRecordHash = Get-Sha256Hex -Bytes $savedRecord
+        $intendedRecordHash = $null
+        $intendedRecordProperty = $journal.PSObject.Properties['intended_repository_record_sha256']
+        if ($null -ne $intendedRecordProperty -and $null -ne $intendedRecordProperty.Value) {
+            $intendedRecordHash = [string]$intendedRecordProperty.Value
+            if ($intendedRecordHash -cnotmatch '^[0-9a-f]{64}$') { throw $damagedNotes }
+        }
+        if (-not [IO.File]::Exists($repositoryRecordPath)) {
+            throw "Rewindle's record of your backup location is missing, so it can't repair the move by itself. $askForHelp"
+        }
+        [void](Assert-NormalFile -File $repositoryRecordPath)
+        $currentRecordHash = Get-FileSha256Hex -File $repositoryRecordPath
+        if ($currentRecordHash -cne $savedRecordHash -and
+            ($null -eq $intendedRecordHash -or $currentRecordHash -cne $intendedRecordHash)) {
+            throw "Rewindle's record of your backup location changed while the move was stopped, so it can't repair the move by itself. $askForHelp"
+        }
+    }
 
     # Restore known originals first while run.lock is held. Until the journal is
     # deleted, the Python loader still refuses to start any backup.
     if ($currentConfigHash -ne $savedConfigHash) { Set-AtomicFileBytes -Target $configPath -Bytes $savedConfig }
     if ($currentManifestHash -ne $savedManifestHash) { Set-AtomicFileBytes -Target $runtimeManifestPath -Bytes $savedManifest }
+    if ($null -ne $savedRecord -and $currentRecordHash -cne $savedRecordHash) {
+        Set-RepositoryRecordBytes -Bytes $savedRecord
+    }
 
     $savedCanonicalCurrent = $canonicalCurrent
     $savedCanonicalHash = $canonicalConfigHash
@@ -2502,6 +2819,7 @@ try {
     $runtime = Get-ValidatedRuntimeManifest
     [void](Get-ValidatedRecoveryBundle -Directory $validated.RecoveryTools `
         -ExpectedRepository $validated.Repository -ExpectedPlan $validated)
+    $repositoryRecord = Get-ValidatedRepositoryRecord
 
     $sourceStorageMode = $validated.StorageMode
     $destinationStorageMode = Get-StorageModeForPath -Repository $canonicalNew
@@ -2621,6 +2939,7 @@ try {
     [byte[]]$newManifestBytes = New-RuntimeManifestBytes -Manifest $runtime.Json -NewConfigBytes $newConfigBytes
     $originalConfigBytes = $validated.RawBytes
     $originalManifestBytes = $runtime.RawBytes
+    if ($null -ne $repositoryRecord) { $originalRepositoryRecordBytes = $repositoryRecord.RawBytes }
     $script:journalDocument = [ordered]@{
         schema_version = 1
         action = 'relocate'
@@ -2655,12 +2974,24 @@ try {
         original_runtime_manifest_base64 = [Convert]::ToBase64String($originalManifestBytes)
         intended_config_sha256 = Get-Sha256Hex -Bytes $newConfigBytes
         intended_runtime_manifest_sha256 = Get-Sha256Hex -Bytes $newManifestBytes
+        # Optional fields (Repair accepts journals without them): the repository record to put
+        # back, the hash of its rewrite once staged, and the process running this move.
+        original_repository_record_base64 = if ($null -eq $originalRepositoryRecordBytes) { $null } else {
+            [Convert]::ToBase64String($originalRepositoryRecordBytes)
+        }
+        intended_repository_record_sha256 = $null
+        owner_process_id = $PID
+        owner_process_creation_filetime_utc = Get-CurrentProcessCreationFileTime
         state = 'copying'
         created_utc = [DateTime]::UtcNow.ToString('o')
         updated_utc = [DateTime]::UtcNow.ToString('o')
     }
     Write-Journal -State copying
     $sourceIdentity = Get-ResticIdentity -Validated $validated -Repository $validated.Repository
+    if ($null -ne $repositoryRecord -and
+        -not [string]::Equals($repositoryRecord.RepositoryId, $sourceIdentity.RepositoryId, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The record of the current backup location belongs to a different backup, so nothing was moved. Run Rewindle Setup and choose reinstall or repair, then try again.'
+    }
     $copyStartedUtc = [DateTime]::UtcNow
     Write-Progress -Stage copying -Message 'Copying the encrypted repository and recovery tools.' -Percent 5 -Cancellable $false
     # Each stage is held from its creation until it has its final name (see Open-PinnedDirectory), so every write below
@@ -2676,6 +3007,12 @@ try {
     Update-StagedRecoveryBundle -Directory $recoveryStage -Repository $canonicalNew `
         -VolumeSerial $destinationSerial -RecoveryDirectory $newRecovery `
         -ExpectedBefore $validated -ExpectedAfter $stagedPlan
+    if ($null -ne $repositoryRecord) {
+        $stagedRecoveryManifest = (Read-JsonObject -File (Join-Path $recoveryStage 'recovery-manifest.json')).Json
+        [byte[]]$newRepositoryRecordBytes = New-RelocatedRepositoryRecordBytes -Record $repositoryRecord `
+            -RecoveryManifest $stagedRecoveryManifest -VolumeSerial $destinationSerial
+        $script:journalDocument['intended_repository_record_sha256'] = Get-Sha256Hex -Bytes $newRepositoryRecordBytes
+    }
 
     Write-Journal -State verifying
     Assert-StageOwnershipMarker -Directory $repositoryStage -Journal $script:journalDocument
@@ -2770,6 +3107,18 @@ try {
     [void](Assert-NormalFile -File (Join-Path $validated.Repository 'config'))
     [void](Get-ValidatedRecoveryBundle -Directory $validated.RecoveryTools `
         -ExpectedRepository $validated.Repository -ExpectedPlan $validated)
+    if ($null -ne $newRepositoryRecordBytes) {
+        # The journal already holds the original record and the hash of this rewrite, so the
+        # rollback below and Repair both put the original back if the move stops from here on.
+        if ((Get-FileSha256Hex -File $repositoryRecordPath) -cne (Get-Sha256Hex -Bytes $originalRepositoryRecordBytes)) {
+            throw 'The record of the backup location changed during the move, so the move was undone. Try again.'
+        }
+        Set-RepositoryRecordBytes -Bytes $newRepositoryRecordBytes
+        if ((Get-FileSha256Hex -File $repositoryRecordPath) -cne (Get-Sha256Hex -Bytes $newRepositoryRecordBytes)) {
+            throw 'The record of the new backup location could not be written, so the move was undone. Try again.'
+        }
+    }
+    Assert-InjectionAllowed -Point 5
     Write-Journal -State committed
     [IO.File]::Delete($journalPath)
     $journalReady = $false
@@ -2800,6 +3149,14 @@ catch {
             }
         }
         catch { $rollbackErrors.Add("runtime manifest: $($_.Exception.Message)") }
+        try {
+            if ($null -ne $originalRepositoryRecordBytes -and
+                [IO.File]::Exists($repositoryRecordPath) -and
+                (Get-FileSha256Hex -File $repositoryRecordPath) -cne (Get-Sha256Hex -Bytes $originalRepositoryRecordBytes)) {
+                Set-RepositoryRecordBytes -Bytes $originalRepositoryRecordBytes
+            }
+        }
+        catch { $rollbackErrors.Add("backup location record: $($_.Exception.Message)") }
         try {
             if ($repositoryPromoted) {
                 Remove-OwnedTree -Path $canonicalNew -ExpectedParent (Split-Path -Parent $canonicalNew) `

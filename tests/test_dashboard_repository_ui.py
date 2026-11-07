@@ -228,6 +228,93 @@ class DashboardRepositoryUiTests(unittest.TestCase):
         self.assertNotIn("File.Delete", surface)
         self.assertNotIn("Directory.Delete", surface)
 
+    def test_a_running_move_is_not_called_interrupted(self) -> None:
+        # The record of a move exists for the whole move. While the move runs (this dashboard's own, or one whose recorded
+        # process is still that same running process) it keeps every change blocked but asks for no repair. Once that
+        # process has ended, it is an interrupted move again. tests/Test-RepositoryRecoveryStatus.ps1 runs the decision.
+        status = self.method(self.manager, "GetRecoveryStatus")
+        self.assertLess(status.index("if (OwnMoveInFlight)"), status.index("ReadRecordedRecoveryStatus()"))
+        self.assertIn("RememberedMoveOwnerIsRunning()", status)
+        self.assertIn(
+            "return ClassifyRecovery(TryReadSharedText(journalPath));",
+            self.method(self.manager, "ReadRecordedRecoveryStatus"),
+        )
+        classify = self.method(self.manager, "ClassifyRecovery")
+        self.assertIn("ProcessLiveness.IsSameProcessAlive(ownerProcessId, ownerCreationFileTimeUtc)", classify)
+        self.assertIn("return RepositoryRecoveryStatus.Recoverable();", classify)
+        owner = self.method(self.manager, "TryReadMoveOwner")
+        self.assertIn('"owner_process_id"', owner)
+        self.assertIn('"owner_process_creation_filetime_utc"', owner)
+        # The manager replaces the record during the move; a reader that did not share deletion would make that fail.
+        self.assertIn("FileShare.ReadWrite | FileShare.Delete", self.method(self.manager, "TryReadSharedText"))
+        run = self.method(self.manager, "Run")
+        began = run.index("BeginOwnMove();")
+        self.assertLess(run.index("Process.Start(startInfo)"), began)
+        self.assertLess(began, run.index("process.WaitForExit(500)"))
+        self.assertIn("EndOwnMove();", run[run.index("finally", began):])
+        recover = self.method(self.manager, "Recover")
+        self.assertNotIn("BeginOwnMove", recover)
+        self.assertLess(recover.index("status.IsMoveRunning"), recover.index("!status.IsRecoverable"))
+        self.assertIn("'ProcessLiveness.cs'", self.build)
+        liveness = (DASHBOARD / "ProcessLiveness.cs").read_text(encoding="utf-8")
+        self.assertIn("internal static class ProcessLiveness", liveness)
+        self.assertIn("public static bool IsSameProcessAlive(int processId, long creationFileTimeUtc)", liveness)
+        engine = (ROOT / "src" / "Manage-Repository.ps1").read_text(encoding="utf-8")
+        self.assertIn("owner_process_id = $PID", engine)
+        self.assertIn("owner_process_creation_filetime_utc = Get-CurrentProcessCreationFileTime", engine)
+
+    def test_a_running_move_blocks_changes_but_offers_no_repair(self) -> None:
+        # The hard gate is the record's presence, running or not.
+        gate = self.method(self.window, "RepositoryRecoveryBlocksMutations")
+        self.assertIn("repositoryRecoveryStatus.Exists", gate)
+        self.assertNotIn("IsMoveRunning", gate)
+        surface = self.method(self.window, "UpdateRepositoryRecoverySurface")
+        visible = surface[surface.index("bool visible"):]
+        visible = visible[: visible.index(";")]
+        self.assertIn("!status.IsMoveRunning", visible)
+        can_repair = surface[surface.index("bool canRepair"):]
+        can_repair = can_repair[: can_repair.index(";")]
+        self.assertIn("!status.IsMoveRunning", can_repair)
+        self.assertIn("status.IsRecoverable", can_repair)
+        apply = self.method(self.window, "ApplyRepositoryRecoverySurface")
+        self.assertLess(apply.index("repairButton.IsEnabled = canRepair;"), apply.index("if (!visible)"))
+        click = self.method(self.window, "OnRepairRepositoryClick")
+        self.assertIn("!repositoryRecoveryStatus.IsRecoverable", click)
+        web = (DASHBOARD / "DashboardWindow.Web.cs").read_text(encoding="utf-8")
+        recovery = self.method(web, "BuildWebRecoveryState")
+        self.assertIn('recovery["repairNeeded"] = status.Exists && !moveRunning;', recovery)
+        self.assertIn('recovery["moveRunning"] = moveRunning;', recovery)
+        hero = self.method(self.window, "ApplyRepositoryRecoveryPrimaryStatus")
+        self.assertLess(
+            hero.index("else if (RepositoryMoveRunning())"),
+            hero.index('"Backups paused: backup-location move unfinished"'),
+        )
+        self.assertIn('heroTitle.Text = "Moving your backup location";', hero)
+        readiness = self.method(self.window, "UpdateRestoreReadiness")
+        self.assertLess(
+            readiness.index("else if (RepositoryMoveRunning())"),
+            readiness.index("else if (repositoryRecoveryStatus.Exists)"),
+        )
+        for name in ("UpdateBackupButton", "UpdateScheduleButton", "UpdateRepositoryButtons"):
+            self.assertIn("RepositoryMoveRunning()", self.method(self.window, name), name)
+        app = (DASHBOARD / "web" / "src" / "App.tsx").read_text(encoding="utf-8")
+        self.assertIn("if (state.recovery.moveRunning) return", app)
+        types = (DASHBOARD / "web" / "src" / "native-types.ts").read_text(encoding="utf-8")
+        self.assertIn("moveRunning?: boolean", types)
+
+    def test_a_running_move_is_told_in_plain_calm_words(self) -> None:
+        texts = re.findall(r'(?:OwnMoveRunningMessage|MoveRunningMessage) =\s+"([^"]+)"', self.manager)
+        self.assertEqual(2, len(texts))
+        hero = self.method(self.window, "ApplyRepositoryRecoveryPrimaryStatus")
+        branch = hero[hero.index("else if (RepositoryMoveRunning())"):]
+        texts += re.findall(r'"([^"]+)"', branch[: branch.index("}")])
+        readiness = self.method(self.window, "UpdateRestoreReadiness")
+        branch = readiness[readiness.index("else if (RepositoryMoveRunning())"):]
+        texts += re.findall(r'"([^"]+)"', branch[: branch.index("}")])
+        self.assertGreater(len(texts), 8)
+        for text in texts:
+            self.assertNotRegex(text.lower(), r"repositor|journal|snapshot|restic|interrupt|paused|action required", text)
+
     def test_only_bound_progress_and_final_result_are_accepted(self) -> None:
         for field in (
             "request_nonce",

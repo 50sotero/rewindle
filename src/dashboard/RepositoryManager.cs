@@ -109,6 +109,9 @@ namespace ResticBackuper.Dashboard
     {
         public bool Exists { get; private set; }
         public bool IsRecoverable { get; private set; }
+        // A move of the backup location that is still running. Its record exists for the whole move, so Exists stays true
+        // and every protected change stays blocked, but nothing was interrupted and there is nothing to repair.
+        public bool IsMoveRunning { get; private set; }
         public string Message { get; private set; }
 
         private RepositoryRecoveryStatus(bool exists, bool isRecoverable, string message)
@@ -135,6 +138,13 @@ namespace ResticBackuper.Dashboard
         {
             return new RepositoryRecoveryStatus(true, false, message);
         }
+
+        internal static RepositoryRecoveryStatus MoveRunning(string message)
+        {
+            RepositoryRecoveryStatus status = new RepositoryRecoveryStatus(true, false, message);
+            status.IsMoveRunning = true;
+            return status;
+        }
     }
 
     internal static class RepositoryManagerLauncher
@@ -152,6 +162,34 @@ namespace ResticBackuper.Dashboard
         private const string ResultDirectoryName = "RepositoryManagerResults";
         private const string JournalFileName = "repository-relocation.journal.json";
         private const int MaximumJsonBytes = 128 * 1024;
+
+        internal const string OwnMoveRunningMessage =
+            "Moving your backups to the new location. No backup starts until the move has finished.";
+        internal const string MoveRunningMessage =
+            "Your backups are being moved to a new backup location. No backup starts until the move has finished; this page updates by itself.";
+
+        // The record of a move (the journal) exists from its first copy to its commit, so its presence alone can't tell a
+        // running move from an interrupted one. Moves this dashboard started and still waits for are counted here; for a
+        // move started elsewhere (or before this dashboard restarted) the manager names its own process in the record.
+        private static int ownMovesInFlight;
+        private static readonly object moveOwnerGate = new object();
+        private static int rememberedMoveOwnerProcessId;
+        private static long rememberedMoveOwnerCreationFileTimeUtc;
+
+        internal static bool OwnMoveInFlight
+        {
+            get { return Thread.VolatileRead(ref ownMovesInFlight) > 0; }
+        }
+
+        internal static void BeginOwnMove()
+        {
+            Interlocked.Increment(ref ownMovesInFlight);
+        }
+
+        internal static void EndOwnMove()
+        {
+            Interlocked.Decrement(ref ownMovesInFlight);
+        }
 
         internal static RepositoryManagerResult Run(
             SourceConfiguration configuration,
@@ -298,6 +336,7 @@ namespace ResticBackuper.Dashboard
             startInfo.WindowStyle = ProcessWindowStyle.Hidden;
             startInfo.ErrorDialog = false;
 
+            bool ownMoveBegun = false;
             try
             {
                 int exitCode;
@@ -309,6 +348,10 @@ namespace ResticBackuper.Dashboard
                             "Windows didn't start the change. Nothing was changed.",
                             -1);
                     }
+                    // From here until the manager has exited and its answer was read, the record of this move
+                    // belongs to a running move (EndOwnMove in the finally below).
+                    BeginOwnMove();
+                    ownMoveBegun = true;
                     InvokeSafely(onElevatedProcessStarted);
                     string lastProgressFingerprint = string.Empty;
                     while (!process.WaitForExit(500))
@@ -367,9 +410,34 @@ namespace ResticBackuper.Dashboard
             {
                 return RepositoryManagerResult.Failure(SanitizeError(error.Message), -1);
             }
+            finally
+            {
+                if (ownMoveBegun)
+                {
+                    EndOwnMove();
+                }
+            }
         }
 
         internal static RepositoryRecoveryStatus GetRecoveryStatus()
+        {
+            // This dashboard's own move is running. Its record is the manager's working state, so nothing is read here
+            // and nothing can get in the way of the manager replacing it.
+            if (OwnMoveInFlight)
+            {
+                return RepositoryRecoveryStatus.MoveRunning(OwnMoveRunningMessage);
+            }
+            RepositoryRecoveryStatus status = ReadRecordedRecoveryStatus();
+            if (!status.IsMoveRunning && RememberedMoveOwnerIsRunning())
+            {
+                // The process a trusted record named a moment ago is still running: the manager is replacing the record
+                // (for an instant it can be missing or unreadable) or has just removed it as the move finished.
+                return RepositoryRecoveryStatus.MoveRunning(MoveRunningMessage);
+            }
+            return status;
+        }
+
+        private static RepositoryRecoveryStatus ReadRecordedRecoveryStatus()
         {
             string journalPath = GetRecoveryJournalPath();
             if (!File.Exists(journalPath) && !Directory.Exists(journalPath))
@@ -394,7 +462,7 @@ namespace ResticBackuper.Dashboard
                     return RepositoryRecoveryStatus.Blocked(
                         "The record of the unfinished move has an unexpected size. Backups remain paused.");
                 }
-                return RepositoryRecoveryStatus.Recoverable();
+                return ClassifyRecovery(TryReadSharedText(journalPath));
             }
             catch (Exception error)
             {
@@ -402,6 +470,150 @@ namespace ResticBackuper.Dashboard
                     "Rewindle could not check the record of the unfinished move: " +
                         SanitizeError(error.Message));
             }
+        }
+
+        // What the record of an unfinished move says once its permissions and size were checked. Rewindle's manager names
+        // the process running the move (owner_process_id and owner_process_creation_filetime_utc); while that same
+        // process runs, the move is running, not interrupted. A record without these fields (the earlier edition writes
+        // none), or one they can't be read from, means what it always did: an interrupted move to repair.
+        internal static RepositoryRecoveryStatus ClassifyRecovery(string journalJson)
+        {
+            int ownerProcessId;
+            long ownerCreationFileTimeUtc;
+            if (TryReadMoveOwner(journalJson, out ownerProcessId, out ownerCreationFileTimeUtc) &&
+                ProcessLiveness.IsSameProcessAlive(ownerProcessId, ownerCreationFileTimeUtc))
+            {
+                RememberMoveOwner(ownerProcessId, ownerCreationFileTimeUtc);
+                return RepositoryRecoveryStatus.MoveRunning(MoveRunningMessage);
+            }
+            return RepositoryRecoveryStatus.Recoverable();
+        }
+
+        private static bool TryReadMoveOwner(
+            string journalJson,
+            out int processId,
+            out long creationFileTimeUtc)
+        {
+            processId = 0;
+            creationFileTimeUtc = 0;
+            if (string.IsNullOrEmpty(journalJson) || journalJson.Length > MaximumJsonBytes)
+            {
+                return false;
+            }
+            try
+            {
+                IDictionary<string, object> document =
+                    new JavaScriptSerializer().DeserializeObject(journalJson) as IDictionary<string, object>;
+                object idValue;
+                object creationValue;
+                if (document == null ||
+                    !document.TryGetValue("owner_process_id", out idValue) ||
+                    !(idValue is int) ||
+                    (int)idValue <= 0 ||
+                    !document.TryGetValue("owner_process_creation_filetime_utc", out creationValue))
+                {
+                    return false;
+                }
+                // An exact unsigned decimal string, as status.json writes its FILETIMEs: no sign, no leading zero.
+                string creationText = creationValue as string;
+                if (string.IsNullOrEmpty(creationText) || creationText.Length > 19 || creationText[0] == '0')
+                {
+                    return false;
+                }
+                foreach (char character in creationText)
+                {
+                    if (character < '0' || character > '9')
+                    {
+                        return false;
+                    }
+                }
+                long creation;
+                if (!long.TryParse(creationText, NumberStyles.None, CultureInfo.InvariantCulture, out creation) ||
+                    creation <= 0)
+                {
+                    return false;
+                }
+                processId = (int)idValue;
+                creationFileTimeUtc = creation;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // Shares reading, writing and deletion: the manager replaces this record while a move runs, and a reader that did
+        // not share deletion would make that replacement, and with it the move, fail. Any failure reads as "no owner".
+        private static string TryReadSharedText(string path)
+        {
+            try
+            {
+                using (FileStream stream = new FileStream(
+                    path,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete,
+                    4096,
+                    FileOptions.SequentialScan))
+                {
+                    if (stream.Length <= 0 || stream.Length > MaximumJsonBytes)
+                    {
+                        return null;
+                    }
+                    using (StreamReader reader = new StreamReader(
+                        stream,
+                        new UTF8Encoding(false, true),
+                        true,
+                        4096,
+                        true))
+                    {
+                        return reader.ReadToEnd();
+                    }
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static void RememberMoveOwner(int processId, long creationFileTimeUtc)
+        {
+            lock (moveOwnerGate)
+            {
+                rememberedMoveOwnerProcessId = processId;
+                rememberedMoveOwnerCreationFileTimeUtc = creationFileTimeUtc;
+            }
+        }
+
+        private static bool RememberedMoveOwnerIsRunning()
+        {
+            int processId;
+            long creationFileTimeUtc;
+            lock (moveOwnerGate)
+            {
+                processId = rememberedMoveOwnerProcessId;
+                creationFileTimeUtc = rememberedMoveOwnerCreationFileTimeUtc;
+            }
+            if (processId <= 0)
+            {
+                return false;
+            }
+            if (ProcessLiveness.IsSameProcessAlive(processId, creationFileTimeUtc))
+            {
+                return true;
+            }
+            lock (moveOwnerGate)
+            {
+                if (rememberedMoveOwnerProcessId == processId &&
+                    rememberedMoveOwnerCreationFileTimeUtc == creationFileTimeUtc)
+                {
+                    rememberedMoveOwnerProcessId = 0;
+                    rememberedMoveOwnerCreationFileTimeUtc = 0;
+                }
+            }
+            return false;
         }
 
         internal static RepositoryManagerResult Recover(
@@ -413,6 +625,12 @@ namespace ResticBackuper.Dashboard
             {
                 return RepositoryManagerResult.Failure(
                     "Nothing to repair: no move of the backup location was interrupted.",
+                    -1);
+            }
+            if (status.IsMoveRunning)
+            {
+                return RepositoryManagerResult.Failure(
+                    "Nothing to repair: the move of your backup location is still running. Wait for it to finish.",
                     -1);
             }
             if (!status.IsRecoverable)

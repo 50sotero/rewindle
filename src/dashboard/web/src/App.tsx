@@ -224,6 +224,7 @@ function busyNote(state: DashboardState, offline = false): string {
   if (offline) return 'Waiting to reconnect to Rewindle. Backup controls are paused. Scheduled backups are not affected.';
   if (state.status.active) return 'A backup is running. Schedule, location and folder changes unlock when it finishes.';
   if (state.recovery.repairNeeded) return 'Backups are paused until the backup location is repaired.';
+  if (state.recovery.moveRunning) return 'Your backup location is being moved. Backups and changes wait until the move finishes.';
   return '';
 }
 

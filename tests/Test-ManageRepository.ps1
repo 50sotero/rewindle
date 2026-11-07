@@ -150,28 +150,173 @@ function Get-RecoveryRequestDigest {
 $compilerRoot = Join-Path ([IO.Path]::GetTempPath()) ('RRM-C-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
 [void][IO.Directory]::CreateDirectory($compilerRoot)
 $fakeRestic = Join-Path $compilerRoot 'restic.exe'
+# The fake reads its command line the way Restic (a Go program) does and splits the password command the way Restic
+# does before starting it, so a manager that quotes the password command wrongly fails here as it fails with the real
+# Restic. It also refuses any environment variable beyond the manager's allow-list. Its log and its check-failure
+# switch are files in the fixture, because the manager gives Restic a clean environment.
 $fakeSource = @'
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
+using System.Text;
 public static class FakeRestic {
-  static string ValueAfter(string[] args, string name) {
-    int i = Array.IndexOf(args, name);
-    if (i < 0 || i + 1 >= args.Length) throw new Exception("missing " + name);
-    return args[i + 1];
+  // Go's os.commandLineToArgv/readNextArg, including its "prior to 2008" double-quote rule.
+  static List<string> GoArgv(string cmd) {
+    List<string> args = new List<string>();
+    int i = 0;
+    while (i < cmd.Length) {
+      if (cmd[i] == ' ' || cmd[i] == '\t') { i++; continue; }
+      StringBuilder b = new StringBuilder();
+      bool inQuote = false;
+      int slashes = 0;
+      for (; i < cmd.Length; i++) {
+        char c = cmd[i];
+        if ((c == ' ' || c == '\t') && !inQuote) break;
+        if (c == '"') {
+          b.Append('\\', slashes / 2);
+          if (slashes % 2 == 0) {
+            if (inQuote && i + 1 < cmd.Length && cmd[i + 1] == '"') { b.Append('"'); i++; }
+            inQuote = !inQuote;
+          } else {
+            b.Append('"');
+          }
+          slashes = 0;
+          continue;
+        }
+        if (c == '\\') { slashes++; continue; }
+        b.Append('\\', slashes);
+        slashes = 0;
+        b.Append(c);
+      }
+      b.Append('\\', slashes);
+      args.Add(b.ToString());
+    }
+    return args;
   }
-  public static int Main(string[] args) {
-    string log = Environment.GetEnvironmentVariable("FAKE_RESTIC_LOG");
-    if (!String.IsNullOrEmpty(log)) File.AppendAllText(log, String.Join("\t", args) + Environment.NewLine);
-    string repo = ValueAfter(args, "--repo");
-    // The fixture repository has Restic's layout: the ID is the text of config, and each snapshot is a file in snapshots.
-    if (args.Contains("cat") && args.Contains("config")) {
+  // Restic's backend.SplitShellStrings, which turns --password-command into the program and its arguments.
+  static List<string> SplitShell(string data) {
+    List<string> parts = new List<string>();
+    char quote = '\0';
+    char last = '\0';
+    int start = -1;
+    for (int i = 0; i < data.Length; i++) {
+      char c = data[i];
+      bool split;
+      if (last != '\\' && quote != '\0' && c == quote) { quote = '\0'; split = true; }
+      else if (last != '\\' && quote == '\0' && (c == '"' || c == '\'')) { quote = c; split = true; }
+      else { last = c; split = quote == '\0' && (c == '\\' || Char.IsWhiteSpace(c)); }
+      if (split) {
+        if (start >= 0) { parts.Add(data.Substring(start, i - start)); start = -1; }
+      } else if (start == -1) {
+        start = i;
+      }
+    }
+    if (start >= 0) parts.Add(data.Substring(start));
+    if (quote != '\0') throw new InvalidOperationException("quoted string not terminated");
+    return parts;
+  }
+  static bool SamePath(string left, string right) {
+    return String.Equals(left.Replace('\\', '/'), right.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase);
+  }
+  static bool IsWithin(string candidate, string parent) {
+    string full = Path.GetFullPath(candidate).TrimEnd('\\');
+    string root = Path.GetFullPath(parent).TrimEnd('\\');
+    return String.Equals(full, root, StringComparison.OrdinalIgnoreCase) ||
+      full.StartsWith(root + "\\", StringComparison.OrdinalIgnoreCase);
+  }
+  static int Refuse(string message) {
+    Console.Error.WriteLine("fake restic refused: " + message);
+    return 92;
+  }
+  public static int Main(string[] ignored) {
+    List<string> argv = GoArgv(Environment.CommandLine);
+    if (argv.Count > 0) argv.RemoveAt(0);
+    string[] args = argv.ToArray();
+    string installRoot = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
+    string fixtureRoot = Path.GetFullPath(Path.Combine(installRoot, "..", ".."));
+    string stateRoot = Path.Combine(fixtureRoot, "ProgramData\\ResticBackuper");
+    File.AppendAllText(Path.Combine(fixtureRoot, "fake-restic.log"), String.Join("\t", args) + Environment.NewLine);
+
+    string repo = null;
+    string passwordCommand = null;
+    string cacheDirectory = null;
+    List<string> words = new List<string>();
+    for (int i = 0; i < args.Length; i++) {
+      string a = args[i];
+      if (a == "--repo" || a == "--password-command" || a == "--cache-dir" || a == "--retry-lock") {
+        if (i + 1 >= args.Length) return Refuse("missing value for " + a);
+        string value = args[++i];
+        if (a == "--repo") repo = value;
+        if (a == "--password-command") passwordCommand = value;
+        if (a == "--cache-dir") cacheDirectory = value;
+        if (a == "--retry-lock" && value != "0s") return Refuse("unexpected --retry-lock " + value);
+        continue;
+      }
+      if (a == "--json") continue;
+      if (a.StartsWith("-")) return Refuse("unknown flag " + a);
+      words.Add(a);
+    }
+    if (String.IsNullOrEmpty(passwordCommand)) return Refuse("no --password-command");
+    string[] expected = new string[] {
+      Path.Combine(installRoot, "Python\\python.exe"), "-I", "-S", "-B", Path.Combine(installRoot, "secret_store.py"),
+      "reveal", "--secret-file", Path.Combine(stateRoot, "repository-password.dpapi.json")
+    };
+    List<string> actual;
+    try { actual = SplitShell(passwordCommand); }
+    catch (InvalidOperationException error) { return Refuse("password command: " + error.Message); }
+    bool same = actual.Count == expected.Length;
+    for (int i = 0; same && i < expected.Length; i++) same = SamePath(actual[i], expected[i]);
+    if (!same) return Refuse("password command does not name the expected helper: [" + String.Join("|", actual.ToArray()) + "]");
+
+    IDictionary environment = Environment.GetEnvironmentVariables();
+    foreach (DictionaryEntry entry in environment) {
+      string name = ((string)entry.Key).ToUpperInvariant();
+      if (name.StartsWith("RESTIC_") || name.StartsWith("RCLONE_")) return Refuse("inherited environment variable " + name);
+    }
+    // Exactly the Windows values, as Windows itself reports them, and TEMP/TMP in the protected temp folder next to
+    // the cache. PROCESSOR_ARCHITECTURE is passed on only when it is one of Windows' own values.
+    string system = Environment.SystemDirectory;
+    string windows = Directory.GetParent(system).FullName;
+    string temporary = Path.Combine(stateRoot, "temp");
+    Dictionary<string, string> required = new Dictionary<string, string>();
+    required["SYSTEMROOT"] = windows;
+    required["WINDIR"] = windows;
+    required["SYSTEMDRIVE"] = Path.GetPathRoot(windows).TrimEnd('\\');
+    required["COMSPEC"] = Path.Combine(system, "cmd.exe");
+    required["PATH"] = String.Join(";", new string[] {
+      system, windows, Path.Combine(system, "Wbem"), Path.Combine(system, "WindowsPowerShell\\v1.0") });
+    required["PATHEXT"] = ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC";
+    required["OS"] = "Windows_NT";
+    required["NUMBER_OF_PROCESSORS"] = Environment.ProcessorCount.ToString();
+    required["TEMP"] = temporary;
+    required["TMP"] = temporary;
+    foreach (DictionaryEntry entry in environment) {
+      string name = ((string)entry.Key).ToUpperInvariant();
+      string value = (string)entry.Value;
+      if (name == "PROCESSOR_ARCHITECTURE") {
+        if (Array.IndexOf(new string[] { "AMD64", "x86", "ARM64" }, value) < 0) return Refuse("unexpected PROCESSOR_ARCHITECTURE " + value);
+        continue;
+      }
+      if (!required.ContainsKey(name)) return Refuse("environment variable outside the allow-list " + name);
+      if (!String.Equals(value, required[name], StringComparison.OrdinalIgnoreCase)) return Refuse(name + " is not the expected value: " + value);
+    }
+    foreach (string name in required.Keys) {
+      if (String.IsNullOrEmpty(Environment.GetEnvironmentVariable(name))) return Refuse("missing environment variable " + name);
+    }
+    if (!Directory.Exists(temporary)) return Refuse("the protected temp folder does not exist");
+
+    if (String.IsNullOrEmpty(repo)) return Refuse("missing --repo");
+    if (String.IsNullOrEmpty(cacheDirectory) || !IsWithin(cacheDirectory, stateRoot)) return Refuse("--cache-dir is not inside the protected state folder");
+
+    string command = String.Join(" ", words.ToArray());
+    if (command == "cat config") {
+      // The fixture repository has Restic's layout: the ID is the text of config, and each snapshot is a file in snapshots.
       string id = File.ReadAllText(Path.Combine(repo, "config")).Trim();
       Console.WriteLine("{\"id\":\"" + id + "\"}");
       return 0;
     }
-    if (args.Contains("snapshots")) {
+    if (command == "snapshots") {
       List<string> rows = new List<string>();
       foreach (string file in Directory.GetFiles(Path.Combine(repo, "snapshots"))) {
         rows.Add("{\"id\":\"" + Path.GetFileName(file) + "\"}");
@@ -179,22 +324,24 @@ public static class FakeRestic {
       Console.WriteLine("[" + String.Join(",", rows.ToArray()) + "]");
       return 0;
     }
-    if (args.Contains("check")) {
-      if (Environment.GetEnvironmentVariable("FAKE_RESTIC_FAIL_CHECK") == "1") return 17;
+    if (command == "check") {
+      if (File.Exists(Path.Combine(fixtureRoot, "fake-restic-fail-check"))) return 17;
       if (!File.Exists(Path.Combine(repo, "config")) ||
           Directory.GetFiles(Path.Combine(repo, "data"), "*", SearchOption.AllDirectories).Length == 0) return 18;
       Console.WriteLine("repository check passed");
       return 0;
     }
-    Console.Error.WriteLine("forbidden or unknown fake Restic command");
-    return 91;
+    return Refuse("forbidden, unknown or stray positional arguments: [" + String.Join("|", words.ToArray()) + "]");
   }
 }
 '@
 Add-Type -TypeDefinition $fakeSource -OutputAssembly $fakeRestic -OutputType ConsoleApplication
 
 function New-Fixture {
-    $root = Join-Path ([IO.Path]::GetTempPath()) ('RRM-T-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    param([switch]$NoRepositoryRecord)
+    # The space matters: the installed paths are under "Program Files", and a password command that is quoted wrongly
+    # still splits into the right words when no path in it has a space.
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('RRM T-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
     $fixtureRoots.Add($root)
     $installRoot = Join-Path $root 'ProgramFiles\ResticBackuper'
     $stateRoot = Join-Path $root 'ProgramData\ResticBackuper'
@@ -224,7 +371,9 @@ function New-Fixture {
     [IO.File]::WriteAllText((Join-Path $source 'document.txt'), "source data`n", $encoding)
 
     # Restic's own layout. The fake Restic reads the repository ID from config and the snapshot IDs from the file names.
-    [IO.File]::WriteAllText((Join-Path $oldRepository 'config'), "fixture-repository-id`n", $encoding)
+    # The ID has Restic's form (64 hex digits), which the repository record must carry.
+    $repositoryId = ([Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')).ToLowerInvariant()
+    [IO.File]::WriteAllText((Join-Path $oldRepository 'config'), "$repositoryId`n", $encoding)
     [IO.File]::WriteAllText((Join-Path $oldRepository "keys\$(Get-TextSha256 'fixture key')"), "fixture key`n", $encoding)
     [IO.File]::WriteAllText((Join-Path $oldRepository "index\$(Get-TextSha256 'fixture index')"), "fixture index`n", $encoding)
     foreach ($snapshot in @('fixture snapshot b', 'fixture snapshot a')) {
@@ -277,6 +426,26 @@ function New-Fixture {
     }
     Write-JsonFile -Path (Join-Path $oldRecovery 'recovery-manifest.json') -Value $recoveryManifest
 
+    # The record initialize_repository.py writes, plus a field this manager does not know about.
+    $recordPath = Join-Path $stateRoot 'repository.json'
+    if (-not $NoRepositoryRecord) {
+        Write-JsonFile -Path $recordPath -Value ([ordered]@{
+            custom_marker = 'preserve-me'
+            initialized_utc = '2026-01-02T03:04:05+00:00'
+            recovery_key_created = $true
+            recovery_key_names_other_repository = $false
+            recovery_tools_directory = $oldRecovery
+            recovery_tools_manifest = $recoveryManifest
+            repository = $oldRepository
+            repository_id = $repositoryId
+            repository_storage_mode = 'local_ntfs'
+            repository_version = 2
+            repository_volume_serial = $serial
+            schema_version = 1
+            secret_created = $true
+        })
+    }
+
     $manifestFiles = @(Get-ChildItem -LiteralPath $installRoot -Recurse -File -Force | Sort-Object FullName)
     $runtimeManifest = [ordered]@{
         schema_version = 1; created_utc = [DateTime]::UtcNow.ToString('o'); fixture_marker = 'preserve-me'
@@ -301,8 +470,32 @@ function New-Fixture {
         Root=$root; InstallRoot=$installRoot; StateRoot=$stateRoot; OldRepository=$oldRepository;
         OldRecovery=$oldRecovery; NewParent=$newParent; NewRepository=$newRepository;
         ConfigPath=$configPath; ManifestPath=(Join-Path $installRoot 'runtime-manifest.json'); Log=$log;
-        Source=$source; Diagnostics=$diagnostics; PlanId=$planId; SourceSerial=$sourceSerial
+        Source=$source; Diagnostics=$diagnostics; PlanId=$planId; SourceSerial=$sourceSerial; RepositoryId=$repositoryId;
+        RecordPath=$recordPath; JournalPath=(Join-Path $stateRoot 'repository-relocation.journal.json')
     }
+}
+
+function Get-RecordHash {
+    param([pscustomobject]$Fixture)
+    if (-not (Test-Path -LiteralPath $Fixture.RecordPath -PathType Leaf)) { return $null }
+    return Get-Hash -Path $Fixture.RecordPath
+}
+
+function Read-RecordedRepositoryId {
+    param([string]$ConfigPath)
+    # What the backup itself reads: restic_common.read_recorded_repository_id with the published configuration.
+    $recordedIdProbe = @'
+import json
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from restic_common import read_recorded_repository_id
+config = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+print(read_recorded_repository_id(config) or "none")
+'@
+    $output = @($recordedIdProbe | & $python - (Join-Path $projectRoot 'src') $ConfigPath 2>&1 | ForEach-Object { [string]$_ })
+    if ($LASTEXITCODE -ne 0) { throw "The recorded repository ID probe failed: $($output -join ' ')" }
+    return ($output -join '').Trim()
 }
 
 function Set-InstallerStyleCanary {
@@ -363,7 +556,6 @@ function Invoke-Relocation {
             -ConfigHash $configHash -Nonce $nonce
     }
     $resultPath = Join-Path $Fixture.StateRoot "RepositoryManagerResults\$nonce.json"
-    $env:FAKE_RESTIC_LOG = $Fixture.Log
     $arguments = @(
         '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
         (Join-Path $Fixture.InstallRoot 'Manage-Repository.ps1'), '-Relocate',
@@ -461,11 +653,36 @@ if (-not $SkipInstalledChecks) {
     $taskXmlBefore = try { (Export-ScheduledTask -TaskName 'ResticBackuper' -ErrorAction Stop).Replace("`r`n", "`n") } catch { $null }
 }
 
+# Settings a user can leave in their own environment. The manager must not hand any of them to Restic or to the
+# password helper it starts; the fake refuses to run when one arrives.
+$leakedVariables = [ordered]@{
+    RESTIC_PASSWORD_FILE = 'Z:\elsewhere\not-the-backup-password.txt'
+    RESTIC_REPOSITORY = 'Z:\elsewhere\not-the-backup'
+    RCLONE_CONFIG = 'Z:\elsewhere\not-an-rclone-config.conf'
+}
+$priorVariables = @{}
+foreach ($name in $leakedVariables.Keys) {
+    $priorVariables[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+    [Environment]::SetEnvironmentVariable($name, $leakedVariables[$name], 'Process')
+}
+
 try {
     # Successful copy-only relocation with full identity/history/check verification.
     $fixture = New-Fixture
     $oldRepositoryDigest = Get-TreeDigest -Root $fixture.OldRepository -ExcludeLocks
     $oldRecoveryDigest = Get-TreeDigest -Root $fixture.OldRecovery
+    # A distinctive protected DACL on the record: the rewrite must keep the record's permissions, not take the
+    # temporary file's. (Outside test mode the manager also resets them to the installer's, which needs elevation.)
+    $recordAcl = Get-Acl -LiteralPath $fixture.RecordPath
+    $recordAcl.SetAccessRuleProtection($true, $false)
+    foreach ($rule in @($recordAcl.Access)) { [void]$recordAcl.RemoveAccessRule($rule) }
+    $recordAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        [Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'Allow'))
+    $recordAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        [Security.Principal.SecurityIdentifier]::new('S-1-5-18'), 'ReadAndExecute', 'Allow'))
+    Set-Acl -LiteralPath $fixture.RecordPath -AclObject $recordAcl
+    $recordDaclBefore = (Get-Acl -LiteralPath $fixture.RecordPath).GetSecurityDescriptorSddlForm('Access')
+    $recordBefore = Get-Content -LiteralPath $fixture.RecordPath -Raw | ConvertFrom-Json
     $run = Invoke-Relocation -Fixture $fixture -Destination $fixture.NewRepository
     if ($run.ExitCode -ne 0) {
         Write-Output ("success-case output: " + ($run.Output -join ' | '))
@@ -523,6 +740,27 @@ try {
     Assert-True ($logText -match '\tcat\tconfig' -and $logText -match '\tsnapshots\t--json' -and $logText -match '\tcheck') 'fake Restic verification commands used'
     Assert-True ($logText -notmatch '(?im)(^|\t)(backup|init|forget|prune|delete)(\t|$)') 'no history-creating or destructive Restic command'
 
+    # The repository record follows the move, so the backup still reads the repository ID from it.
+    $recordBytes = [IO.File]::ReadAllBytes($fixture.RecordPath)
+    Assert-True (-not ($recordBytes.Length -ge 3 -and $recordBytes[0] -eq 0xEF -and $recordBytes[1] -eq 0xBB -and $recordBytes[2] -eq 0xBF)) 'repository record is UTF-8 without BOM'
+    $record = [Text.UTF8Encoding]::new($false, $true).GetString($recordBytes) | ConvertFrom-Json
+    Assert-True ([string]$record.repository -eq $fixture.NewRepository) 'repository record names the new location'
+    Assert-True ([string]$record.repository_id -ceq $fixture.RepositoryId) 'repository record keeps the repository ID'
+    Assert-True ([string]$record.repository_volume_serial -ceq (Get-VolumeSerial -Path $fixture.NewRepository)) 'repository record names the new volume'
+    Assert-True ([string]$record.repository_storage_mode -ceq 'local_ntfs') 'repository record keeps the local storage mode'
+    Assert-True ([string]$record.recovery_tools_directory -eq $newRecovery) 'repository record names the new recovery tools'
+    Assert-True ([string]$record.recovery_tools_manifest.repository -eq $fixture.NewRepository) 'repository record carries the moved recovery manifest'
+    Assert-True ([string]$record.custom_marker -ceq 'preserve-me' -and
+        [string]$record.initialized_utc -ceq [string]$recordBefore.initialized_utc -and
+        [long]$record.repository_version -eq 2 -and $record.secret_created -eq $true -and
+        $record.recovery_key_created -eq $true -and $record.recovery_key_names_other_repository -eq $false -and
+        [long]$record.schema_version -eq 1) 'repository record keeps every other field'
+    Assert-True ($null -eq $record.PSObject.Properties['drivefs_my_drive_root'] -and
+        $null -eq $record.PSObject.Properties['drivefs_cache_directory']) 'local repository record has no DriveFS fields'
+    Assert-True (-not [string]::IsNullOrWhiteSpace([string]$record.relocated_utc)) 'repository record says when it moved'
+    Assert-True ((Get-Acl -LiteralPath $fixture.RecordPath).GetSecurityDescriptorSddlForm('Access') -ceq $recordDaclBefore) 'repository record keeps its permissions'
+    Assert-True ((Read-RecordedRepositoryId -ConfigPath $fixture.ConfigPath) -ceq $fixture.RepositoryId) 'backup reads the repository ID after the move'
+
     # DriveFS is an explicit backend: only the encrypted repository moves onto
     # its synthetic filesystem, while recovery material stays on protected NTFS.
     $driveFsFixture = New-Fixture
@@ -554,6 +792,14 @@ try {
         Where-Object Name -like '.restic-repository-*.staging').Count -eq 0) 'DriveFS staging removed after verified promotion'
     Assert-True (@(Get-ChildItem -LiteralPath $driveFsParent -Force |
         Where-Object Name -like '.resticbackuper-provider-*').Count -eq 0) 'DriveFS provider probes cleaned'
+    $driveFsRecord = Get-Content -LiteralPath $driveFsFixture.RecordPath -Raw | ConvertFrom-Json
+    Assert-True ([string]$driveFsRecord.repository -eq $driveFsRepository -and
+        [string]$driveFsRecord.repository_id -ceq $driveFsFixture.RepositoryId) 'DriveFS repository record names the new location and keeps the ID'
+    Assert-True ([string]$driveFsRecord.repository_storage_mode -ceq 'google_drivefs_stream' -and
+        [string]$driveFsRecord.drivefs_my_drive_root -eq $driveFsRoot -and
+        [string]$driveFsRecord.drivefs_cache_directory -eq $driveFsCache) 'DriveFS repository record carries the DriveFS bindings'
+    Assert-True ([string]$driveFsRecord.recovery_tools_directory -eq $driveFsRecovery) 'DriveFS repository record names the protected recovery tools'
+    Assert-True ((Read-RecordedRepositoryId -ConfigPath $driveFsFixture.ConfigPath) -ceq $driveFsFixture.RepositoryId) 'backup reads the repository ID after a DriveFS move'
     Assert-True (@(Get-ChildItem -LiteralPath $driveFsParent -Force |
         Where-Object Name -like '.resticbackuper-hold-*').Count -eq 0) 'Google Drive hold checks cleaned'
 
@@ -664,11 +910,13 @@ try {
         [void][IO.Directory]::CreateDirectory($directory)
     }
     $driveFsCrashRepository = Join-Path $driveFsCrashParent 'Personal'
+    $driveFsCrashRecordBefore = Get-RecordHash -Fixture $driveFsCrashFixture
     $driveFsCrash = Invoke-Relocation -Fixture $driveFsCrashFixture `
         -Destination $driveFsCrashRepository -CrashPoint 1
     Assert-True ($driveFsCrash.ExitCode -ne 0) 'DriveFS post-promotion crash terminates'
     $driveFsRecoveryRun = Invoke-Recovery -Fixture $driveFsCrashFixture
     Assert-True ($driveFsRecoveryRun.ExitCode -eq 0 -and $driveFsRecoveryRun.Result.ok -eq $true) 'DriveFS post-promotion crash rolls back from protected journal'
+    Assert-True ((Get-RecordHash -Fixture $driveFsCrashFixture) -ceq $driveFsCrashRecordBefore) 'DriveFS crash recovery restores the repository record'
     Assert-True (-not (Test-Path -LiteralPath $driveFsCrashRepository)) 'DriveFS crash recovery removes only manifest-proven promoted repository'
     Assert-True (Test-Path -LiteralPath $driveFsCrashFixture.OldRepository -PathType Container) 'DriveFS crash recovery retains old repository'
 
@@ -682,6 +930,43 @@ try {
     [IO.File]::WriteAllText((Join-Path $nonemptyFixture.NewRepository 'config'), "foreign repository`n", $encoding)
     $nonemptyRun = Invoke-Relocation -Fixture $nonemptyFixture -Destination $nonemptyFixture.NewRepository
     Assert-True ($nonemptyRun.ExitCode -ne 0 -and $nonemptyRun.Result.error -match 'missing or completely empty') 'nonempty destination rejected'
+
+    # Without a repository record there is nothing to keep in step, and the move does not invent one.
+    $noRecordFixture = New-Fixture -NoRepositoryRecord
+    $noRecordRun = Invoke-Relocation -Fixture $noRecordFixture -Destination $noRecordFixture.NewRepository
+    Assert-True ($noRecordRun.ExitCode -eq 0 -and $noRecordRun.Result.ok -eq $true) 'move without a repository record succeeds'
+    Assert-True (-not (Test-Path -LiteralPath $noRecordFixture.RecordPath)) 'move without a repository record creates none'
+
+    # A record left naming an earlier folder of the same backup is brought up to date.
+    $staleRecordFixture = New-Fixture
+    $staleRecord = Get-Content -LiteralPath $staleRecordFixture.RecordPath -Raw | ConvertFrom-Json
+    $staleRecord.repository = Join-Path $staleRecordFixture.Root 'EarlierStore\Personal'
+    Write-JsonFile -Path $staleRecordFixture.RecordPath -Value $staleRecord
+    $staleRecordRun = Invoke-Relocation -Fixture $staleRecordFixture -Destination $staleRecordFixture.NewRepository
+    Assert-True ($staleRecordRun.ExitCode -eq 0) 'record naming an earlier folder of the same backup is accepted'
+    Assert-True ([string](Get-Content -LiteralPath $staleRecordFixture.RecordPath -Raw | ConvertFrom-Json).repository -eq
+        $staleRecordFixture.NewRepository) 'record naming an earlier folder is brought up to date'
+
+    # A record of another backup, or one that is damaged, stops the move before anything is copied.
+    $recordRefusals = @(
+        [pscustomobject]@{ Name = 'another backup'; Id = ('ab' * 32); Pattern = 'belongs to a different backup' },
+        [pscustomobject]@{ Name = 'damaged'; Id = 'not-a-repository-id'; Pattern = 'is damaged' }
+    )
+    foreach ($refusal in $recordRefusals) {
+        $foreignFixture = New-Fixture
+        $foreignRecord = Get-Content -LiteralPath $foreignFixture.RecordPath -Raw | ConvertFrom-Json
+        $foreignRecord.repository_id = $refusal.Id
+        Write-JsonFile -Path $foreignFixture.RecordPath -Value $foreignRecord
+        $foreignRecordHash = Get-RecordHash -Fixture $foreignFixture
+        $foreignConfigHash = Get-Hash -Path $foreignFixture.ConfigPath
+        $foreignRun = Invoke-Relocation -Fixture $foreignFixture -Destination $foreignFixture.NewRepository
+        Assert-True ($foreignRun.ExitCode -ne 0 -and [string]$foreignRun.Result.error -match $refusal.Pattern) "record of $($refusal.Name) refused"
+        Assert-True (-not (Test-Path -LiteralPath $foreignFixture.NewRepository) -and
+            @(Get-ChildItem -LiteralPath $foreignFixture.NewParent -Force).Count -eq 0) "record of $($refusal.Name) refused before any copy"
+        Assert-True ((Get-RecordHash -Fixture $foreignFixture) -ceq $foreignRecordHash -and
+            (Get-Hash -Path $foreignFixture.ConfigPath) -ceq $foreignConfigHash) "record of $($refusal.Name) leaves the record and configuration alone"
+        Assert-True (-not (Test-Path -LiteralPath $foreignFixture.JournalPath)) "record of $($refusal.Name) leaves no journal"
+    }
 
     # Request binding and v1 path policy rejections occur before any copy.
     $digestFixture = New-Fixture
@@ -735,17 +1020,20 @@ try {
     $overflowRun = Invoke-Relocation -Fixture $overflowFixture -Destination $overflowFixture.NewRepository
     Assert-True ($overflowRun.ExitCode -ne 0 -and $overflowRun.Result.error -match 'supported maximum') 'generation overflow rejected'
 
-    # All four activation failure points roll back protected files and owned copies.
-    foreach ($point in 1..4) {
+    # All five activation failure points roll back protected files and owned copies. Point 5 follows the rewrite of the
+    # repository record.
+    foreach ($point in 1..5) {
         $rollbackFixture = New-Fixture
         $configBefore = Get-Hash -Path $rollbackFixture.ConfigPath
         $manifestBefore = Get-Hash -Path $rollbackFixture.ManifestPath
+        $recordHashBefore = Get-RecordHash -Fixture $rollbackFixture
         $repoBefore = Get-TreeDigest -Root $rollbackFixture.OldRepository -ExcludeLocks
         $recoveryBefore = Get-TreeDigest -Root $rollbackFixture.OldRecovery
         $rollbackRun = Invoke-Relocation -Fixture $rollbackFixture -Destination $rollbackFixture.NewRepository -FailurePoint $point
         Assert-True ($rollbackRun.ExitCode -ne 0 -and $rollbackRun.Result.ok -eq $false) "failure point $point reports failure"
         Assert-True ((Get-Hash -Path $rollbackFixture.ConfigPath) -eq $configBefore) "failure point $point restores config"
         Assert-True ((Get-Hash -Path $rollbackFixture.ManifestPath) -eq $manifestBefore) "failure point $point restores manifest"
+        Assert-True ((Get-RecordHash -Fixture $rollbackFixture) -ceq $recordHashBefore) "failure point $point restores the repository record"
         Assert-True ((Get-TreeDigest -Root $rollbackFixture.OldRepository -ExcludeLocks) -eq $repoBefore) "failure point $point retains old repo"
         Assert-True ((Get-TreeDigest -Root $rollbackFixture.OldRecovery) -eq $recoveryBefore) "failure point $point retains old recovery"
         Assert-True (-not (Test-Path -LiteralPath $rollbackFixture.NewRepository)) "failure point $point removes owned destination"
@@ -799,18 +1087,40 @@ try {
         [pscustomobject]@{ Name='repository_promoted'; Publish=1; Copy=0; Stage=0 },
         [pscustomobject]@{ Name='recovery_promoted'; Publish=2; Copy=0; Stage=0 },
         [pscustomobject]@{ Name='config_published'; Publish=3; Copy=0; Stage=0 },
-        [pscustomobject]@{ Name='manifest_published'; Publish=4; Copy=0; Stage=0 }
+        [pscustomobject]@{ Name='manifest_published'; Publish=4; Copy=0; Stage=0 },
+        [pscustomobject]@{ Name='repository_record_rewritten'; Publish=5; Copy=0; Stage=0 }
     )
     foreach ($case in $crashCases) {
         $crashFixture = New-Fixture
         $crashConfigBefore = Get-Hash -Path $crashFixture.ConfigPath
         $crashManifestBefore = Get-Hash -Path $crashFixture.ManifestPath
+        $crashRecordBefore = Get-RecordHash -Fixture $crashFixture
         $crashRepoBefore = Get-TreeDigest -Root $crashFixture.OldRepository -ExcludeLocks
         $crashRecoveryBefore = Get-TreeDigest -Root $crashFixture.OldRecovery
+        $crashStartedUtc = [DateTime]::UtcNow
         $crashRun = Invoke-Relocation -Fixture $crashFixture -Destination $crashFixture.NewRepository `
             -CrashPoint $case.Publish -CrashDuringCopyAfterFiles $case.Copy -CrashAfterStageCreation $case.Stage
+        $crashEndedUtc = [DateTime]::UtcNow
         Assert-True ($crashRun.ExitCode -ne 0) "crash state $($case.Name) terminates process"
         Assert-True (Test-Path -LiteralPath (Join-Path $crashFixture.StateRoot 'repository-relocation.journal.json') -PathType Leaf) "crash state $($case.Name) leaves durable journal"
+        # The journal names the process that ran the move, so a dashboard opened during a move can tell whether that
+        # process is still running.
+        $crashJournal = Get-Content -LiteralPath $crashFixture.JournalPath -Raw | ConvertFrom-Json
+        $ownerProcessId = $crashJournal.PSObject.Properties['owner_process_id']
+        $ownerCreation = $crashJournal.PSObject.Properties['owner_process_creation_filetime_utc']
+        $ownerFileTime = 0L
+        Assert-True ($null -ne $ownerProcessId -and $ownerProcessId.Value -is [int] -and
+            [int]$ownerProcessId.Value -gt 0) "crash state $($case.Name) journal names the moving process"
+        Assert-True ($null -ne $ownerCreation -and $ownerCreation.Value -is [string] -and
+            [string]$ownerCreation.Value -cmatch '^[1-9][0-9]*$' -and
+            [long]::TryParse([string]$ownerCreation.Value, [ref]$ownerFileTime) -and
+            [DateTime]::FromFileTimeUtc($ownerFileTime) -ge $crashStartedUtc.AddSeconds(-1) -and
+            [DateTime]::FromFileTimeUtc($ownerFileTime) -le $crashEndedUtc.AddSeconds(1)) "crash state $($case.Name) journal has the moving process's creation time"
+        if ($case.Publish -eq 5) {
+            $intendedRecord = $crashJournal.PSObject.Properties['intended_repository_record_sha256']
+            Assert-True ((Get-RecordHash -Fixture $crashFixture) -cne $crashRecordBefore -and $null -ne $intendedRecord -and
+                [string]$intendedRecord.Value -ceq (Get-RecordHash -Fixture $crashFixture)) "crash state $($case.Name) stopped after the journaled record rewrite"
+        }
         $recoveryRun = Invoke-Recovery -Fixture $crashFixture
         Assert-True ($recoveryRun.ExitCode -eq 0 -and $recoveryRun.Result.ok -eq $true) "crash state $($case.Name) reconciles on dedicated recovery"
         Assert-True ([string]$recoveryRun.Result.action -eq 'recover') "crash state $($case.Name) recovery result action"
@@ -820,12 +1130,60 @@ try {
         Assert-True ($recoveryRun.Result.old_repository_retained -eq $true) "crash state $($case.Name) recovery retention boolean"
         Assert-True ((Get-Hash -Path $crashFixture.ConfigPath) -eq $crashConfigBefore) "crash state $($case.Name) restores config"
         Assert-True ((Get-Hash -Path $crashFixture.ManifestPath) -eq $crashManifestBefore) "crash state $($case.Name) restores manifest"
+        Assert-True ((Get-RecordHash -Fixture $crashFixture) -ceq $crashRecordBefore) "crash state $($case.Name) restores the repository record"
         Assert-True ((Get-TreeDigest -Root $crashFixture.OldRepository -ExcludeLocks) -eq $crashRepoBefore) "crash state $($case.Name) retains old repository"
         Assert-True ((Get-TreeDigest -Root $crashFixture.OldRecovery) -eq $crashRecoveryBefore) "crash state $($case.Name) retains old recovery"
         Assert-True (-not (Test-Path -LiteralPath $crashFixture.NewRepository)) "crash state $($case.Name) removes proven owned destination"
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $crashFixture.NewParent 'RecoveryTools'))) "crash state $($case.Name) removes proven owned recovery"
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $crashFixture.StateRoot 'repository-relocation.journal.json'))) "crash state $($case.Name) clears journal"
     }
+
+    # Repair stops before it changes anything when the record of the backup location, or the record of the move, is not
+    # what the move left behind. Trying again gives the same answer, so what the person reads must say, in plain words,
+    # what is safe and where to get help.
+    $refusedFixture = New-Fixture
+    $refusedRecordBefore = Get-RecordHash -Fixture $refusedFixture
+    $refusedCrash = Invoke-Relocation -Fixture $refusedFixture -Destination $refusedFixture.NewRepository -CrashPoint 5
+    Assert-True ($refusedCrash.ExitCode -ne 0 -and (Test-Path -LiteralPath $refusedFixture.JournalPath -PathType Leaf)) 'refused repair fixture stops mid-move'
+    [byte[]]$refusedJournalBytes = [IO.File]::ReadAllBytes($refusedFixture.JournalPath)
+    $refusedJournalText = $encoding.GetString($refusedJournalBytes)
+    [byte[]]$refusedRecordBytes = [IO.File]::ReadAllBytes($refusedFixture.RecordPath)
+    $refusedConfigHash = Get-Hash -Path $refusedFixture.ConfigPath
+    $refusedManifestHash = Get-Hash -Path $refusedFixture.ManifestPath
+    $schemaTwoRecord = [Convert]::ToBase64String($encoding.GetBytes('{"schema_version":2}'))
+    $refusedCases = @(
+        [pscustomobject]@{ Name='record changed'; Reason="Rewindle's record of your backup location changed while the move was stopped"; Record='changed'; Field=$null; Value=$null },
+        [pscustomobject]@{ Name='record missing'; Reason="Rewindle's record of your backup location is missing"; Record='missing'; Field=$null; Value=$null },
+        [pscustomobject]@{ Name='saved record not readable'; Reason="Rewindle's record of the unfinished move is damaged"; Record=$null; Field='original_repository_record_base64'; Value='not base64!' },
+        [pscustomobject]@{ Name='saved record of another kind'; Reason="Rewindle's record of the unfinished move is damaged"; Record=$null; Field='original_repository_record_base64'; Value=$schemaTwoRecord },
+        [pscustomobject]@{ Name='rewrite fingerprint damaged'; Reason="Rewindle's record of the unfinished move is damaged"; Record=$null; Field='intended_repository_record_sha256'; Value='not-a-fingerprint' }
+    )
+    foreach ($case in $refusedCases) {
+        $journalText = $refusedJournalText
+        if ($null -ne $case.Field) {
+            $journalText = [regex]::Replace($refusedJournalText, '("' + $case.Field + '"\s*:\s*)"[^"]*"', ('${1}"' + $case.Value + '"'))
+            Assert-True ($journalText -cne $refusedJournalText) "refused repair ($($case.Name)) fixture changes the saved field"
+            [IO.File]::WriteAllText($refusedFixture.JournalPath, $journalText, $encoding)
+        }
+        if ($case.Record -eq 'changed') { [IO.File]::WriteAllText($refusedFixture.RecordPath, "{`"schema_version`": 1}`n", $encoding) }
+        if ($case.Record -eq 'missing') { [IO.File]::Delete($refusedFixture.RecordPath) }
+        $recordBeforeAttempt = Get-RecordHash -Fixture $refusedFixture
+        $refusedRun = Invoke-Recovery -Fixture $refusedFixture
+        $refusedText = if ($null -eq $refusedRun.Result) { '' } else { [string]$refusedRun.Result.error }
+        Assert-True ($refusedRun.ExitCode -ne 0 -and $null -ne $refusedRun.Result -and $refusedRun.Result.ok -eq $false) "refused repair ($($case.Name)) stops"
+        Assert-True ($refusedText.StartsWith($case.Reason, [StringComparison]::Ordinal)) "refused repair ($($case.Name)) says why: $refusedText"
+        Assert-True ($refusedText -notmatch '(?i)repositor|journal|relocat|metadata|snapshot|restic|engine|canary') "refused repair ($($case.Name)) uses plain words: $refusedText"
+        Assert-True ($refusedText.EndsWith("It stopped before changing anything, and your backups were not touched. Choose Save problem report in Settings and ask for help; don't delete anything in the backup location.", [StringComparison]::Ordinal)) "refused repair ($($case.Name)) names a next step that can help: $refusedText"
+        Assert-True ((Get-Hash -Path $refusedFixture.ConfigPath) -eq $refusedConfigHash -and
+            (Get-Hash -Path $refusedFixture.ManifestPath) -eq $refusedManifestHash -and
+            (Get-RecordHash -Fixture $refusedFixture) -ceq $recordBeforeAttempt -and
+            $encoding.GetString([IO.File]::ReadAllBytes($refusedFixture.JournalPath)) -ceq $journalText) "refused repair ($($case.Name)) changes nothing"
+        [IO.File]::WriteAllBytes($refusedFixture.JournalPath, $refusedJournalBytes)
+        [IO.File]::WriteAllBytes($refusedFixture.RecordPath, $refusedRecordBytes)
+    }
+    $acceptedRepair = Invoke-Recovery -Fixture $refusedFixture
+    Assert-True ($acceptedRepair.ExitCode -eq 0 -and $acceptedRepair.Result.ok -eq $true -and
+        (Get-RecordHash -Fixture $refusedFixture) -ceq $refusedRecordBefore) 'refused repairs leave the move repairable'
 
     $managerText = Get-Content -LiteralPath $managerSource -Raw
     Assert-True ($managerText -match 'New-RepositoryStagingDirectory -Path \$repositoryStage -StorageMode \$destinationStorageMode') 'repository staging uses storage-mode-specific protection contract'
@@ -856,6 +1214,84 @@ try {
     Assert-True ($renameAt -ge 0 -and $afterRename -notmatch 'Get-DirectoryHandleIdentity|Assert-|Open-' -and
         $afterRename -match 'return \$identity') 'a renamed stage is returned without another check that could fail'
     Assert-True ($managerText -match '(?s)\nfunction Assert-ReadyDriveFsDestination \{(?:(?!\nfunction ).)+?\n    Assert-DriveFsFolderHold -Directory') 'Google Drive moves check held folders before they start'
+    # Outside test mode the rewritten record gets the installer's owner and inherited permissions; that needs elevation,
+    # so only the source can be checked here.
+    Assert-True ($managerText -match '(?s)function Set-RepositoryRecordBytes \{.+?Set-AtomicFileBytes -Target \$repositoryRecordPath.+?if \(\$isTestMode\) \{ return \}.+?/reset /C /L.+?/setowner ''\*S-1-5-32-544'' /C /L.+?AreAccessRulesProtected.+?GetAccessRules\(\$true, \$false') 'repository record gets the installer owner and inherited permissions'
+    # The same goes for what the person reads when that step fails (on a move, its undo or a repair): plain words and a
+    # next step. An undo that fails names the record in plain words too.
+    $recordWriter = [regex]::Match($managerText, '(?s)\nfunction Set-RepositoryRecordBytes \{.+?\n\}\n').Value
+    $recordWriterTexts = @([regex]::Matches($recordWriter, 'throw "([^"]*)"') | ForEach-Object { $_.Groups[1].Value })
+    Assert-True ($recordWriter.Contains("`$tryAgain = 'Try again. If it keeps failing, choose Save problem report in Settings and ask for help.'")) 'record permission failures name a next step'
+    Assert-True ($recordWriterTexts.Count -eq 3 -and @($recordWriterTexts | Where-Object {
+        -not $_.EndsWith(' $tryAgain', [StringComparison]::Ordinal) -or $_ -match '(?i)repositor|journal|relocat|metadata|icacls'
+    }).Count -eq 0) "record permission failures use plain words and end with the next step: $($recordWriterTexts -join ' | ')"
+    Assert-True ($managerText.Contains('$rollbackErrors.Add("backup location record: ') -and
+        -not $managerText.Contains('$rollbackErrors.Add("repository record: ')) 'a failed undo names the backup location record in plain words'
+    # Those permissions, and the held copy folders' own, are set by running System32's icacls.exe as administrator, and only
+    # once Microsoft itself has signed it: the installer's rule (Get-MicrosoftSignerProblem), not a signer name that merely
+    # contains "Microsoft". The rule gets made-up facts here, and Get-TrustedIcacls gets Windows' answer about the file
+    # replaced by a certificate made in memory and never stored. Nothing runs icacls.
+    & {
+        $signerAst = [Management.Automation.Language.Parser]::ParseFile($managerSource, [ref]$null, [ref]$null)
+        $signerFunctions = @($signerAst.EndBlock.Statements | Where-Object {
+                $_ -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $_.Name -in @('Assert-NormalFile', 'Get-MicrosoftSignerProblem', 'Get-AuthenticodeSignerFacts', 'Get-TrustedIcacls')
+            })
+        Assert-True ($signerFunctions.Count -eq 4) "the manager defines the installer's signer rule and Get-TrustedIcacls once each (got: $(@($signerFunctions | ForEach-Object { $_.Name }) -join ', '))"
+        foreach ($definition in $signerFunctions) { . ([scriptblock]::Create($definition.Extent.Text)) }
+        $leaf = '1111111111111111111111111111111111111111'
+        $intermediate = '2222222222222222222222222222222222222222'
+        $windowsSubject = "C=US`r`nS=Washington`r`nL=Redmond`r`nO=Microsoft Corporation`r`nCN=Microsoft Windows"
+        foreach ($case in @(
+                @{ Label = 'Microsoft Corporation through Microsoft Root Certificate Authority 2010'; Pass = $true; Root = '3B1EFD3A66EA28B16697394703A72CA340A05BD5' },
+                @{ Label = 'Microsoft Corporation through Microsoft Root Certificate Authority 2011'; Pass = $true; Root = '8F43288AD272F3103B6FB1428485EA3014C0BCFE' },
+                @{ Label = 'a file Windows reports as its own, without its chain'; Pass = $true; OSBinary = $true; Chain = @(); ChainValid = $false },
+                @{ Label = 'an organization that merely contains Microsoft'; Pass = $false; OSBinary = $true; Subject = "C=US`r`nO=Contoso Microsoftware Ltd`r`nCN=Microsoft Corporation" },
+                @{ Label = 'Microsoft Corporation in the common name only'; Pass = $false; OSBinary = $true; Subject = "C=US`r`nO=Contoso Ltd`r`nCN=Microsoft Corporation" },
+                @{ Label = 'Microsoft Corporation and a second organization'; Pass = $false; Subject = "O=Microsoft Corporation`r`nCN=x + O=Contoso Ltd" },
+                @{ Label = "Microsoft's root for other publishers"; Pass = $false; Root = 'F40042E2E5F7E8EF8189FED15519AECE42C3BFA2' },
+                @{ Label = 'a chain that did not validate'; Pass = $false; ChainValid = $false },
+                @{ Label = 'a signature that is not valid'; Pass = $false; OSBinary = $true; Status = 'NotTrusted' }
+            )) {
+            $root = if ($case.ContainsKey('Root')) { $case.Root } else { '8F43288AD272F3103B6FB1428485EA3014C0BCFE' }
+            $problem = Get-MicrosoftSignerProblem `
+                -Status $(if ($case.ContainsKey('Status')) { $case.Status } else { 'Valid' }) `
+                -Subject $(if ($case.ContainsKey('Subject')) { $case.Subject } else { $windowsSubject }) `
+                -ChainThumbprints $(if ($case.ContainsKey('Chain')) { $case.Chain } else { @($leaf, $intermediate, $root) }) `
+                -ChainValid $(if ($case.ContainsKey('ChainValid')) { $case.ChainValid } else { $true }) `
+                -IsOSBinary $($case.ContainsKey('OSBinary') -and $case.OSBinary)
+            if ($case.Pass) { Assert-True ($null -eq $problem) "the icacls signer rule passes $($case.Label) (got: $problem)" }
+            else { Assert-True (-not [string]::IsNullOrEmpty($problem)) "the icacls signer rule refuses $($case.Label)" }
+        }
+        $systemIcacls = Join-Path ([Environment]::SystemDirectory) 'icacls.exe'
+        foreach ($case in @(
+                @{ Label = 'a valid signature by a publisher with Microsoft in its name, even one Windows calls its own'; Subject = 'CN=Microsoft Corporation, O=Contoso Microsoft Fans Ltd, C=US'; OSBinary = $true; Pass = $false },
+                @{ Label = "a valid signature named Microsoft Corporation that doesn't lead to Microsoft's root"; Subject = 'CN=Microsoft Corporation, O=Microsoft Corporation, C=US'; OSBinary = $false; Pass = $false },
+                @{ Label = 'a file Windows reports as its own, signed by Microsoft Corporation'; Subject = 'CN=Microsoft Windows, O=Microsoft Corporation, C=US'; OSBinary = $true; Pass = $true }
+            )) {
+            $key = [Security.Cryptography.RSA]::Create(2048)
+            $request = [Security.Cryptography.X509Certificates.CertificateRequest]::new($case.Subject, $key,
+                [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+            $fixtureSignature = [pscustomobject]@{
+                Status = 'Valid'
+                SignatureType = 'Authenticode'
+                SignerCertificate = $request.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOffset]::UtcNow.AddDays(30))
+                IsOSBinary = $case.OSBinary
+            }
+            $answer = & {
+                function Get-AuthenticodeSignature { param([string]$LiteralPath) return $fixtureSignature }
+                try { 'returned ' + (Get-TrustedIcacls) } catch { 'refused: ' + $_.Exception.Message }
+            }
+            if ($case.Pass) {
+                Assert-True ($answer -ceq "returned $systemIcacls") "Get-TrustedIcacls accepts $($case.Label) (got: $answer)"
+            }
+            else {
+                Assert-True ($answer.StartsWith("refused: Windows' permissions tool didn't pass Microsoft's signature check (", [StringComparison]::Ordinal) -and
+                    $answer.EndsWith(' Choose Save problem report in Settings and ask for help.', [StringComparison]::Ordinal)) "Get-TrustedIcacls refuses $($case.Label) in plain words with a next step (got: $answer)"
+            }
+        }
+        Assert-True ((Get-TrustedIcacls) -ceq $systemIcacls) "System32's own icacls.exe passes with Windows' real answer"
+    }
     $builderText = Get-Content -LiteralPath (Join-Path $projectRoot 'build\Build-Release.ps1') -Raw
     $installerText = Get-Content -LiteralPath (Join-Path $projectRoot 'installer\Install-ResticBackuper.ps1') -Raw
     $commonText = Get-Content -LiteralPath (Join-Path $projectRoot 'src\restic_common.py') -Raw
@@ -865,10 +1301,10 @@ try {
 
     # Failed Restic check never activates the copy.
     $checkFixture = New-Fixture
-    $env:FAKE_RESTIC_FAIL_CHECK = '1'
-    try { $checkRun = Invoke-Relocation -Fixture $checkFixture -Destination $checkFixture.NewRepository }
-    finally { Remove-Item Env:FAKE_RESTIC_FAIL_CHECK -ErrorAction SilentlyContinue }
+    [IO.File]::WriteAllText((Join-Path $checkFixture.Root 'fake-restic-fail-check'), "fail`n", $encoding)
+    $checkRun = Invoke-Relocation -Fixture $checkFixture -Destination $checkFixture.NewRepository
     Assert-True ($checkRun.ExitCode -ne 0 -and -not (Test-Path -LiteralPath $checkFixture.NewRepository)) 'failed check prevents activation'
+    Assert-True ([string]$checkRun.Result.error -match 'exit code 17') 'failed check is the reason the move stopped'
     Assert-True ((Get-Content -LiteralPath $checkFixture.ConfigPath -Raw | ConvertFrom-Json).repository -eq $checkFixture.OldRepository) 'failed check preserves config'
 
     # Shared lock excludes relocation, and pending journals independently block the Python backup loader.
@@ -991,9 +1427,12 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
         disposable_roots = $fixtureRoots.Count
         success_copy_and_verify = 'passed'
         empty_destination = 'passed'
+        password_command_and_allow_listed_environment = 'passed'
+        repository_record_follows_the_move = 'passed'
         unsafe_destinations_and_capacity = 'passed'
-        activation_rollback_points = 4
+        activation_rollback_points = 5
         abrupt_termination_recovery_states = $crashCases.Count
+        refused_repairs_in_plain_words = $refusedCases.Count
         empty_destination_removal_crash_states = 2
         existing_empty_acl_and_attributes_restored = 'passed'
         protected_staging_and_activation_acl_contract = 'passed'
@@ -1006,13 +1445,15 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
         old_repository_retention = 'passed'
         only_restic_files_copied = 'passed'
         stages_held_during_copy = 'passed'
+        icacls_signed_by_microsoft_itself = 'passed'
         production_config_untouched = $productionCheck
         production_task_untouched = $productionCheck
     } | ConvertTo-Json -Compress
 }
 finally {
-    Remove-Item Env:FAKE_RESTIC_LOG -ErrorAction SilentlyContinue
-    Remove-Item Env:FAKE_RESTIC_FAIL_CHECK -ErrorAction SilentlyContinue
+    foreach ($name in $leakedVariables.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $priorVariables[$name], 'Process')
+    }
     # A junction the swap test planted goes first, on its own, so removing the fixture never reaches through it.
     foreach ($link in $plantedLinks) {
         if ([IO.Directory]::Exists($link) -and ([IO.File]::GetAttributes($link) -band [IO.FileAttributes]::ReparsePoint)) {
@@ -1023,8 +1464,12 @@ finally {
         if (Test-Path -LiteralPath $root) {
             $full = [IO.Path]::GetFullPath($root)
             $temp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+            # Only roots this run made are listed. Both prefixes are this suite's: 'RRM T-' for fixtures (with the
+            # space) and 'RRM-T-' for any root made without one.
+            $rootName = [IO.Path]::GetFileName($full)
             if ($full.StartsWith($temp, [StringComparison]::OrdinalIgnoreCase) -and
-                [IO.Path]::GetFileName($full).StartsWith('RRM-T-', [StringComparison]::Ordinal)) {
+                ($rootName.StartsWith('RRM T-', [StringComparison]::Ordinal) -or
+                    $rootName.StartsWith('RRM-T-', [StringComparison]::Ordinal))) {
                 Remove-Item -LiteralPath $full -Recurse -Force
             }
         }
