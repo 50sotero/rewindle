@@ -26,6 +26,7 @@ import {
 import { Button } from '@/components/atoms/Button';
 import { ValuePill, type ValuePillTone } from '@/components/atoms/ValuePill';
 import LoadingState from '@/components/primitives/LoadingState';
+import RestoreFileSearch from '@/components/primitives/RestoreFileSearch';
 import type {
   Availability,
   CommandName,
@@ -39,6 +40,7 @@ import { noticeHoldProps, type NoticeHold } from '@/src/useDashboard';
 import { usePendingCommand } from '@/src/pendingCommands';
 import { pageSnapshots, SNAPSHOT_PAGE, snapshotListSignature } from '@/src/restoreList';
 import { formatClock, formatWhen } from '@/src/when';
+import { FIND_TEXT, fill, footerHint, statusFrom, type WhenText } from '@/src/fileSearch';
 
 // `onResult` hears how the host answered a command: false when it refused it, or when the page could not send it.
 type Send = (command: CommandName, payload?: Record<string, string | boolean>, onResult?: (ok: boolean) => void) => void;
@@ -88,14 +90,14 @@ const UNAVAILABLE_WARNING: Record<Exclude<Availability, 'ok'>, string> = {
 // A backup in the words its day is remembered by ("Yesterday, 2:00 AM"), then the same date format as the Activity page. The host's own
 // text is only for a backup whose time cannot be read.
 const dayStart = (date: Date) => new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
-function backupWhen(snapshot: RestoreSnapshot, locale?: string): string {
-  const fallback = snapshot.whenDisplay || snapshot.when || 'Date unavailable';
-  const date = new Date(snapshot.when);
-  if (Number.isNaN(date.getTime())) return fallback;
+function backupWhenAt(when: string, fallback: string, locale?: string): string {
+  const date = new Date(when);
+  if (!when || Number.isNaN(date.getTime())) return fallback;
   const days = Math.round((dayStart(new Date()) - dayStart(date)) / 86_400_000);
-  if (days === 0 || days === 1) return `${days === 0 ? 'Today' : 'Yesterday'}, ${formatClock(snapshot.when, locale, fallback)}`;
-  return formatWhen(snapshot.when, locale, fallback);
+  if (days === 0 || days === 1) return `${days === 0 ? 'Today' : 'Yesterday'}, ${formatClock(when, locale, fallback)}`;
+  return formatWhen(when, locale, fallback);
 }
+const backupWhen = (snapshot: RestoreSnapshot, locale?: string) => backupWhenAt(snapshot.when, snapshot.whenDisplay || snapshot.when || 'Date unavailable', locale);
 const backupWhenFull = (snapshot: RestoreSnapshot, locale?: string) => formatWhen(snapshot.when, locale, snapshot.whenDisplay || snapshot.when || 'Date unavailable');
 const snapshotSource = (snapshot: RestoreSnapshot) => snapshot.sourceSummary || snapshot.hostname || 'Your backed-up folders';
 // The host sends the count on its own ("12,345", in its regional format), so the unit is always added here.
@@ -223,6 +225,10 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
   // Closing with choices made asks first; this is that question being shown.
   const [confirmClose, setConfirmClose] = useState(false);
   const [snapshotQuery, setSnapshotQuery] = useState('');
+  // Find a file: whether its tab is the one shown on the first step, and the text typed there (kept here, so the date tab's search
+  // can hand its words over). Both are the page's own, and are forgotten when Restore closes.
+  const [findMode, setFindMode] = useState(false);
+  const [findText, setFindText] = useState('');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [fileQuery, setFileQuery] = useState('');
@@ -302,6 +308,7 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
   useEffect(() => { setRowLimit(ROW_CHUNK); }, [treePath, selectedId, fileQuery]);
   // So does another search of the backups, other dates, or Restore opened again.
   useEffect(() => { setSnapshotLimit(SNAPSHOT_PAGE); }, [snapshotQuery, dateFrom, dateTo, flow?.open]);
+  useEffect(() => { if (!flow?.open) { setFindMode(false); setFindText(''); } }, [flow?.open]);
   // A question about closing belongs to the step it was asked on, and to a flow that is still open.
   useEffect(() => { setConfirmClose(false); }, [activeStep, flow?.open, busy]);
   useEffect(() => {
@@ -684,6 +691,21 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
   // "Loading" with nothing under way (see `stalled`) is not shown as a spinner that never ends.
   const loadingBackups = current.status === 'loading' && !stalled;
   const filtersActive = !!(snapshotQuery || dateFrom || dateTo);
+  // Find a file shows as a second tab only while the host sends a search (its session serves one); otherwise step 1 is as it was.
+  const search = current.search;
+  const findShown = !!search && findMode;
+  const searchQuery = snapshotQuery.trim();
+  const whenText: WhenText = (iso, fallback) => backupWhenAt(iso, fallback, locale);
+  const findWaitReason = loadingBackups ? FIND_TEXT.listLoading : !current.snapshots.length ? FIND_TEXT.noBackups : '';
+  const chooseTab = (find: boolean) => { if (find !== findMode) { dismissNotice(); setFindMode(find); } };
+  const onTabKey = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && event.key !== 'Home' && event.key !== 'End') return;
+    event.preventDefault();
+    const find = event.key === 'End' || (event.key !== 'Home' && !findMode);
+    chooseTab(find);
+    panelRef.current?.querySelector<HTMLElement>(find ? '#restore-tab-find' : '#restore-tab-date')?.focus();
+  };
+  const offerFind = () => { setFindText(searchQuery); setFindMode(true); dismissNotice(); };
   const clearFilters = () => { setSnapshotQuery(''); setDateFrom(''); setDateTo(''); };
   const scopeText = wholeSnapshot ? 'Everything in this backup' : paths.length ? `${paths.length} ${paths.length === 1 ? 'item' : 'items'}` : 'Nothing chosen yet';
 
@@ -751,6 +773,7 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
     // Restore now looks at the folder once more before anything is written; the restore starts when that look has answered.
     if (activeStep === 'review' && busy) return ['Checking the folder before restoring…', true];
     if (busy && approvalWaiting) return ['Waiting for you to answer the Windows permission prompt…', true];
+    if (activeStep === 'backup' && findShown && search) return [footerHint(search), statusFrom(search.status) === 'searching'];
     if (busy) return ['Working… this can take a minute.', true];
     if (activeStep === 'backup') return selectedId ? ['Choose files to go on with the selected backup, or pick another.', false] : ['Click the backup you want to restore from.', true];
     if (activeStep === 'files') {
@@ -822,14 +845,22 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
 
         <div className="restore-flow-body" ref={bodyRef}>
           {activeStep === 'backup' && <section className="restore-flow-step" aria-labelledby="restore-backup-heading">
-            <div className="restore-flow-section-heading"><div><span className="eyebrow">Step 1 of 4</span><h3 ref={stepHeadingRef} tabIndex={-1} data-autofocus id="restore-backup-heading">Choose a backup</h3><p>Each entry is a saved copy of your files from one backup. Choose the newest one from before the files went missing. You can look inside it on the next step, and nothing is restored until the last step.</p></div>{filtersActive && <ValuePill tone="accent">{`${filteredSnapshots.length} of ${current.snapshots.length}`}</ValuePill>}</div>
+            <div className="restore-flow-section-heading"><div><span className="eyebrow">Step 1 of 4</span><h3 ref={stepHeadingRef} tabIndex={-1} data-autofocus id="restore-backup-heading">Choose a backup</h3>{!findShown && <p>Each entry is a saved copy of your files from one backup. Choose the newest one from before the files went missing. You can look inside it on the next step, and nothing is restored until the last step.</p>}</div>{!findShown && filtersActive && <ValuePill tone="accent">{`${filteredSnapshots.length} of ${current.snapshots.length}`}</ValuePill>}</div>
+            {search && <div className="restore-find-tabs" role="tablist" aria-label={FIND_TEXT.tabs} onKeyDown={onTabKey}>
+              <button type="button" role="tab" id="restore-tab-date" aria-selected={!findShown} aria-controls={findShown ? undefined : 'restore-panel-date'} tabIndex={findShown ? -1 : 0} className={findShown ? '' : 'is-active'} onClick={() => chooseTab(false)}><CalendarDays size={14} aria-hidden="true" />{FIND_TEXT.tabByDate}</button>
+              <button type="button" role="tab" id="restore-tab-find" aria-selected={findShown} aria-controls={findShown ? 'restore-panel-find' : undefined} tabIndex={findShown ? 0 : -1} className={findShown ? 'is-active' : ''} onClick={() => chooseTab(true)}><Search size={14} aria-hidden="true" />{FIND_TEXT.tabFind}</button>
+            </div>}
+            {findShown && search && <RestoreFileSearch search={search} text={findText} onTextChange={setFindText} busy={busy} connected={connected} waitReason={findWaitReason}
+              approvalWaiting={approvalWaiting} approvalHint={<ApprovalHint notice={approvalNotice} />} run={move} whenText={whenText} onChooseByDate={() => chooseTab(false)} id="restore-panel-find" labelledBy="restore-tab-find" />}
+            {!findShown && <div className="restore-find-date" {...(search ? { role: 'tabpanel', id: 'restore-panel-date', 'aria-labelledby': 'restore-tab-date' } : {})}>
             <div className="restore-snapshot-filters"><label className="restore-flow-search"><Search size={14} /><span className="sr-only">Search backups</span><input value={snapshotQuery} onChange={event => setSnapshotQuery(event.target.value)} onKeyDown={clearOnEscape(snapshotQuery, () => setSnapshotQuery(''))} placeholder="Search by date, folder or computer…" /></label><label className="restore-date-field"><CalendarDays size={13} /><span className="sr-only">From date</span><input type="date" value={dateFrom} onChange={event => setDateFrom(event.target.value)} onKeyDown={clearOnEscape(dateFrom, () => setDateFrom(''))} aria-label="From date" /></label><span className="restore-date-separator">to</span><label className="restore-date-field"><CalendarDays size={13} /><span className="sr-only">To date</span><input type="date" value={dateTo} onChange={event => setDateTo(event.target.value)} onKeyDown={clearOnEscape(dateTo, () => setDateTo(''))} aria-label="To date" /></label>{filtersActive && <Button size="xs" variant="quiet" onClick={clearFilters}>Clear</Button>}</div>
             <div className="restore-snapshot-list" role="list" aria-label="Available backups">
               {loadingBackups && <div className="restore-flow-empty"><LoadingState label={approvalWaiting ? 'Waiting for Windows permission…' : 'Opening your list of backups…'} variant="Orbit" live={false} />{approvalWaiting && <ApprovalHint notice={approvalNotice} />}</div>}
               {!loadingBackups && snapshotPage.shown.map(snapshot => { const label = snapshotLabels.get(snapshot.id); return <div key={snapshot.id} role="listitem"><SnapshotCard snapshot={snapshot} when={label?.when ?? whenOf(snapshot)} full={label?.full ?? ''} selected={snapshot.id === selectedId} newest={snapshot.id === newestId} disabled={busy || !connected} onSelect={selectSnapshot} reducedMotion={reducedMotion} /></div>; })}
               {!loadingBackups && snapshotPage.hidden > 0 && <div role="listitem" className="restore-snapshot-more"><Button size="sm" onClick={showOlderBackups}>Show older backups<span> · {snapshotPage.hidden.toLocaleString()} not shown</span></Button></div>}
-              {!loadingBackups && filteredSnapshots.length === 0 && <div className="restore-flow-empty"><Search size={20} /><strong>{dateFrom && dateTo && dateFrom > dateTo ? 'Choose a valid date range' : current.snapshots.length ? 'No backups match those filters' : 'No backups to restore from'}</strong><p>{dateFrom && dateTo && dateFrom > dateTo ? 'The start date must be on or before the end date.' : current.snapshots.length ? 'Try a different date range or search.' : 'Rewindle did not find a backup it can restore from. If you have not made a backup yet, run one from the Protection page first. If you have, choose Try again.'}</p>{filtersActive && <Button size="sm" onClick={clearFilters}>Clear filters</Button>}{!current.snapshots.length && <Button size="sm" disabled={busy || !connected} onClick={() => move('restoreFlowRetry')}><RotateCcw size={13} />Try again</Button>}</div>}
+              {!loadingBackups && filteredSnapshots.length === 0 && <div className="restore-flow-empty"><Search size={20} /><strong>{dateFrom && dateTo && dateFrom > dateTo ? 'Choose a valid date range' : current.snapshots.length ? 'No backups match those filters' : 'No backups to restore from'}</strong><p>{dateFrom && dateTo && dateFrom > dateTo ? 'The start date must be on or before the end date.' : current.snapshots.length ? 'Try a different date range or search.' : 'Rewindle did not find a backup it can restore from. If you have not made a backup yet, run one from the Protection page first. If you have, choose Try again.'}</p>{filtersActive && <Button size="sm" onClick={clearFilters}>Clear filters</Button>}{search && searchQuery && current.snapshots.length > 0 && <Button size="sm" variant="secondary" onClick={offerFind}><Search size={13} aria-hidden="true" />{fill(FIND_TEXT.suggest, { query: searchQuery })}</Button>}{!current.snapshots.length && <Button size="sm" disabled={busy || !connected} onClick={() => move('restoreFlowRetry')}><RotateCcw size={13} />Try again</Button>}</div>}
             </div>
+            </div>}
             {availability !== 'ok' && <div className="restore-flow-inline-warning" role="alert"><CircleAlert size={15} />{UNAVAILABLE_WARNING[availability]}</div>}
           </section>}
 
@@ -925,7 +956,8 @@ export default function RestoreFlowModal({ flow, reducedMotion, availability, se
         <footer className="restore-flow-footer"><span className="restore-flow-footnote" id={HINT_ID}><Info size={13} />{hint}</span><div className="restore-flow-actions">
           {!['backup', 'success', 'partial', 'error'].includes(activeStep) && !restoring && !busy && <Button size="md" variant="secondary" disabled={!connected} onClick={() => { if (activeStep === 'files') move('restoreFlowNavigate', { step: 'backup' }); else if (activeStep === 'destination') move('restoreFlowNavigate', { step: 'files' }); else if (activeStep === 'review') move('restoreFlowNavigate', { step: 'destination' }); }}><ArrowLeft size={14} />Back</Button>}
           {!restoring && activeStep === 'backup' && <Button size="md" variant="secondary" disabled={busy} onClick={requestClose}>Cancel</Button>}
-          {!restoring && activeStep === 'backup' && <Button size="md" variant="primary" aria-describedby={HINT_ID} disabled={!selectedId || !connected || busy} onClick={openFiles}>Choose files <ArrowRight size={14} /></Button>}
+          {/* On the Find tab each version has its own Restore this. */}
+          {!restoring && activeStep === 'backup' && !findShown && <Button size="md" variant="primary" aria-describedby={HINT_ID} disabled={!selectedId || !connected || busy} onClick={openFiles}>Choose files <ArrowRight size={14} /></Button>}
           {!restoring && activeStep === 'files' && <Button size="md" variant="primary" aria-describedby={HINT_ID} disabled={!canContinueFiles || !connected || busy} onClick={goDestination}>Choose folder <ArrowRight size={14} /></Button>}
           {!restoring && activeStep === 'destination' && (needsCheck
             ? <Button size="md" variant="primary" aria-describedby={HINT_ID} disabled={!connected || busy} onClick={validateDestination}>{destinationChecking ? <LoaderCircle size={14} className="restore-spin" /> : <Check size={14} />}Check folder</Button>

@@ -504,6 +504,12 @@ namespace ResticBackuper.Dashboard
         {
             get { return Id == RewindleId ? ProductDirectoryName + ".RestoreSession." : null; }
         }
+
+        // The file-search answer a session serves (find_files). Null for the legacy edition, which has no session to serve it.
+        internal string FileSearchSchema
+        {
+            get { return Id == RewindleId ? ProductDirectoryName + ".FileSearch.v1" : null; }
+        }
         // ---- end of the restore approval session block ---------------------------------------------------------------
 
         // ---- Clean-up of old backups ------------------------------------------------------------------------------------

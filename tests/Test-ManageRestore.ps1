@@ -121,6 +121,33 @@ public static class FakeRestic {
     string source = Control("FAKE_SOURCE");
     bool legacy = Control("FAKE_LEGACY_SNAPSHOT") == "1";
     string snapshot = new String(legacy ? 'f' : 'b', 64);
+    if (args.Contains("find")) {
+      // Like Restic 0.19.1's find --json: one array, with an object for each backup that has matches. The pattern must
+      // be the last argument, after "--", and start and end with "*"; a "?" matches any one character.
+      string sleep = Control("FAKE_FIND_SLEEP_MS");
+      if (!String.IsNullOrEmpty(sleep)) System.Threading.Thread.Sleep(Int32.Parse(sleep));
+      string pattern = args[args.Length - 1];
+      if (Array.IndexOf(args, "--") != args.Length - 2 || pattern.Length < 2 || pattern[0] != '*' || pattern[pattern.Length - 1] != '*') {
+        Console.Error.WriteLine("unexpected find pattern"); return 94;
+      }
+      System.Text.RegularExpressions.Regex rule = new System.Text.RegularExpressions.Regex(
+        "^" + System.Text.RegularExpressions.Regex.Escape(pattern).Replace("\\*", ".*").Replace("\\?", ".") + "$",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+      string root = Path.GetFullPath(source); string drive = root.Substring(0, 1).ToUpperInvariant();
+      string prefix = "/" + drive + "/" + root.Substring(2).Replace('\\', '/').Trim('/');
+      StringBuilder nodes = new StringBuilder(); int hits = 0;
+      foreach (string name in new[] { "notes.txt", "-notes draft.txt", "documents" }) {
+        if (!rule.IsMatch(name)) continue;
+        if (hits++ > 0) nodes.Append(",");
+        nodes.Append("{\"name\":\"" + Escape(name) + "\",\"type\":\"" + (name == "documents" ? "dir" : "file") + "\",\"path\":\"" +
+          Escape(prefix + "/" + name) + "\"" + (name == "documents" ? "" : ",\"size\":14") + ",\"mtime\":\"2026-07-19T10:00:00.1234567+02:00\"}");
+      }
+      StringBuilder output = new StringBuilder("[");
+      for (int i = 0; i < args.Length - 1; i++) if (args[i] == "--snapshot" && args[i + 1] == snapshot && hits > 0) {
+        output.Append("{\"matches\":[" + nodes + "],\"hits\":" + hits + ",\"snapshot\":\"" + snapshot + "\"}");
+      }
+      Console.WriteLine(output.Append("]").ToString()); return 0;
+    }
     if (args.Contains("cat") && args.Contains("config")) {
       Console.WriteLine("{\"id\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"version\":2}"); return 0;
     }
@@ -177,7 +204,7 @@ Add-Type -TypeDefinition $fakeResticSource -OutputAssembly $fakeRestic -OutputTy
 
 function Write-FakeResticControl {
     # Restic gets an allow-listed environment, so this process's FAKE_* settings reach the fake through a file.
-    $lines = @(foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_RESTORE_NOTHING','FAKE_LEGACY_SNAPSHOT')) {
+    $lines = @(foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_RESTORE_NOTHING','FAKE_LEGACY_SNAPSHOT','FAKE_FIND_SLEEP_MS')) {
         $value = [Environment]::GetEnvironmentVariable($name, 'Process')
         if ($null -ne $value) { $name + '=' + $value }
     })
@@ -232,6 +259,9 @@ public static class PythonWrapper {
 Add-Type -TypeDefinition $pythonWrapperSource -OutputAssembly $pythonWrapper -OutputType ConsoleApplication
 
 function New-Fixture {
+    # -WithPasswordHelper: the configuration names a stored password, as every installed one does, so restore.py gives Restic
+    # its password helper (which this fake never runs). A file search needs it; the other requests also run without it.
+    param([switch]$WithPasswordHelper)
     $root = Join-Path ([IO.Path]::GetTempPath()) ('RSTR-T-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
     $roots.Add($root)
     $install = Join-Path $root 'ProgramFiles\ResticBackuper'
@@ -258,12 +288,17 @@ function New-Fixture {
     # The backup's own Restic cache, which restore requests read through.
     [void][IO.Directory]::CreateDirectory((Join-Path $state 'cache'))
     $serial = Get-VolumeSerial -Path $repository
+    $secretFile = Join-Path $state 'missing-secret.json'
+    if ($WithPasswordHelper) {
+        $secretFile = Join-Path $state 'repository-password.dpapi.json'
+        [IO.File]::WriteAllText($secretFile, "{}`n", $encoding)
+    }
     $config = [ordered]@{
         schema_version = 1; plan_id = $planId; config_generation = $generation
         repository = $repository; repository_volume_serial = $serial
         restic_executable = Join-Path $install 'restic.exe'; recovery_tools_directory = $recovery
         python_executable = Join-Path $install 'Python\python.exe'; state_directory = $state
-        secret_file = Join-Path $state 'missing-secret.json'; recovery_key_file = Join-Path $root 'RecoveryKey.txt'
+        secret_file = $secretFile; recovery_key_file = Join-Path $root 'RecoveryKey.txt'
         exclude_file = Join-Path $install 'excludes.txt'; canary_file = Join-Path $source 'canary.txt'
         hostname = 'FIXTURE'; scheduled_tag = 'scheduled'; use_vss = $false
         cloud_placeholder_policy = 'strict'; sources = @($source)
@@ -655,7 +690,9 @@ try {
     $sessionFunctionNames = @(
         'Get-Sha256Hex', 'New-SessionException', 'Test-FixedTextEqual', 'Assert-SessionTimeouts', 'ConvertTo-SessionFrame',
         'Get-SessionFrameLength', 'ConvertFrom-SessionFrameBody', 'Assert-SessionMessageFields', 'Get-SessionMessageType',
-        'Get-SessionString', 'Get-SessionInteger', 'ConvertTo-SessionHello', 'ConvertTo-SessionRequest', 'Assert-RestoreSessionClient'
+        'Get-SessionString', 'Get-SessionInteger', 'ConvertTo-SessionHello', 'ConvertTo-SessionRequest', 'Assert-RestoreSessionClient',
+        'Test-PathEqual', 'Get-CanonicalLocalPath', 'Get-OptionalProperty', 'Get-FindTextProblem', 'Test-FindPayloadInteger',
+        'Test-FindPayloadTime', 'Test-FindPayloadPath', 'Get-FindPayloadArray', 'Assert-FindPayload'
     )
     $parseTokens = $null
     $parseErrors = $null
@@ -734,6 +771,92 @@ try {
     Assert-True ((Get-SessionFailureReason { ConvertTo-SessionRequest -Message (ConvertTo-TestJsonObject ((New-TestRequestText 1).Replace('"allow_legacy_unbound":"0"', '"allow_legacy_unbound":false'))) -ExpectedRequestId 1 }) -ceq 'schema_violation') 'a request field of the wrong type is refused'
     Assert-True ((Get-SessionFailureReason { ConvertTo-SessionRequest -Message (ConvertTo-TestJsonObject ((New-TestRequestText 1).Replace('"target":""', ('"target":"' + ('x' * 4097) + '"')))) -ExpectedRequestId 1 }) -ceq 'schema_violation') 'an over-long request field is refused'
     Assert-True ((Get-SessionFailureReason { ConvertTo-SessionRequest -Message (ConvertTo-TestJsonObject ((New-TestRequestText 1).Replace('"request_id":1', '"request_id":1.5'))) -ExpectedRequestId 1 }) -ceq 'schema_violation') 'a fractional request id is refused'
+
+    # A file search: two more fields, only on a find_files request, and the shared text rules.
+    $findFields = ',"find_text":"Budget","find_from_snapshot_id":"' + $snapshotId + '"'
+    $parsedFind = ConvertTo-SessionRequest -Message (ConvertTo-TestJsonObject (New-TestRequestText 1 'find_files' $findFields)) -ExpectedRequestId 1
+    Assert-True ($parsedFind.Action -ceq 'find_files' -and $parsedFind.FindText -ceq 'Budget' -and $parsedFind.FindFromSnapshotId -ceq $snapshotId) 'a file search request is accepted'
+    Assert-True ($parsedRequest.FindText -ceq '' -and $parsedRequest.FindFromSnapshotId -ceq '') 'a listing carries no search fields'
+    Assert-True ((Get-SessionFailureReason { ConvertTo-SessionRequest -Message (ConvertTo-TestJsonObject (New-TestRequestText 1 'find_files')) -ExpectedRequestId 1 }) -ceq 'schema_violation') 'a file search without its two fields is refused'
+    Assert-True ((Get-SessionFailureReason { ConvertTo-SessionRequest -Message (ConvertTo-TestJsonObject (New-TestRequestText 1 'list_snapshots' $findFields)) -ExpectedRequestId 1 }) -ceq 'schema_violation') 'a listing with search fields is refused'
+    Assert-True ((Get-SessionFailureReason { ConvertTo-SessionRequest -Message (ConvertTo-TestJsonObject (New-TestRequestText 1 'find_files' (',"find_text":"' + ('x' * 257) + '","find_from_snapshot_id":"' + $snapshotId + '"'))) -ExpectedRequestId 1 }) -ceq 'schema_violation') 'an over-long search text is refused'
+    Assert-True ((Get-SessionFailureReason { ConvertTo-SessionRequest -Message (ConvertTo-TestJsonObject (New-TestRequestText 1 'find_files' (',"find_text":5,"find_from_snapshot_id":"' + $snapshotId + '"'))) -ExpectedRequestId 1 }) -ceq 'schema_violation') 'a search text that is not a string is refused'
+    # Windows PowerShell's ConvertFrom-Json writes an array as one object (the parentheses and ForEach-Object take it apart)
+    # and reads an unpaired surrogate (\ud800 in the file) as U+FFFD, so each text is also read from the file as written.
+    $findCasesJson = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'fixtures\file-search-text-cases.json') -Raw -Encoding UTF8
+    $findCases = @(($findCasesJson | ConvertFrom-Json) | ForEach-Object { $_ })
+    $findCaseTexts = @([regex]::Matches($findCasesJson, '"text": "((?:[^"\\]|\\.)*)"') | ForEach-Object { [regex]::Unescape($_.Groups[1].Value) })
+    Assert-True ($findCases.Count -gt 30 -and $findCaseTexts.Count -eq $findCases.Count) 'the shared file-search text cases were read'
+    for ($caseIndex = 0; $caseIndex -lt $findCases.Count; $caseIndex++) {
+        $case = $findCases[$caseIndex]
+        $caseText = [string]$findCaseTexts[$caseIndex]
+        $expectedProblem = if ($case.valid) { '' } else { [string]$case.error }
+        Assert-True ((Get-FindTextProblem -Value $caseText) -ceq $expectedProblem) ('shared file-search text case ' + $caseIndex + ' gives ' + $expectedProblem)
+        if ($case.valid) { Assert-True ($caseText.Trim([char]0x20) -ceq [string]$case.normalized) ('shared file-search text case ' + $caseIndex + ' trims to its normal form') }
+    }
+
+    # What restore.py --find-json returns must answer this search, for this backup location and plan.
+    $fileSearchSchema = 'ResticBackuper.FileSearch.v1'
+    Assert-True ((Get-Content -LiteralPath $managerSource -Raw) -match "(?m)^\`$fileSearchSchema = 'ResticBackuper\.FileSearch\.v1'\r?$") 'the file-search schema the unit checks use is the manager''s own'
+    $ExpectedPlanId = $planId
+    $findText = 'Budget'
+    $findFromSnapshotId = $snapshotId
+    $findConfiguration = [pscustomobject]@{ Repository = 'C:\Backups\Personal' }
+    function New-TestFindPayload {
+        return (ConvertFrom-Json -InputObject ('{"schema":"ResticBackuper.FileSearch.v1","schema_version":1,"repository":"C:\\Backups\\Personal",' +
+            '"binding":{"plan_id":"' + $planId + '","legacy_match_policy":"exact-host-scheduled-tags-and-sources"},' +
+            '"query":{"text":"Budget","from_snapshot_id":"' + $snapshotId + '"},"status":"more","snapshots_total":3,"snapshots_searched":1,' +
+            '"searched_newest_time":"2026-07-20T02:00:00.0000000Z","searched_oldest_time":"2026-07-20T02:00:00.0000000Z",' +
+            '"next_from_snapshot_id":"' + $legacySnapshotId + '","matches_total":1,"skipped":0,"elapsed_ms":120,' +
+            '"matches":[{"path":"/C/Docs/Budget.xlsx","name":"Budget.xlsx","type":"file","versions_total":1,"versions":[' +
+            '{"size":10,"mtime":"2026-07-19T08:00:00.1234567Z","snapshot_id":"' + $snapshotId + '","snapshot_time":"2026-07-20T02:00:00.0000000Z",' +
+            '"first_snapshot_id":"' + $snapshotId + '","first_snapshot_time":null,"backups":1,"binding_state":"plan"}]}]}'))
+    }
+    function Test-FindPayloadAccepted([scriptblock]$Change) {
+        $payload = New-TestFindPayload
+        & $Change $payload
+        try { Assert-FindPayload -Payload $payload -Configuration $findConfiguration; return $true }
+        catch { return $false }
+    }
+    Assert-True (Test-FindPayloadAccepted { param($p) }) 'a file-search payload bound to the search is accepted'
+    Assert-True (Test-FindPayloadAccepted { param($p) $p.status = 'complete'; $p.next_from_snapshot_id = $null }) 'a finished search without a next start is accepted'
+    Assert-True (Test-FindPayloadAccepted { param($p) $p.matches = @(); $p.status = 'too_broad' }) 'a search that found nothing is accepted'
+    Assert-True (Test-FindPayloadAccepted { param($p) $p.status = 'too_many'; $p.next_from_snapshot_id = $null }) 'too many matches up to the oldest backup is accepted without a next start'
+    Assert-True (Test-FindPayloadAccepted { param($p) $p.matches[0].versions[0].binding_state = 'legacy_unbound' }) 'a version in an older-setup backup is accepted'
+    $findDefects = @(
+        @{ Name = 'another schema'; Change = { param($p) $p.schema = 'ResticBackuper.FileSearch.v2' } },
+        @{ Name = 'another backup location'; Change = { param($p) $p.repository = 'C:\Backups\Other' } },
+        @{ Name = 'another plan'; Change = { param($p) $p.binding.plan_id = '87654321-4321-4abc-8def-ba0987654321' } },
+        @{ Name = 'another text'; Change = { param($p) $p.query.text = 'budget' } },
+        @{ Name = 'another start'; Change = { param($p) $p.query.from_snapshot_id = $legacySnapshotId } },
+        @{ Name = 'an unknown status'; Change = { param($p) $p.status = 'stopped' } },
+        @{ Name = 'more searched than listed'; Change = { param($p) $p.snapshots_searched = 4 } },
+        @{ Name = 'a count that is text'; Change = { param($p) $p.snapshots_total = '3' } },
+        @{ Name = 'too many backups'; Change = { param($p) $p.snapshots_total = 10001 } },
+        @{ Name = 'an unfinished search without a next start'; Change = { param($p) $p.next_from_snapshot_id = $null } },
+        @{ Name = 'a search cut short without a next start'; Change = { param($p) $p.status = 'too_slow'; $p.next_from_snapshot_id = $null } },
+        @{ Name = 'a finished search with a next start'; Change = { param($p) $p.status = 'complete' } },
+        @{ Name = 'a next start that is not exact'; Change = { param($p) $p.next_from_snapshot_id = $legacySnapshotId.ToUpperInvariant() } },
+        @{ Name = 'no list of matches'; Change = { param($p) $p.matches = $null } },
+        @{ Name = 'more than 100 matches'; Change = { param($p) $first = $p.matches[0]; $p.matches = @(for ($i = 0; $i -lt 101; $i++) { $first }) } },
+        @{ Name = 'a path with a .. part'; Change = { param($p) $p.matches[0].path = '/C/Docs/../Budget.xlsx' } },
+        @{ Name = 'a Windows path'; Change = { param($p) $p.matches[0].path = 'C:\Docs\Budget.xlsx' } },
+        @{ Name = 'the top of the backup'; Change = { param($p) $p.matches[0].path = '/'; $p.matches[0].name = '' } },
+        @{ Name = 'a name that is not the last part'; Change = { param($p) $p.matches[0].name = 'Other.xlsx' } },
+        @{ Name = 'a link'; Change = { param($p) $p.matches[0].type = 'symlink' } },
+        @{ Name = 'no versions'; Change = { param($p) $p.matches[0].versions = @() } },
+        @{ Name = 'eleven versions'; Change = { param($p) $one = $p.matches[0].versions[0]; $p.matches[0].versions = @(for ($i = 0; $i -lt 11; $i++) { $one }); $p.matches[0].versions_total = 11 } },
+        @{ Name = 'fewer versions in total than listed'; Change = { param($p) $p.matches[0].versions_total = 0 } },
+        @{ Name = 'a version in an unknown backup form'; Change = { param($p) $p.matches[0].versions[0].snapshot_id = 'abc' } },
+        @{ Name = 'a version bound to the configuration only'; Change = { param($p) $p.matches[0].versions[0].binding_state = 'configuration' } },
+        @{ Name = 'a negative size'; Change = { param($p) $p.matches[0].versions[0].size = -1 } },
+        @{ Name = 'a size that is text'; Change = { param($p) $p.matches[0].versions[0].size = '10' } },
+        @{ Name = 'a version in no backup'; Change = { param($p) $p.matches[0].versions[0].backups = 0 } },
+        @{ Name = 'a time that is a number'; Change = { param($p) $p.matches[0].versions[0].mtime = 5 } }
+    )
+    foreach ($defect in $findDefects) {
+        Assert-True (-not (Test-FindPayloadAccepted $defect.Change)) ('a file-search payload with ' + $defect.Name + ' was accepted')
+    }
 
     # The client: Windows' word on its process and account, and the token.
     $tokenHash = Get-Sha256Hex -Bytes $encoding.GetBytes($goodToken)
@@ -875,6 +998,13 @@ try {
             includes_base64 = [Convert]::ToBase64String($encoding.GetBytes($includeJson)); allow_legacy_unbound = $Legacy
         })
     }
+    function Send-SessionTestFind([pscustomobject]$Broker, [long]$Id, [string]$Text, [string]$From = $snapshotId, [string]$Snapshot = '', [string]$RestoreTarget = '', [string]$IncludeJson = '[]', [string]$Legacy = '0') {
+        Send-SessionTestMessage $Broker ([ordered]@{
+            type = 'request'; request_id = $Id; action = 'find_files'; snapshot_id = $Snapshot; tree_path = ''; target = $RestoreTarget
+            includes_base64 = [Convert]::ToBase64String($encoding.GetBytes($IncludeJson)); allow_legacy_unbound = $Legacy
+            find_text = $Text; find_from_snapshot_id = $From
+        })
+    }
     function Receive-SessionTestResult([pscustomobject]$Broker, [long]$Id) {
         $progress = @()
         while ($true) {
@@ -969,6 +1099,64 @@ try {
     $ended = Wait-SessionBrokerEnd $broker
     Assert-True ($ended.EndedOnItsOwn -and $ended.ExitCode -eq 0 -and [string]$ended.Record.close_reason -ceq 'client_closed') 'a session ends when the dashboard closes it'
 
+    # A file search: served by the session, bound to its text and its start, and read through the backup cache without a
+    # Restic lock, like a listing. The text reaches Restic as one pattern after "--", even when it starts with "-".
+    $findFixture = New-Fixture -WithPasswordHelper
+    $broker = Start-SessionBroker -Fixture $findFixture
+    [void](Open-SessionBroker $broker)
+    Send-SessionTestRequest $broker 1 'list_snapshots'
+    Assert-True ((Receive-SessionTestResult $broker 1).Result.ok -eq $true) 'a session lists its backups before a search'
+    Send-SessionTestFind $broker 2 'notes'
+    $searched = Receive-SessionTestResult $broker 2
+    $searchedNames = @($searched.Result.payload.matches | ForEach-Object { [string]$_.name })
+    Assert-True ($searched.ExitCode -eq 0 -and $searched.Result.ok -eq $true -and [string]$searched.Result.action -ceq 'find_files' -and
+        [string]$searched.Result.request_nonce -ceq $broker.Nonce -and [string]$searched.Result.plan_id -ceq $planId -and
+        [string]$searched.Result.find_text_sha256 -ceq (Get-BytesHash -Bytes $encoding.GetBytes('notes')) -and
+        [string]$searched.Result.find_from_snapshot_id -ceq $snapshotId -and $null -eq $searched.Result.snapshot_id -and
+        $null -eq $searched.Result.target -and [string]$searched.Result.payload.schema -ceq 'ResticBackuper.FileSearch.v1' -and
+        [string]$searched.Result.payload.status -ceq 'complete' -and [int]$searched.Result.payload.snapshots_searched -eq 1 -and
+        ($searchedNames -join '|') -ceq '-notes draft.txt|notes.txt') ('a session finds files by name with a bound result: ' + ($searched.Result | ConvertTo-Json -Compress -Depth 20))
+    Assert-True (@($searched.Progress | Where-Object { [string]$_.stage -ceq 'searching' }).Count -eq 1) 'a search reports that it is searching'
+    Assert-True ($null -eq $sessionList.Result.PSObject.Properties['find_text_sha256'] -and $null -eq $sessionTree.Result.PSObject.Properties['find_from_snapshot_id']) 'a listing result carries no search fields'
+    Send-SessionTestFind $broker 3 '-notes'
+    $dashSearch = Receive-SessionTestResult $broker 3
+    Assert-True ($dashSearch.Result.ok -eq $true -and [string]$dashSearch.Result.payload.query.text -ceq '-notes' -and
+        (@($dashSearch.Result.payload.matches | ForEach-Object { [string]$_.name }) -join '|') -ceq '-notes draft.txt') ('a text that starts with "-" is searched for as it is: ' + [string]$dashSearch.Result.error)
+    $findCalls = @(Get-Content -LiteralPath $findFixture.Log | Where-Object { $_ -match '(^|\t)find(\t|$)' })
+    Assert-True ($findCalls.Count -eq 2 -and $findCalls[0].EndsWith("`tfind`t--json`t--ignore-case`t--snapshot`t$snapshotId`t--`t*notes*") -and
+        $findCalls[1].EndsWith("`t--`t*-notes*") -and
+        @($findCalls | Where-Object { -not $_.Contains((Join-Path $findFixture.State 'cache')) -or $_ -notmatch '(^|\t)--no-lock(\t|$)' }).Count -eq 0) ('a search runs a read-only Restic find through the backup cache: ' + ($findCalls -join ' / '))
+    Send-SessionTestFind $broker 4 'notes' ('9' * 64)
+    $goneStart = Receive-SessionTestResult $broker 4
+    Assert-True ($goneStart.Result.ok -eq $false -and [string]$goneStart.Result.error -match 'no longer in the list' -and
+        [string]$goneStart.Result.find_from_snapshot_id -ceq ('9' * 64)) 'a search from a backup that is no longer listed fails and says so'
+    # The manager chooses how long a search may take: restore.py stops at its own deadline and says how far it got.
+    $env:FAKE_FIND_SLEEP_MS = '120000'
+    Write-FakeResticControl
+    $slowWatch = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        Send-SessionTestFind $broker 5 'notes'
+        $slowSearch = Receive-SessionTestResult $broker 5
+    }
+    finally {
+        Remove-Item Env:FAKE_FIND_SLEEP_MS -ErrorAction SilentlyContinue
+        Write-FakeResticControl
+    }
+    Assert-True ($slowSearch.Result.ok -eq $true -and [string]$slowSearch.Result.payload.status -ceq 'too_slow' -and
+        [int]$slowSearch.Result.payload.snapshots_searched -eq 0 -and $slowWatch.Elapsed.TotalSeconds -ge 19 -and
+        $slowWatch.Elapsed.TotalSeconds -lt 34) ('a search ends at the manager''s time limit: ' + [string]$slowWatch.Elapsed.TotalSeconds + ' s, ' + [string]$slowSearch.Result.error)
+    Send-SessionTestRequest $broker 6 'list_tree' $snapshotId '/'
+    Assert-True ((Receive-SessionTestResult $broker 6).Result.ok -eq $true) 'a session goes on after a search'
+    Send-SessionTestMessage $broker ([ordered]@{ type = 'close' })
+    [void](Read-SessionTestMessage $broker 30000)
+    $ended = Wait-SessionBrokerEnd $broker
+    Assert-True ($ended.EndedOnItsOwn -and [string]$ended.Record.close_reason -ceq 'client_closed' -and
+        [int]$ended.Record.operations.find_files -eq 4 -and [int]$ended.Record.operations.list_snapshots -eq 1) 'the session record counts the searches'
+    Assert-True ((Get-Content -LiteralPath $broker.ResultPath -Raw) -notmatch 'notes') 'the session record holds no search text'
+    # A single request can never ask for a search.
+    $singleFind = Invoke-Manager -Fixture $findFixture -Action find_files
+    Assert-True ($singleFind.ExitCode -ne 0 -and $null -eq $singleFind.Result) 'a single request asking for a search is refused'
+
     # Each protocol violation ends the session at once, with a fixed reason that quotes nothing the client sent.
     $violationFixture = New-Fixture
     $marker = 'never-echo-' + [Guid]::NewGuid().ToString('N')
@@ -982,6 +1170,11 @@ try {
         @{ Name = 'a recovery drill'; Reason = 'action_not_allowed'; Send = { param($b) Send-SessionTestRequest $b 1 'restore_drill' } },
         @{ Name = 'a request the single-request validation refuses'; Reason = 'request_rejected'; Send = { param($b) Send-SessionTestRequest $b 1 'list_tree' ('B' * 64) } },
         @{ Name = 'a listing with a target'; Reason = 'request_rejected'; Send = { param($b) Send-SessionTestRequest $b 1 'list_snapshots' '' '' 'C:\Elsewhere' } },
+        @{ Name = 'a search of older-setup backups only'; Reason = 'request_rejected'; Send = { param($b) Send-SessionTestFind $b 1 'notes' -Legacy '1' } },
+        @{ Name = 'a search in one backup'; Reason = 'request_rejected'; Send = { param($b) Send-SessionTestFind $b 1 'notes' -Snapshot $snapshotId } },
+        @{ Name = 'a search with a target and chosen items'; Reason = 'request_rejected'; Send = { param($b) Send-SessionTestFind $b 1 'notes' -RestoreTarget 'C:\Elsewhere' -IncludeJson '["/notes.txt"]' } },
+        @{ Name = 'a search text that is not in its normal form'; Reason = 'request_rejected'; Send = { param($b) Send-SessionTestFind $b 1 ' notes' } },
+        @{ Name = 'a search for a path'; Reason = 'request_rejected'; Send = { param($b) Send-SessionTestFind $b 1 'docs\notes' } },
         @{ Name = 'a frame that stops half-way'; Reason = 'frame_timeout'; Send = { param($b) Send-RawSessionBytes $b ([byte[]]@(64, 0)) } }
     )
     foreach ($violation in $violations) {
@@ -1122,7 +1315,8 @@ namespace RestoreManagerTests {
 }
 '@
         }
-        $interopFixture = New-Fixture
+        # With a stored password, as every installed plan has: a file search never asks for one.
+        $interopFixture = New-Fixture -WithPasswordHelper
         [RestoreManagerTests.DisposableSessionLauncher]::TestRoot = $interopFixture.Root
         [RestoreManagerTests.DisposableSessionLauncher]::Launches = 0
         $env:FAKE_RESTIC_LOG = $interopFixture.Log
@@ -1144,12 +1338,17 @@ namespace RestoreManagerTests {
             Assert-True ($interopList.Succeeded -and $interopList.Snapshots.Count -eq 1 -and $interopList.Snapshots[0].Id -ceq $snapshotId) ('the dashboard could not list snapshots through a real session: ' + $interopList.ErrorMessage)
             $interopTree = $sessionMethods['ListTree'].Invoke($null, [object[]]@($interopConfiguration, $snapshotId, '/', $false, $interopHost, $null, $null, $null))
             Assert-True ($interopTree.Succeeded -and $interopTree.Entries.Count -eq 2) ('the dashboard could not list a folder through a real session: ' + $interopTree.ErrorMessage)
+            # Find a file through the same session: the dashboard's request, this broker's checks, restore.py's page and the dashboard's own.
+            $interopFind = $sessionMethods['FindFiles'].Invoke($null, [object[]]@($interopConfiguration, $interopHost, 'notes', $snapshotId, $null, $null, $null))
+            $interopFound = @(if ($interopFind.Succeeded) { $interopFind.FileSearch.Matches | ForEach-Object { [string]$_.Name } })
+            Assert-True ($interopFind.Succeeded -and [string]$interopFind.FileSearch.Status -ceq 'complete' -and ($interopFound -join '|') -ceq '-notes draft.txt|notes.txt' -and
+                [string]$interopFind.FileSearch.Matches[1].Versions[0].SnapshotId -ceq $snapshotId) ('the dashboard could not find a file through a real session: ' + $interopFind.ErrorMessage)
             $interopTarget = [string](Join-Path $interopFixture.Root 'Restored\Interop')
             $interopIncludes = [System.Collections.Generic.List[string]]::new()
             $interopIncludes.Add('/notes.txt')
             $interopRestore = $sessionMethods['Restore'].Invoke($null, [object[]]@($interopConfiguration, $snapshotId, $interopTarget, $interopIncludes, $false, $interopHost, $null, $null, $null))
             Assert-True ($interopRestore.Succeeded -and $interopRestore.Report.Verified) ('the dashboard could not restore through a real session: ' + $interopRestore.ErrorMessage)
-            Assert-True ([RestoreManagerTests.DisposableSessionLauncher]::Launches -eq 1) 'the dashboard asked for more than one session for two listings and a restore'
+            Assert-True ([RestoreManagerTests.DisposableSessionLauncher]::Launches -eq 1) 'the dashboard asked for more than one session for two listings, a search and a restore'
             Assert-True (-not [bool]$hostType.GetProperty('HasLiveSession', $memberFlags).GetValue($interopHost)) 'the dashboard kept a session after its one restore'
             $records = @(Get-ChildItem -LiteralPath (Join-Path $interopFixture.State 'RestoreManagerResults') -Filter '*.json' |
                 Where-Object { $_.Name -match '^[0-9a-f]{64}\.json$' } | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json })
@@ -1159,7 +1358,8 @@ namespace RestoreManagerTests {
                 $records = @(Get-ChildItem -LiteralPath (Join-Path $interopFixture.State 'RestoreManagerResults') -Filter '*.json' |
                     Where-Object { $_.Name -match '^[0-9a-f]{64}\.json$' } | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json })
             }
-            Assert-True ($records.Count -eq 1 -and [string]$records[0].close_reason -ceq 'restore_completed' -and [int]$records[0].operations.list_tree -eq 1) 'the real session did not end after the dashboard''s restore'
+            Assert-True ($records.Count -eq 1 -and [string]$records[0].close_reason -ceq 'restore_completed' -and [int]$records[0].operations.list_tree -eq 1 -and
+                [int]$records[0].operations.find_files -eq 1) 'the real session did not end after the dashboard''s restore'
             # A session the dashboard closes ends at once.
             $closingHost = [Activator]::CreateInstance($hostType, $memberFlags, $null, [object[]]@($interopLaunch), $null)
             $closingList = $sessionMethods['ListSnapshots'].Invoke($null, [object[]]@($interopConfiguration, $closingHost, $null, $null, $null))
@@ -1195,13 +1395,13 @@ namespace RestoreManagerTests {
         partial_restore_retained = 'passed'; unsafe_target = 'passed'; plan_and_digest_binding = 'passed'; legacy_unbound_opt_in = 'passed'
         journal_and_lock_gates = 'passed'; orphan_recovery_and_manifest_parity = 'passed'; no_repository_or_source_mutation = 'passed'
         restore_session = 'passed'; session_framing_and_schema = 'passed'; session_client_identity = 'passed'
-        session_single_restore = 'passed'; session_timeouts = 'passed'; session_pipe_squatting = 'passed'
+        session_single_restore = 'passed'; session_timeouts = 'passed'; session_pipe_squatting = 'passed'; session_file_search = 'passed'
         dashboard_session_interop = $interopCheck
         production_untouched = $productionCheck
     } | ConvertTo-Json -Depth 3
 }
 finally {
-    foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_RESTORE_NOTHING','FAKE_LEGACY_SNAPSHOT')) {
+    foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_RESTORE_NOTHING','FAKE_LEGACY_SNAPSHOT','FAKE_FIND_SLEEP_MS')) {
         Remove-Item "Env:$name" -ErrorAction SilentlyContinue
     }
     foreach ($name in $plantedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $null, 'Process') }

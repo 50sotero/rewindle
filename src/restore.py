@@ -298,6 +298,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="list without Restic's repository lock; only for a caller that holds the protected run lock",
     )
+    parser.add_argument(
+        "--find-json",
+        action="store_true",
+        help="look for files and folders by name in every backup, newest first, and emit one JSON object",
+    )
+    parser.add_argument(
+        "--find-text",
+        help="with --find-json: part of the name to look for (pass it as --find-text=TEXT)",
+    )
+    parser.add_argument(
+        "--find-from-snapshot",
+        help="with --find-json: the exact ID of the newest backup to look through",
+    )
+    parser.add_argument(
+        "--find-seconds",
+        type=int,
+        help="with --find-json: the time the search may take, in seconds",
+    )
     return parser.parse_args(argv)
 
 
@@ -1106,7 +1124,10 @@ def query_snapshots(
     binding: str,
     selector: str | None = None,
     allow_legacy_unbound: bool = False,
+    capture: Any = None,
 ) -> list[dict[str, Any]]:
+    # `capture` runs Restic and returns its output; a file search passes one that stops at its deadline.
+    capture = capture or run_restic_capture
     if binding not in {"current", "browse", "explicit"}:
         raise ValueError("invalid internal snapshot binding mode")
     arguments = ["snapshots", "--json"]
@@ -1129,7 +1150,7 @@ def query_snapshots(
     if selector:
         arguments.extend(["--", selector])
     snapshots = parse_json_array(
-        run_restic_capture(
+        capture(
             base_command,
             arguments,
             environment,
@@ -2549,11 +2570,575 @@ def base_report(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+# ---- Find a file in every backup (--find-json) ------------------------------------------------------------------------
+# Restore's "Find a file" asks the protected restore manager, inside the restore session that was already approved, to look
+# for a name in the backups it lists. It only reads: `restic find` through the backup's cache and, because the manager holds
+# the protected run lock, without Restic's own lock. The search has a time budget, looks through the newest backups first,
+# in batches that grow, and says how far back it got, so the next request can go on from there.
+
+FIND_SCHEMA = "ResticBackuper.FileSearch.v1"
+FIND_TEXT_MIN = 2
+FIND_TEXT_MAX = 200
+FIND_FORBIDDEN = '\\/:*?"<>|'
+FIND_SECONDS_DEFAULT = 20
+FIND_SECONDS_MIN = 5
+FIND_SECONDS_MAX = 60
+FIND_MAX_BATCH = 32
+FIND_MAX_PATHS = 100
+FIND_MAX_VERSIONS = 10
+# Restic matches the pattern against every part of a path, so a name that is part of a folder's name ("doc" in Documents)
+# brings back everything inside that folder. Past either limit in one batch the search stops and asks for more of the name.
+FIND_MAX_BATCH_BYTES = 32 * 1024 * 1024
+FIND_MAX_BATCH_NODES = 100_000
+FIND_MAX_LIST_BYTES = 64 * 1024 * 1024
+FIND_EXIT_START_MISSING = 4
+FIND_INVALID_OUTPUT = "Restic returned unexpected file-search output"
+_RESTIC_TIME = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})")
+# The job that ends every process this one starts when this one ends (see tie_children_to_this_process). Never closed:
+# Windows closes it when this process ends.
+_FIND_JOB: Any = None
+
+
+def find_text_problem(value: Any) -> str:
+    """The rule of the shared file-search text rules that `value` breaks first, or "".
+
+    The same rules, in the same order, are in Manage-Restore.ps1, the dashboard and its page, and all four are tested
+    against tests/fixtures/file-search-text-cases.json. Only spaces are trimmed. An unpaired surrogate is refused before
+    the length is measured, since it has no UTF-16 length of its own.
+    """
+    if not isinstance(value, str):
+        return "EMPTY"
+    text = value.strip(" ")
+    if not text:
+        return "EMPTY"
+    for character in text:
+        code = ord(character)
+        if code < 0x20 or code == 0x7F or 0xD800 <= code <= 0xDFFF:
+            return "CONTROL"
+    if any(character in FIND_FORBIDDEN for character in text):
+        return "FORBIDDEN"
+    units = len(text.encode("utf-16-le")) // 2
+    if units < FIND_TEXT_MIN:
+        return "SHORT"
+    if units > FIND_TEXT_MAX:
+        return "LONG"
+    return ""
+
+
+def normalize_find_text(value: Any) -> str:
+    problem = find_text_problem(value)
+    if problem:
+        raise ValueError(f"the file search text is invalid ({problem})")
+    return str(value).strip(" ")
+
+
+def find_restic_pattern(text: str) -> str:
+    """The Restic pattern for names that hold `text`: always "*" first, so it can never be read as an option.
+
+    Restic matches with Go's filepath.Match, where "[" starts a character class and Windows has no escape character, so
+    both brackets match any one character here; find_keep then keeps only names that hold the text itself.
+    """
+    pattern = "*" + text.replace("[", "?").replace("]", "?") + "*"
+    if pattern.startswith("-"):
+        raise ValueError("the file search pattern must not look like an option")
+    return pattern
+
+
+def find_fold(text: str) -> str:
+    # Restic lowers names with Go's strings.ToLower, one character at a time ("İ" becomes "i", and a sigma at the end
+    # of a word stays a sigma); str.lower() handles both differently.
+    return "".join(character.lower()[0] for character in text)
+
+
+def normalize_restic_time(value: Any) -> str | None:
+    """A time Restic prints (RFC 3339, up to nine fraction digits, a local offset), in UTC with the 100 ns NTFS keeps.
+
+    The same text is the version key here and in the dashboard, which compares and orders these strings as they are.
+    """
+    if not isinstance(value, str) or len(value) > 64:
+        return None
+    match = _RESTIC_TIME.fullmatch(value)
+    if match is None:
+        return None
+    offset = "+00:00" if match.group(3) == "Z" else match.group(3)
+    try:
+        moment = datetime.fromisoformat(match.group(1) + offset).astimezone(timezone.utc)
+    except (ValueError, OverflowError):
+        return None
+    fraction = (match.group(2) or "").ljust(9, "0")[:7]
+    return moment.strftime("%Y-%m-%dT%H:%M:%S") + "." + fraction + "Z"
+
+
+def tie_children_to_this_process() -> None:
+    """Put this process in a job that ends every process in it when this one ends.
+
+    Every Restic a search starts (and the password helper Restic starts) is then in the job from the moment it exists, so
+    none can go on reading the backup after the manager has stopped this process. This uses Windows' own job objects, as
+    restic_common does for backups; it is a copy because this file must stay standalone.
+    """
+    global _FIND_JOB
+    if os.name != "nt" or _FIND_JOB is not None:
+        return
+
+    class BasicLimits(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_uint64) for name in ("Reads", "Writes", "Others", "ReadBytes", "WriteBytes", "OtherBytes")]
+
+    class ExtendedLimits(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", BasicLimits),
+            ("IoInfo", IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.CreateJobObjectW(None, None)
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    limits = ExtendedLimits()
+    limits.BasicLimitInformation.LimitFlags = 0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not kernel32.SetInformationJobObject(handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)) or not (
+        kernel32.AssignProcessToJobObject(handle, kernel32.GetCurrentProcess())
+    ):
+        error = ctypes.get_last_error()
+        kernel32.CloseHandle(handle)
+        raise RuntimeError(f"the file search could not be tied to this process (Windows error {error})")
+    _FIND_JOB = handle
+
+
+class _BoundedRun:
+    __slots__ = ("returncode", "output", "stopped")
+
+    def __init__(self, returncode: int | None, output: bytes, stopped: str) -> None:
+        self.returncode = returncode
+        self.output = output
+        # "" when Restic ended on its own, "deadline" when the time ran out first, "overflow" past the byte limit.
+        self.stopped = stopped
+
+
+def run_restic_bounded(
+    base_command: list[str],
+    arguments: list[str],
+    environment: dict[str, str],
+    deadline: float,
+    maximum_bytes: int,
+) -> _BoundedRun:
+    """One Restic read, stopped at `deadline` (time.monotonic) or once it has printed more than `maximum_bytes`."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return _BoundedRun(None, b"", "deadline")
+    process = subprocess.Popen(
+        [*base_command, *arguments],
+        cwd=SCRIPT_DIRECTORY,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=environment,
+        shell=False,
+        creationflags=CREATE_NO_WINDOW,
+    )
+    if process.stdout is None or process.stderr is None:
+        process.kill()
+        raise RuntimeError("Restic output channels could not be opened")
+    stopped: list[str] = []
+    guard = threading.Lock()
+
+    def stop(reason: str) -> None:
+        with guard:
+            if not stopped:
+                stopped.append(reason)
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+    def drain_diagnostics() -> None:
+        # Read only so that Restic never waits on a full pipe; a search reports none of it.
+        for _ in iter(lambda: process.stderr.read(64 * 1024), b""):
+            pass
+
+    drainer = threading.Thread(target=drain_diagnostics, daemon=True)
+    drainer.start()
+    timer = threading.Timer(remaining, stop, args=("deadline",))
+    timer.daemon = True
+    timer.start()
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        while True:
+            block = process.stdout.read1(64 * 1024)
+            if not block:
+                break
+            total += len(block)
+            if total > maximum_bytes:
+                stop("overflow")
+                break
+            chunks.append(block)
+    finally:
+        timer.cancel()
+        try:
+            process.stdout.close()
+        except OSError:
+            pass
+    returncode = process.wait()
+    drainer.join(timeout=5)
+    reason = stopped[0] if stopped else ""
+    if reason == "deadline" and returncode == 0:
+        # It had finished before the time ran out; only the kill came late.
+        reason = ""
+    return _BoundedRun(returncode, b"".join(chunks), reason)
+
+
+class _FindOutOfTime(Exception):
+    pass
+
+
+def bounded_restic_capture(deadline: float) -> Any:
+    """run_restic_capture, for a search: stopped at the deadline, and bounded."""
+
+    def capture(
+        base_command: list[str],
+        arguments: list[str],
+        environment: dict[str, str],
+        interactive_password: bool,
+        operation: str,
+    ) -> str:
+        if interactive_password:
+            raise ValueError("a file search needs the protected password helper or a recovery key")
+        run = run_restic_bounded(base_command, arguments, environment, deadline, FIND_MAX_LIST_BYTES)
+        if run.stopped == "deadline":
+            raise _FindOutOfTime()
+        if run.stopped == "overflow":
+            raise RuntimeError(f"Restic returned more output than a file search accepts for the {operation}")
+        if run.returncode != 0:
+            raise ResticReadError(operation, int(run.returncode or 1))
+        return run.output.decode("utf-8", errors="replace")
+
+    return capture
+
+
+def parse_find_output(output: bytes, batch: set[str]) -> dict[str, list[Any]]:
+    """What `restic find --json` printed for one batch: each backup that had matches, with them.
+
+    Restic 0.19.1 prints one array of {"matches": [...], "hits": N, "snapshot": "<id>"}, one object for each backup that
+    has a match. Anything else, a count that does not add up or a backup that was not asked for is not used.
+    """
+    try:
+        value = json.loads(output.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(FIND_INVALID_OUTPUT) from error
+    if not isinstance(value, list):
+        raise ValueError(FIND_INVALID_OUTPUT)
+    found: dict[str, list[Any]] = {}
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"matches", "hits", "snapshot"}:
+            raise ValueError(FIND_INVALID_OUTPUT)
+        matches, hits, snapshot_id = item["matches"], item["hits"], item["snapshot"]
+        if (
+            not isinstance(matches, list)
+            or isinstance(hits, bool)
+            or not isinstance(hits, int)
+            or hits != len(matches)
+            or not isinstance(snapshot_id, str)
+            or snapshot_id not in batch
+            or snapshot_id in found
+        ):
+            raise ValueError(FIND_INVALID_OUTPUT)
+        found[snapshot_id] = matches
+    return found
+
+
+def find_keep(node: Any, needle: str) -> tuple[str, str, int, str | None] | None:
+    """A file or folder whose own name holds the text, as (type, path, size, modified), or None.
+
+    Restic also prints everything inside a folder whose name matches, links and other kinds of items, and a path is
+    used only in the form a folder listing gives it (the same rules as the dashboard's TryNormalizeRestoreFlowTreePath).
+    """
+    if not isinstance(node, dict):
+        return None
+    kind, path = node.get("type"), node.get("path")
+    if kind not in ("file", "dir") or not isinstance(path, str) or len(path) > MAX_REPORT_STRING:
+        return None
+    parts = path.split("/")
+    if (
+        not path.startswith("/")
+        or "\\" in path
+        or "\x00" in path
+        or any(part in ("", ".", "..") for part in parts[1:])
+    ):
+        return None
+    if needle not in find_fold(parts[-1]):
+        return None
+    size = node.get("size", 0) if kind == "file" else 0
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        return None
+    return kind, path, size, normalize_restic_time(node.get("mtime")) if kind == "file" else None
+
+
+class FindResults:
+    """Every file and folder found, by type and path, and each of its versions (a size and a change time; a folder has one)."""
+
+    def __init__(self) -> None:
+        self.entries: dict[tuple[str, str], dict[tuple[Any, ...], dict[str, Any]]] = {}
+        self.skipped = 0
+
+    def add(self, snapshot_id: str, snapshot_time: str, binding_state: str, nodes: list[Any], needle: str) -> None:
+        seen: set[tuple[str, str]] = set()
+        for node in nodes:
+            kept = find_keep(node, needle)
+            if kept is None:
+                self.skipped += 1
+                continue
+            kind, path, size, modified = kept
+            if (kind, path) in seen:
+                continue
+            seen.add((kind, path))
+            versions = self.entries.setdefault((kind, path), {})
+            key: tuple[Any, ...] = ("dir",) if kind == "dir" else (size, modified or "")
+            sighting = (snapshot_time, snapshot_id)
+            version = versions.get(key)
+            if version is None:
+                versions[key] = {
+                    "size": size,
+                    "mtime": modified,
+                    "snapshot_id": snapshot_id,
+                    "snapshot_time": snapshot_time,
+                    "first_snapshot_id": snapshot_id,
+                    "first_snapshot_time": snapshot_time,
+                    "backups": 1,
+                    "binding_state": binding_state,
+                }
+                continue
+            version["backups"] += 1
+            if sighting > (version["snapshot_time"], version["snapshot_id"]):
+                version["snapshot_id"], version["snapshot_time"] = snapshot_id, snapshot_time
+                version["binding_state"] = binding_state
+            if sighting < (version["first_snapshot_time"], version["first_snapshot_id"]):
+                version["first_snapshot_id"], version["first_snapshot_time"] = snapshot_id, snapshot_time
+
+    def matches(self) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for (kind, path), versions in self.entries.items():
+            ordered = sorted(
+                versions.values(), key=lambda item: (item["snapshot_time"], item["snapshot_id"]), reverse=True
+            )
+            rows.append(
+                {
+                    "path": path,
+                    "name": path.rsplit("/", 1)[-1],
+                    "type": kind,
+                    "versions_total": len(ordered),
+                    "versions": [
+                        {
+                            **version,
+                            "snapshot_time": version["snapshot_time"] or None,
+                            "first_snapshot_time": version["first_snapshot_time"] or None,
+                        }
+                        for version in ordered[:FIND_MAX_VERSIONS]
+                    ],
+                }
+            )
+        # The most recently seen first, then by path.
+        rows.sort(key=lambda row: row["path"].casefold())
+        rows.sort(key=lambda row: row["versions"][0]["snapshot_time"] or "", reverse=True)
+        return rows[:FIND_MAX_PATHS]
+
+
+def run_file_search(
+    args: argparse.Namespace,
+    command: list[str],
+    environment: dict[str, str],
+    config: dict[str, Any],
+    repository: Path,
+    started: float,
+) -> int:
+    """Look for args.find_text in the backups --list-snapshots-json lists, from the newest (or from
+    --find-from-snapshot) towards the oldest, until the time is up, and emit what was found as one JSON object.
+
+    The time goes first to the list of backups and then to batches of 1, 2, 4 ... 32 backups, each made only as large
+    as the time left allows at the rate of the one before it. A batch that the deadline cuts is not counted: Restic
+    prints nothing for a backup without matches, so what a cut batch looked through cannot be told.
+
+    The first batch (one backup) runs with whatever time the list left. When the list or that backup takes the rest of
+    the time, nothing was searched and the page ends as too_slow; "more" always means at least one backup was searched,
+    so going on from it gets further. Otherwise a location that is always slow to list would repeat the same empty page.
+    """
+    tie_children_to_this_process()
+    budget = float(FIND_SECONDS_DEFAULT if args.find_seconds is None else args.find_seconds)
+    deadline = started + budget
+    text = args.find_text
+    from_id = args.find_from_snapshot
+    pattern = find_restic_pattern(text)
+    needle = find_fold(text)
+    plan = configured_plan(config)
+    payload: dict[str, Any] = {
+        "schema": FIND_SCHEMA,
+        "schema_version": 1,
+        "repository": str(repository),
+        "binding": {
+            "plan_id": plan[0] if plan is not None else None,
+            "legacy_match_policy": "exact-host-scheduled-tags-and-sources",
+        },
+        "query": {"text": text, "from_snapshot_id": from_id},
+        "status": "more",
+        "snapshots_total": 0,
+        "snapshots_searched": 0,
+        "searched_newest_time": None,
+        "searched_oldest_time": None,
+        "next_from_snapshot_id": from_id,
+        "matches_total": 0,
+        "skipped": 0,
+        "elapsed_ms": 0,
+        "matches": [],
+    }
+
+    def finish(status: str, results: FindResults | None = None) -> int:
+        payload["status"] = status
+        if status == "complete":
+            payload["next_from_snapshot_id"] = None
+        if results is not None:
+            payload["matches_total"] = len(results.entries)
+            payload["skipped"] = results.skipped
+            payload["matches"] = results.matches()
+        payload["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+        emit_json(payload)
+        return 0
+
+    try:
+        snapshots = query_snapshots(
+            command, environment, False, config, binding="browse", capture=bounded_restic_capture(deadline)
+        )
+    except _FindOutOfTime:
+        if from_id is None:
+            raise RuntimeError("the list of backups could not be read in the time the search has") from None
+        # Nothing was searched. The same request can be made again (the next start stays this one), and the dashboard's
+        # own list still offers a backup by date.
+        return finish("too_slow")
+    snapshots.sort(key=snapshot_sort_key, reverse=True)
+    ids = [str(item["id"]).lower() for item in snapshots]
+    payload["snapshots_total"] = len(snapshots)
+    if from_id is None:
+        start = 0
+    elif from_id in ids:
+        start = ids.index(from_id)
+    else:
+        print("RESTORE FAILED: the backup to search from is no longer in the list", file=sys.stderr)
+        return FIND_EXIT_START_MISSING
+    if start >= len(snapshots):
+        return finish("complete", FindResults())
+    payload["next_from_snapshot_id"] = ids[start]
+    results = FindResults()
+    index = start
+    next_size = 1
+    rate: float | None = None
+    first_batch = True
+    while index < len(snapshots):
+        size = min(next_size, len(snapshots) - index)
+        # The first batch of a request has one backup and runs with whatever time is left, however little (see above).
+        if rate is not None:
+            remaining = deadline - time.monotonic()
+            size = min(size, int(remaining / (rate * 1.25)) if rate > 0 else size)
+            if size < 1:
+                return finish("more", results)
+        batch = snapshots[index : index + size]
+        batch_ids = [str(item["id"]).lower() for item in batch]
+        arguments = ["find", "--json", "--ignore-case"]
+        for snapshot_id in batch_ids:
+            arguments.extend(["--snapshot", snapshot_id])
+        arguments.extend(["--", pattern])
+        batch_started = time.monotonic()
+        run = run_restic_bounded(command, arguments, environment, deadline, FIND_MAX_BATCH_BYTES)
+        if run.stopped == "deadline":
+            return finish("too_slow" if first_batch else "more", results)
+        if run.stopped == "overflow":
+            return finish("too_broad", results)
+        if run.returncode != 0:
+            raise ResticReadError("file search", int(run.returncode or 1))
+        found = parse_find_output(run.output, set(batch_ids))
+        if sum(len(nodes) for nodes in found.values()) > FIND_MAX_BATCH_NODES:
+            return finish("too_broad", results)
+        for snapshot in batch:
+            snapshot_id = str(snapshot["id"]).lower()
+            nodes = found.get(snapshot_id)
+            if nodes:
+                results.add(
+                    snapshot_id,
+                    normalize_restic_time(snapshot.get("time")) or "",
+                    snapshot_binding_state(snapshot, config) or SNAPSHOT_BINDING_CONFIGURATION,
+                    nodes,
+                    needle,
+                )
+        if payload["searched_newest_time"] is None:
+            payload["searched_newest_time"] = normalize_restic_time(batch[0].get("time"))
+        payload["searched_oldest_time"] = normalize_restic_time(batch[-1].get("time"))
+        payload["snapshots_searched"] += len(batch)
+        index += len(batch)
+        payload["next_from_snapshot_id"] = ids[index] if index < len(ids) else None
+        if len(results.entries) > FIND_MAX_PATHS:
+            return finish("too_many", results)
+        rate = (time.monotonic() - batch_started) / len(batch)
+        next_size = min(next_size * 2, FIND_MAX_BATCH)
+        first_batch = False
+    return finish("complete", results)
+
+
 def emit_json(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 
+def check_find_arguments(args: argparse.Namespace) -> None:
+    find_options = (args.find_text, args.find_from_snapshot, args.find_seconds)
+    if not args.find_json:
+        if any(value is not None for value in find_options):
+            raise ValueError("--find-text, --find-from-snapshot and --find-seconds require --find-json")
+        return
+    if (
+        args.target is not None
+        or args.report is not None
+        or args.include
+        or args.source is not None
+        or args.allow_legacy_unbound
+        or args.recovery_drill
+        or args.tree_path is not None
+        or args.snapshot != "latest"
+    ):
+        raise ValueError("a file search takes only its text, where to start and how long it may take")
+    if args.find_text is None or normalize_find_text(args.find_text) != args.find_text:
+        raise ValueError("--find-json needs --find-text with the search text as the dashboard checked it")
+    if args.find_from_snapshot is not None and not re.fullmatch(r"[0-9a-f]{64}", args.find_from_snapshot):
+        raise ValueError("--find-from-snapshot must be a full backup ID")
+    if args.find_seconds is not None and not FIND_SECONDS_MIN <= args.find_seconds <= FIND_SECONDS_MAX:
+        raise ValueError(f"--find-seconds must be from {FIND_SECONDS_MIN} to {FIND_SECONDS_MAX}")
+
+
 def main(argv: list[str] | None = None) -> int:
+    # A file search's time budget counts from here, so that starting Python and reading settings are in it.
+    started = time.monotonic()
     args = parse_args(argv)
     if args.json and not args.list:
         raise ValueError("--json is only valid with --list")
@@ -2561,13 +3146,14 @@ def main(argv: list[str] | None = None) -> int:
         args.list_snapshots_json = True
     selected_actions = sum(
         bool(value)
-        for value in (args.list, args.list_snapshots_json, args.list_tree_json, args.target)
+        for value in (args.list, args.list_snapshots_json, args.list_tree_json, args.target, args.find_json)
     )
     # `--list --json` is one action despite setting the normalized flag above.
     if args.list and args.list_snapshots_json:
         selected_actions -= 1
     if selected_actions > 1:
-        raise ValueError("choose only one of snapshot listing, tree listing, or restore")
+        raise ValueError("choose only one of snapshot listing, tree listing, file search, or restore")
+    check_find_arguments(args)
     if args.report is not None and args.target is None:
         raise ValueError("--report is only valid with --target")
     if args.allow_legacy_unbound and not (args.list_tree_json or args.target is not None):
@@ -2680,6 +3266,11 @@ def main(argv: list[str] | None = None) -> int:
             if dpapi_command:
                 command.extend(["--password-command", dpapi_command])
                 interactive_password = False
+
+        if args.find_json:
+            if interactive_password:
+                raise ValueError("a file search needs the protected password helper or a recovery key")
+            return run_file_search(args, command, environment, config, repository, started)
 
         if args.list and not args.list_snapshots_json:
             return subprocess.call(
