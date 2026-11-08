@@ -82,6 +82,21 @@ or backup repository.
   recovery key internally, invokes only read-only metadata and non-overwriting
   restore operations, and records bounded protected evidence only after all
   Restic, canary, inventory, and sample checks pass.
+- Clean-up of old backups is off until the person turns it on, and it never
+  runs on a schedule. Each step goes through the UAC-elevated
+  `Manage-Retention.ps1`, bound to the user's SID, plan, generation and
+  configuration hash. Listing what would go is a `--dry-run --no-lock` read; a
+  removal names the exact list the person saw (the preview file's SHA-256 and
+  a digest of its backup IDs), removes those IDs only, and only after a
+  verified backup with no open change review, no pending journal and an
+  identical fresh listing. The latest verified backup, the only checked
+  backup of each kept period and the last backup before an unconfirmed change
+  are always kept. The setting is bound to the plan, the repository and the
+  installation (a random value the installer writes on every install), so
+  every install, update or reinstall turns it off, while a change of folders
+  or of the backup location does not. The dashboard and the clean-up helper
+  trust the clean-up records only when only Administrators and SYSTEM can
+  change them and the state folder that holds them.
 - The guided restore asks Windows once per restore session instead of once per
   step. The elevated `Manage-Restore.ps1 -Operation session` serves any number
   of snapshot and folder listings and at most one restore, then ends; it also

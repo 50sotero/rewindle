@@ -3,6 +3,7 @@
 // no real computer. Timestamps are computed from the current time so the charts and "last run" text
 // always look recent. This file is only reachable from the dev server and the `demo` build mode; the
 // build that ships inside the desktop app does not include it (see main.tsx).
+import { createSampleRetention } from './retentionDemo';
 import type { BackupSpaceState, DashboardState, RunDetailsState, RunState } from '../native-types';
 
 const MINUTE = 60_000;
@@ -141,7 +142,7 @@ export function createSampleState(now = Date.now()): DashboardState {
       repairRepository: action('Repair interrupted move', false), reviewChanges: action('Review changes', false), openRestore: action('Restore files…', true, 'Choose a backup and restore files into a separate folder. Windows will ask for your permission.'),
       checkReadiness: action('Check recovery readiness', true, 'Check that your backups can be opened and restored. This only reads; it changes nothing.'), viewRunDetails: action('View run details'), exportDiagnostics: action('Export diagnostics'),
     },
-    runDetails: null, restoreFlow: null,
+    runDetails: null, restoreFlow: null, retention: createSampleRetention(now),
   };
 }
 

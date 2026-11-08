@@ -15,6 +15,9 @@ export type CommandName = 'ready' | 'refresh' | 'navigate' | 'setTheme' | 'toggl
   | 'restoreFlowOpenDestination' | 'restoreFlowCopyDestination'
   // Settings > About: opens the licenses folder beside the app. The host builds the path itself; the page sends none.
   | 'openLicensesFolder'
+  // Settings > Old backups (clean-up of old backups). Only the dialogs' own buttons send retentionConfigure and retentionApply.
+  | 'retentionConfigure' | 'retentionCheckNow' | 'retentionOpenReview' | 'retentionReviewPage' | 'retentionApply'
+  | 'retentionCloseReview'
   // Settings > Backup alerts: notifications on or off ({ notify: 'on' | 'off' }). A per-user preference like the theme, not protected.
   | 'setAlerts'
   // Settings > Backup location > Low space warning: { weeks: '4' | '8' | '12' }. Only changes when the page warns, so it is not protected.
@@ -33,6 +36,7 @@ export const PROTECTED_COMMANDS: ReadonlySet<CommandName> = new Set<CommandName>
   'browseSourcePicker', 'validateSourcePath', 'confirmSourcePicker',
   'restoreFlowBrowseSnapshots', 'restoreFlowBrowseFiles', 'restoreFlowBrowseDestination', 'restoreFlowValidateDestination',
   'restoreFlowSelectPaths', 'restoreFlowReview', 'restoreFlowStart', 'restoreFlowCancel', 'restoreFlowRetry', 'restoreFlowNavigate',
+  'retentionConfigure', 'retentionCheckNow', 'retentionOpenReview', 'retentionApply',
 ]);
 /** Why protected controls are on or off: the link works and the status reads (`ok`), or one of the reasons it does not. */
 export type Availability = 'ok' | 'offline' | 'dataError' | 'preview';
@@ -234,6 +238,12 @@ export interface BackupSpaceState {
     /** `weeksLeft` in whole weeks: the number the words use and the host judged `level` on, so the page never rounds it again. */
     weeksRounded: number | null;
     weeklyBytes: number; weeklyDisplay: string;
+    /**
+     * Clean-up of old backups in the forecast's weeks. 'counted': the space it freed was taken away, so this is how much the backups
+     * grew, net. 'unmeasured': it freed space nobody measured, so the forecast is learning until that clean-up is 8 weeks back.
+     * Missing from an older host.
+     */
+    cleanUp?: '' | 'counted' | 'unmeasured';
   };
   level: 'unknown' | 'ok' | 'low' | 'full';
   /** 'percent': little room now (under 1.5 times the reserve, or, while the forecast is learning or unknown, under a tenth of the drive above it). */
@@ -300,6 +310,8 @@ export interface DashboardState {
   actions: Partial<Record<CommandName, ActionState>>;
   runDetails?: RunDetailsState | null;
   restoreFlow?: RestoreFlowState | null;
+  /** Clean-up of old backups (Settings > Old backups). Additive: an older host and the sample bridge may not send it; the card is then not drawn. */
+  retention?: RetentionState | null;
 }
 /** Why a scheduled backup did not happen, as the host's MissedRunExplainer names it; `unknown` when nothing more is known. */
 export type MissedRunKind = 'unknown' | 'driveMissing' | 'repairPending' | 'ranAndFailed' | 'cancelled' | 'busy' | 'programProblem'
@@ -357,3 +369,88 @@ export function usableLocale(value?: string): string | undefined {
  */
 export interface RestoreFlowApproval { waiting: boolean; session: boolean; notice: string }
 // ---- end of the restore approval session block -------------------------------------------------------------------------
+// ---- Clean-up of old backups ------------------------------------------------------------------------------------------
+/** Why clean-up has to wait, as the backup service reports it. The page words each one (retention.ts). */
+export type RetentionBlocked = '' | 'google_drive_not_supported' | 'pending_change' | 'no_verified_backup' | 'last_backup_not_verified'
+  | 'folders_changed' | 'change_review_open' | 'clock_problem' | 'future_dated_backup' | 'backup_location_unavailable' | 'policy_inactive';
+export type RetentionOutcome = 'removed' | 'nothing_to_remove' | 'partial' | 'space_pending' | 'check_failed' | 'failed';
+/** A hint only: the host checks again when the button is pressed. `help` is why it is off. */
+export interface RetentionAbility { enabled: boolean; help: string }
+export interface RetentionPreviewState {
+  /** `stale`: the list was made before the latest backup. `none`: there is no list yet. */
+  status: 'none' | 'ready' | 'blocked' | 'error' | 'stale';
+  blocked: RetentionBlocked;
+  errorCode: string;
+  checkedAt: string;
+  removeCount: number; keepCount: number;
+  /** ISO 8601 times of the oldest and newest backup that would go. */
+  oldestRemoveAt: string; newestRemoveAt: string;
+  /** Earlier backups to look over before anything is removed, newest first (see RetentionEarlierChange). */
+  earlierChanges: RetentionEarlierChange[];
+  earlierChangesUnknown: boolean;
+  futureDatedAt: string;
+  /** Backups were removed earlier and their space is not freed yet. */
+  prunePending: boolean;
+}
+/**
+ * An earlier checked backup the person is asked to look over before old backups go, and why. `hold`: it changed far more files than
+ * usual and nobody confirmed it. `not_compared`: it couldn't be compared with the backup before it (the first backup, or the first
+ * after a folder, exclusion or location change). `unknown`: its record doesn't say (an older backup service). Only `hold` is worded as
+ * unusual changes.
+ */
+export interface RetentionEarlierChange { at: string; kind: 'hold' | 'not_compared' | 'unknown' }
+/**
+ * The newest recorded clean-up. `unverified`: it stopped before anyone could confirm which backups on the list were removed, so
+ * `removedCount` is only what is certain. `checkUnfinished`: the space was freed, then the check of the remaining backups didn't
+ * finish (it found no problem).
+ */
+export interface RetentionLastRun {
+  finishedAt: string; outcome: RetentionOutcome; removedCount: number; confirmedCount: number; freedDisplay: string;
+  unverified: boolean; checkUnfinished: boolean;
+}
+export interface RetentionOperationState {
+  active: boolean;
+  action: '' | 'configure' | 'preview' | 'apply';
+  stage: '' | 'approval' | 'listing' | 'checking' | 'freeing' | 'verifying';
+  count: number;
+  percent: number | null;
+}
+/** One backup in the list: when it was made, how many files it had, and (staying list only) why it stays. */
+export interface RetentionReviewRow { key: string; when: string; files: number | null; reasons: string[] }
+export type RetentionResultStatus = 'removed' | 'nothing_to_remove' | 'declined' | 'preview_changed' | 'refused' | 'partial'
+  | 'space_pending' | 'check_failed' | 'failed' | 'unconfirmed';
+/**
+ * The list of old backups while it is open. Only counts, month totals and one page of rows are sent; the host keeps the whole list
+ * and is the one that binds the removal to it. `changed`: the list on disk is no longer the one shown, so nothing can be removed
+ * until it is shown again. `result` replaces the list once a removal was asked for. Its `reason` is the refusal code for
+ * `refused`, and otherwise says more about how it ended: `unverified` (partial: nobody knows which backups on the list went),
+ * `unrecorded` (space_pending: the removal couldn't be recorded), `unfinished` (check_failed: the check didn't finish) or `closed`
+ * (preview_changed: the new list has nothing to offer, so the dialog ends there).
+ */
+export interface RetentionReviewState {
+  removeCount: number; keepCount: number; newestKeptAt: string;
+  earlierChanges: RetentionEarlierChange[]; earlierChangesUnknown: boolean; needsFilesConfirmed: boolean;
+  pruneOnly: boolean; changed: boolean; running: boolean;
+  /** Changes whenever a different list is shown, so ticked boxes are cleared. */
+  captureKey: string;
+  months: { month: string; count: number }[];
+  page: { list: 'remove' | 'keep'; offset: number; total: number; size: number; rows: RetentionReviewRow[] };
+  result: null | { status: RetentionResultStatus; removedCount: number; confirmedCount: number; freedDisplay: string; reason: string };
+}
+export interface RetentionState {
+  mode: 'unsupported' | 'unknown' | 'off' | 'on';
+  unsupportedReason: '' | 'legacy' | 'older_service' | 'google_drive';
+  /** The counts in force, or the ones the dialog suggests. */
+  keepDaily: number; keepWeekly: number; keepMonthly: number;
+  limits: { daily: [number, number]; weekly: [number, number]; monthly: [number, number] };
+  recommended: { daily: number; weekly: number; monthly: number };
+  /** It was on, and an update or reinstall turned it off. */
+  resetByReinstall: boolean;
+  problem: string;
+  preview: RetentionPreviewState | null;
+  lastRun: RetentionLastRun | null;
+  operation: RetentionOperationState;
+  notice: { text: string; tone: 'info' | 'success' | 'warning' | 'error' } | null;
+  canConfigure: RetentionAbility; canTurnOff: RetentionAbility; canReview: RetentionAbility; canCheckNow: RetentionAbility;
+  review: RetentionReviewState | null;
+}

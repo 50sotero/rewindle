@@ -12,6 +12,7 @@ export const ONE_SHOT_COMMANDS: ReadonlySet<CommandName> = new Set<CommandName>(
   'backupNow', 'cancelBackup', 'addSource', 'removeSource', 'editSchedule', 'changeRepository', 'repairRepository',
   'reviewChanges', 'openRestore', 'checkReadiness', 'exportDiagnostics', 'retrySourceChange', 'confirmSourcePicker',
   'viewRunDetails', 'restoreFlowReview', 'restoreFlowStart', 'restoreFlowRetry',
+  'retentionConfigure', 'retentionCheckNow', 'retentionOpenReview', 'retentionApply',
 ]);
 
 export type Send = (command: CommandName, payload?: Record<string, string | boolean>, onResult?: (ok: boolean) => void) => void;

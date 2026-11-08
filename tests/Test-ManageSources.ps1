@@ -107,6 +107,8 @@ function Assert-RuntimeManifest {
         Assert-True -Condition ([string]$record.sha256 -eq (Get-Hash -Path $path)) -Message "runtime hash: $path"
     }
     Assert-True -Condition ([string]$manifest.product -eq 'ResticBackuper') -Message 'runtime product metadata preserved'
+    # Clean-up of old backups is bound to the installer's installation_id: a folder change keeps it, so a saved setting stays on.
+    Assert-True -Condition ([string]$manifest.installation_id -ceq ('5' * 64)) -Message 'runtime manifest keeps the installer''s installation_id'
     Assert-True -Condition ([string]$manifest.last_update_reason -eq 'Protected source configuration changed') -Message 'runtime update reason'
 }
 
@@ -352,6 +354,7 @@ try {
         schema_version = 1
         product = 'ResticBackuper'
         version = 'test'
+        installation_id = ('5' * 64)
         created_utc = '2026-01-01T00:00:00Z'
         file_count = $runtimeFiles.Count
         files = @(

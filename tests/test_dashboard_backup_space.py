@@ -128,6 +128,19 @@ namespace ResticBackuper.Dashboard
                     }
                 }
                 facts.Samples = samples;
+                List<BackupSpaceCleanUp> cleanUps = new List<BackupSpaceCleanUp>();
+                object cleanUpsValue;
+                if (spec.TryGetValue("cleanUps", out cleanUpsValue))
+                {
+                    foreach (object raw in (object[])cleanUpsValue)
+                    {
+                        object[] pair = (object[])raw;
+                        cleanUps.Add(new BackupSpaceCleanUp(
+                            Origin.AddDays(Convert.ToDouble(pair[0], CultureInfo.InvariantCulture)),
+                            Convert.ToInt64(pair[1], CultureInfo.InvariantCulture)));
+                    }
+                }
+                facts.CleanUps = cleanUps;
                 BackupSpaceResult result;
                 object judgeValue;
                 if (spec.TryGetValue("judge", out judgeValue))
@@ -157,6 +170,7 @@ namespace ResticBackuper.Dashboard
                 outcome["weeksLeft"] = result.WeeksLeft.HasValue ? (object)result.WeeksLeft.Value : null;
                 outcome["weeksRounded"] = result.WeeksRounded.HasValue ? (object)result.WeeksRounded.Value : null;
                 outcome["weekly"] = result.WeeklyBytes.ToString(CultureInfo.InvariantCulture);
+                outcome["cleanUp"] = result.CleanUp.ToString();
                 report[(string)spec["name"]] = outcome;
             }
             Dictionary<string, object> allowed = new Dictionary<string, object>();
@@ -267,6 +281,50 @@ EVALUATOR_CASES = [
         "name": "hold_unavailable_low",
         "facts": {"free": 14 * GIB, "total": 931 * GIB, "reserve": 10 * GIB, "forecastAvailable": False},
         "hold": True,
+    },
+    # Clean-up of old backups. Daily backups adding 1 GiB each grow 7 GiB a week, which fills 50 GiB above the reserve in about 7
+    # weeks: amber at the default 8. A clean-up in those two weeks that freed 14 GiB keeps the backups the same size, so they are
+    # flat; one that freed 7 GiB halves the growth. One whose freed space was not measured leaves the forecast learning.
+    {"name": "cleanup_none", "facts": {"free": 60 * GIB, "total": 931 * GIB, "reserve": 10 * GIB}, "samples": daily(15, GIB)},
+    {
+        "name": "cleanup_steady", "facts": {"free": 60 * GIB, "total": 931 * GIB, "reserve": 10 * GIB}, "samples": daily(15, GIB),
+        "cleanUps": [[7.5, 14 * GIB]],
+    },
+    {
+        "name": "cleanup_net", "facts": {"free": 60 * GIB, "total": 931 * GIB, "reserve": 10 * GIB}, "samples": daily(15, GIB),
+        "cleanUps": [[3.5, 3 * GIB], [10.5, 4 * GIB]],
+    },
+    # Its space is already free when the newest backup came before it.
+    {
+        "name": "cleanup_after_newest", "facts": {"free": 60 * GIB, "total": 931 * GIB, "reserve": 10 * GIB}, "samples": daily(15, GIB),
+        "cleanUps": [[14.5, 14 * GIB]],
+    },
+    # Before the oldest backup in the window opened it: nothing to take away, measured or not.
+    {
+        "name": "cleanup_before_window", "facts": {"free": 60 * GIB, "total": 931 * GIB, "reserve": 10 * GIB}, "samples": daily(15, GIB),
+        "cleanUps": [[-1, -1], [0, -1]],
+    },
+    {
+        "name": "cleanup_unmeasured", "facts": {"free": 60 * GIB, "total": 931 * GIB, "reserve": 10 * GIB}, "samples": daily(15, GIB),
+        "cleanUps": [[3.5, 7 * GIB], [7.5, -1]],
+    },
+    {
+        "name": "cleanup_unmeasured_roomy", "facts": {"free": 500 * GIB, "total": 1000 * GIB, "reserve": 10 * GIB}, "samples": daily(15, GIB),
+        "cleanUps": [[7.5, -1]],
+    },
+    # Too few backups to tell is still the ordinary learning.
+    {"name": "cleanup_learning", "facts": {"free": 500 * GIB, "total": 1000 * GIB, "reserve": 10 * GIB}, "samples": daily(2, GIB), "cleanUps": [[0.5, -1]]},
+    {
+        "name": "cleanup_hold", "facts": {"free": 60 * GIB, "total": 931 * GIB, "reserve": 10 * GIB}, "samples": daily(15, GIB),
+        "cleanUps": [[7.5, 14 * GIB]], "hold": True,
+    },
+    {
+        "name": "cleanup_unavailable", "facts": {"free": 60 * GIB, "total": 931 * GIB, "reserve": 10 * GIB, "forecastAvailable": False},
+        "samples": daily(15, GIB), "cleanUps": [[7.5, -1]],
+    },
+    {
+        "name": "cleanup_unreadable", "facts": {"free": 60 * GIB, "total": 931 * GIB, "reserve": 10 * GIB, "historyReadable": False},
+        "samples": daily(15, GIB), "cleanUps": [[7.5, 14 * GIB]],
     },
 ]
 
@@ -412,6 +470,42 @@ class BackupSpaceEvaluatorTests(unittest.TestCase):
         self.assertEqual("Growing", big["state"])
         self.assertGreater(int(big["weekly"]), 0)
 
+    def test_clean_up_of_old_backups_makes_the_forecast_net_growth(self) -> None:
+        self.assertEqual(("Growing", str(7 * GIB), "None", "Low", "Forecast"), self.cleanup("cleanup_none"))
+        # Removing old backups as fast as new ones are added keeps the backups the same size: no warning about it.
+        self.assertEqual(("Flat", "0", "Counted", "Ok", "None"), self.cleanup("cleanup_steady"))
+        self.assertIsNone(self.case("cleanup_steady")["weeksLeft"])
+        self.assertEqual(("Growing", str(7 * GIB // 2), "Counted", "Ok", "None"), self.cleanup("cleanup_net"))
+        self.assertEqual((14.29, 14), (self.case("cleanup_net")["weeksLeft"], self.case("cleanup_net")["weeksRounded"]))
+        self.assertEqual(("Flat", "0", "Counted", "Ok", "None"), self.cleanup("cleanup_after_newest"))
+        self.assertEqual(("Growing", str(7 * GIB), "None", "Low", "Forecast"), self.cleanup("cleanup_before_window"))
+
+    def test_space_freed_that_was_not_measured_never_gives_a_forecast(self) -> None:
+        for name in ("cleanup_unmeasured", "cleanup_unmeasured_roomy"):
+            with self.subTest(name=name):
+                case = self.case(name)
+                self.assertEqual(("Learning", "-1", "Unmeasured"), (case["state"], case["weekly"], case["cleanUp"]))
+                self.assertIsNone(case["weeksLeft"])
+                self.assertNotEqual("Forecast", case["reason"])
+        # Still learning, it warns on the space there is now, as without a forecast.
+        self.assertEqual(("Low", "Percent"), self.level("cleanup_unmeasured"))
+        self.assertEqual(("Ok", "None"), self.level("cleanup_unmeasured_roomy"))
+        self.assertEqual(("Learning", "None"), (self.case("cleanup_learning")["state"], self.case("cleanup_learning")["cleanUp"]))
+
+    def test_clean_up_changes_nothing_where_there_is_no_forecast_and_holds_during_a_run(self) -> None:
+        self.assertEqual(("Flat", "Counted", "Ok"), (self.case("cleanup_hold")["state"], self.case("cleanup_hold")["cleanUp"],
+                                                     self.case("cleanup_hold")["level"]))
+        self.assertEqual(("Unavailable", "None"), (self.case("cleanup_unavailable")["state"], self.case("cleanup_unavailable")["cleanUp"]))
+        self.assertEqual(("Unknown", "None"), (self.case("cleanup_unreadable")["state"], self.case("cleanup_unreadable")["cleanUp"]))
+        # Without clean-up records every earlier case is unchanged.
+        for name in ("growing", "weekly_imports", "flat_zero", "learning_none", "wrong_clock"):
+            with self.subTest(name=name):
+                self.assertEqual("None", self.case(name)["cleanUp"])
+
+    def cleanup(self, name: str) -> tuple:
+        case = self.case(name)
+        return case["state"], case["weekly"], case["cleanUp"], case["level"], case["reason"]
+
     def test_a_running_backup_keeps_what_the_card_said_before_it(self) -> None:
         self.assertEqual(("Unknown", "None"), self.level("hold_full"))
         self.assertEqual("Growing", self.case("hold_full")["state"])
@@ -441,8 +535,9 @@ def space(
     reserve_display: str = "10.0 GiB",
     free_display: str = "96.0 GiB",
     stopped: bool = False,
+    clean_up: str | None = None,
 ) -> dict:
-    return {
+    result = {
         "kind": kind, "reading": reading, "drive": drive,
         "freeBytes": 96 * GIB if reading == "ready" else -1, "freeDisplay": free_display if reading == "ready" else "",
         "totalBytes": 931 * GIB if reading == "ready" else -1, "totalDisplay": "931 GiB" if reading == "ready" else "",
@@ -455,6 +550,9 @@ def space(
         },
         "level": level, "reason": reason, "warnWeeks": 8, "runStoppedForSpace": stopped,
     }
+    if clean_up is not None:
+        result["forecast"]["cleanUp"] = clean_up
+    return result
 
 
 def repository(space_state: dict | None, *, ready: bool | None = True, path: str = "D:\\Backups\\Rewindle") -> dict:
@@ -500,6 +598,12 @@ CARDS = {
     "google_estimated": repository(space(kind="googleDrive", drive="G:", estimated=True), path="G:\\My Drive\\Rewindle"),
     "full_already_stopped": repository(space(level="full", reason="reserve", stopped=True)),
     "older_host": repository(None),
+    # Clean-up of old backups in the forecast's weeks (the forecast's `cleanUp`).
+    "cleanup_growing": repository(space(clean_up="counted")),
+    "cleanup_flat": repository(space(state="flat", clean_up="counted")),
+    "cleanup_unmeasured": repository(space(state="learning", clean_up="unmeasured")),
+    "cleanup_unmeasured_low": repository(space(level="low", reason="percent", state="learning", clean_up="unmeasured", free_display="60.0 GiB")),
+    "cleanup_none": repository(space(clean_up="")),
 }
 
 WEEKS = [[0.05, None], [0.5, None], [1, None], [4.4, 4], [25.4, 25], [26, None], [57.33, None], [77, None], [78, None], [103, None], [104, None], [8.49, 9]]
@@ -676,6 +780,30 @@ class BackupSpaceWordingTests(unittest.TestCase):
         self.assertIn("Lately they have added almost nothing.", self.card("local_flat")["how"])
         self.assertIn("shared with Gmail and Google Photos", self.card("google_growing")["how"])
         self.assertEqual("", self.card("local_learning")["how"])
+
+    def test_clean_up_of_old_backups_is_said_where_it_changed_the_forecast(self) -> None:
+        growing = self.card("cleanup_growing")
+        self.assertEqual("Full in about 13 months at this rate.", growing["status"])
+        self.assertIn(
+            "leaves out the single biggest one (such as a folder added once), takes away the space that removing old backups freed, "
+            "and assumes backups keep running as often as they have. Lately that is about 1.50 GiB a week.",
+            growing["how"],
+        )
+        flat = self.card("cleanup_flat")
+        self.assertEqual("Your backups haven’t grown lately, so they aren’t filling the drive.", flat["status"])
+        self.assertIn("Lately removing old backups has freed as much space as they added, or more.", flat["how"])
+        unmeasured = self.card("cleanup_unmeasured")
+        self.assertEqual(
+            ("Old backups were removed lately, so Rewindle needs up to 8 more weeks of backups to tell when the drive will be full.", "muted", "", ""),
+            (unmeasured["status"], unmeasured["tone"], unmeasured["nextStep"], unmeasured["how"]),
+        )
+        # Little room is still said, with what to do, and the hero stays calm about it.
+        low = self.card("cleanup_unmeasured_low")
+        self.assertEqual(("Space is running low: only 60.0 GiB is free on D:, and backups stop below 10.0 GiB.", "warning"), (low["status"], low["tone"]))
+        self.assertIsNone(self.report["concerns"]["cleanup_unmeasured_low"])
+        # An empty value, or an older host that sends none, words the forecast as before.
+        self.assertEqual(self.card("local_growing"), self.card("cleanup_none"))
+        self.assertNotIn("removing old backups", self.card("local_growing")["how"])
 
     def test_an_older_host_keeps_the_volume_line(self) -> None:
         self.assertEqual(("D:\\  •  Local disk  •  96.0 GiB free", "", "muted"), self.lines("older_host"))
@@ -884,6 +1012,14 @@ class BackupSpaceWiringTests(unittest.TestCase):
         self.assertIn("const SPACE_WARNING_WEEKS = ['4', '8', '12'] as const;", self.app)
         self.assertIn("send('setSpaceWarning', { weeks })", self.app)
         self.assertIn("space.forecast.state === 'unavailable'", self.app)
+
+    def test_the_forecast_is_given_what_clean_up_of_old_backups_freed(self) -> None:
+        # How the clean-up records reach it is checked with them, in test_dashboard_retention.py.
+        self.assertIn("bool cleanUpsKnown = TryGetRetentionSpaceChanges(out cleanUps);", self.window_space)
+        self.assertIn("facts.HistoryReadable = readable && cleanUpsKnown;", self.window_space)
+        self.assertIn("facts.CleanUps = cleanUps;", self.window_space)
+        self.assertIn('forecast["cleanUp"] = CleanUpEffectName(judged.CleanUp);', self.window_space)
+        self.assertIn("cleanUp?: '' | 'counted' | 'unmeasured';", self.types)
 
     def test_the_sample_data_has_space(self) -> None:
         self.assertIn("space: sampleSpace()", self.demo)

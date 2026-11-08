@@ -340,6 +340,91 @@ def verify_protected_readonly_acl(path: Path, user_sid: str | None = None) -> No
         raise RuntimeError(f"ACL is missing a required principal on {path}: {sddl}")
 
 
+# What may change a file or folder, read from its security descriptor. Used by anomaly_review.py and retention.py for
+# the records the elevated backup and managers keep in the protected state folder.
+ADMIN_SIDS = frozenset({"SY", "BA", "S-1-5-18", "S-1-5-32-544"})
+# Any right that changes an object or its access: write or append data (add a file or folder), write extended attributes,
+# delete a child, write attributes, delete, change the access list or the owner, and the generic and maximum-allowed forms.
+WRITE_RIGHTS = (
+    0x00000002 | 0x00000004 | 0x00000010 | 0x00000040 | 0x00000100
+    | 0x00010000 | 0x00040000 | 0x00080000
+    | 0x02000000 | 0x10000000 | 0x40000000
+)
+RIGHT_TOKENS = {
+    "GA": 0x10000000, "GR": 0x80000000, "GW": 0x40000000, "GX": 0x20000000,
+    "RC": 0x00020000, "SD": 0x00010000, "WD": 0x00040000, "WO": 0x00080000,
+    "FA": 0x001F01FF, "FR": 0x00120089, "FW": 0x00120116, "FX": 0x001200A0,
+    "CC": 0x00000001, "DC": 0x00000002, "LC": 0x00000004, "SW": 0x00000008,
+    "RP": 0x00000010, "WP": 0x00000020, "DT": 0x00000040, "LO": 0x00000080,
+    "CR": 0x00000100,
+}
+
+
+def _rights_mask(rights: str) -> int | None:
+    if rights[:2].casefold() == "0x":
+        try:
+            return int(rights, 16)
+        except ValueError:
+            return None
+    if not rights or len(rights) % 2:
+        return None
+    mask = 0
+    for index in range(0, len(rights), 2):
+        bit = RIGHT_TOKENS.get(rights[index : index + 2])
+        if bit is None:
+            return None
+        mask |= bit
+    return mask
+
+
+OWNER_RIGHTS_SIDS = frozenset({"OW", "S-1-3-4"})
+
+
+def admin_only_writable_problem(sddl: str, *, owner_limited_by_owner_rights: bool = False) -> str | None:
+    """Why a security descriptor (owner and access list) lets anyone but Administrators or SYSTEM change the object, or None.
+
+    Inherited entries count like any other, and deny entries and entries that apply only to children are skipped.
+
+    With owner_limited_by_owner_rights, an owner other than Administrators or SYSTEM is accepted when an OWNER RIGHTS entry
+    applies to the object itself: Windows then gives the owner only that entry's rights (and the loop below makes sure they
+    cannot change anything), not its usual right to rewrite the access list. Files the elevated backup writes into the
+    protected state folder inherit such an entry, and on a PC where Windows makes the creator their owner they belong to the
+    user; they are still admin-only writable.
+    """
+    owner = re.search(r"O:(.*?)(?=[GDS]:)", sddl)
+    start = sddl.find("D:")
+    if start < 0:
+        return "it has no access list"
+    dacl = sddl[start:]
+    if "NO_ACCESS_CONTROL" in dacl.split("(", 1)[0]:
+        return "it has no access list"
+    entries = re.findall(r"\(([^)]*)\)", dacl)
+    if not entries:
+        return "its access list is empty"
+    owner_rights_entry = False
+    for entry in entries:
+        fields = entry.split(";")
+        if len(fields) < 6:
+            return f"it has an access entry that cannot be read: {entry}"
+        flags = {fields[1][index : index + 2] for index in range(0, len(fields[1]), 2)}
+        if fields[0] == "D" or "IO" in flags:
+            continue
+        if fields[0] != "A":
+            return f"it has an unexpected access entry: {entry}"
+        if fields[5] in ADMIN_SIDS:
+            continue
+        mask = _rights_mask(fields[2])
+        if mask is None or mask & WRITE_RIGHTS:
+            return f"someone other than Administrators can change it: {entry}"
+        if fields[5] in OWNER_RIGHTS_SIDS:
+            owner_rights_entry = True
+    if owner is None:
+        return "it is not owned by Administrators or SYSTEM"
+    if owner.group(1) not in ADMIN_SIDS and not (owner_limited_by_owner_rights and owner_rights_entry):
+        return "it is not owned by Administrators or SYSTEM"
+    return None
+
+
 def secure_directory(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     restrict_acl(path, directory=True)

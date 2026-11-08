@@ -1,0 +1,67 @@
+/* Settings > Old backups: the card, the counts and Turn off dialogs, and the list of old backups. The dialogs share the app's scrim
+   (.app-dialog in app.css); their panel follows the folder chooser's. */
+.old-backups-card .info-main { display: flex; align-items: center; gap: 8px; }
+.old-backups-line { line-height: 1.6; }
+.old-backups-tone-warning { box-shadow: inset 3px 0 0 var(--orange), var(--shadow-hairline); }
+.old-backups-tone-error { box-shadow: inset 3px 0 0 var(--red), var(--shadow-hairline); }
+.old-backups-tone-active { box-shadow: inset 3px 0 0 var(--accent), var(--shadow-hairline); }
+.old-backups-notice { margin: 12px 0 0; }
+.old-backups-progress { margin-top: 12px; }
+.old-backups-spinner { animation: old-backups-spin 1.1s linear infinite; flex-shrink: 0; }
+@keyframes old-backups-spin { to { transform: rotate(360deg); } }
+html[data-reduced-motion=true] .old-backups-spinner { animation: none; }
+@media (prefers-reduced-motion: reduce) { html:not([data-motion="full"]) .old-backups-spinner { animation: none; } }
+
+.old-backups-dialog { width: 720px; max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); padding: 0; border: 0; margin: auto; overflow: visible; background: transparent; color: var(--ink); }
+.old-backups-dialog.old-backups-small { width: 520px; }
+.old-backups-panel { display: flex; flex-direction: column; max-height: calc(100vh - 32px); background: var(--page); border: 1px solid var(--line-strong); border-radius: var(--r-panel); box-shadow: var(--dialog-shadow); overflow: hidden; }
+.old-backups-heading { display: flex; align-items: flex-start; gap: 14px; padding: 25px 25px 21px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
+.old-backups-heading > div { flex: 1; min-width: 0; }
+.old-backups-heading h2 { font-size: var(--type-xl); letter-spacing: -.6px; font-weight: 600; margin: 6px 0; line-height: 1.3; }
+.old-backups-heading p { font-size: var(--type-sm); color: var(--ink-2); line-height: 1.65; margin: 0; }
+.old-backups-emblem { display: grid; place-items: center; width: 47px; height: 47px; border-radius: var(--r-panel); background: var(--accent-tint); color: var(--accent); flex-shrink: 0; }
+.old-backups-body { overflow-y: auto; padding: 20px 25px; min-height: 0; font-size: var(--type-sm); line-height: 1.6; }
+.old-backups-body:empty { display: none; }
+.old-backups-footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 16px 25px; border-top: 1px solid var(--line); flex-shrink: 0; }
+.old-backups-footer > span { display: flex; align-items: flex-start; gap: 8px; color: var(--ink-3); font-size: var(--type-xs); line-height: 1.5; max-width: 52%; }
+.old-backups-footer > span svg { flex-shrink: 0; margin-top: 2px; }
+.old-backups-footer > div { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+
+.old-backups-counts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.old-backups-count { display: flex; flex-direction: column; gap: 6px; }
+.old-backups-count label { font-weight: 550; }
+.old-backups-count input { width: 100%; border: 1px solid var(--line-strong); border-radius: var(--r-control); background: var(--surface); color: var(--ink); padding: 8px 10px; font-size: var(--type-md); }
+.old-backups-count input[aria-invalid="true"] { border-color: var(--red); }
+.old-backups-count span { font-size: var(--type-xs); line-height: 1.5; }
+.old-backups-summary { margin: 16px 0 0; min-height: 1.6em; font-weight: 500; }
+.old-backups-notes { margin: 12px 0 0; padding-left: 18px; color: var(--ink-2); }
+.old-backups-notes li + li { margin-top: 6px; }
+.old-backups-error { color: var(--red-ink); }
+
+.old-backups-result { margin: 0 0 14px; }
+.old-backups-changed { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 11px 14px; margin: 0 0 14px; border-radius: var(--r-control); background: var(--orange-tint); }
+.old-backups-overview { margin: 0 0 14px; font-weight: 500; }
+.old-backups-check { padding: 14px; margin: 0 0 14px; border-radius: var(--r-card); background: var(--orange-tint); box-shadow: var(--shadow-hairline); }
+.old-backups-check h3 { margin: 0 0 6px; font-size: var(--type-sm); font-weight: 600; }
+.old-backups-check p { margin: 0 0 10px; }
+.old-backups-tabs { display: flex; gap: 8px; margin: 0 0 12px; }
+.old-backups-list { margin: 0; padding: 0; list-style: none; }
+.old-backups-list details { border: 1px solid var(--line); border-radius: var(--r-control); background: var(--surface); margin-bottom: 8px; }
+.old-backups-list summary { cursor: pointer; padding: 9px 12px; font-weight: 500; }
+.old-backups-list details ul { margin: 0; padding: 0 12px 10px 28px; color: var(--ink-2); }
+.old-backups-staying li { display: flex; justify-content: space-between; gap: 12px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.old-backups-tags { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.old-backups-tags span { font-size: var(--type-xs); padding: 1px 8px; border-radius: 999px; background: var(--accent-tint); color: var(--accent-ink, var(--ink)); }
+.old-backups-pager { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.old-backups-pager .muted-copy { margin-right: auto; }
+.old-backups-tick { display: flex; align-items: flex-start; gap: 9px; cursor: pointer; }
+.old-backups-tick input { margin-top: 4px; }
+.old-backups-confirm { margin-top: 16px; font-weight: 500; }
+/* Removing backups is the one action here that cannot be undone, so its button is the red one. */
+.old-backups-danger:not(:disabled) { background: var(--red-ink); color: #fff; }
+.dark .old-backups-danger:not(:disabled) { color: var(--page); }
+@media (max-width: 640px) {
+  .old-backups-counts { grid-template-columns: 1fr; }
+  .old-backups-footer { flex-direction: column; align-items: stretch; }
+  .old-backups-footer > span { max-width: none; }
+}

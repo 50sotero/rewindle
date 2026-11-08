@@ -10,6 +10,7 @@ import type { CommandName, DashboardState, NativeCommand, NativeMessage, NativeW
 import { applySpaceScenario, createSampleRunDetails, createSampleState, formatBytes, formatDuration, setSampleSpaceWarning } from './demoState';
 import { createRestoreDemo, sampleBackupRange } from './restoreDemo';
 import { applyAlertsScenario, setSampleAlerts } from './alertsDemo';
+import { createRetentionDemo } from './retentionDemo';
 
 const READ_ONLY = 'Sample data is read-only.';
 // The desktop host re-sends state about once a second. The app treats 15 seconds of silence as a lost
@@ -75,6 +76,8 @@ export function installSampleBridge(): void {
 
   // The Restore flow, with invented backups and folders; it moves `state.restoreFlow` through its steps (see restoreDemo.ts).
   const restore = createRestoreDemo(() => state, publish);
+  // Settings > Old backups, with an invented list of old backups (see retentionDemo.ts).
+  const retention = createRetentionDemo(() => state, publish);
 
   const togglePreview = () => {
     state.preview = !state.preview;
@@ -140,6 +143,7 @@ export function installSampleBridge(): void {
         return null;
       }
       default:
+        if (retention.handles(command)) return retention.handle(command, payload);
         return restore.handles(command) ? restore.handle(command, payload) : READ_ONLY;
     }
   };

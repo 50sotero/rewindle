@@ -506,6 +506,36 @@ namespace ResticBackuper.Dashboard
         }
         // ---- end of the restore approval session block ---------------------------------------------------------------
 
+        // ---- Clean-up of old backups ------------------------------------------------------------------------------------
+        // Only the Rewindle engine has a clean-up manager (Manage-Retention.ps1); for the legacy personal edition these are
+        // null, nothing in its state folder is read for clean-up, and the page says clean-up is not available. Whether the
+        // installed engine has it is read from engine-capabilities.json (RetentionCapability in RetentionManager.cs).
+        internal string RetentionManagerFileName
+        {
+            get { return Id == RewindleId ? "Manage-Retention.ps1" : null; }
+        }
+
+        internal string RetentionRequestDomain
+        {
+            get { return Id == RewindleId ? ProductDirectoryName + ".RetentionRequest.v1" : null; }
+        }
+
+        internal string RetentionPolicySchema
+        {
+            get { return Id == RewindleId ? ProductDirectoryName + ".RetentionPolicy.v1" : null; }
+        }
+
+        internal string RetentionPreviewSchema
+        {
+            get { return Id == RewindleId ? ProductDirectoryName + ".RetentionPreview.v1" : null; }
+        }
+
+        internal string RetentionHistorySchema
+        {
+            get { return Id == RewindleId ? ProductDirectoryName + ".RetentionHistory.v1" : null; }
+        }
+        // ---- end of the clean-up block ----------------------------------------------------------------------------------
+
         private static EngineProfile CreateRewindle()
         {
             EngineProfile profile = CreateCommon("ResticBackuper");

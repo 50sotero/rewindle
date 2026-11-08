@@ -3015,6 +3015,480 @@ namespace RewindleRegression {
 
     # Backup drive space (the Backup location card), in its own file and run in this scope.
     . (Join-Path $PSScriptRoot 'backup-space-regressions.ps1')
+
+    # Clean-up of old backups (Settings > Old backups). The legacy personal edition has no clean-up manager: the page is told so,
+    # every clean-up command is refused with one sentence and nothing of its state folder is read. With Rewindle, nothing else runs
+    # while the list of old backups is open, protected actions wait while a clean-up step runs, and a removal is refused unless the
+    # list on disk is still the one the person looked at, with the count they saw and both confirmations. The manager is never run:
+    # a stand-in launch writes the result a manager would, and every file is in the fixture folders.
+    $retentionFilesType = $assembly.GetType('ResticBackuper.Dashboard.RetentionFiles', $true)
+    $retentionViewType = $assembly.GetType('ResticBackuper.Dashboard.RetentionView', $true)
+    $retentionRequestType = $assembly.GetType('ResticBackuper.Dashboard.RetentionRequest', $true)
+    $retentionResultType = $assembly.GetType('ResticBackuper.Dashboard.RetentionLaunchResult', $true)
+    $retentionKindType = $assembly.GetType('ResticBackuper.Dashboard.RetentionLaunchKind', $true)
+    $retentionLauncherType = $assembly.GetType('ResticBackuper.Dashboard.RetentionManagerLauncher', $true)
+    $retentionLaunchType = $assembly.GetType('ResticBackuper.Dashboard.RetentionManagerLaunch', $true)
+    $retentionUnavailable = [string]$dashboardType.GetField('RetentionUnavailableMessage', $flags).GetValue($null)
+    function Set-ObjectField([object]$Target, [string]$Name, [object]$Value) { $Target.GetType().GetField($Name, $flags).SetValue($Target, $Value) }
+    function Get-ObjectField([object]$Target, [string]$Name) { return $Target.GetType().GetField($Name, $flags).GetValue($Target) }
+    function New-RetentionDashboard {
+        $created = [Runtime.Serialization.FormatterServices]::GetUninitializedObject($dashboardType)
+        # Field initializers do not run for an uninitialized object: set the ones the clean-up code reads.
+        Set-PrivateField $created 'retentionOperationAction' ''
+        Set-PrivateField $created 'retentionOperationStage' ''
+        Set-PrivateField $created 'retentionReviewList' 'remove'
+        Set-PrivateField $created 'retentionNoticeText' ''
+        Set-PrivateField $created 'retentionNoticeTone' 'info'
+        return $created
+    }
+    function New-RetentionPayload([hashtable]$Values) {
+        $payload = [System.Collections.Generic.Dictionary[string,object]]::new()
+        foreach ($key in $Values.Keys) { $payload[$key] = $Values[$key] }
+        return ,$payload
+    }
+    function Invoke-RetentionCommand([object]$Target, [string]$Method, [object]$Payload) {
+        $arguments = [object[]]@($Payload, $null)
+        $accepted = [bool](Invoke-Private $Target $Method $arguments)
+        return [pscustomobject]@{ Accepted = $accepted; Error = [string]$arguments[1] }
+    }
+
+    Assert-True ([string](Get-ProfileValue $rewindleProfile 'RetentionManagerFileName') -eq 'Manage-Retention.ps1' -and $null -eq (Get-ProfileValue $legacyProfile 'RetentionManagerFileName') -and $null -eq (Get-ProfileValue $legacyProfile 'RetentionRequestDomain')) 'the clean-up manager names of the engines are wrong'
+    [void]$engineProfileType.GetMethod('Activate', $flags).Invoke($null, [object[]]@($legacyProfile))
+    try {
+        $legacyRetention = New-RetentionDashboard
+        $legacyRetentionState = Invoke-Private $legacyRetention 'BuildWebRetentionState'
+        Assert-True ([string]$legacyRetentionState['mode'] -eq 'unsupported' -and [string]$legacyRetentionState['unsupportedReason'] -eq 'legacy') 'the legacy edition was not told that clean-up is not available'
+        Assert-True ($null -eq $legacyRetentionState['preview'] -and $null -eq $legacyRetentionState['lastRun'] -and $null -eq $legacyRetentionState['review']) 'the legacy edition was shown a clean-up list or history'
+        foreach ($ability in @('canConfigure', 'canTurnOff', 'canReview', 'canCheckNow')) {
+            Assert-True (-not [bool]$legacyRetentionState[$ability]['enabled'] -and [string]$legacyRetentionState[$ability]['help'] -eq $retentionUnavailable) ('the legacy edition offered a clean-up button: ' + $ability)
+        }
+        foreach ($command in @('retentionConfigure', 'retentionCheckNow', 'retentionOpenReview', 'retentionReviewPage', 'retentionApply', 'retentionCloseReview')) {
+            $arguments = [object[]]@($command, (New-RetentionPayload @{ enabled = '1'; keepDaily = '14'; keepWeekly = '8'; keepMonthly = '24'; removeCount = '1'; confirmList = $true }), $null)
+            $accepted = [bool](Invoke-Private $legacyRetention 'ExecuteRetentionCommand' $arguments)
+            Assert-True (-not $accepted -and [string]$arguments[2] -eq $retentionUnavailable) ('the legacy edition accepted a clean-up command: ' + $command)
+        }
+        Assert-True ($null -eq (Get-FieldValue $legacyRetention 'retentionView') -and -not [bool](Get-FieldValue $legacyRetention 'retentionCapabilityKnown') -and -not [bool](Get-FieldValue $legacyRetention 'retentionOperationInProgress')) 'the legacy edition read clean-up records or started a clean-up step'
+        $legacyActions = [System.Collections.Generic.Dictionary[string,object]]::new()
+        $legacyActions['backupNow'] = [System.Collections.Generic.Dictionary[string,object]]::new()
+        $legacyActions['backupNow']['enabled'] = $true
+        [void](Invoke-Private $legacyRetention 'ApplyRetentionBusyToActions' @($legacyActions))
+        Assert-True ([bool]$legacyActions['backupNow']['enabled']) 'the legacy edition turned off Back up now for a clean-up that cannot exist'
+    }
+    finally {
+        [void]$engineProfileType.GetMethod('Activate', $flags).Invoke($null, [object[]]@($rewindleProfile))
+    }
+
+    $retention = New-RetentionDashboard
+    function Test-RetentionBlocks([string]$Command) {
+        $arguments = [object[]]@($Command, $null)
+        $blocked = [bool](Invoke-Private $retention 'RetentionBlocksCommand' $arguments)
+        return [pscustomobject]@{ Blocked = $blocked; Error = [string]$arguments[1] }
+    }
+    foreach ($command in @('backupNow', 'removeSource', 'editSchedule', 'openRestore', 'restoreFlowOpen', 'reviewChanges')) {
+        Assert-True (-not (Test-RetentionBlocks $command).Blocked) ('a command waited for a clean-up that is not running: ' + $command)
+    }
+    Set-PrivateField $retention 'retentionReviewOpen' $true
+    foreach ($command in @('backupNow', 'removeSource', 'openRestore', 'setTheme', 'checkReadiness')) {
+        $answer = Test-RetentionBlocks $command
+        Assert-True ($answer.Blocked -and $answer.Error -eq 'Close the list of old backups first.') ('a command ran while the list of old backups was open: ' + $command)
+    }
+    foreach ($command in @('retentionApply', 'retentionCloseReview', 'retentionReviewPage', 'refresh', 'navigate')) {
+        Assert-True (-not (Test-RetentionBlocks $command).Blocked) ('the list of old backups blocked its own command: ' + $command)
+    }
+    # The hook runs before any other routing, so the refusal comes before anything is read or started.
+    $hookArguments = [object[]]@('backupNow', $null, $null)
+    Assert-True (-not [bool](Invoke-Private $retention 'ExecuteWebCommand' $hookArguments) -and [string]$hookArguments[2] -eq 'Close the list of old backups first.') 'Back up now was routed while the list of old backups was open'
+    Set-PrivateField $retention 'retentionReviewOpen' $false
+    Set-PrivateField $retention 'retentionOperationInProgress' $true
+    Set-PrivateField $retention 'retentionOperationAction' 'apply'
+    foreach ($command in @('backupNow', 'addSource', 'removeSource', 'editSchedule', 'changeRepository', 'repairRepository', 'reviewChanges', 'openRestore', 'checkReadiness', 'restoreFlowStart')) {
+        $answer = Test-RetentionBlocks $command
+        Assert-True ($answer.Blocked -and $answer.Error -like 'Old backups are being removed.*skipped.') ('a protected command started while old backups were being removed: ' + $command)
+    }
+    Assert-True (-not (Test-RetentionBlocks 'setTheme').Blocked -and -not (Test-RetentionBlocks 'cancelBackup').Blocked) 'a command that changes no backup waited for clean-up'
+    $busyActions = [System.Collections.Generic.Dictionary[string,object]]::new()
+    foreach ($name in @('backupNow', 'editSchedule', 'openRestore', 'setTheme')) {
+        $busyActions[$name] = [System.Collections.Generic.Dictionary[string,object]]::new()
+        $busyActions[$name]['enabled'] = $true
+        $busyActions[$name]['help'] = ''
+    }
+    [void](Invoke-Private $retention 'ApplyRetentionBusyToActions' @($busyActions))
+    Assert-True (-not [bool]$busyActions['backupNow']['enabled'] -and -not [bool]$busyActions['editSchedule']['enabled'] -and -not [bool]$busyActions['openRestore']['enabled'] -and [bool]$busyActions['setTheme']['enabled']) 'the page offered protected actions while old backups were being removed'
+    Assert-True ([string]$busyActions['backupNow']['help'] -like 'Old backups are being removed*') 'a turned-off action did not say it waits for clean-up'
+    Set-PrivateField $retention 'retentionOperationAction' 'preview'
+    Assert-True ((Test-RetentionBlocks 'backupNow').Error -eq 'Rewindle is checking for old backups. Other changes wait until it finishes.') 'the wait while old backups are listed was not explained'
+    Set-PrivateField $retention 'retentionOperationInProgress' $false
+    Set-PrivateField $retention 'retentionOperationAction' ''
+
+    # A removal names only the list that was looked at.
+    $retentionState = [string](Invoke-Private $rewindleProfile 'StateDirectory')
+    New-Item -ItemType Directory -Path $retentionState -Force | Out-Null
+    $previewPath = Join-Path $retentionState 'retention-preview.json'
+    [IO.File]::WriteAllText($previewPath, '{"schema":"fixture"}', $utf8)
+    $previewSha = ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes($previewPath))) -replace '-', '').ToLowerInvariant()
+    [void]$retentionFilesType.GetMethod('TrustTemporaryFolderForTesting', $flags).Invoke($null, [object[]]@($true))
+    try {
+        $goodApply = @{ removeCount = '2'; confirmList = $true; confirmEarlierChanges = $true }
+        $answer = Invoke-RetentionCommand $retention 'BeginRetentionApply' (New-RetentionPayload $goodApply)
+        Assert-True (-not $answer.Accepted -and $answer.Error -eq 'Open the list of old backups first.') 'a removal was accepted without the list open'
+        $capture = [Activator]::CreateInstance($retentionViewType, $true)
+        Set-ObjectField $capture 'Mode' 'on'
+        Set-ObjectField $capture 'PreviewStatus' 'ready'
+        Set-ObjectField $capture 'PreviewSha256' ('0' * 64)
+        Set-ObjectField $capture 'RemoveSetSha256' ('c' * 64)
+        Set-ObjectField $capture 'RemoveCount' ([int]2)
+        Set-ObjectField $capture 'NeedsFilesConfirmed' $true
+        Set-PrivateField $retention 'retentionReviewCapture' $capture
+        Set-PrivateField $retention 'retentionReviewOpen' $true
+        $answer = Invoke-RetentionCommand $retention 'BeginRetentionApply' (New-RetentionPayload $goodApply)
+        Assert-True (-not $answer.Accepted -and $answer.Error -eq 'This list was updated. Nothing was removed.' -and [bool](Get-FieldValue $retention 'retentionReviewChanged')) 'a removal was accepted for a list that is no longer the one on disk'
+        Set-ObjectField $capture 'PreviewSha256' $previewSha
+        $answer = Invoke-RetentionCommand $retention 'BeginRetentionApply' (New-RetentionPayload $goodApply)
+        Assert-True (-not $answer.Accepted -and $answer.Error -eq 'This list was updated. Nothing was removed.') 'a list marked as updated could still be removed'
+        Set-PrivateField $retention 'retentionReviewChanged' $false
+        foreach ($case in @(
+            @(@{ removeCount = '3'; confirmList = $true; confirmEarlierChanges = $true }, 'The number of backups to remove doesn''t match the list.'),
+            @(@{ removeCount = '2x'; confirmList = $true; confirmEarlierChanges = $true }, 'The number of backups to remove doesn''t match the list.'),
+            @(@{ removeCount = '2'; confirmList = 'true'; confirmEarlierChanges = $true }, 'Tick the box to confirm you''ve looked at the list.'),
+            @(@{ removeCount = '2'; confirmEarlierChanges = $true }, 'Tick the box to confirm you''ve looked at the list.'),
+            @(@{ removeCount = '2'; confirmList = $true; confirmEarlierChanges = $false }, 'Tick the box to confirm you''ve checked your files.'))) {
+            $answer = Invoke-RetentionCommand $retention 'BeginRetentionApply' (New-RetentionPayload $case[0])
+            Assert-True (-not $answer.Accepted -and $answer.Error -eq $case[1]) ('a removal was accepted without what it needs: ' + $case[1] + ' got: ' + $answer.Error)
+        }
+        # A backup finished while the list was open: the dialog ends before Windows asks for permission, in the same words as
+        # the protected step's refusal (close this list and choose Check now), and nothing more can be asked of this list.
+        $freshView = [Activator]::CreateInstance($retentionViewType, $true)
+        Set-ObjectField $freshView 'Mode' 'on'
+        Set-ObjectField $freshView 'PreviewStatus' 'ready'
+        Assert-True (-not [bool](Invoke-Private $retention 'EndRetentionReviewIfOutOfDate' @($capture, $freshView)) -and $null -eq (Get-FieldValue $retention 'retentionReviewResult')) 'a current list was treated as out of date'
+        Set-ObjectField $freshView 'PreviewStatus' 'stale'
+        Assert-True ([bool](Invoke-Private $retention 'EndRetentionReviewIfOutOfDate' @($capture, $freshView))) 'a list made before the latest backup was not treated as out of date'
+        $outOfDate = Get-FieldValue $retention 'retentionReviewResult'
+        Assert-True ([string]$outOfDate['status'] -eq 'refused' -and [string]$outOfDate['reason'] -eq 'preview_mismatch' -and [long]$outOfDate['removedCount'] -eq 0 -and -not [bool](Get-FieldValue $retention 'retentionReviewChanged') -and -not [bool](Get-FieldValue $retention 'retentionOperationInProgress')) 'an out-of-date list did not end as nothing removed'
+        $answer = Invoke-RetentionCommand $retention 'BeginRetentionApply' (New-RetentionPayload $goodApply)
+        Assert-True (-not $answer.Accepted -and $answer.Error -eq 'Open the list of old backups first.') 'an out-of-date list could still be removed'
+        Set-PrivateField $retention 'retentionReviewResult' $null
+        Set-PrivateField $retention 'retentionView' $null
+
+        # Every check passed: the request stops only because this fixture dashboard has no backup plan, and nothing started.
+        $answer = Invoke-RetentionCommand $retention 'BeginRetentionApply' (New-RetentionPayload $goodApply)
+        Assert-True (-not $answer.Accepted -and $answer.Error -like 'Rewindle couldn''t read the backup plan.*' -and -not [bool](Get-FieldValue $retention 'retentionOperationInProgress')) ('a confirmed removal did not reach the request step: ' + $answer.Error)
+
+        # How each ending of a removal reaches the list dialog.
+        function Complete-RetentionApply([string]$Kind, [string]$State = '', [string]$Refusal = '', [long]$Removed = 0, [bool]$Unverified = $false,
+            [bool]$Recorded = $true, [bool]$CheckUnfinished = $false) {
+            $request = [Activator]::CreateInstance($retentionRequestType, $true)
+            Set-ObjectField $request 'Action' 'apply'
+            Set-ObjectField $request 'RemoveCount' '5'
+            $result = [Activator]::CreateInstance($retentionResultType, $true)
+            Set-ObjectField $result 'Kind' ([Enum]::Parse($retentionKindType, $Kind))
+            Set-ObjectField $result 'State' $State
+            Set-ObjectField $result 'RefusalCode' $Refusal
+            Set-ObjectField $result 'RemovedCount' $Removed
+            Set-ObjectField $result 'RemovalUnverified' $Unverified
+            Set-ObjectField $result 'HistoryRecorded' $Recorded
+            Set-ObjectField $result 'CheckUnfinished' $CheckUnfinished
+            Set-PrivateField $retention 'retentionOperationInProgress' $true
+            Set-PrivateField $retention 'retentionReviewChanged' $false
+            [void](Invoke-Private $retention 'FinishRetentionRequest' @($request, $result))
+            Assert-True (-not [bool](Get-FieldValue $retention 'retentionOperationInProgress') -and [bool](Get-FieldValue $retention 'retentionReviewOpen')) 'a finished removal did not end the step and keep its result on screen'
+            return (Get-FieldValue $retention 'retentionReviewResult')
+        }
+        $outcome = Complete-RetentionApply 'Cancelled'
+        Assert-True ([string]$outcome['status'] -eq 'declined') 'a declined approval was not shown as nothing removed'
+        $outcome = Complete-RetentionApply 'Finished' 'removed' '' 5
+        Assert-True ([string]$outcome['status'] -eq 'removed' -and [long]$outcome['removedCount'] -eq 5 -and [long]$outcome['confirmedCount'] -eq 5) 'a complete removal was not shown with its count'
+        $outcome = Complete-RetentionApply 'Finished' 'partial' '' 2 $true
+        Assert-True ([string]$outcome['status'] -eq 'partial' -and [string]$outcome['reason'] -eq 'unverified' -and [long]$outcome['removedCount'] -eq 2) 'a removal that could not be read back was not shown as stopped'
+        # An out-of-date list ends with its result (close this list and choose Check now). It is not marked as updated: that
+        # would offer a new list there is none of until Check now makes one.
+        $outcome = Complete-RetentionApply 'Finished' 'refused' 'preview_mismatch'
+        Assert-True ([string]$outcome['status'] -eq 'refused' -and [string]$outcome['reason'] -eq 'preview_mismatch' -and -not [bool](Get-FieldValue $retention 'retentionReviewChanged')) 'a refusal for an out-of-date list offered a new list that does not exist'
+        # After the backups were removed, a later step that didn't finish is said as such.
+        $outcome = Complete-RetentionApply 'Finished' 'space_pending' '' 2
+        Assert-True ([string]$outcome['status'] -eq 'space_pending' -and [string]$outcome['reason'] -eq '' -and [long]$outcome['removedCount'] -eq 2) 'a removal whose space was not freed was not shown with its count'
+        $outcome = Complete-RetentionApply 'Finished' 'space_pending' '' 2 $false $false
+        Assert-True ([string]$outcome['reason'] -eq 'unrecorded') 'a removal that could not be recorded still offered to finish freeing space'
+        $outcome = Complete-RetentionApply 'Finished' 'space_pending' '' 0 $false $false
+        Assert-True ([string]$outcome['reason'] -eq '') 'freeing earlier space that did not finish was shown as an unrecorded removal'
+        $outcome = Complete-RetentionApply 'Finished' 'check_failed' '' 2 $false $true $true
+        Assert-True ([string]$outcome['status'] -eq 'check_failed' -and [string]$outcome['reason'] -eq 'unfinished') 'a check that did not finish was shown as a check that found a problem'
+        $outcome = Complete-RetentionApply 'Finished' 'check_failed' '' 2
+        Assert-True ([string]$outcome['reason'] -eq '') 'a check that found a problem was shown as one that did not finish'
+        # Backups changed and the new list has nothing to offer (or isn't ready): the dialog ends with what to do.
+        $outcome = Complete-RetentionApply 'Finished' 'preview_changed'
+        Assert-True ([string]$outcome['status'] -eq 'preview_changed' -and [string]$outcome['reason'] -eq 'closed' -and -not [bool](Get-FieldValue $retention 'retentionReviewChanged')) 'a changed list with nothing new to show offered a new list'
+        $outcome = Complete-RetentionApply 'Unconfirmed'
+        Assert-True ([string]$outcome['status'] -eq 'unconfirmed') 'a result that could not be confirmed was shown as an outcome'
+        Set-PrivateField $retention 'retentionReviewOpen' $false
+        Set-PrivateField $retention 'retentionReviewCapture' $null
+        Set-PrivateField $retention 'retentionReviewResult' $null
+
+        # Each earlier backup to look over reaches the page with its kind, so only one that changed far more files than usual is
+        # worded that way (retention.ts filesCheckSentence). A kind this dashboard does not know arrives as 'unknown'.
+        $earlierType = $assembly.GetType('ResticBackuper.Dashboard.RetentionEarlierChange', $true)
+        $kindsView = [Activator]::CreateInstance($retentionViewType, $true)
+        Set-ObjectField $kindsView 'Mode' 'on'
+        Set-ObjectField $kindsView 'PreviewStatus' 'ready'
+        # Read directly: a function would unroll the empty list into nothing.
+        $earlierList = $retentionViewType.GetField('EarlierChanges', $flags).GetValue($kindsView)
+        foreach ($pair in @(@('2026-09-29T00:30:00Z', 'unknown'), @('2026-09-28T00:30:00Z', 'not_compared'), @('2026-09-27T00:30:00Z', 'hold'), @('2026-09-26T00:30:00Z', 'something_new'))) {
+            $change = [Activator]::CreateInstance($earlierType, $true)
+            Set-ObjectField $change 'FinishedUtc' $pair[0]
+            Set-ObjectField $change 'Kind' $pair[1]
+            [void]$earlierList.GetType().GetMethod('Add').Invoke($earlierList, [object[]]@($change))
+        }
+        $webPreview = Invoke-Private $retention 'BuildWebRetentionPreview' @($kindsView)
+        $previewChanges = @($webPreview['earlierChanges'])
+        $previewKinds = @($previewChanges | ForEach-Object { [string]$_['kind'] }) -join ','
+        Assert-True ($previewKinds -eq 'unknown,not_compared,hold,unknown' -and [string]$previewChanges[2]['at'] -eq '2026-09-27T00:30:00Z') ('the card was not given each earlier backup with its kind: ' + $previewKinds)
+        Set-PrivateField $retention 'retentionReviewCapture' $kindsView
+        Set-PrivateField $retention 'retentionReviewOpen' $true
+        $webReview = Invoke-Private $retention 'BuildWebRetentionReview'
+        $reviewKinds = @(@($webReview['earlierChanges']) | ForEach-Object { [string]$_['kind'] }) -join ','
+        Assert-True ($reviewKinds -eq 'unknown,not_compared,hold,unknown') ('the list of old backups was not given each earlier backup with its kind: ' + $reviewKinds)
+        Set-ObjectField $kindsView 'PreviewStatus' 'error'
+        Assert-True (@((Invoke-Private $retention 'BuildWebRetentionPreview' @($kindsView))['earlierChanges']).Count -eq 0) 'a list that could not be made still named earlier backups'
+        Set-PrivateField $retention 'retentionReviewOpen' $false
+        Set-PrivateField $retention 'retentionReviewCapture' $null
+
+        # Clean-up and the Backup location card: its forecast takes away the space each recorded clean-up freed, so backups kept at a
+        # steady size by removing old ones are not "full in N weeks"; a clean-up whose freed space was not measured leaves it
+        # learning, and until the clean-up records are read there is no forecast at all. Daily backups add 1 GiB each here, and
+        # 50 GiB are free above the reserve: about 7 weeks, amber, when nothing was removed.
+        $cleanGiB = [long]1073741824
+        $cleanRunType = $assembly.GetType('ResticBackuper.Dashboard.RunMetricView', $true)
+        $cleanSnapshotType = $assembly.GetType('ResticBackuper.Dashboard.TelemetrySnapshot', $true)
+        $spaceChangeType = $assembly.GetType('ResticBackuper.Dashboard.RetentionSpaceChange', $true)
+        $cleanStart = [DateTime]::SpecifyKind([DateTime]'2026-10-01T02:10:00', [DateTimeKind]::Utc)
+        $cleanRuns = New-GenericList $cleanRunType
+        foreach ($day in 0..14) {
+            $run = [Activator]::CreateInstance($cleanRunType)
+            $run.RunId = 'clean-run-' + $day
+            $run.TypeKey = 'backup'
+            $run.Success = $true
+            $run.FinishedUtc = $cleanStart.AddDays($day)
+            $run.StoredBytes = $cleanGiB
+            [void]$cleanRuns.Add($run)
+        }
+        $cleanSnapshot = [Activator]::CreateInstance($cleanSnapshotType)
+        $cleanSnapshot.History = $cleanRuns
+        $cleanSnapshot.BackupsBytes = 212 * $cleanGiB
+        $cleanConfig = New-SyntheticConfiguration $installRoot $planConfigurationFile $repositoryRoot $stateRoot @($sourceRoot)
+        $configurationType.GetField('<MinimumFreeBytes>k__BackingField', $flags).SetValue($cleanConfig, [long](10 * $cleanGiB))
+        $configurationType.GetField('<RepositoryStorageMode>k__BackingField', $flags).SetValue($cleanConfig, 'local_ntfs')
+        # A window that has just opened: nothing has read the engine's capability yet.
+        function New-CleanSpaceDashboard {
+            $opened = New-RetentionDashboard
+            Set-PrivateField $opened 'currentSourceConfiguration' $cleanConfig
+            Set-PrivateField $opened 'lastSnapshot' $cleanSnapshot
+            Set-PrivateField $opened 'repositoryVolumePath' ([string]$repositoryRoot)
+            Set-PrivateField $opened 'repositoryVolumeReady' $true
+            Set-PrivateField $opened 'repositoryVolumeRead' $true
+            Set-PrivateField $opened 'repositoryVolumeFreeBytes' ([long](60 * $cleanGiB))
+            Set-PrivateField $opened 'repositoryVolumeTotalBytes' ([long](931 * $cleanGiB))
+            Set-PrivateField $opened 'spaceWarningWeeks' 8
+            Set-PrivateField $opened 'webTelemetryError' ''
+            return $opened
+        }
+        function Get-CleanForecast {
+            $built = Invoke-Private $cleanSpace 'BuildWebSpaceState'
+            return [string]$built['forecast']['state'] + '/' + [string]$built['forecast']['cleanUp'] + '/' + [string]$built['level'] + '/' + [string]$built['reason']
+        }
+        function Test-CleanCapabilityRead([object]$Window, [bool]$Supported) {
+            return [bool](Get-FieldValue $Window 'retentionCapabilityKnown') -and ([bool](Get-FieldValue $Window 'retentionCapabilitySupported') -eq $Supported)
+        }
+        # The page's state builds this card before the clean-up card, so the card reads the engine's capability itself (from the
+        # fixture install folder) before it decides. An engine without clean-up (no capability document) keeps the forecast from what
+        # the backups added: amber. One that advertises clean-up has no forecast until its records are read, from the first state on.
+        $cleanCapabilityFile = Join-Path ([string](Invoke-Private $rewindleProfile 'InstallRoot')) 'engine-capabilities.json'
+        Assert-True (-not (Test-Path -LiteralPath $cleanCapabilityFile)) 'the fixture install folder already had a capability document'
+        $cleanSpace = New-CleanSpaceDashboard
+        Assert-True ((Get-CleanForecast) -eq 'growing//low/forecast') ('backups growing 7 GiB a week with an engine without clean-up were not amber: ' + (Get-CleanForecast))
+        Assert-True (Test-CleanCapabilityRead $cleanSpace $false) 'the forecast did not find out that the engine has no clean-up'
+        [IO.File]::WriteAllText($cleanCapabilityFile, $repositoryCapabilities, $utf8)
+        try {
+            $cleanSpace = New-CleanSpaceDashboard
+            Assert-True ((Get-CleanForecast) -eq 'unknown//low/percent') ('a window that had just opened forecast before the clean-up records were read: ' + (Get-CleanForecast))
+            Assert-True (Test-CleanCapabilityRead $cleanSpace $true) 'the forecast did not read that the engine has clean-up'
+        }
+        finally {
+            Remove-Item -LiteralPath $cleanCapabilityFile -Force
+        }
+        Assert-True ((Get-CleanForecast) -eq 'unknown//low/percent') ('the forecast did not wait for the clean-up records: ' + (Get-CleanForecast))
+        $cleanView = [Activator]::CreateInstance($retentionViewType, $true)
+        Set-ObjectField $cleanView 'HistoryKnown' $true
+        Set-PrivateField $cleanSpace 'retentionView' $cleanView
+        Assert-True ((Get-CleanForecast) -eq 'growing//low/forecast') ('with no clean-up recorded the forecast changed: ' + (Get-CleanForecast))
+        $cleanChange = [Activator]::CreateInstance($spaceChangeType, $true)
+        Set-ObjectField $cleanChange 'FinishedUtc' $cleanStart.AddDays(7.5)
+        Set-ObjectField $cleanChange 'FreedBytes' ([long](14 * $cleanGiB))
+        # Read straight from the field: a function's empty list would reach the caller as nothing.
+        [void]$cleanView.GetType().GetField('SpaceChanges', $flags).GetValue($cleanView).Add($cleanChange)
+        Assert-True ((Get-CleanForecast) -eq 'flat/counted/ok/') ('backups kept the same size by clean-up were still filling the drive: ' + (Get-CleanForecast))
+        Set-ObjectField $cleanChange 'FreedBytes' ([long](7 * $cleanGiB))
+        $halfGrowth = Invoke-Private $cleanSpace 'BuildWebSpaceState'
+        Assert-True ([string]$halfGrowth['forecast']['state'] -eq 'growing' -and [long]$halfGrowth['forecast']['weeklyBytes'] -eq [long](3.5 * $cleanGiB) -and [int]$halfGrowth['forecast']['weeksRounded'] -eq 14 -and [string]$halfGrowth['level'] -eq 'ok') ('the forecast did not take away half the growth: ' + $halfGrowth['forecast']['weeklyBytes'])
+        Set-ObjectField $cleanChange 'FreedBytes' ([long]-1)
+        Assert-True ((Get-CleanForecast) -eq 'learning/unmeasured/low/percent') ('a clean-up that freed space nobody measured gave a forecast: ' + (Get-CleanForecast))
+        Set-ObjectField $cleanView 'HistoryKnown' $false
+        Assert-True ((Get-CleanForecast) -eq 'unknown//low/percent') ('a record of clean-ups that could not be read gave a forecast: ' + (Get-CleanForecast))
+        Set-ObjectField $cleanView 'HistoryKnown' $true
+        Set-PrivateField $cleanSpace 'retentionCapabilitySupported' $false
+        Assert-True ((Get-CleanForecast) -eq 'growing//low/forecast') ('an engine without clean-up had its forecast changed: ' + (Get-CleanForecast))
+        Set-PrivateField $cleanSpace 'retentionCapabilitySupported' $true
+        [void]$engineProfileType.GetMethod('Activate', $flags).Invoke($null, [object[]]@($legacyProfile))
+        try {
+            Assert-True ((Get-CleanForecast) -eq 'unavailable//ok/') ('the legacy edition was given a clean-up forecast: ' + (Get-CleanForecast))
+        }
+        finally {
+            [void]$engineProfileType.GetMethod('Activate', $flags).Invoke($null, [object[]]@($rewindleProfile))
+        }
+
+        # Clean-up and how far back backups go ("412 backups, oldest ..."): a count made before a clean-up removed backups names
+        # backups that are gone, so it is left out until a later listing (the next backup, or the Restore list) counts them again,
+        # as it is while the clean-up records are not read. A backup service without clean-up keeps its count.
+        $rangeViewType = $assembly.GetType('ResticBackuper.Dashboard.BackupRangeView', $true)
+        $cleanPlan = [string]$configurationType.GetProperty('PlanId', $flags).GetValue($cleanConfig)
+        $cleanRepository = [string]$configurationType.GetProperty('RepositoryPath', $flags).GetValue($cleanConfig)
+        function New-CleanRange([string]$Source, [DateTime]$CountedUtc) {
+            return [Activator]::CreateInstance($rangeViewType, $constructorFlags, $null, [object[]]@($Source, $cleanPlan, $cleanRepository,
+                [long]412, $cleanStart.AddDays(-400), $cleanStart.AddDays(14), $CountedUtc), $null)
+        }
+        $countedBefore = $cleanStart.AddDays(14)
+        $cleanSnapshot.EngineBackupRange = New-CleanRange 'backup' $countedBefore
+        Set-PrivateField $cleanSpace 'webTelemetryError' ''
+        function Get-CleanRange {
+            $rangeArguments = New-Object object[] 1
+            $rangeArguments[0] = $cleanSnapshot
+            $built = Invoke-Private $cleanSpace 'BuildWebBackupRangeState' $rangeArguments
+            if ($null -eq $built) { return 'unknown' }
+            return [string]$built['count'] + '/' + [string]$built['source']
+        }
+        # The first state of a window that has just opened builds the count before the clean-up card too: an engine that advertises
+        # clean-up, with records not read yet, shows no count; an engine without clean-up shows its count as before.
+        $readSpace = $cleanSpace
+        [IO.File]::WriteAllText($cleanCapabilityFile, $repositoryCapabilities, $utf8)
+        try {
+            $cleanSpace = New-CleanSpaceDashboard
+            Assert-True ((Get-CleanRange) -eq 'unknown') ('a window that had just opened showed how far back backups go before the clean-up records were read: ' + (Get-CleanRange))
+            Assert-True ((Get-CleanForecast) -eq 'unknown//low/percent' -and (Test-CleanCapabilityRead $cleanSpace $true)) ('the first state gave a forecast before the clean-up records were read: ' + (Get-CleanForecast))
+        }
+        finally {
+            Remove-Item -LiteralPath $cleanCapabilityFile -Force
+        }
+        $cleanSpace = New-CleanSpaceDashboard
+        Assert-True ((Get-CleanRange) -eq '412/backup' -and (Test-CleanCapabilityRead $cleanSpace $false)) ('a window that had just opened with an engine without clean-up did not show how far back backups go: ' + (Get-CleanRange))
+        $cleanSpace = $readSpace
+        Set-ObjectField $cleanView 'BackupsRemovedUtc' $null
+        Set-PrivateField $cleanSpace 'retentionView' $null
+        Assert-True ((Get-CleanRange) -eq 'unknown') ('how far back backups go was shown before the clean-up records were read: ' + (Get-CleanRange))
+        Set-PrivateField $cleanSpace 'retentionView' $cleanView
+        Assert-True ((Get-CleanRange) -eq '412/backup') ('with no clean-up that removed backups the count was not shown: ' + (Get-CleanRange))
+        # A clean-up that removed backups before the count was made leaves the count as it is.
+        Set-ObjectField $cleanView 'BackupsRemovedUtc' ([Nullable[DateTime]]$countedBefore.AddHours(-1))
+        Assert-True ((Get-CleanRange) -eq '412/backup') ('a count made after the last clean-up that removed backups was not shown: ' + (Get-CleanRange))
+        Set-ObjectField $cleanView 'BackupsRemovedUtc' ([Nullable[DateTime]]$countedBefore.AddHours(6))
+        Assert-True ((Get-CleanRange) -eq 'unknown') ('a count made before a clean-up removed backups was still shown: ' + (Get-CleanRange))
+        # The Restore list counts them again after the clean-up: that count is shown.
+        $cleanSnapshot.ListedBackupRange = New-CleanRange 'restore' $countedBefore.AddHours(7)
+        Assert-True ((Get-CleanRange) -eq '412/restore') ('the count the Restore list made after the clean-up was not shown: ' + (Get-CleanRange))
+        $cleanSnapshot.ListedBackupRange = $null
+        Set-ObjectField $cleanView 'HistoryKnown' $false
+        Set-ObjectField $cleanView 'BackupsRemovedUtc' $null
+        Assert-True ((Get-CleanRange) -eq 'unknown') ('how far back backups go was shown while the clean-up records could not be read: ' + (Get-CleanRange))
+        Set-ObjectField $cleanView 'HistoryKnown' $true
+        Set-ObjectField $cleanView 'BackupsRemovedUtc' ([Nullable[DateTime]]$countedBefore.AddHours(6))
+        Set-PrivateField $cleanSpace 'retentionCapabilitySupported' $false
+        Assert-True ((Get-CleanRange) -eq '412/backup') ('an engine without clean-up lost how far back its backups go: ' + (Get-CleanRange))
+        Set-PrivateField $cleanSpace 'retentionCapabilitySupported' $true
+        [void]$engineProfileType.GetMethod('Activate', $flags).Invoke($null, [object[]]@($legacyProfile))
+        try {
+            Assert-True ((Get-CleanRange) -eq '412/backup') ('the legacy edition lost how far back its backups go: ' + (Get-CleanRange))
+            # A legacy window that has just opened reads no clean-up capability for either card.
+            $readSpace = $cleanSpace
+            $cleanSpace = New-CleanSpaceDashboard
+            Assert-True ((Get-CleanForecast) -eq 'unavailable//ok/' -and (Get-CleanRange) -eq '412/backup' -and -not [bool](Get-FieldValue $cleanSpace 'retentionCapabilityKnown')) ('a legacy window that had just opened read the clean-up capability: ' + (Get-CleanForecast) + ' ' + (Get-CleanRange))
+            $cleanSpace = $readSpace
+        }
+        finally {
+            [void]$engineProfileType.GetMethod('Activate', $flags).Invoke($null, [object[]]@($rewindleProfile))
+        }
+
+        # The launch itself, with a stand-in for Windows: the approval prompt is asked for (runas) with the manager from the install
+        # folder and only the arguments of the action, and a result is believed only when it matches the request, the exit code and
+        # a fresh read of the records.
+        $retentionInstall = [string](Invoke-Private $rewindleProfile 'InstallRoot')
+        New-Item -ItemType Directory -Path $retentionInstall -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $retentionInstall 'Manage-Retention.ps1'), "# stand-in: never run`n", $utf8)
+        [IO.File]::WriteAllText((Join-Path $retentionState 'retention-policy.json'), '{"schema":"ResticBackuper.RetentionPolicy.v1","schema_version":1,"enabled":false,"keep_daily":14,"keep_weekly":8,"keep_monthly":24}', $utf8)
+        $originalLaunch = $retentionLauncherType.GetField('Launch', $flags).GetValue($null)
+        $standIn = @{ Exit = 0; State = 'disabled'; Start = $null; Write = $true; Return = $true }
+        $standInFlags = $flags
+        $standInEncoding = $utf8
+        $standInShell = Join-Path $env:SystemRoot 'System32\cmd.exe'
+        $standInLaunch = {
+            param($start, $request)
+            $standIn.Start = $start
+            if (-not $standIn.Return) { return $null }
+            if ($standIn.Write) {
+                $read = { param($name) $request.GetType().GetField($name, $standInFlags).GetValue($request) }
+                $resultPath = [string](& $read 'ResultPath')
+                [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($resultPath))
+                $document = [ordered]@{
+                    schema_version = 1; request_nonce = (& $read 'Nonce'); request_digest = (& $read 'Digest'); request_user_sid = (& $read 'UserSid')
+                    action = (& $read 'Action'); expected_config_sha256 = (& $read 'ConfigHash'); plan_id = (& $read 'PlanId'); config_generation = (& $read 'ConfigGeneration')
+                    enabled = (& $read 'Enabled'); keep_daily = ''; keep_weekly = ''; keep_monthly = ''; expected_preview_sha256 = ''; expected_remove_set_sha256 = ''
+                    expected_remove_count = ''; confirm_earlier_changes = ''; ok = ($standIn.Exit -eq 0); state = $standIn.State; refusal_code = $null
+                }
+                [IO.File]::WriteAllText($resultPath, ($document | ConvertTo-Json -Compress), $standInEncoding)
+            }
+            return [Diagnostics.Process]::Start($standInShell, ('/d /c exit ' + $standIn.Exit))
+        }.GetNewClosure()
+        $retentionLauncherType.GetField('Launch', $flags).SetValue($null, [System.Management.Automation.LanguagePrimitives]::ConvertTo($standInLaunch, $retentionLaunchType))
+        try {
+            function Invoke-StandInLaunch {
+                $request = Invoke-Static $retentionLauncherType 'CreateRequest' @($rewindleProfile, 'configure', 'S-1-5-21-1-2-3-1001', ('a' * 64), '12345678-1234-4abc-8def-1234567890ab', [long]7)
+                Set-ObjectField $request 'Enabled' '0'
+                [void](Invoke-Static $retentionLauncherType 'Seal' @($rewindleProfile, $request))
+                return (Invoke-Static $retentionLauncherType 'Run' @($rewindleProfile, $request, $null, $null))
+            }
+            $launched = Invoke-StandInLaunch
+            Assert-True ([string](Get-ObjectField $launched 'Kind') -eq 'Finished' -and [string](Get-ObjectField $launched 'State') -eq 'disabled') ('a matching result of turning clean-up off was not believed: ' + (Get-ObjectField $launched 'Kind'))
+            $started = $standIn.Start
+            Assert-True ($started.Verb -eq 'runas' -and $started.UseShellExecute -and $started.FileName -like '*\WindowsPowerShell\v1.0\powershell.exe') 'the clean-up step was not started through the Windows approval prompt'
+            $managerFile = Join-Path $retentionInstall 'Manage-Retention.ps1'
+            Assert-True (($started.Arguments.Contains('-File ' + $managerFile + ' ') -or $started.Arguments.Contains('-File "' + $managerFile + '" ')) -and $started.Arguments -like '*-Action configure -Enabled 0 -ExpectedUserSid*' -and $started.Arguments -notlike '*-KeepDaily*' -and $started.Arguments -notlike '*-ExpectedRemoveCount*') ('the clean-up step got the wrong arguments: ' + $started.Arguments)
+            $standIn.Exit = 2
+            $launched = Invoke-StandInLaunch
+            Assert-True ([string](Get-ObjectField $launched 'Kind') -eq 'Unconfirmed') 'a result that disagrees with the exit code was believed'
+            $standIn.Exit = 0
+            $standIn.State = 'configured'
+            $launched = Invoke-StandInLaunch
+            Assert-True ([string](Get-ObjectField $launched 'Kind') -eq 'Unconfirmed') 'a result naming another outcome than the one asked for was believed'
+            $standIn.State = 'disabled'
+            [IO.File]::WriteAllText((Join-Path $retentionState 'retention-policy.json'), '{"schema":"ResticBackuper.RetentionPolicy.v1","schema_version":1,"enabled":true,"keep_daily":14,"keep_weekly":8,"keep_monthly":24}', $utf8)
+            $launched = Invoke-StandInLaunch
+            Assert-True ([string](Get-ObjectField $launched 'Kind') -eq 'Unconfirmed') 'turning clean-up off was believed while the setting on disk is still on'
+            $standIn.Write = $false
+            $launched = Invoke-StandInLaunch
+            Assert-True ([string](Get-ObjectField $launched 'Kind') -eq 'Unconfirmed') 'a step that left no result was shown as finished'
+            $standIn.Return = $false
+            $launched = Invoke-StandInLaunch
+            Assert-True ([string](Get-ObjectField $launched 'Kind') -eq 'Failed' -and [string](Get-ObjectField $launched 'Error') -eq 'Windows did not start the clean-up step.') 'a launch that started nothing was not reported'
+            Remove-Item -LiteralPath (Join-Path $retentionInstall 'Manage-Retention.ps1') -Force
+            $standIn.Return = $true
+            $standIn.Start = $null
+            $launched = Invoke-StandInLaunch
+            Assert-True ([string](Get-ObjectField $launched 'Kind') -eq 'Failed' -and $null -eq $standIn.Start -and [string](Get-ObjectField $launched 'Error') -like 'The clean-up step of the backup service is missing.*') 'a missing clean-up step was launched or not reported'
+        }
+        finally {
+            $retentionLauncherType.GetField('Launch', $flags).SetValue($null, $originalLaunch)
+        }
+    }
+    finally {
+        [void]$retentionFilesType.GetMethod('TrustTemporaryFolderForTesting', $flags).Invoke($null, [object[]]@($false))
+    }
 }
 finally {
     [void]$engineProfileType.GetMethod('UseFolderRootsForTesting', $flags).Invoke($null, [object[]]@([string]$null))
@@ -3034,4 +3508,4 @@ finally {
 }
 
 foreach ($note in $skipped) { Write-Output $note }
-Write-Output 'Regressions passed: snapshot scope reset, explicit whole-snapshot validation, observed-path enforcement, review invalidation, reload, retry routing, inline folder-read failures, launch guards, the restore folder looked at again before Review and Restore now and acted on only while that look is current and passes, honest cancellation, UNC/reparse/no-overwrite/overlap destination guards and their plain-language refusals, diagnostics redaction of object keys, of whole paths (either slash, any root) and of account IDs, capped run history that is not rewritten for an evicted baseline, no live samples written and the old file removed, readable run-details timelines from long and odd logs, the restore approval wait, one Windows approval per restore session (every listing and one restore, a new session only after one ended, closed with the flow and a changed plan, a declined approval, a pipe served by another process, oversized and foreign frames), no folder read on choosing a backup or restoring all of it, folder listings kept per snapshot and bounded, the session-or-per-step choice from the installed engine, the published reason a restore cannot start, Open and Copy on a restore result acting only on the folder the restore reported once it has finished, an unreadable schedule and the outcome of a schedule change, schedule summaries for every day and lenient schedule times, capped automatic web view reloads, missing-runtime detection, a configuration check that could not complete ending the read it followed, cut-short folder listings and the published path limit, history lists bound again only when a run differs, one not-responding notice per stuck web view, backup freshness across a change of the clocks and of the run times, a missed backup Windows catches up on after a sign-in or a wake, an off-site check that is overdue, the tray balloon for a backup starting once per run, the not-started note for an accepted backup request that started nothing, timers on a clock that setting the time does not move, the window hiding to the tray again after a cancelled sign-out, the bounded crash log and its redacted copy in a diagnostic bundle, the installed plan read without keeping its writer out (and still refused when cut short, not an object or too large) with an install root that follows Program Files, the backup-location window''s done/current/failed steps and refused folders, the recovery-readiness window''s explained actions, the folder picker''s cloud-only walk (bounded by entries and time, skipping excluded folders and links), OneDrive paths and wording, the free-space warning for a whole snapshot that will not fit (a warning and never an error), the history limit the page is told, the schedule, location and readiness dialogs sharing the page tokens and the schedule wording, a status that cannot be read for a moment, a missing state folder, the retired legacy cloud file, a run history that is never written over while it is unreadable, the tray hover text and first-close hint, backup alerts (the tray mark, a failing streak told in place of the run balloon, the Settings switch), the setup state the page is told, diagnostics that say what they left out and read a log cut inside a character, and the backup drive''s space (the size the engine records, the reserve, the forecast, the earlier edition without one, a running backup that keeps what the card said, and the Low space warning file).'
+Write-Output 'Regressions passed: snapshot scope reset, explicit whole-snapshot validation, observed-path enforcement, review invalidation, reload, retry routing, inline folder-read failures, launch guards, the restore folder looked at again before Review and Restore now and acted on only while that look is current and passes, honest cancellation, UNC/reparse/no-overwrite/overlap destination guards and their plain-language refusals, diagnostics redaction of object keys, of whole paths (either slash, any root) and of account IDs, capped run history that is not rewritten for an evicted baseline, no live samples written and the old file removed, readable run-details timelines from long and odd logs, the restore approval wait, one Windows approval per restore session (every listing and one restore, a new session only after one ended, closed with the flow and a changed plan, a declined approval, a pipe served by another process, oversized and foreign frames), no folder read on choosing a backup or restoring all of it, folder listings kept per snapshot and bounded, the session-or-per-step choice from the installed engine, the published reason a restore cannot start, Open and Copy on a restore result acting only on the folder the restore reported once it has finished, an unreadable schedule and the outcome of a schedule change, schedule summaries for every day and lenient schedule times, capped automatic web view reloads, missing-runtime detection, a configuration check that could not complete ending the read it followed, cut-short folder listings and the published path limit, history lists bound again only when a run differs, one not-responding notice per stuck web view, backup freshness across a change of the clocks and of the run times, a missed backup Windows catches up on after a sign-in or a wake, an off-site check that is overdue, the tray balloon for a backup starting once per run, the not-started note for an accepted backup request that started nothing, timers on a clock that setting the time does not move, the window hiding to the tray again after a cancelled sign-out, the bounded crash log and its redacted copy in a diagnostic bundle, the installed plan read without keeping its writer out (and still refused when cut short, not an object or too large) with an install root that follows Program Files, the backup-location window''s done/current/failed steps and refused folders, the recovery-readiness window''s explained actions, the folder picker''s cloud-only walk (bounded by entries and time, skipping excluded folders and links), OneDrive paths and wording, the free-space warning for a whole snapshot that will not fit (a warning and never an error), the history limit the page is told, the schedule, location and readiness dialogs sharing the page tokens and the schedule wording, a status that cannot be read for a moment, a missing state folder, the retired legacy cloud file, a run history that is never written over while it is unreadable, the tray hover text and first-close hint, backup alerts (the tray mark, a failing streak told in place of the run balloon, the Settings switch), the setup state the page is told, diagnostics that say what they left out and read a log cut inside a character, the backup drive''s space (the size the engine records, the reserve, the forecast, the earlier edition without one, a running backup that keeps what the card said, and the Low space warning file), and clean-up of old backups (nothing offered or read for the legacy edition, nothing else run while the list is open, protected actions waiting while a step runs, a removal bound to the list on disk with the count seen and both confirmations, each ending shown on the list, and a launch result believed only when it matches the request, the exit code and the records, the backup drive forecast net of the space a clean-up freed, and how far back backups go left out after a clean-up removed some until they are counted again, with neither given before the clean-up records are read, from a window''s first state on).'

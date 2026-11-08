@@ -102,6 +102,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File src\dashboard\tests\rest
 
 # PowerShell suites for the managers and helpers you touched, for example:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Test-ManageSources.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Test-ManageRetention.ps1 -SkipInstalledChecks
 
 # The installer's machine-readable backend (plan mode, progress feed): hermetic, installs nothing
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Test-InstallPlan.ps1
@@ -131,7 +132,9 @@ Notes:
 - CI (`.github/workflows/ci.yml`) compiles the Python sources, parses every
   `.ps1` file with the PowerShell parser, and runs the Python tests,
   `Test-ManageSources.ps1`, the release build, `Test-SetupHost.ps1`, the
-  dashboard regressions, `Test-ReleaseArtifact.ps1` and `Test-InstallPlan.ps1`.
+  dashboard regressions, the restore and clean-up manager suites
+  (`Test-ManageRestore.ps1`, `Test-ManageRetention.ps1`, as a standard user),
+  `Test-ReleaseArtifact.ps1` and `Test-InstallPlan.ps1`.
 - `tests\Test-InstallerContract.ps1` really installs and uninstalls Rewindle. It
   refuses to run anywhere but a GitHub-hosted runner (it checks
   `GITHUB_ACTIONS` and `RUNNER_ENVIRONMENT` and needs `-AllowSystemInstall`),
@@ -209,7 +212,13 @@ vulnerability) to discuss it first.
    and journal checks remain the final authority.
 
 Also: retention, `forget`, `prune`, repository deletion and state purging must
-never run automatically or be enabled by default.
+never run automatically or be enabled by default. Clean-up of old backups is
+off until the person turns it on, and even then removes only a list the
+person reviewed and confirmed after a verified backup, through
+`Manage-Retention.ps1` with its own UAC approval. Listing which backups would
+go (`forget --dry-run --no-lock`) also runs only through that manager, when
+the person turns clean-up on or chooses Check now; nothing in the scheduled
+backup task lists or removes backups.
 
 ## Commits and pull requests
 

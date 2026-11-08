@@ -130,6 +130,7 @@ an engine. Two profiles are built in:
 | Direct cloud proof | `ResticBackuperCloudVerification\evidence\latest-verification.json`, also bound to its evidence and asset manifest | `ResticPersonalBackupCloudVerification\latest-verification.json` |
 | Anomaly review | An acknowledgement; Google Drive upload is never paused | An approval that releases one generation for off-site promotion |
 | Restore approvals | One per restore session (advertised by `engine-capabilities.json`) | One per step |
+| Clean-up of old backups | Through `Manage-Retention.ps1` (advertised by `engine-capabilities.json`) | Not available: the card says so and nothing is read |
 | Dashboard folder | `%LOCALAPPDATA%\ResticBackuperDashboard` | `%LOCALAPPDATA%\ResticPersonalBackupDashboard` |
 | Version shown | The `VERSION` file the installer puts in the install root | Not recorded by that edition |
 
@@ -161,7 +162,7 @@ install root or in `System32`, started by fixed path.
 | --- | --- | --- |
 | `schtasks.exe /Query` | Read the installed backup task and its schedule. | As the user. Read-only, with a time limit and an output cap. |
 | `schtasks.exe /Run` | Ask Windows to start the engine's backup task. | After a UAC prompt, only for a task whose definition validates, is enabled and allows a manual start. Task Scheduler starts the task and its launcher; the dashboard never does. |
-| Windows PowerShell running `Manage-Sources.ps1`, `Manage-Schedule.ps1`, `Manage-Repository.ps1`, `Manage-Restore.ps1` or `Manage-Backup.ps1` from the install root | Change protected folders, the schedule or the repository location, browse and restore backups, cancel a run. | After a UAC prompt for each request. A request names the user's SID and carries a one-time nonce inside a request digest, and the result is accepted only from the protected results folder when it is bound to that exact request. |
+| Windows PowerShell running `Manage-Sources.ps1`, `Manage-Schedule.ps1`, `Manage-Repository.ps1`, `Manage-Restore.ps1`, `Manage-Retention.ps1` or `Manage-Backup.ps1` from the install root | Change protected folders, the schedule or the repository location, browse and restore backups, turn clean-up of old backups on or off, list old backups and remove a list the user confirmed, cancel a run. | After a UAC prompt for each request. A request names the user's SID and carries a one-time nonce inside a request digest, and the result is accepted only from the protected results folder when it is bound to that exact request. |
 | `Python\python.exe` running `recovery_health.py` from the install root | Inspect recovery readiness. | As the user, with no prompt. Read-only, 60 seconds at most, with an output cap. |
 | `Python\python.exe` running `credential_repair.py`, `stale_lock_repair.py`, `anomaly_review.py` or `key_rotation.py` | Repair the credential, clear stale locks, acknowledge a held change set, rotate keys. | After a UAC prompt. Each is bound to the plan, its generation, the plan file's SHA-256 and the user's SID (an anomaly review also to the exact run, snapshot and evidence). |
 | `explorer.exe` | Show a folder the user asked for, such as a finished restore or the licenses folder. | As the user. The host chooses the folder. |

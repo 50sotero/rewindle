@@ -268,6 +268,9 @@ foreach ($name in @(
     'Manage-Backup.ps1',
     'Manage-Repository.ps1',
     'Manage-Restore.ps1',
+    # Clean-up of old backups: started only by the dashboard, through UAC, when the person asks.
+    'Manage-Retention.ps1',
+    'retention.py',
     # Read by the dashboard (never written) to learn that Manage-Restore.ps1 serves restore approval sessions.
     'engine-capabilities.json',
     'backup-canary.txt',

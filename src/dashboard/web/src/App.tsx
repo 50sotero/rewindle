@@ -16,6 +16,8 @@ import ProtectionHealth, { phaseName } from '@/components/primitives/ProtectionH
 import FolderPickerModal from '@/components/primitives/FolderPickerModal';
 import RestoreFlowModal from '@/components/primitives/RestoreFlowModal';
 import RunDetailsModal from '@/components/primitives/RunDetailsModal';
+import RetentionCard from '@/components/primitives/RetentionCard';
+import { retentionBusyNote } from './retention';
 import { Button } from '@/components/atoms/Button';
 import { Shimmer } from '@/components/atoms/Shimmer';
 import { noticeHoldProps, useDashboard, type NoticeHold } from './useDashboard';
@@ -228,6 +230,8 @@ function busyNote(state: DashboardState, offline = false): string {
   if (state.preview) return 'The animation preview is running. Real backups and changes are paused.';
   // The page lost the host and every control is off. The banner at the top says so; this says it once for the controls, so they do not each repeat it.
   if (offline) return 'Waiting to reconnect to Rewindle. Backup controls are paused. Scheduled backups are not affected.';
+  const cleanup = retentionBusyNote(state.retention);
+  if (cleanup) return cleanup;
   if (state.status.active) return 'A backup is running. Schedule, location and folder changes unlock when it finishes.';
   if (state.recovery.repairNeeded) return 'Backups are paused until the backup location is repaired.';
   if (state.recovery.moveRunning) return 'Your backup location is being moved. Backups and changes wait until the move finishes.';
@@ -949,8 +953,11 @@ function SettingsPage({ state, send, stale = false }: { state: DashboardState; s
         </div> : <><p className="muted-copy">Next: {formatWhen(state.schedule.nextRunAt, usableLocale(state.locale), state.schedule.nextRun)}</p>{state.schedule.clockChange && <p className="muted-copy schedule-clock-change">{state.schedule.clockChange}</p>}<details className="inline-details"><summary>Run conditions</summary><p className="muted-copy">{state.schedule.detail}</p></details></>}
         <ScheduleNotice notice={state.schedule.notice} className="schedule-notice-slot" /></div><div className="setting-controls"><Action state={state} send={send} command="editSchedule" quiet={quiet} /></div></section>
       {state.alerts && <AlertsSetting alerts={state.alerts} send={send} />}
+      <RetentionCard state={state} send={send} quiet={quiet} />
     </div><div className="settings-notes">
-      <p className="muted-copy settings-note"><LockKeyhole size={12} aria-hidden="true" />Windows asks for your permission before the location or schedule changes.</p>
+      <p className="muted-copy settings-note"><LockKeyhole size={12} aria-hidden="true" />{state.retention && state.retention.mode !== 'unsupported'
+        ? 'Windows asks for your permission before the location, the schedule or clean-up changes, and before any backup is removed.'
+        : 'Windows asks for your permission before the location or schedule changes.'}</p>
       {/* Closing the window sends it to the tray (the host says so once, in a balloon, and never again). */}
       <p className="muted-copy settings-note"><Info size={12} aria-hidden="true" />Closing this window never stops a running backup. Rewindle keeps running in the notification area, where it shows your backup status, and scheduled backups run either way. To quit Rewindle, right-click its tray icon and choose Exit Rewindle.</p>
     </div></section>}

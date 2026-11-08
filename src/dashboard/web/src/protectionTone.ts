@@ -239,7 +239,9 @@ export function describeSpace(repository: SpaceRepository): SpaceView {
         : google ? `Your Google storage will be full in ${when} at this rate.` : `Full in ${when} at this rate.`;
       break;
     case 'flat': status = `Your backups haven’t grown lately, so they aren’t filling ${google ? 'your Google storage' : 'the drive'}.`; break;
-    case 'learning': status = `After a few more backups, Rewindle can tell when ${fills}.`; break;
+    case 'learning': status = forecast.cleanUp === 'unmeasured'
+      ? `Old backups were removed lately, so Rewindle needs up to 8 more weeks of backups to tell when ${fills}.`
+      : `After a few more backups, Rewindle can tell when ${fills}.`; break;
     case 'unavailable': status = `With this backup program, Rewindle can’t forecast when ${fills}.`; break;
   }
   return { ...quiet, usage, status, how: spaceHow(space) };
@@ -251,14 +253,18 @@ function spaceHow(space: NonNullable<SpaceRepository['space']>): string {
   if (state !== 'growing' && state !== 'flat') return '';
   const google = space.kind === 'googleDrive';
   const reserve = space.reserveBytes > 0 && space.reserveDisplay ? space.reserveDisplay : '';
-  const lately = state === 'growing' && space.forecast.weeklyDisplay ? `Lately that is about ${space.forecast.weeklyDisplay} a week.` : 'Lately they have added almost nothing.';
+  // With clean-up of old backups in those weeks, the rate is net: what the backups added less the space that removing old ones freed.
+  const counted = space.forecast.cleanUp === 'counted';
+  const lately = state === 'growing' && space.forecast.weeklyDisplay ? `Lately that is about ${space.forecast.weeklyDisplay} a week.`
+    : counted ? 'Lately removing old backups has freed as much space as they added, or more.' : 'Lately they have added almost nothing.';
   const others = google
     ? 'Google storage is shared with Gmail and Google Photos, so they can fill it sooner.'
     : 'It counts only your backups, so other files on the drive can fill it sooner.';
   const full = !reserve ? ''
     : google ? ` “Full” means less than ${reserve} of it free: below that Rewindle stops backing up.`
     : ` “Full” means less than ${reserve} free: below that Rewindle stops backing up, so Windows and your other programs keep some room.`;
-  return `Rewindle looks at what each backup added over the last 8 weeks, leaves out the single biggest one (such as a folder added once), and assumes backups keep running as often as they have. ${lately} ${others}${full}`;
+  const cleanedUp = counted ? ' takes away the space that removing old backups freed,' : '';
+  return `Rewindle looks at what each backup added over the last 8 weeks, leaves out the single biggest one (such as a folder added once),${cleanedUp} and assumes backups keep running as often as they have. ${lately} ${others}${full}`;
 }
 
 /**

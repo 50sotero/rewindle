@@ -5,5 +5,12 @@
     "protocol": "ResticBackuper.RestoreSession.v1",
     "request_domain": "ResticBackuper.RestoreRequest.v3",
     "manager": "Manage-Restore.ps1"
+  },
+  "retention": {
+    "manager": "Manage-Retention.ps1",
+    "request_domain": "ResticBackuper.RetentionRequest.v1",
+    "policy_schema": "ResticBackuper.RetentionPolicy.v1",
+    "preview_schema": "ResticBackuper.RetentionPreview.v1",
+    "history_schema": "ResticBackuper.RetentionHistory.v1"
   }
 }

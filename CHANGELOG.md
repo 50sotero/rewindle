@@ -33,6 +33,18 @@ labels. Releases before 0.2.0 were published under the name ResticBackuper.
   anything Rewindle can't read, show nothing rather than a zero. With the
   earlier personal edition of the backup service, the backups are counted the
   first time Restore lists them.
+- **Clean-up of old backups, off until you turn it on.** Settings has an Old
+  backups card: choose how many days, weeks and months to keep, see exactly
+  which backups would go and which stay, and confirm before anything is
+  removed. Windows asks for your permission each time. Nothing is removed
+  while the last backup didn't finish or needs a look, or while another
+  change is unfinished. It works for a backup location on a drive of this PC
+  (not yet for Google Drive), and installing, updating or reinstalling
+  Rewindle turns it off until you turn it on again. If a clean-up stops
+  part-way, it says what was removed and what is left to do. The backup drive
+  forecast takes away the space a clean-up frees, and how far back your
+  backups go is counted again after one. The earlier personal edition says
+  clean-up isn't available.
 
 ### Changed
 

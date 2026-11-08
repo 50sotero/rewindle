@@ -107,6 +107,7 @@ class DiagnosticRedactionTests(unittest.TestCase):
                 self.assertIn("status.json", names)
                 self.assertIn("latest-run-log-events.json", names)
                 self.assertIn("redaction-report.json", names)
+                self.assertIn("runtime-manifest.json", names)
                 payload = "\n".join(
                     archive.read(name).decode("utf-8") for name in names
                 )
@@ -133,6 +134,7 @@ class DiagnosticRedactionTests(unittest.TestCase):
                 "d" * 64,
                 "e" * 64,
                 "f" * 64,
+                "7" * 64,
             ):
                 self.assertNotIn(forbidden.casefold(), visible_payload.casefold())
             self.assertNotRegex(visible_payload, re.compile(r"[A-Za-z]:\\\\"))

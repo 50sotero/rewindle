@@ -36,6 +36,7 @@ ELEVATED = {
     "src/Manage-Backup.ps1": "the dashboard, through UAC",
     "src/Manage-Repository.ps1": "the dashboard, through UAC",
     "src/Manage-Restore.ps1": "the dashboard, through UAC",
+    "src/Manage-Retention.ps1": "the dashboard, through UAC",
     "src/Manage-Schedule.ps1": "the dashboard, through UAC",
     "src/Manage-Sources.ps1": "the dashboard, through UAC",
     "src/install_google_drive_sync_task.ps1": "an administrator (docs/google-drive-direct-verification.md)",
