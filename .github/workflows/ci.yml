@@ -176,7 +176,7 @@ jobs:
       # generates for WSL links, also with --use-fs-snapshot (as installed backups run; this runner is elevated). With the
       # variable set, a missing restic.exe, a WSL special file Windows refuses to create or a VSS run that cannot happen
       # fails the step instead of skipping. It comes last, so a failure here hides no other check, and it runs whenever the
-      # release was built, so a failed check above does not hide this one.
+      # release was built, so a failed check after the build does not hide this one.
       - name: Check what the pinned Restic leaves out
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: pwsh
