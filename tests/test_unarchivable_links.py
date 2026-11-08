@@ -32,8 +32,8 @@ sys.path.insert(0, str(SOURCE))
 EXCLUDES = SOURCE / "excludes.txt"
 RESTIC = PROJECT / "build" / "build-output" / "ResticBackuper" / "payload" / "restic.exe"
 # Set by CI's step after the release build: there, a missing pinned restic.exe,
-# or a run that cannot test --use-fs-snapshot (as installed backups run), fails
-# instead of skipping.
+# a WSL special file Windows refuses to create, or a run that cannot test
+# --use-fs-snapshot (as installed backups run) fails instead of skipping.
 REQUIRE_PINNED_RESTIC = os.environ.get("REWINDLE_REQUIRE_PINNED_RESTIC") == "1"
 
 import backup  # noqa: E402
@@ -689,11 +689,11 @@ class ReplacedLinkTests(unittest.TestCase):
             # A line matches ignoring case, and Windows reads "pkg." as "pkg".
             (folder / "CASE").write_text("data\n", encoding="ascii")
             pkg = extended(str(folder) + "\\pkg.")
-            with open(pkg, "w", encoding="ascii", newline="\n") as handle:
-                handle.write("data\n")
-            # From here on, "pkg." must be removed as written: the temporary
-            # folder's own clean-up cannot remove a name ending in a dot.
+            # "pkg." must be removed as written: the temporary folder's own
+            # clean-up cannot remove a name ending in a dot.
             try:
+                with open(pkg, "w", encoding="ascii", newline="\n") as handle:
+                    handle.write("data\n")
                 paths = [
                     str(folder / name)
                     for name in ("file", "gone", "folder", "case", "pkg", "no folder\\link")
@@ -714,7 +714,8 @@ class ReplacedLinkTests(unittest.TestCase):
                 )
                 self.assertEqual([], restic_common.unarchivable_links_replaced([]))
             finally:
-                os.remove(pkg)
+                if os.path.lexists(pkg):
+                    os.remove(pkg)
 
 
 @unittest.skipUnless(
