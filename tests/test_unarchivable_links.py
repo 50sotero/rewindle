@@ -691,21 +691,23 @@ class ReplacedLinkTests(unittest.TestCase):
             pkg = extended(str(folder) + "\\pkg.")
             with open(pkg, "w", encoding="ascii", newline="\n") as handle:
                 handle.write("data\n")
-            paths = [
-                str(folder / name)
-                for name in ("file", "gone", "folder", "case", "pkg", "no folder\\link")
-            ]
+            # From here on, "pkg." must be removed as written: the temporary
+            # folder's own clean-up cannot remove a name ending in a dot.
             try:
-                make_wsl_special_file(
-                    str(folder / "still a link"),
-                    restic_common.IO_REPARSE_TAG_LX_SYMLINK,
-                    struct.pack("<I", 2) + b"file",
-                )
-            except OSError:
-                pass  # The real-link test below says why; the rest still applies.
-            else:
-                paths.append(str(folder / "still a link"))
-            try:
+                paths = [
+                    str(folder / name)
+                    for name in ("file", "gone", "folder", "case", "pkg", "no folder\\link")
+                ]
+                try:
+                    make_wsl_special_file(
+                        str(folder / "still a link"),
+                        restic_common.IO_REPARSE_TAG_LX_SYMLINK,
+                        struct.pack("<I", 2) + b"file",
+                    )
+                except OSError:
+                    pass  # The real-link test below says why; the rest still applies.
+                else:
+                    paths.append(str(folder / "still a link"))
                 self.assertEqual(
                     [str(folder / name) for name in ("file", "folder", "case", "pkg")],
                     restic_common.unarchivable_links_replaced(paths),
@@ -901,7 +903,10 @@ class PinnedResticUnarchivableTests(unittest.TestCase):
                 )
                 make_wsl_special_file(str(source / "repo" / "socket"), IO_REPARSE_TAG_AF_UNIX)
             except OSError as error:
-                self.skipTest(f"Windows refused to create a WSL special file here: {error}")
+                reason = f"Windows refused to create a WSL special file here: {error}"
+                if REQUIRE_PINNED_RESTIC:
+                    self.fail(reason)
+                self.skipTest(reason)
 
             # The real walk, through the real preflight, finds both by their tag.
             configured = str(source)
