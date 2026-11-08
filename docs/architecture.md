@@ -222,20 +222,32 @@ to `unarchivable-excludes.txt` in the state folder and passes it as a second
 as configured (so a short 8.3 name stays the one Restic walks), then the path
 below it, with what Restic reads specially escaped: `$` as `$$`, and `[`, `*`,
 `?` and white space at the very end each as a one-character class. It matches
-that one path and nothing else. Junctions, Windows symbolic links, WSL's
-AF_UNIX sockets (which Restic stores) and every other tag stay with Restic.
+that one path and nothing else. Junctions and Windows symbolic links (which
+Restic stores), WSL's AF_UNIX sockets (which Restic skips without an error) and
+every other tag stay with Restic.
 
 An entry is left in, so Restic handles it as before and a failure stays
 visible, when a line could match something else or not match it at all: another
 name in its folder, or in a folder above it, is the same to Restic (other letter
-case, or the same with dots or spaces at the end); a name on its path has a
-control character or is not valid Unicode; or its name ends in a dot or a
-space. Restic looks each item up by its full Windows path, and Windows drops
-those dots and spaces, so Restic never sees such an item under its own name
-(and does not fail on it either). With more than 1,000 entries across all
-sources none is left out, because Restic checks every file against every line.
-With none, the file is deleted and the command is exactly as before.
-`status.json` records what was left out and what was kept in, and why
+case, or the same with dots or spaces at the end); or a name on its path has a
+control character, is not valid Unicode, or ends in a dot or a space. Restic
+looks each item up by its full Windows path, and Windows drops those dots and
+spaces, so Restic never sees such an item under its own name (and does not fail
+on it either). An entry is also left in when its line would be longer than
+60,000 bytes: Restic refuses an exclusion file with a line of 64 KiB or more,
+and with it the whole run. With more than 1,000 entries across all sources none
+is left out, because Restic checks every file against every line. With none,
+the file is deleted (if something holds it open, it stays until the next run,
+since it is not passed on) and the command is exactly as before.
+
+Restic reaches each path a while after the walk: once its VSS snapshot is
+taken, or, without one, whenever its own walk gets there. If WSL put a regular
+file or folder at a left-out path in the meantime (a checkout, say), the line
+would leave that out too. So once Restic has finished with exit 0, the run
+lists the folder of each left-out path again, and if an entry Restic would match
+with a line no longer has one of the four tags, the run ends as incomplete
+(`partial`), just as Restic's own exit 3 does. A path that is simply gone does
+not count. `status.json` records what was left out and what was kept in, and why
 (`unarchivable_links`); the change-anomaly comparison still hashes only the
 installed list. The dry run, which Rewindle itself never starts, is unchanged.
 

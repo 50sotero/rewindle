@@ -26,6 +26,9 @@ SOURCE = PROJECT / "src"
 sys.path.insert(0, str(SOURCE))
 EXCLUDES = SOURCE / "excludes.txt"
 RESTIC = PROJECT / "build" / "build-output" / "ResticBackuper" / "payload" / "restic.exe"
+# Set by CI's step after the release build, where a missing pinned restic.exe
+# fails instead of skipping.
+REQUIRE_PINNED_RESTIC = os.environ.get("REWINDLE_REQUIRE_PINNED_RESTIC") == "1"
 
 import credential_repair  # noqa: E402
 import restic_common  # noqa: E402
@@ -282,13 +285,21 @@ def pinned_restic_present() -> bool:
 
 
 @unittest.skipUnless(
-    os.name == "nt" and pinned_restic_present(),
+    os.name == "nt" and (pinned_restic_present() or REQUIRE_PINNED_RESTIC),
     "needs the release build's pinned restic.exe (run build\\Build-Release.ps1)",
 )
 class PinnedResticExclusionTests(unittest.TestCase):
     """The same files, through the pinned Restic in a throwaway backup."""
 
     maxDiff = None
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not pinned_restic_present():
+            raise AssertionError(
+                f"REWINDLE_REQUIRE_PINNED_RESTIC is set, but {RESTIC} is missing "
+                "or is not the pinned release"
+            )
 
     def test_pinned_restic_keeps_personal_folders_and_leaves_out_developer_output(self) -> None:
         tagged_cache = ("Projects/tool-cache/CACHEDIR.TAG", "Projects/tool-cache/blob.bin")

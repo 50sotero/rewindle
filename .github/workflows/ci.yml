@@ -80,6 +80,16 @@ jobs:
         shell: pwsh
         run: .\build\Build-Release.ps1
 
+      # The unit-test step above runs before the build, so it skips the checks that need the pinned restic.exe. Run them
+      # here against the release just built: what it leaves out with the shipped exclusion list and with the file each
+      # backup generates for WSL links, also with --use-fs-snapshot (as installed backups run; this runner is elevated).
+      # With the variable set, a missing restic.exe or a VSS run that cannot happen fails the step instead of skipping.
+      - name: Check what the pinned Restic leaves out
+        shell: pwsh
+        env:
+          REWINDLE_REQUIRE_PINNED_RESTIC: "1"
+        run: python -m unittest -v tests.test_unarchivable_links tests.test_exclusions
+
       # Compiles the setup program's logic (installer\setup, without its window) with the .NET Framework compiler and checks the
       # installer contract, the progress-file reader, ZIP unpacking, folder measurement, plan mode (against a stub script), the
       # install flow (against a fake launcher) and the message bridge's validation. It never starts the setup program or an installer.

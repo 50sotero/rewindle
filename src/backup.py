@@ -43,6 +43,7 @@ from restic_common import (
     sha256_file,
     snapshot_plan_identity,
     stream_command,
+    unarchivable_links_replaced,
     utc_now,
     validate_and_record_plan_state,
     validate_repository_storage_readiness,
@@ -75,6 +76,13 @@ MAX_DATA_CHECK_STATE_BYTES = 64 * 1024
 # change-anomaly comparison still hashes only the installed list.
 UNARCHIVABLE_EXCLUDES_NAME = "unarchivable-excludes.txt"
 MAX_UNARCHIVABLE_SAMPLES = 20
+# The longest sample path status.json and the run log keep: its start (the
+# source) and its end (the name), with an ellipsis between them.
+MAX_UNARCHIVABLE_SAMPLE_CHARACTERS = 1000
+# The longest exclusion line generated, in UTF-8 bytes. Restic reads exclusion
+# files with Go's bufio.Scanner, which refuses a line of 64 KiB or more, and
+# then fails the whole run; a longer line is not written (the entry is kept in).
+MAX_UNARCHIVABLE_LINE_BYTES = 60_000
 # What Go's strings.TrimSpace removes from the end of each line Restic reads
 # from an exclusion file: every character unicode.IsSpace accepts.
 RESTIC_TRIMMED_SPACE = frozenset(
@@ -164,14 +172,20 @@ def _comparable_path(path: str) -> str:
 
 def _display_text(text: str) -> str:
     # A name that is not valid Unicode cannot be written to status.json as UTF-8;
-    # Restic, too, shows U+FFFD in its place.
-    return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+    # Restic, too, shows U+FFFD in its place. A path can be over 32,000
+    # characters long, so a sample keeps its start and its end.
+    text = text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+    if len(text) > MAX_UNARCHIVABLE_SAMPLE_CHARACTERS:
+        head = MAX_UNARCHIVABLE_SAMPLE_CHARACTERS // 4
+        tail = MAX_UNARCHIVABLE_SAMPLE_CHARACTERS - head - 1
+        text = text[:head] + "\u2026" + text[-tail:]
+    return text
 
 
 def unarchivable_exclusions(
     config: dict[str, Any], found: Any
-) -> tuple[list[str], dict[str, Any]]:
-    """The exclusion lines for the WSL links and special files a run leaves out, and its record.
+) -> tuple[list[str], dict[str, Any], list[str]]:
+    """The exclusion lines for the WSL links and special files a run leaves out, its record, and their paths.
 
     ``found`` is preflight_sources' "unarchivable_links". Each line is the source
     exactly as configured and handed to Restic, then the path below it with "/"
@@ -181,7 +195,10 @@ def unarchivable_exclusions(
     So is a last name ending in a space or a dot: Restic matches each item by its
     full Windows path, which drops them, so no line could name it exactly (the
     source walk keeps such names in, as "trailing_dot_or_space").
-    The record goes to status.json as "unarchivable_links".
+    A line longer than MAX_UNARCHIVABLE_LINE_BYTES is not written: that entry is
+    kept in, as "too_long". The record goes to status.json as
+    "unarchivable_links"; the paths (in Windows form, one for each line) are
+    for unarchivable_links_replaced after Restic has run.
     """
     record: dict[str, Any] = {
         "count": 0,
@@ -190,6 +207,17 @@ def unarchivable_exclusions(
         "not_left_out": {"count": 0, "reasons": {}, "samples": []},
     }
     lines: list[str] = []
+    left_out: list[str] = []
+    kept_in = record["not_left_out"]
+
+    def keep_in(path: str, tag: str, reason: str) -> None:
+        kept_in["count"] += 1
+        kept_in["reasons"][reason] = kept_in["reasons"].get(reason, 0) + 1
+        if len(kept_in["samples"]) < MAX_UNARCHIVABLE_SAMPLES:
+            kept_in["samples"].append(
+                {"path": _display_text(path), "tag": tag, "reason": reason}
+            )
+
     sources = [str(source) for source in config["sources"]]
     canary = _comparable_path(str(config["canary_file"]))
     for item in found or ():
@@ -233,29 +261,33 @@ def unarchivable_exclusions(
                     "a WSL link to leave out is not strictly inside its source, "
                     f"or is the restore test file: {display!r}"
                 )
-            lines.append(
-                restic_literal_exclude(base.replace("\\", "/") + "/" + "/".join(parts))
+            line = restic_literal_exclude(
+                base.replace("\\", "/") + "/" + "/".join(parts)
             )
+            if len(line.encode("utf-8", "surrogatepass")) > MAX_UNARCHIVABLE_LINE_BYTES:
+                keep_in(display, tag, "too_long")
+                continue
+            lines.append(line)
+            left_out.append(display)
             record["count"] += 1
             record["tags"][tag] += 1
             if len(record["samples"]) < MAX_UNARCHIVABLE_SAMPLES:
                 record["samples"].append(_display_text(display))
         not_left_out = item["not_left_out"]
-        record["not_left_out"]["count"] += int(not_left_out["count"])
-        reasons = record["not_left_out"]["reasons"]
+        kept_in["count"] += int(not_left_out["count"])
         for reason, count in not_left_out["reasons"].items():
-            reasons[reason] = reasons.get(reason, 0) + int(count)
+            kept_in["reasons"][reason] = kept_in["reasons"].get(reason, 0) + int(count)
         for sample in not_left_out["samples"]:
-            if len(record["not_left_out"]["samples"]) >= MAX_UNARCHIVABLE_SAMPLES:
+            if len(kept_in["samples"]) >= MAX_UNARCHIVABLE_SAMPLES:
                 break
-            record["not_left_out"]["samples"].append(
+            kept_in["samples"].append(
                 {
                     "path": _display_text(base + "\\" + sample["relative_path"]),
                     "tag": sample["tag"],
                     "reason": sample["reason"],
                 }
             )
-    return lines, record
+    return lines, record, left_out
 
 
 # The most backups the inventory record counts; a listing larger than this is
@@ -947,15 +979,32 @@ def _run_locked(
             # this run by exact path; without them nothing changes. A stale file
             # from an earlier run is removed, never passed on.
             unarchivable_excludes = state_directory / UNARCHIVABLE_EXCLUDES_NAME
-            unarchivable_lines, status["unarchivable_links"] = unarchivable_exclusions(
-                config, found_links
-            )
+            (
+                unarchivable_lines,
+                status["unarchivable_links"],
+                unarchivable_paths,
+            ) = unarchivable_exclusions(config, found_links)
             if unarchivable_lines:
                 atomic_write_text(
                     unarchivable_excludes, "\n".join(unarchivable_lines) + "\n"
                 )
             else:
-                unarchivable_excludes.unlink(missing_ok=True)
+                try:
+                    unarchivable_excludes.unlink(missing_ok=True)
+                except OSError as error:
+                    # It is not passed to Restic, so a file that something
+                    # holds open changes nothing; the next run tries again.
+                    log_handle.write(
+                        json.dumps(
+                            {
+                                "wrapper_event": "unarchivable_excludes_not_removed",
+                                "run_id": run_id,
+                                "utc": utc_now(),
+                                "error": str(error),
+                            }
+                        )
+                        + "\n"
+                    )
             atomic_write_json(status_path, status)
             if status["unarchivable_links"]["count"]:
                 log_handle.write(
@@ -1121,6 +1170,34 @@ def _run_locked(
             if backup_return_code != 0:
                 status["exit_code"] = backup_return_code
                 raise RuntimeError(f"Restic backup failed with exit {backup_return_code}")
+            # If WSL put a real file or folder where a left-out link was before
+            # Restic got there, this backup left it out: it is not complete.
+            replaced = unarchivable_links_replaced(unarchivable_paths)
+            if replaced:
+                status["unarchivable_links"]["replaced"] = {
+                    "count": len(replaced),
+                    "samples": [
+                        _display_text(path)
+                        for path in replaced[:MAX_UNARCHIVABLE_SAMPLES]
+                    ],
+                }
+                log_handle.write(
+                    json.dumps(
+                        {
+                            "wrapper_event": "unarchivable_links_replaced",
+                            "run_id": run_id,
+                            "utc": utc_now(),
+                            **status["unarchivable_links"]["replaced"],
+                        }
+                    )
+                    + "\n"
+                )
+                status["state"] = "partial"
+                status["exit_code"] = 3
+                raise RuntimeError(
+                    "a WSL link left out of this backup was replaced by a file or "
+                    "folder while it ran, so the backup may be missing it"
+                )
             cancellation_checkpoint(cancellation, on_cancellation)
 
             status["state"] = "verifying_snapshot"

@@ -859,10 +859,18 @@ class UnarchivableLinkScanTests(unittest.TestCase):
                     ("solo ", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK),
                     ("...", REPARSE_FILE, IO_REPARSE_TAG_LX_FIFO),
                     ("dir ", FILE_ATTRIBUTE_DIRECTORY, 0),
+                    # The same for a name that is not all ASCII.
+                    ("caf\xe9", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK),
+                    ("caf\xe9.", FILE_ATTRIBUTE_ARCHIVE, 0),
                     ("ok", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK),
                 ],
-                # Below a twin folder, a line would also match the same path in the other one.
-                "Build": [("current", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK)],
+                # Below a twin folder, at any depth, a line would also match the
+                # same path in the other one.
+                "Build": [
+                    ("current", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK),
+                    ("sub", FILE_ATTRIBUTE_DIRECTORY, 0),
+                ],
+                "Build\\sub": [("deeper", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK)],
                 "build": [("plain.txt", FILE_ATTRIBUTE_ARCHIVE, 0)],
                 "bad\x01folder": [("inside", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK)],
                 "dir ": [("inside", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK)],
@@ -870,10 +878,10 @@ class UnarchivableLinkScanTests(unittest.TestCase):
         )
         links = result["unarchivable_links"]
         self.assertEqual([{"relative_path": "ok", "tag": "lx_symlink"}], links["candidates"])
-        self.assertEqual(12, links["found"])
+        self.assertEqual(14, links["found"])
         self.assertEqual(
             {
-                "case_twin": 4,
+                "case_twin": 6,
                 "control_character": 3,
                 "invalid_unicode": 1,
                 "trailing_dot_or_space": 3,
@@ -885,7 +893,9 @@ class UnarchivableLinkScanTests(unittest.TestCase):
                 ("Link", "case_twin"),
                 ("\u0130nfo", "case_twin"),
                 ("Build\\current", "case_twin"),
+                ("Build\\sub\\deeper", "case_twin"),
                 ("pkg", "case_twin"),
+                ("caf\xe9", "case_twin"),
                 ("line\nbreak", "control_character"),
                 ("tab\t", "control_character"),
                 ("bad\x01folder\\inside", "control_character"),

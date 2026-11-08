@@ -87,8 +87,9 @@ SOURCE_PREFLIGHT_SAMPLE_LIMIT = 20
 # The reparse tags of the special files WSL keeps on an NTFS drive: its symbolic
 # links, FIFOs and character and block devices. Go reports each as an irregular
 # file, and the pinned Restic cannot store one: it fails the file, and the run
-# ends as incomplete. Junctions, Windows symbolic links and WSL's AF_UNIX sockets
-# (which Restic does store) are not among them, and neither is any other tag.
+# ends as incomplete. Junctions and Windows symbolic links (which Restic stores),
+# WSL's AF_UNIX sockets (which Go reports as sockets, and Restic skips without an
+# error) and every other tag are not among them.
 IO_REPARSE_TAG_LX_SYMLINK = 0xA000001D
 IO_REPARSE_TAG_LX_FIFO = 0x80000024
 IO_REPARSE_TAG_LX_CHR = 0x80000025
@@ -947,6 +948,53 @@ def _unarchivable_name_problem(name: str, case_twin: bool) -> str | None:
         # (or, for a folder, everything in it).
         return "case_twin"
     return None
+
+
+def unarchivable_links_replaced(paths: list[str]) -> list[str]:
+    """The left-out paths that no longer name only WSL special files.
+
+    A run's exclusion lines come from the source walk, and Restic reaches each
+    path later. A line matches its path ignoring case, and everything below it,
+    so if WSL has meanwhile put a regular file or folder there (or next to it,
+    under a name Restic takes for the same one), that run left it out. Each
+    path's folder is listed again, once per folder, and a path is returned when
+    an entry Restic would match with it (see _restic_case_keys) no longer
+    carries one of the four tags, or when the folder or the entry cannot be
+    read. A path that is gone is not returned: nothing was left out in its place.
+    """
+    names_by_folder: dict[str, list[tuple[str, str]]] = {}
+    for path in paths:
+        folder, name = ntpath.split(path)
+        names_by_folder.setdefault(folder, []).append((path, name))
+    replaced: set[str] = set()
+    for folder, items in names_by_folder.items():
+        paths_by_key: dict[str, list[str]] = {}
+        for path, name in items:
+            for key in _restic_case_keys(name):
+                paths_by_key.setdefault(key, []).append(path)
+        try:
+            with os.scandir(_extended_windows_path(folder)) as entries:
+                for entry in entries:
+                    matched = {
+                        path
+                        for key in _restic_case_keys(entry.name)
+                        for path in paths_by_key.get(key, ())
+                    }
+                    if not matched:
+                        continue
+                    try:
+                        entry_stat = entry.stat(follow_symlinks=False)
+                    except OSError as error:
+                        if not _path_disappeared_during_scan(error):
+                            replaced.update(matched)
+                        continue
+                    attributes = getattr(entry_stat, "st_file_attributes", None)
+                    if _unarchivable_reparse_tag(entry_stat, attributes) is None:
+                        replaced.update(matched)
+        except OSError as error:
+            if not _path_disappeared_during_scan(error):
+                replaced.update(path for path, _name in items)
+    return [path for path in paths if path in replaced]
 
 
 def scan_cloud_placeholders(

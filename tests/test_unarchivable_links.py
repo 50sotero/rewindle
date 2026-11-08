@@ -31,6 +31,10 @@ SOURCE = PROJECT / "src"
 sys.path.insert(0, str(SOURCE))
 EXCLUDES = SOURCE / "excludes.txt"
 RESTIC = PROJECT / "build" / "build-output" / "ResticBackuper" / "payload" / "restic.exe"
+# Set by CI's step after the release build: there, a missing pinned restic.exe,
+# or a run that cannot test --use-fs-snapshot (as installed backups run), fails
+# instead of skipping.
+REQUIRE_PINNED_RESTIC = os.environ.get("REWINDLE_REQUIRE_PINNED_RESTIC") == "1"
 
 import backup  # noqa: E402
 import restic_common  # noqa: E402
@@ -42,6 +46,7 @@ GENERATION_TAG = "restic-backuper-generation:1"
 REPOSITORY_ID = "f" * 64
 NO_TAGS = {"lx_symlink": 0, "lx_fifo": 0, "lx_chr": 0, "lx_blk": 0}
 NOTHING_KEPT_IN = {"count": 0, "reasons": {}, "samples": []}
+IO_REPARSE_TAG_AF_UNIX = 0x80000023
 
 
 def found_in(configured: str, *relative_paths: str, tag: str = "lx_symlink") -> dict[str, object]:
@@ -81,7 +86,7 @@ class ExclusionLineTests(unittest.TestCase):
             "sources": [r"E:\PROJEC~1\App", "D:\\"],
             "canary_file": r"E:\PROJEC~1\App\backup-canary.txt",
         }
-        lines, record = backup.unarchivable_exclusions(
+        lines, record, paths = backup.unarchivable_exclusions(
             config,
             [
                 found_in(
@@ -111,6 +116,66 @@ class ExclusionLineTests(unittest.TestCase):
             },
             record,
         )
+        # The paths the run checks again once Restic has finished.
+        self.assertEqual(record["samples"], paths)
+
+    @unittest.skipUnless(os.name == "nt", "short (8.3) names are a Windows feature")
+    def test_a_source_given_by_its_short_name_keeps_it(self) -> None:
+        # As on GitHub's runner, whose TEMP is a short name: a line must use the
+        # name Restic is given, not the long name the folder also has.
+        with tempfile.TemporaryDirectory(prefix="unarchivable-short-") as root_text:
+            folder = Path(root_text) / "Long Source Folder Name"
+            folder.mkdir()
+            short = short_windows_path(str(folder))
+            if short is None or short.casefold() == (
+                restic_common.canonical_windows_path(folder).casefold()
+            ):
+                self.skipTest("this drive does not make short (8.3) names")
+            config = {"sources": [short], "canary_file": short + "\\canary.txt"}
+            lines, _record, paths = backup.unarchivable_exclusions(
+                config, [found_in(short, "wsl\\link")]
+            )
+            self.assertEqual([short.replace("\\", "/") + "/wsl/link"], lines)
+            self.assertEqual([short + "\\wsl\\link"], paths)
+
+    def test_a_line_restic_could_not_read_is_kept_in(self) -> None:
+        # Restic refuses an exclusion file with a line of 64 KiB or more, and then
+        # fails the whole run. The limit counts UTF-8 bytes after escaping, where
+        # "[" takes three.
+        config = {"sources": [r"C:\Data"], "canary_file": r"C:\Data\canary.txt"}
+        prefix = "C:/Data/"
+        fits = "a" * (backup.MAX_UNARCHIVABLE_LINE_BYTES - len(prefix))
+        # 20,099 characters, whose line takes 60,107 bytes.
+        brackets = "\\".join(["[" * 200] * 100)
+        lines, record, paths = backup.unarchivable_exclusions(
+            config,
+            [found_in(r"C:\Data", fits, fits + "b", brackets, tag="lx_fifo")],
+        )
+        self.assertEqual([prefix + fits], lines)
+        self.assertEqual(backup.MAX_UNARCHIVABLE_LINE_BYTES, len(lines[0].encode("utf-8")))
+        self.assertEqual(["C:\\Data\\" + fits], paths)
+        self.assertEqual(1, record["count"])
+        self.assertEqual({**NO_TAGS, "lx_fifo": 1}, record["tags"])
+        kept = record["not_left_out"]
+        self.assertEqual(2, kept["count"])
+        self.assertEqual({"too_long": 2}, kept["reasons"])
+        self.assertEqual(
+            [("lx_fifo", "too_long")] * 2,
+            [(sample["tag"], sample["reason"]) for sample in kept["samples"]],
+        )
+        # A sample keeps the start and the end of a long path, so status.json
+        # stays small.
+        limit = backup.MAX_UNARCHIVABLE_SAMPLE_CHARACTERS
+        for sample, start, end in (
+            (record["samples"][0], "C:\\Data\\aaa", "aaa"),
+            (kept["samples"][0]["path"], "C:\\Data\\aaa", "aab"),
+            (kept["samples"][1]["path"], "C:\\Data\\[[[", "[\\" + "[" * 200),
+        ):
+            self.assertEqual(limit, len(sample))
+            self.assertTrue(sample.startswith(start), sample[:20])
+            self.assertTrue(sample.endswith(end), sample[-20:])
+            self.assertEqual(1, sample.count("\u2026"))
+        self.assertLess(len(json.dumps(record, ensure_ascii=False)), 4 * limit)
 
     def test_nothing_found_gives_no_lines_and_an_empty_record(self) -> None:
         config = {"sources": [r"C:\Data"], "canary_file": r"C:\Data\canary.txt"}
@@ -125,6 +190,7 @@ class ExclusionLineTests(unittest.TestCase):
                             "tags": NO_TAGS,
                             "not_left_out": NOTHING_KEPT_IN,
                         },
+                        [],
                     ),
                     backup.unarchivable_exclusions(config, found),
                 )
@@ -178,11 +244,12 @@ class ExclusionLineTests(unittest.TestCase):
                 },
             }
 
-        lines, record = backup.unarchivable_exclusions(
+        lines, record, paths = backup.unarchivable_exclusions(
             config,
             [kept_in(r"C:\Data", 15, "case_twin"), kept_in(r"E:\Projects", 30, "over_limit")],
         )
         self.assertEqual([], lines)
+        self.assertEqual([], paths)
         self.assertEqual(0, record["count"])
         kept = record["not_left_out"]
         self.assertEqual(45, kept["count"])
@@ -426,6 +493,65 @@ class BackupCommandTests(unittest.TestCase):
                         ],
                     )
 
+    def test_a_stale_file_that_cannot_be_removed_does_not_stop_the_run(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unarchivable-held-") as root_text:
+            run = BackupRun(Path(root_text))
+            run.generated.write_text(
+                "C:/Users/you/left over\n", encoding="utf-8", newline="\n"
+            )
+            unlink = Path.unlink
+
+            def held_open(path: Path, *args: object, **kwargs: object) -> None:
+                if path == run.generated:
+                    # As when an indexer or a virus scanner holds the file open.
+                    raise PermissionError(13, "being used by another process", str(path))
+                unlink(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "unlink", held_open):
+                self.assertEqual(0, run.run([]))
+            # The file is not handed to Restic, so the command is as before.
+            self.assertEqual([run.expected_command()], run.backup_commands)
+            self.assertEqual("success", run.document("status.json")["state"])
+            (event,) = [
+                event
+                for event in run.log_events()
+                if event.get("wrapper_event") == "unarchivable_excludes_not_removed"
+            ]
+            self.assertIn("being used by another process", event["error"])
+
+    def test_a_left_out_link_replaced_while_the_run_went_on_makes_it_partial(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unarchivable-replaced-") as root_text:
+            run = BackupRun(Path(root_text))
+            source = str(run.source)
+            # The walk found WSL links at both paths. By the time Restic has
+            # finished, WSL has put a real file at one of them (a checkout, say),
+            # which the run left out; the other one is simply gone.
+            (run.source / "wsl").mkdir()
+            (run.source / "wsl" / "link").write_text(
+                "real data\n", encoding="utf-8", newline="\n"
+            )
+            self.assertEqual(3, run.run([found_in(source, "wsl\\link", "wsl\\gone")]))
+            self.assertEqual(
+                [run.expected_command(str(run.generated))], run.backup_commands
+            )
+            status = run.document("status.json")
+            self.assertEqual("partial", status["state"])
+            self.assertEqual(0, status["backup_exit_code"])
+            self.assertEqual("source_data_unreadable", status["failure_code"])
+            self.assertFalse(status["verification_complete"])
+            self.assertFalse((run.state / "last-success.json").exists())
+            self.assertEqual(2, status["unarchivable_links"]["count"])
+            self.assertEqual(
+                {"count": 1, "samples": [source + "\\wsl\\link"]},
+                status["unarchivable_links"]["replaced"],
+            )
+            (event,) = [
+                event
+                for event in run.log_events()
+                if event.get("wrapper_event") == "unarchivable_links_replaced"
+            ]
+            self.assertEqual(1, event["count"])
+
     def test_links_kept_in_still_end_the_run_as_partial(self) -> None:
         with tempfile.TemporaryDirectory(prefix="unarchivable-partial-") as root_text:
             run = BackupRun(Path(root_text))
@@ -470,6 +596,18 @@ def pinned_restic_present() -> bool:
 def extended(path: str) -> str:
     """A Win32 path Windows takes as written, keeping a trailing space."""
     return "\\\\?\\" + path
+
+
+def short_windows_path(path: str) -> str | None:
+    """The path with every name in its short (8.3) form, where the drive keeps one."""
+    from ctypes import wintypes
+
+    get_short_path = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+    get_short_path.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    get_short_path.restype = wintypes.DWORD
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = get_short_path(path, buffer, len(buffer))
+    return buffer.value if 0 < length < len(buffer) else None
 
 
 def make_wsl_special_file(path: str, tag: int, data: bytes = b"") -> None:
@@ -538,14 +676,61 @@ def make_wsl_special_file(path: str, tag: int, data: bytes = b"") -> None:
         close_handle(handle)
 
 
+@unittest.skipUnless(os.name == "nt", "reads Windows folder listings")
+class ReplacedLinkTests(unittest.TestCase):
+    """After Restic has run, a left-out path that now holds real data is found."""
+
+    def test_paths_where_restic_would_have_left_out_real_data_are_reported(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unarchivable-recheck-") as root_text:
+            folder = Path(root_text)
+            (folder / "file").write_text("data\n", encoding="ascii")
+            (folder / "folder").mkdir()
+            (folder / "folder" / "inside.txt").write_text("data\n", encoding="ascii")
+            # A line matches ignoring case, and Windows reads "pkg." as "pkg".
+            (folder / "CASE").write_text("data\n", encoding="ascii")
+            pkg = extended(str(folder) + "\\pkg.")
+            with open(pkg, "w", encoding="ascii", newline="\n") as handle:
+                handle.write("data\n")
+            paths = [
+                str(folder / name)
+                for name in ("file", "gone", "folder", "case", "pkg", "no folder\\link")
+            ]
+            try:
+                make_wsl_special_file(
+                    str(folder / "still a link"),
+                    restic_common.IO_REPARSE_TAG_LX_SYMLINK,
+                    struct.pack("<I", 2) + b"file",
+                )
+            except OSError:
+                pass  # The real-link test below says why; the rest still applies.
+            else:
+                paths.append(str(folder / "still a link"))
+            try:
+                self.assertEqual(
+                    [str(folder / name) for name in ("file", "folder", "case", "pkg")],
+                    restic_common.unarchivable_links_replaced(paths),
+                )
+                self.assertEqual([], restic_common.unarchivable_links_replaced([]))
+            finally:
+                os.remove(pkg)
+
+
 @unittest.skipUnless(
-    os.name == "nt" and pinned_restic_present(),
+    os.name == "nt" and (pinned_restic_present() or REQUIRE_PINNED_RESTIC),
     "needs the release build's pinned restic.exe (run build\\Build-Release.ps1)",
 )
 class PinnedResticUnarchivableTests(unittest.TestCase):
     """What the pinned Restic leaves out with the generated file, in a throwaway repository."""
 
     maxDiff = None
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not pinned_restic_present():
+            raise AssertionError(
+                f"REWINDLE_REQUIRE_PINNED_RESTIC is set, but {RESTIC} is missing "
+                "or is not the pinned release"
+            )
 
     def restic(self, root: Path) -> list[str]:
         # Only what Restic needs: no inherited RESTIC_* setting can point it at any other backup.
@@ -612,11 +797,12 @@ class PinnedResticUnarchivableTests(unittest.TestCase):
 
     def generate(
         self, root: Path, config: dict[str, object], found: list[dict[str, object]]
-    ) -> Path:
-        lines, _record = backup.unarchivable_exclusions(config, found)
+    ) -> tuple[Path, list[str]]:
+        """The generated exclusion file, and the paths it leaves out."""
+        lines, _record, paths = backup.unarchivable_exclusions(config, found)
         generated = root / "state" / backup.UNARCHIVABLE_EXCLUDES_NAME
         restic_common.atomic_write_text(generated, "\n".join(lines) + "\n")
-        return generated
+        return generated, paths
 
     def test_tricky_names_are_left_out_exactly_and_look_alikes_are_kept(self) -> None:
         # Each name would match something else, or nothing, if it were not
@@ -653,7 +839,7 @@ class PinnedResticUnarchivableTests(unittest.TestCase):
                 )
 
                 config = {"sources": [str(source)], "canary_file": str(root / "canary.txt")}
-                generated = self.generate(
+                generated, _paths = self.generate(
                     root, config, [found_in(str(source), *tricky)]
                 )
                 listed, saved, errors = self.dry_run(common, source, generated)
@@ -702,7 +888,9 @@ class PinnedResticUnarchivableTests(unittest.TestCase):
             (source / "repo").mkdir(parents=True)
             (source / "repo" / "readme.txt").write_text("fixture\n", encoding="ascii")
             try:
-                # As WSL stores `ln -s readme.txt link` and `mkfifo pipe`.
+                # As WSL stores `ln -s readme.txt link` and `mkfifo pipe`, and a
+                # socket a WSL program listens on: Go reports that as a socket,
+                # which Restic skips without an error, so it is not left out.
                 make_wsl_special_file(
                     str(source / "repo" / "link"),
                     restic_common.IO_REPARSE_TAG_LX_SYMLINK,
@@ -711,6 +899,7 @@ class PinnedResticUnarchivableTests(unittest.TestCase):
                 make_wsl_special_file(
                     str(source / "repo" / "pipe"), restic_common.IO_REPARSE_TAG_LX_FIFO
                 )
+                make_wsl_special_file(str(source / "repo" / "socket"), IO_REPARSE_TAG_AF_UNIX)
             except OSError as error:
                 self.skipTest(f"Windows refused to create a WSL special file here: {error}")
 
@@ -734,9 +923,11 @@ class PinnedResticUnarchivableTests(unittest.TestCase):
                 ],
                 sorted(found[0]["entries"], key=lambda entry: entry["relative_path"]),
             )
-            generated = self.generate(root, config, found)
+            generated, paths = self.generate(root, config, found)
             common = self.restic(root)
 
+            # Installed backups run with --use-fs-snapshot, which needs an
+            # elevated run (as on CI).
             modes = [False]
             if restic_common.is_administrator():
                 modes.append(True)
@@ -746,10 +937,13 @@ class PinnedResticUnarchivableTests(unittest.TestCase):
                     text = listed.stdout + listed.stderr
                     other_errors = [error for error in errors if "irregular" not in error]
                     if vss and (other_errors or listed.returncode not in (0, 3)):
-                        self.skipTest(
+                        reason = (
                             "Windows could not make a VSS snapshot here: "
                             + (" ".join(other_errors) or text)[-500:]
                         )
+                        if REQUIRE_PINNED_RESTIC:
+                            self.fail(reason)
+                        self.skipTest(reason)
                     self.assertEqual(3, listed.returncode, text[-2000:])
                     self.assertEqual(2, len(errors), errors)
                     for error in errors:
@@ -761,6 +955,43 @@ class PinnedResticUnarchivableTests(unittest.TestCase):
                     self.assertIn("repo/readme.txt", saved)
                     self.assertNotIn("repo/link", saved)
                     self.assertNotIn("repo/pipe", saved)
+                    self.assertNotIn("repo/socket", saved)
+
+            # Read again after the run, real WSL files are still what was left out.
+            self.assertEqual(2, len(paths))
+            self.assertEqual([], restic_common.unarchivable_links_replaced(paths))
+            if REQUIRE_PINNED_RESTIC and len(modes) == 1:
+                self.fail(
+                    "REWINDLE_REQUIRE_PINNED_RESTIC is set, but this run is not "
+                    "elevated, so the --use-fs-snapshot run was not tested"
+                )
+
+    def test_the_longest_line_generated_is_one_restic_reads(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rewindle-unarchivable-long-") as root_text:
+            root = Path(root_text)
+            source = root / "probe-source"
+            source.mkdir()
+            (source / "kept.txt").write_text("fixture\n", encoding="ascii")
+            common = self.restic(root)
+            longest = root / "longest.txt"
+            longest.write_text(
+                "C:/" + "z" * (backup.MAX_UNARCHIVABLE_LINE_BYTES - 3) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            listed, saved, errors = self.dry_run(common, source, longest)
+            self.assertEqual(0, listed.returncode, listed.stderr[-2000:])
+            self.assertEqual([], errors)
+            self.assertIn("kept.txt", saved)
+
+            # At 64 KiB, Restic refuses the file and so the whole run.
+            too_long = root / "too-long.txt"
+            too_long.write_text(
+                "C:/" + "z" * (64 * 1024 - 3) + "\n", encoding="utf-8", newline="\n"
+            )
+            listed, _saved, _errors = self.dry_run(common, source, too_long)
+            self.assertEqual(1, listed.returncode, listed.stderr[-2000:])
+            self.assertIn("token too long", listed.stderr)
 
 
 if __name__ == "__main__":
