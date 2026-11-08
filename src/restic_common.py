@@ -84,6 +84,24 @@ CLOUD_ONLY_ATTRIBUTE_MASK = (
     | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
 )
 SOURCE_PREFLIGHT_SAMPLE_LIMIT = 20
+# The reparse tags of the special files WSL keeps on an NTFS drive: its symbolic
+# links, FIFOs and character and block devices. Go reports each as an irregular
+# file, and the pinned Restic cannot store one: it fails the file, and the run
+# ends as incomplete. Junctions, Windows symbolic links and WSL's AF_UNIX sockets
+# (which Restic does store) are not among them, and neither is any other tag.
+IO_REPARSE_TAG_LX_SYMLINK = 0xA000001D
+IO_REPARSE_TAG_LX_FIFO = 0x80000024
+IO_REPARSE_TAG_LX_CHR = 0x80000025
+IO_REPARSE_TAG_LX_BLK = 0x80000026
+UNARCHIVABLE_REPARSE_TAGS = {
+    IO_REPARSE_TAG_LX_SYMLINK: "lx_symlink",
+    IO_REPARSE_TAG_LX_FIFO: "lx_fifo",
+    IO_REPARSE_TAG_LX_CHR: "lx_chr",
+    IO_REPARSE_TAG_LX_BLK: "lx_blk",
+}
+# With more of them than this across all sources, a run leaves none out: Restic
+# checks every file it backs up against every exclusion pattern.
+UNARCHIVABLE_LINK_LIMIT = 1000
 MAX_CONFIG_GENERATION = 2**63 - 1
 CHILD_TEMP_DIRECTORY_NAME = "temp"
 CHILD_PATHEXT = ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC"
@@ -152,13 +170,19 @@ def _is_retryable_atomic_write_error(error: OSError) -> bool:
 
 
 def atomic_write_json(path: Path, value: Any) -> None:
+    atomic_write_text(
+        path, json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    )
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Replace a file with UTF-8 text (no BOM, LF line endings) in one step."""
     path.parent.mkdir(parents=True, exist_ok=True)
     for attempt in range(ATOMIC_WRITE_ATTEMPTS):
         temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
         try:
             with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-                json.dump(value, handle, indent=2, sort_keys=True, ensure_ascii=False)
-                handle.write("\n")
+                handle.write(text)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, path)
@@ -874,16 +898,84 @@ def _path_disappeared_during_scan(error: OSError) -> bool:
     )
 
 
+def _unarchivable_reparse_tag(stat_result: Any, attributes: int | None) -> str | None:
+    """The name of a WSL special file's reparse tag, or None for anything else."""
+    if type(attributes) is not int or not attributes & FILE_ATTRIBUTE_REPARSE_POINT:
+        return None
+    tag = getattr(stat_result, "st_reparse_tag", 0)
+    if type(tag) is not int:
+        return None
+    return UNARCHIVABLE_REPARSE_TAGS.get(tag)
+
+
+def _restic_case_keys(name: str) -> frozenset[str]:
+    """The spellings under which an --iexclude-file line for this name also matches another name.
+
+    Restic lower-cases both the pattern and the path with Go's strings.ToLower, one
+    character at a time (U+0130 becomes a plain "i"); casefold() is added on top.
+    Windows also drops dots and spaces at the end of a name before Restic matches
+    it, so "link " is the same as "link" to Restic.
+    """
+    if name.isascii():
+        # Every folder entry comes through here: the common case stays cheap.
+        lowered = name.lower()
+        return frozenset((lowered, lowered.rstrip(" .")))
+    keys: set[str] = set()
+    for spelling in (name, name.rstrip(" .")):
+        keys.add("".join(character.lower()[0] for character in spelling))
+        keys.add(spelling.casefold())
+    return frozenset(keys)
+
+
+def _unarchivable_name_problem(name: str, case_twin: bool) -> str | None:
+    """Why a name cannot be named exactly in a generated exclusion line, if it cannot."""
+    if any(ord(character) < 0x20 for character in name):
+        # Restic reads the file one line at a time, so a line break or other
+        # control character would cut the line apart or be trimmed from it.
+        return "control_character"
+    if any(0xD800 <= ord(character) <= 0xDFFF for character in name):
+        # Not valid Unicode: it cannot be written as UTF-8, and Restic sees the
+        # name with U+FFFD in its place.
+        return "invalid_unicode"
+    if name.endswith((" ", ".")):
+        # Restic looks each item up by its full Windows path, which drops dots
+        # and spaces at the end of a name: it never sees this name (and does not
+        # fail on it), or it reads the same name without them in its place.
+        return "trailing_dot_or_space"
+    if case_twin:
+        # The line is matched ignoring case, so it would also leave out the twin
+        # (or, for a folder, everything in it).
+        return "case_twin"
+    return None
+
+
 def scan_cloud_placeholders(
     source: Path,
     *,
     sample_limit: int = SOURCE_PREFLIGHT_SAMPLE_LIMIT,
     exclude_file: Path | None = None,
+    unarchivable_limit: int = UNARCHIVABLE_LINK_LIMIT,
 ) -> dict[str, Any]:
-    """Classify a source tree from Windows attributes without opening file data."""
+    """Classify a source tree from Windows attributes without opening file data.
+
+    The same walk finds the WSL special files Restic cannot store (see
+    UNARCHIVABLE_REPARSE_TAGS) from the reparse tag the folder listing already
+    carries. They are returned under "unarchivable_links", relative to the
+    source, for preflight_sources to hand over; they never change the status.
+    """
     source_display = Path(_display_windows_path(source))
     source_io = _extended_windows_path(source_display)
     exclusion_rules = _literal_directory_exclusion_rules(exclude_file)
+    unarchivable: dict[str, Any] = {
+        # Every entry with one of the tags, and those of them that can be left
+        # out: at most unarchivable_limit + 1 are kept, since a run with more
+        # leaves none out anyway.
+        "found": 0,
+        "candidate_count": 0,
+        "candidates": [],
+        "not_left_out_reasons": {},
+        "not_left_out_samples": [],
+    }
     result: dict[str, Any] = {
         "status": "clear",
         "entries_scanned": 0,
@@ -934,14 +1026,40 @@ def scan_cloud_placeholders(
             errno=getattr(error, "errno", None),
         )
         result["status"] = "inaccessible"
+        result["unarchivable_links"] = unarchivable
         return result
 
-    pending = [source_io]
+    def record_unarchivable(relative: str, tag: str, reason: str | None) -> None:
+        unarchivable["found"] += 1
+        if reason is None:
+            unarchivable["candidate_count"] += 1
+            if len(unarchivable["candidates"]) <= unarchivable_limit:
+                unarchivable["candidates"].append(
+                    {"relative_path": relative, "tag": tag}
+                )
+            return
+        reasons = unarchivable["not_left_out_reasons"]
+        reasons[reason] = reasons.get(reason, 0) + 1
+        if len(unarchivable["not_left_out_samples"]) < sample_limit:
+            unarchivable["not_left_out_samples"].append(
+                {"relative_path": relative, "tag": tag, "reason": reason}
+            )
+
+    # Each folder still to list: its I/O path, its path relative to the source,
+    # and why nothing below it can be named exactly (a parent's name problem).
+    pending: list[tuple[Path, str, str | None]] = [(source_io, "", None)]
     while pending:
-        directory = pending.pop()
+        directory, relative_directory, inherited_problem = pending.pop()
+        # Every name in this folder, by the spellings Restic would confuse, the
+        # WSL special files in it, and the folders to walk next.
+        name_keys: dict[str, int] = {}
+        special_files: list[tuple[str, str]] = []
+        subdirectories: list[tuple[Path, str]] = []
         try:
             with os.scandir(directory) as entries:
                 for entry in entries:
+                    for key in _restic_case_keys(entry.name):
+                        name_keys[key] = name_keys.get(key, 0) + 1
                     try:
                         if (
                             entry.is_dir(follow_symlinks=False)
@@ -978,6 +1096,9 @@ def scan_cloud_placeholders(
                             )
                         continue
                     _classification, attributes = classify(entry.path, entry_stat)
+                    special_tag = _unarchivable_reparse_tag(entry_stat, attributes)
+                    if special_tag is not None:
+                        special_files.append((entry.name, special_tag))
                     if (
                         type(attributes) is int
                         and attributes & FILE_ATTRIBUTE_DIRECTORY
@@ -985,7 +1106,7 @@ def scan_cloud_placeholders(
                         if attributes & FILE_ATTRIBUTE_REPARSE_POINT:
                             result["reparse_points_skipped"] += 1
                         else:
-                            pending.append(Path(entry.path))
+                            subdirectories.append((Path(entry.path), entry.name))
         except OSError as error:
             if directory != source_io and _path_disappeared_during_scan(error):
                 result["vanished_entries_skipped"] += 1
@@ -998,6 +1119,27 @@ def scan_cloud_placeholders(
                     errno=getattr(error, "errno", None),
                 )
 
+        # Only now is every name in the folder known, so a twin listed after a
+        # special file is seen too. A folder's problem applies to all below it.
+        prefix = relative_directory + "\\" if relative_directory else ""
+        for name, special_tag in special_files:
+            twin = any(name_keys.get(key, 0) > 1 for key in _restic_case_keys(name))
+            record_unarchivable(
+                prefix + name,
+                special_tag,
+                inherited_problem or _unarchivable_name_problem(name, twin),
+            )
+        for path, name in subdirectories:
+            twin = any(name_keys.get(key, 0) > 1 for key in _restic_case_keys(name))
+            pending.append(
+                (
+                    path,
+                    prefix + name,
+                    inherited_problem or _unarchivable_name_problem(name, twin),
+                )
+            )
+
+    result["unarchivable_links"] = unarchivable
     if result["inaccessible_count"]:
         result["status"] = "inaccessible"
     elif result["unknown_count"]:
@@ -1013,11 +1155,17 @@ def preflight_sources(
     volume_serial_reader: Callable[[Path], str] | None = None,
     placeholder_scanner: Callable[[Path], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Return complete per-source readiness records without invoking Restic."""
+    """Return complete per-source readiness records without invoking Restic.
+
+    "unarchivable_links" lists, for each scanned source, the WSL special files
+    the backup leaves out of this run and those it cannot (see
+    scan_cloud_placeholders). They never change readiness or fail the preflight.
+    """
     read_serial = volume_serial_reader or volume_serial
     policy = str(config.get("cloud_placeholder_policy", "strict"))
     records: list[dict[str, Any]] = []
     failures: list[str] = []
+    found_links: list[tuple[str, dict[str, Any]]] = []
 
     for configured_source in config["sources"]:
         canonical = canonical_windows_path(configured_source)
@@ -1128,6 +1276,14 @@ def preflight_sources(
                     }
                 ],
             }
+        # Handed over separately, never kept in the scan record that status.json shows.
+        links = (
+            cloud_scan.pop("unarchivable_links", None)
+            if isinstance(cloud_scan, dict)
+            else None
+        )
+        if isinstance(links, dict) and links.get("found"):
+            found_links.append((str(configured_source), links))
         record["cloud_scan"] = cloud_scan
         cloud_status = cloud_scan.get("status")
         if cloud_status in {"inaccessible", "unknown"}:
@@ -1155,7 +1311,47 @@ def preflight_sources(
         "status": "ready" if not failures else "failed",
         "sources": records,
         "failures": failures,
+        "unarchivable_links": _unarchivable_links_per_source(found_links),
     }
+
+
+def _unarchivable_links_per_source(
+    found_links: list[tuple[str, dict[str, Any]]],
+    *,
+    limit: int = UNARCHIVABLE_LINK_LIMIT,
+    sample_limit: int = SOURCE_PREFLIGHT_SAMPLE_LIMIT,
+) -> list[dict[str, Any]]:
+    """Each source's WSL special files to leave out, and those that stay in, with why.
+
+    Over the limit across all sources, none is left out: each one stays in with
+    the reason "over_limit", so the run keeps today's behaviour and stays visible.
+    """
+    over_limit = sum(links["found"] for _source, links in found_links) > limit
+    per_source: list[dict[str, Any]] = []
+    for configured_source, links in found_links:
+        reasons = dict(links["not_left_out_reasons"])
+        samples = list(links["not_left_out_samples"])
+        entries = list(links["candidates"])
+        if over_limit:
+            if links["candidate_count"]:
+                reasons["over_limit"] = links["candidate_count"]
+            samples.extend(
+                {**entry, "reason": "over_limit"}
+                for entry in entries[: max(0, sample_limit - len(samples))]
+            )
+            entries = []
+        per_source.append(
+            {
+                "configured_path": configured_source,
+                "entries": entries,
+                "not_left_out": {
+                    "count": sum(reasons.values()),
+                    "reasons": reasons,
+                    "samples": samples,
+                },
+            }
+        )
+    return per_source
 
 
 def validate_repository_volume(config: dict[str, Any]) -> None:

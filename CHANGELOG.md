@@ -222,6 +222,18 @@ ones a home user reads without a glossary.
   restore ends as incomplete and says what to try next, instead of reporting
   success. However many restores you run, **Check recovery readiness** still
   finds your last restore drill.
+- **A folder that holds WSL links can be backed up.** The backup program can't
+  store the links, pipes and devices that WSL (Windows Subsystem for Linux)
+  keeps on a Windows drive, so a protected folder with any of them, such as a
+  project checked out from inside WSL, made every backup end as incomplete.
+  With no complete backup, Restore and clean-up of old backups refused to run.
+  Each backup now finds these items while it checks your folders and leaves
+  exactly those out, so it completes and is verified; Windows links and
+  junctions are backed up as before, and nothing needs to be added to the
+  exclusion list. An item is left in when it can't be named exactly (for
+  example, another item next to it has the same name in other letter case), or
+  when there are more than 1,000 of them; for those, the backup behaves as it
+  did before.
 
 ### Security
 

@@ -25,7 +25,9 @@ from restic_common import (
     RunLockUnavailable,
     SourcePreflightFailed,
     SourceUpdateJournalPresent,
+    UNARCHIVABLE_REPARSE_TAGS,
     atomic_write_json,
+    atomic_write_text,
     backup_plan_tags,
     cancellation_checkpoint,
     ensure_free_space,
@@ -67,6 +69,18 @@ MAX_AFFECTED_PATHS = 50
 DATA_CHECK_STATE_NAME = "data-check.json"
 DATA_CHECK_INTERVAL_DAYS = 7
 MAX_DATA_CHECK_STATE_BYTES = 64 * 1024
+# The exclusion file each run writes for the WSL links and special files it
+# leaves out (see unarchivable_exclusions), in the protected state folder. It is
+# handed to Restic after the installed list and is not part of the plan: the
+# change-anomaly comparison still hashes only the installed list.
+UNARCHIVABLE_EXCLUDES_NAME = "unarchivable-excludes.txt"
+MAX_UNARCHIVABLE_SAMPLES = 20
+# What Go's strings.TrimSpace removes from the end of each line Restic reads
+# from an exclusion file: every character unicode.IsSpace accepts.
+RESTIC_TRIMMED_SPACE = frozenset(
+    "\t\n\v\f\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
+    "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -112,6 +126,136 @@ def select_snapshot(
             "no snapshot exactly matches the configured host, tag, and source roots"
         )
     return max(matches, key=lambda item: item.get("time", ""))
+
+
+def restic_literal_exclude(path_text: str) -> str:
+    """The exclusion-file line that matches exactly this path, and nothing else.
+
+    Restic replaces $NAME in an exclusion file with that environment variable,
+    and reads "$$" as one "$". It matches each line with Go's filepath.Match
+    rules, which on Windows have no escape character: "[" opens a character
+    class and "*" and "?" are wildcards, so each becomes a class that holds only
+    itself (as restic_literal_pattern in restore.py does for "["). A "]" outside
+    a class is already literal. Restic also trims white space from both ends of
+    a line, so white space at the end of the path becomes a class too (that
+    matters for a name ending in, say, a no-break space: a name ending in a
+    plain space or a dot never gets here, see unarchivable_exclusions). The
+    line starts with a drive or a share, never with white space or "#".
+    """
+    kept = len(path_text)
+    while kept and path_text[kept - 1] in RESTIC_TRIMMED_SPACE:
+        kept -= 1
+    escaped: list[str] = []
+    for character in path_text[:kept]:
+        if character == "$":
+            escaped.append("$$")
+        elif character in "[*?":
+            escaped.append("[" + character + "]")
+        else:
+            escaped.append(character)
+    escaped.extend("[" + character + "]" for character in path_text[kept:])
+    return "".join(escaped)
+
+
+def _comparable_path(path: str) -> str:
+    # Lexical only: ntpath.abspath would ask Windows, which drops trailing spaces and dots.
+    return ntpath.normcase(ntpath.normpath(path))
+
+
+def _display_text(text: str) -> str:
+    # A name that is not valid Unicode cannot be written to status.json as UTF-8;
+    # Restic, too, shows U+FFFD in its place.
+    return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+
+
+def unarchivable_exclusions(
+    config: dict[str, Any], found: Any
+) -> tuple[list[str], dict[str, Any]]:
+    """The exclusion lines for the WSL links and special files a run leaves out, and its record.
+
+    ``found`` is preflight_sources' "unarchivable_links". Each line is the source
+    exactly as configured and handed to Restic, then the path below it with "/"
+    between names, so a short (8.3) name or the letter case in the source is the
+    one Restic walks. Every line names one path strictly inside its source that
+    is not the restore test file; anything else is a fault and stops the run.
+    So is a last name ending in a space or a dot: Restic matches each item by its
+    full Windows path, which drops them, so no line could name it exactly (the
+    source walk keeps such names in, as "trailing_dot_or_space").
+    The record goes to status.json as "unarchivable_links".
+    """
+    record: dict[str, Any] = {
+        "count": 0,
+        "samples": [],
+        "tags": {name: 0 for name in UNARCHIVABLE_REPARSE_TAGS.values()},
+        "not_left_out": {"count": 0, "reasons": {}, "samples": []},
+    }
+    lines: list[str] = []
+    sources = [str(source) for source in config["sources"]]
+    canary = _comparable_path(str(config["canary_file"]))
+    for item in found or ():
+        configured = item["configured_path"]
+        if configured not in sources:
+            raise RuntimeError(
+                "a WSL link to leave out was found outside the configured sources"
+            )
+        root = _comparable_path(configured)
+        base = configured.rstrip("\\/")
+        for entry in item["entries"]:
+            relative = entry["relative_path"]
+            parts = relative.split("\\") if isinstance(relative, str) else []
+            if (
+                not parts
+                or any(
+                    part in ("", ".", "..")
+                    or any(character in part for character in "/:")
+                    or any(ord(character) < 0x20 for character in part)
+                    for part in parts
+                )
+                # Windows drops these before Restic matches (see restic_common).
+                or parts[-1].endswith((" ", "."))
+            ):
+                raise RuntimeError(
+                    f"a WSL link to leave out has an unusable relative path: {relative!r}"
+                )
+            tag = entry.get("tag")
+            if tag not in record["tags"]:
+                raise RuntimeError(
+                    f"a WSL link to leave out has an unknown reparse tag: {tag!r}"
+                )
+            display = base + "\\" + "\\".join(parts)
+            comparable = _comparable_path(display)
+            try:
+                inside = ntpath.commonpath([comparable, root]) == root
+            except ValueError:
+                inside = False
+            if not inside or comparable in (root, canary):
+                raise RuntimeError(
+                    "a WSL link to leave out is not strictly inside its source, "
+                    f"or is the restore test file: {display!r}"
+                )
+            lines.append(
+                restic_literal_exclude(base.replace("\\", "/") + "/" + "/".join(parts))
+            )
+            record["count"] += 1
+            record["tags"][tag] += 1
+            if len(record["samples"]) < MAX_UNARCHIVABLE_SAMPLES:
+                record["samples"].append(_display_text(display))
+        not_left_out = item["not_left_out"]
+        record["not_left_out"]["count"] += int(not_left_out["count"])
+        reasons = record["not_left_out"]["reasons"]
+        for reason, count in not_left_out["reasons"].items():
+            reasons[reason] = reasons.get(reason, 0) + int(count)
+        for sample in not_left_out["samples"]:
+            if len(record["not_left_out"]["samples"]) >= MAX_UNARCHIVABLE_SAMPLES:
+                break
+            record["not_left_out"]["samples"].append(
+                {
+                    "path": _display_text(base + "\\" + sample["relative_path"]),
+                    "tag": sample["tag"],
+                    "reason": sample["reason"],
+                }
+            )
+    return lines, record
 
 
 # The most backups the inventory record counts; a listing larger than this is
@@ -719,6 +863,9 @@ def _run_locked(
         # How many backups the Restore list offers after this run, and how far back
         # they go (summarize_restorable_snapshots). Display only.
         "snapshot_inventory": None,
+        # The WSL links and special files this run leaves out because Restic
+        # cannot store them, and those it could not (unarchivable_exclusions).
+        "unarchivable_links": None,
         "change_anomaly": None,
         "maintenance_hold": False,
         "errors": [],
@@ -784,6 +931,9 @@ def _run_locked(
             status["state"] = "preflighting_sources"
             atomic_write_json(status_path, status)
             source_preflight = preflight_sources(config)
+            # Up to a thousand paths: kept out of status.json, which records
+            # their count and a sample instead.
+            found_links = source_preflight.pop("unarchivable_links", None)
             status["source_preflight"] = source_preflight
             status["source_identities"] = source_preflight["sources"]
             status["affected_paths"] = collect_affected_paths(status)
@@ -792,6 +942,38 @@ def _run_locked(
                 raise SourcePreflightFailed(
                     "source preflight failed: "
                     + "; ".join(source_preflight["failures"])
+                )
+            # WSL links and special files Restic cannot store are left out of
+            # this run by exact path; without them nothing changes. A stale file
+            # from an earlier run is removed, never passed on.
+            unarchivable_excludes = state_directory / UNARCHIVABLE_EXCLUDES_NAME
+            unarchivable_lines, status["unarchivable_links"] = unarchivable_exclusions(
+                config, found_links
+            )
+            if unarchivable_lines:
+                atomic_write_text(
+                    unarchivable_excludes, "\n".join(unarchivable_lines) + "\n"
+                )
+            else:
+                unarchivable_excludes.unlink(missing_ok=True)
+            atomic_write_json(status_path, status)
+            if status["unarchivable_links"]["count"]:
+                log_handle.write(
+                    json.dumps(
+                        {
+                            "wrapper_event": "unarchivable_links_left_out",
+                            "run_id": run_id,
+                            "utc": utc_now(),
+                            "count": status["unarchivable_links"]["count"],
+                            "tags": status["unarchivable_links"]["tags"],
+                            "samples": status["unarchivable_links"]["samples"],
+                            "not_left_out": status["unarchivable_links"][
+                                "not_left_out"
+                            ]["count"],
+                            "exclude_file": str(unarchivable_excludes),
+                        }
+                    )
+                    + "\n"
                 )
             cancellation_checkpoint(cancellation, on_cancellation)
 
@@ -847,6 +1029,11 @@ def _run_locked(
                 *config["sources"],
                 "--iexclude-file",
                 config["exclude_file"],
+                *(
+                    ["--iexclude-file", str(unarchivable_excludes)]
+                    if unarchivable_lines
+                    else []
+                ),
                 "--exclude-caches",
                 "--skip-if-unchanged",
                 "--no-scan",
