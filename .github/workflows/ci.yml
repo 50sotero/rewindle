@@ -77,6 +77,7 @@ jobs:
       # and verifies the pinned WebView2 SDK, compiles the dashboard host and the task launcher with the
       # .NET Framework compiler, and assembles the checksum-pinned payload and setup executable.
       - name: Build checksum-pinned Windows release
+        id: build
         shell: pwsh
         run: .\build\Build-Release.ps1
 
@@ -169,3 +170,16 @@ jobs:
       - name: Exercise the installer contract end to end
         shell: powershell
         run: .\tests\Test-InstallerContract.ps1 -AllowSystemInstall
+
+      # The unit-test step runs before the build, so it skips the checks that need the pinned restic.exe. Run them here
+      # against the release built above: what it leaves out with the shipped exclusion list and with the file each backup
+      # generates for WSL links, also with --use-fs-snapshot (as installed backups run; this runner is elevated). With the
+      # variable set, a missing restic.exe, a WSL special file Windows refuses to create or a VSS run that cannot happen
+      # fails the step instead of skipping. It comes last, so a failure here hides no other check, and it runs whenever the
+      # release was built, so a failed check after the build does not hide this one.
+      - name: Check what the pinned Restic leaves out
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        env:
+          REWINDLE_REQUIRE_PINNED_RESTIC: "1"
+        run: python -m unittest -v tests.test_unarchivable_links tests.test_exclusions

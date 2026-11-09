@@ -208,6 +208,49 @@ or `**/venv/Lib`. The file is part of the manifest-hashed payload: editing the
 installed copy makes the protected managers and repair helpers refuse to run,
 so it changes only with an update.
 
+Each run also leaves out the special files that WSL (Windows Subsystem for
+Linux) keeps on an NTFS drive: its symbolic links, FIFOs, and character and
+block devices. The pinned Restic sees each one as an irregular file, fails it
+and ends the run as incomplete, so a folder holding any of them (a project
+checked out from inside WSL, say) was never verified, and restore and clean-up
+refused to run. The source check's walk, which already reads every entry's
+Windows attributes, notes each entry with the reparse point attribute and one of
+those four reparse tags (`IO_REPARSE_TAG_LX_SYMLINK`, `_LX_FIFO`, `_LX_CHR`,
+`_LX_BLK`), from the folder listing alone. `backup.py` writes one line for each
+to `unarchivable-excludes.txt` in the state folder and passes it as a second
+`--iexclude-file`, right after the installed list. A line is the source exactly
+as configured (so a short 8.3 name stays the one Restic walks), then the path
+below it, with what Restic reads specially escaped: `$` as `$$`, and `[`, `*`,
+`?` and white space at the very end each as a one-character class. It matches
+that one path and nothing else. Junctions and Windows symbolic links (which
+Restic stores), WSL's AF_UNIX sockets (which Restic skips without an error) and
+every other tag stay with Restic.
+
+An entry is left in, so Restic handles it as before and a failure stays
+visible, when a line could match something else or not match it at all: another
+name in its folder, or in a folder above it, is the same to Restic (other letter
+case, or the same with dots or spaces at the end); or a name on its path has a
+control character, is not valid Unicode, or ends in a dot or a space. Restic
+looks each item up by its full Windows path, and Windows drops those dots and
+spaces, so Restic never sees such an item under its own name (and does not fail
+on it either). An entry is also left in when its line would be longer than
+60,000 bytes: Restic refuses an exclusion file with a line of 64 KiB or more,
+and with it the whole run. With more than 1,000 entries across all sources none
+is left out, because Restic checks every file against every line. With none,
+the file is deleted (if something holds it open, it stays until the next run,
+since it is not passed on) and the command is exactly as before.
+
+Restic reaches each path a while after the walk: once its VSS snapshot is
+taken, or, without one, whenever its own walk gets there. If WSL put a regular
+file or folder at a left-out path in the meantime (a checkout, say), the line
+would leave that out too. So once Restic has finished with exit 0, the run
+lists the folder of each left-out path again, and if an entry Restic would match
+with a line no longer has one of the four tags, the run ends as incomplete
+(`partial`), just as Restic's own exit 3 does. A path that is simply gone does
+not count. `status.json` records what was left out and what was kept in, and why
+(`unarchivable_links`); the change-anomaly comparison still hashes only the
+installed list. The dry run, which Rewindle itself never starts, is unchanged.
+
 ## Successful-run criteria
 
 A Restic process exit code alone does not mark a run successful. The wrapper

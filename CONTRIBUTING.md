@@ -123,8 +123,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Test-SetupWindow.p
 
 Notes:
 
-- `test_key_rotation` runs the real `restic.exe` from the release build output
-  and is skipped until you have run `Build-Release.ps1`.
+- `test_key_rotation`, and the pinned-Restic tests in `test_exclusions` and
+  `test_unarchivable_links`, run the real `restic.exe` from the release build
+  output and are skipped until you have run `Build-Release.ps1`.
 - The PowerShell suites live in `tests\*.ps1`. They build disposable fixtures
   in your temporary folder and do not change an installed copy.
 - `-SkipInstalledChecks` keeps the dashboard regressions from reading an
@@ -134,7 +135,10 @@ Notes:
   `Test-ManageSources.ps1`, the release build, `Test-SetupHost.ps1`, the
   dashboard regressions, the restore and clean-up manager suites
   (`Test-ManageRestore.ps1`, `Test-ManageRetention.ps1`, as a standard user),
-  `Test-ReleaseArtifact.ps1` and `Test-InstallPlan.ps1`.
+  `Test-ReleaseArtifact.ps1` and `Test-InstallPlan.ps1`. Its last step runs the
+  pinned-Restic tests against the release just built, elevated, so the
+  `--use-fs-snapshot` case runs too; `REWINDLE_REQUIRE_PINNED_RESTIC=1` makes
+  them fail instead of skipping.
 - `tests\Test-InstallerContract.ps1` really installs and uninstalls Rewindle. It
   refuses to run anywhere but a GitHub-hosted runner (it checks
   `GITHUB_ACTIONS` and `RUNNER_ENVIRONMENT` and needs `-AllowSystemInstall`),

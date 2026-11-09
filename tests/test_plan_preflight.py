@@ -21,7 +21,12 @@ import restic_common  # noqa: E402
 from restic_common import (  # noqa: E402
     FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_OFFLINE,
+    FILE_ATTRIBUTE_REPARSE_POINT,
     GENERATION_TAG_PREFIX,
+    IO_REPARSE_TAG_LX_BLK,
+    IO_REPARSE_TAG_LX_CHR,
+    IO_REPARSE_TAG_LX_FIFO,
+    IO_REPARSE_TAG_LX_SYMLINK,
     MAX_CONFIG_GENERATION,
     PLAN_TAG_PREFIX,
     _cloud_attribute_classification,
@@ -366,6 +371,7 @@ class PlanAndPreflightTests(unittest.TestCase):
         class Entry:
             def __init__(self, path: str, attributes: int):
                 self.path = path
+                self.name = path.rsplit("\\", 1)[-1]
                 self._attributes = attributes
 
             def is_dir(self, *, follow_symlinks: bool):
@@ -427,6 +433,7 @@ class PlanAndPreflightTests(unittest.TestCase):
 
         class VanishedEntry:
             path = r"\\?\E:\Projects\transient"
+            name = "transient"
 
             @staticmethod
             def is_dir(*, follow_symlinks: bool):
@@ -463,6 +470,7 @@ class PlanAndPreflightTests(unittest.TestCase):
 
         class DeniedEntry:
             path = r"\\?\E:\Projects\private"
+            name = "private"
 
             @staticmethod
             def is_dir(*, follow_symlinks: bool):
@@ -680,6 +688,346 @@ class PlanAndPreflightTests(unittest.TestCase):
             status = json.loads((state / "status.json").read_text(encoding="utf-8"))
             self.assertEqual("failed", status["state"])
             self.assertEqual(failed, status["source_preflight"])
+
+
+FILE_ATTRIBUTE_ARCHIVE = 0x20
+REPARSE_FILE = FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_REPARSE_POINT
+REPARSE_DIRECTORY = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT
+NO_TAG = object()
+
+
+class FakeEntry:
+    """A DirEntry whose stat carries what CPython fills in from a Windows folder listing."""
+
+    def __init__(self, directory: str, name: str, attributes: int, tag: object = 0):
+        self.name = name
+        self.path = directory + "\\" + name
+        self._stat = SimpleNamespace(st_file_attributes=attributes)
+        if tag is not NO_TAG:
+            self._stat.st_reparse_tag = tag
+
+    def is_dir(self, *, follow_symlinks: bool) -> bool:
+        if follow_symlinks:
+            raise AssertionError("scanner followed a link")
+        return bool(self._stat.st_file_attributes & FILE_ATTRIBUTE_DIRECTORY)
+
+    def stat(self, *, follow_symlinks: bool) -> SimpleNamespace:
+        if follow_symlinks:
+            raise AssertionError("scanner followed a link")
+        return self._stat
+
+
+def scan_fake_tree(
+    tree: dict[str, list[tuple[str, int, object]]], **options: object
+) -> dict[str, object]:
+    """Run the real scanner over folders given as {relative folder: [(name, attributes, tag)]}."""
+    root = r"\\?\E:\Projects"
+
+    class Listing:
+        def __init__(self, entries: list[FakeEntry]):
+            self.entries = entries
+
+        def __enter__(self):
+            return iter(self.entries)
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_scandir(path):
+        text = str(path)
+        if text.casefold() == root.casefold():
+            relative = ""
+        elif text.casefold().startswith(root.casefold() + "\\"):
+            relative = text[len(root) + 1 :]
+        else:
+            raise AssertionError(f"listed a folder outside the source: {text}")
+        if relative not in tree:
+            raise AssertionError(f"walked into a folder it must not enter: {relative}")
+        return Listing(
+            [FakeEntry(text, name, attributes, tag) for name, attributes, tag in tree[relative]]
+        )
+
+    with (
+        mock.patch.object(
+            restic_common.os,
+            "stat",
+            return_value=SimpleNamespace(st_file_attributes=FILE_ATTRIBUTE_DIRECTORY),
+        ),
+        mock.patch.object(restic_common.os, "scandir", side_effect=fake_scandir),
+    ):
+        return scan_cloud_placeholders(Path(r"E:\Projects"), **options)
+
+
+def scanner_links(
+    configured: str, candidates: list[dict[str, str]], **not_left_out: int
+) -> dict[str, object]:
+    """What the scanner hands preflight_sources for one source."""
+    return {
+        "found": len(candidates) + sum(not_left_out.values()),
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+        "not_left_out_reasons": dict(not_left_out),
+        "not_left_out_samples": [
+            {"relative_path": f"{reason}-{index}", "tag": "lx_symlink", "reason": reason}
+            for reason, count in not_left_out.items()
+            for index in range(count)
+        ],
+    }
+
+
+class UnarchivableLinkScanTests(unittest.TestCase):
+    """The source walk finds the WSL links and special files the pinned Restic cannot store."""
+
+    def test_the_four_wsl_tags_are_recorded_relative_to_the_source(self) -> None:
+        result = scan_fake_tree(
+            {
+                "": [
+                    ("readme.txt", FILE_ATTRIBUTE_ARCHIVE, 0),
+                    ("lx-link", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK),
+                    ("app", FILE_ATTRIBUTE_DIRECTORY, 0),
+                ],
+                "app": [
+                    ("fifo", REPARSE_FILE, IO_REPARSE_TAG_LX_FIFO),
+                    ("tty", REPARSE_FILE, IO_REPARSE_TAG_LX_CHR),
+                    # A special file Windows lists as a folder: recorded, never entered.
+                    ("disk", REPARSE_DIRECTORY, IO_REPARSE_TAG_LX_BLK),
+                    ("src", FILE_ATTRIBUTE_DIRECTORY, 0),
+                ],
+                "app\\src": [
+                    ("deep link", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK),
+                ],
+            }
+        )
+        self.assertEqual("clear", result["status"])
+        links = result["unarchivable_links"]
+        self.assertEqual(
+            [
+                {"relative_path": "app\\disk", "tag": "lx_blk"},
+                {"relative_path": "app\\fifo", "tag": "lx_fifo"},
+                {"relative_path": "app\\src\\deep link", "tag": "lx_symlink"},
+                {"relative_path": "app\\tty", "tag": "lx_chr"},
+                {"relative_path": "lx-link", "tag": "lx_symlink"},
+            ],
+            sorted(links["candidates"], key=lambda item: item["relative_path"]),
+        )
+        self.assertEqual(5, links["found"])
+        self.assertEqual({}, links["not_left_out_reasons"])
+
+    def test_links_restic_stores_and_other_tags_are_not_recorded(self) -> None:
+        result = scan_fake_tree(
+            {
+                "": [
+                    ("junction", REPARSE_DIRECTORY, 0xA0000003),
+                    ("symlink", REPARSE_FILE, 0xA000000C),
+                    ("folder symlink", REPARSE_DIRECTORY, 0xA000000C),
+                    ("socket", REPARSE_FILE, 0x80000023),
+                    ("deduplicated", REPARSE_FILE, 0x80000013),
+                    ("onedrive", REPARSE_FILE, 0x9000001A),
+                    ("unknown tag", REPARSE_FILE, 0x12345678),
+                    # A stat without st_reparse_tag, and a tag without the reparse attribute.
+                    ("no tag", REPARSE_FILE, NO_TAG),
+                    ("tag only", FILE_ATTRIBUTE_ARCHIVE, IO_REPARSE_TAG_LX_SYMLINK),
+                ],
+            }
+        )
+        links = result["unarchivable_links"]
+        self.assertEqual([], links["candidates"])
+        self.assertEqual(0, links["found"])
+        self.assertEqual(2, result["reparse_points_skipped"])
+
+    def test_case_twins_and_names_that_cannot_be_written_are_not_left_out(self) -> None:
+        result = scan_fake_tree(
+            {
+                "": [
+                    # The twin is listed after the link, so the whole folder must be read first.
+                    ("Link", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK),
+                    ("link", FILE_ATTRIBUTE_ARCHIVE, 0),
+                    # Go lower-cases U+0130 to a plain "i".
+                    ("\u0130nfo", REPARSE_FILE, IO_REPARSE_TAG_LX_FIFO),
+                    ("info", FILE_ATTRIBUTE_ARCHIVE, 0),
+                    ("line\nbreak", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK),
+                    ("tab\t", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK),
+                    ("lone\udc80", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK),
+                    ("Build", FILE_ATTRIBUTE_DIRECTORY, 0),
+                    ("build", FILE_ATTRIBUTE_DIRECTORY, 0),
+                    ("bad\x01folder", FILE_ATTRIBUTE_DIRECTORY, 0),
+                    # Windows drops dots and spaces at the end of a name before
+                    # Restic matches it: "pkg." is "pkg" to Restic, and "solo "
+                    # or "..." cannot be named by any line.
+                    ("pkg", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK),
+                    ("pkg.", FILE_ATTRIBUTE_ARCHIVE, 0),
+                    ("solo ", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK),
+                    ("...", REPARSE_FILE, IO_REPARSE_TAG_LX_FIFO),
+                    ("dir ", FILE_ATTRIBUTE_DIRECTORY, 0),
+                    # The same for a name that is not all ASCII.
+                    ("caf\xe9", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK),
+                    ("caf\xe9.", FILE_ATTRIBUTE_ARCHIVE, 0),
+                    ("ok", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK),
+                ],
+                # Below a twin folder, at any depth, a line would also match the
+                # same path in the other one.
+                "Build": [
+                    ("current", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK),
+                    ("sub", FILE_ATTRIBUTE_DIRECTORY, 0),
+                ],
+                "Build\\sub": [("deeper", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK)],
+                "build": [("plain.txt", FILE_ATTRIBUTE_ARCHIVE, 0)],
+                "bad\x01folder": [("inside", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK)],
+                "dir ": [("inside", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK)],
+            }
+        )
+        links = result["unarchivable_links"]
+        self.assertEqual([{"relative_path": "ok", "tag": "lx_symlink"}], links["candidates"])
+        self.assertEqual(14, links["found"])
+        self.assertEqual(
+            {
+                "case_twin": 6,
+                "control_character": 3,
+                "invalid_unicode": 1,
+                "trailing_dot_or_space": 3,
+            },
+            links["not_left_out_reasons"],
+        )
+        self.assertEqual(
+            {
+                ("Link", "case_twin"),
+                ("\u0130nfo", "case_twin"),
+                ("Build\\current", "case_twin"),
+                ("Build\\sub\\deeper", "case_twin"),
+                ("pkg", "case_twin"),
+                ("caf\xe9", "case_twin"),
+                ("line\nbreak", "control_character"),
+                ("tab\t", "control_character"),
+                ("bad\x01folder\\inside", "control_character"),
+                ("lone\udc80", "invalid_unicode"),
+                ("solo ", "trailing_dot_or_space"),
+                ("...", "trailing_dot_or_space"),
+                ("dir \\inside", "trailing_dot_or_space"),
+            },
+            {
+                (sample["relative_path"], sample["reason"])
+                for sample in links["not_left_out_samples"]
+            },
+        )
+
+    def test_the_walk_keeps_at_most_one_more_than_the_limit(self) -> None:
+        result = scan_fake_tree(
+            {
+                "": [
+                    (f"link-{index}", REPARSE_FILE, IO_REPARSE_TAG_LX_SYMLINK)
+                    for index in range(5)
+                ]
+            },
+            unarchivable_limit=2,
+        )
+        links = result["unarchivable_links"]
+        self.assertEqual(5, links["found"])
+        self.assertEqual(5, links["candidate_count"])
+        self.assertEqual(3, len(links["candidates"]))
+
+    def test_preflight_hands_over_entries_per_source_and_stays_ready(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="source-preflight-links-") as root:
+            first = Path(root) / "first"
+            second = Path(root) / "second"
+            first.mkdir()
+            second.mkdir()
+            config = identity_config(first)
+            config["sources"].append(canonical_windows_path(second))
+            config["source_identities"][canonical_windows_path(second)] = {
+                "expected_volume_serial": "A1B2C3D4"
+            }
+            found = {
+                canonical_windows_path(first): scanner_links(
+                    canonical_windows_path(first),
+                    [{"relative_path": "repo\\link", "tag": "lx_symlink"}],
+                    case_twin=1,
+                ),
+                canonical_windows_path(second): scanner_links(
+                    canonical_windows_path(second), []
+                ),
+            }
+
+            def scanner(path: Path) -> dict[str, object]:
+                scan = clear_cloud_scan(path)
+                scan["unarchivable_links"] = found[str(path)]
+                return scan
+
+            result = preflight_sources(
+                config,
+                volume_serial_reader=lambda _path: "A1B2C3D4",
+                placeholder_scanner=scanner,
+            )
+        self.assertEqual("ready", result["status"])
+        self.assertEqual([], result["failures"])
+        for record in result["sources"]:
+            self.assertEqual("ready", record["overall_status"])
+            self.assertNotIn("unarchivable_links", record["cloud_scan"])
+        # A source where nothing was found is not listed.
+        self.assertEqual(
+            [
+                {
+                    "configured_path": canonical_windows_path(first),
+                    "entries": [{"relative_path": "repo\\link", "tag": "lx_symlink"}],
+                    "not_left_out": {
+                        "count": 1,
+                        "reasons": {"case_twin": 1},
+                        "samples": [
+                            {
+                                "relative_path": "case_twin-0",
+                                "tag": "lx_symlink",
+                                "reason": "case_twin",
+                            }
+                        ],
+                    },
+                }
+            ],
+            result["unarchivable_links"],
+        )
+
+    def test_over_the_limit_across_sources_nothing_is_left_out(self) -> None:
+        def entries(prefix: str, count: int) -> list[dict[str, str]]:
+            return [
+                {"relative_path": f"{prefix}\\link-{index}", "tag": "lx_symlink"}
+                for index in range(count)
+            ]
+
+        # 500 + 500 found: at the limit, all are left out.
+        at_limit = restic_common._unarchivable_links_per_source(
+            [
+                (r"C:\Data", scanner_links(r"C:\Data", entries("a", 499), case_twin=1)),
+                (r"E:\Projects", scanner_links(r"E:\Projects", entries("b", 500))),
+            ]
+        )
+        self.assertEqual([499, 500], [len(item["entries"]) for item in at_limit])
+
+        # 500 + 501 found (one of them a case twin): none is left out.
+        over = restic_common._unarchivable_links_per_source(
+            [
+                (r"C:\Data", scanner_links(r"C:\Data", entries("a", 499), case_twin=1)),
+                (r"E:\Projects", scanner_links(r"E:\Projects", entries("b", 501))),
+            ]
+        )
+        self.assertEqual([[], []], [item["entries"] for item in over])
+        self.assertEqual(
+            [
+                {"count": 500, "reasons": {"case_twin": 1, "over_limit": 499}},
+                {"count": 501, "reasons": {"over_limit": 501}},
+            ],
+            [
+                {
+                    "count": item["not_left_out"]["count"],
+                    "reasons": item["not_left_out"]["reasons"],
+                }
+                for item in over
+            ],
+        )
+        self.assertEqual(
+            [20, 20], [len(item["not_left_out"]["samples"]) for item in over]
+        )
+        self.assertEqual(
+            {"case_twin", "over_limit"},
+            {sample["reason"] for sample in over[0]["not_left_out"]["samples"]},
+        )
 
 
 if __name__ == "__main__":
