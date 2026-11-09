@@ -1,5 +1,10 @@
+import json
+import os
 from pathlib import Path
 import re
+import subprocess
+import sys
+import tempfile
 import unittest
 
 
@@ -10,6 +15,11 @@ SCRIPT = (
 PASSWORD_HELPER = (
     PROJECT / "src" / "reveal-rclone-config-password.ps1"
 ).read_text(encoding="utf-8")
+
+
+def powershell_function(text: str, name: str) -> str:
+    start = text.index(f"function {name} {{")
+    return text[start : text.index("\n}\n", start) + 3]
 
 
 def native_launches(text: str) -> list[str]:
@@ -95,8 +105,125 @@ class MyDriveCloudVerifierScriptTests(unittest.TestCase):
         self.assertIn("@('snapshots', '--json')", SCRIPT)
         self.assertIn("Get-ResticSnapshotListingFromJson", SCRIPT)
         self.assertIn("direct_cloud_latest_snapshot_verified = $true", SCRIPT)
-        self.assertIn("'restore', $SnapshotId", SCRIPT)
+        self.assertIn("'restore', ($SnapshotId + ':'", SCRIPT)
         self.assertIn("'--verify'", SCRIPT)
+
+    def test_canary_restore_does_not_recreate_parent_folders(self):
+        # Restoring the canary file with --include also recreated each parent
+        # folder with the source's owner and ACL (C:\ProgramData is
+        # SYSTEM-owned and lets Users write). Assert-ProtectedTree then failed
+        # after the restore, and the folder left behind failed every later run
+        # at its start. The canary's own folder is restored instead, as
+        # backup.py does, so only the canary lands in the run folder.
+        restores = [
+            launch for launch in native_launches(SCRIPT) if "'restore'" in launch
+        ]
+        self.assertEqual(1, len(restores))
+        self.assertIn(
+            "'restore', ($SnapshotId + ':' + $canaryFolderSnapshotPath)",
+            restores[0],
+        )
+        self.assertNotIn("'--include'", SCRIPT)
+        self.assertNotIn("$relativeCanary", SCRIPT)
+        # The folder is worked out before any cloud work, so -ValidateOnly and
+        # the start of a run already refuse a canary at the root of a drive.
+        derived_at = SCRIPT.index(
+            "$canaryFolderSnapshotPath = Get-CanaryFolderSnapshotPath `\n"
+            "    -CanaryPath $canaryReferenceFull"
+        )
+        self.assertLess(derived_at, SCRIPT.index("if ($ValidateOnly) {"))
+        self.assertIn("$canaryLeaf = Split-Path -Leaf $canaryReferenceFull", SCRIPT)
+        # Only the canary may come back, and it lands directly in the target.
+        restore_at = SCRIPT.index(restores[0])
+        after_restore = SCRIPT[restore_at:]
+        self.assertIn(
+            "$restoredEntries = @(Get-ChildItem -LiteralPath $restoreTarget -Force)",
+            after_restore,
+        )
+        # Count first: under StrictMode, [0] on an empty array would throw.
+        self.assertIn(
+            "if ($restoredEntries.Count -ne 1 -or\n"
+            "        -not [string]::Equals(\n"
+            "            $restoredEntries[0].Name,\n"
+            "            $canaryLeaf,\n"
+            "            [System.StringComparison]::OrdinalIgnoreCase\n"
+            "        )) {",
+            after_restore,
+        )
+        self.assertIn(
+            "$restoredCanary = Join-Path $restoreTarget $canaryLeaf", after_restore
+        )
+        # The proof's restore evidence and the post-restore tree check stay.
+        self.assertIn("restored_canary = $restoredCanary", SCRIPT)
+        self.assertIn("Assert-ProtectedTree", after_restore)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows PowerShell 5.1 is Windows-only")
+    def test_canary_folder_selector_refuses_a_drive_root(self):
+        # Runs the verifier's own functions in Windows PowerShell 5.1. A canary
+        # at the root of a drive would make the snapshotID:subfolder selector
+        # restore everything backed up from that drive, so it is refused.
+        probe = "\n".join(
+            [
+                "Set-StrictMode -Version Latest",
+                "$ErrorActionPreference = 'Stop'",
+                powershell_function(SCRIPT, "Convert-ToResticSnapshotPath"),
+                powershell_function(SCRIPT, "Get-CanaryFolderSnapshotPath"),
+                "$result = [ordered]@{}",
+                "foreach ($path in @(",
+                "    'C:\\ProgramData\\ResticBackuper\\Canary\\backup-canary.txt',",
+                "    'D:\\Data\\backup-canary.txt',",
+                "    'C:\\backup-canary.txt',",
+                "    '\\\\server\\share\\Canary\\backup-canary.txt'",
+                ")) {",
+                "    try { $result[$path] = Get-CanaryFolderSnapshotPath -CanaryPath $path }",
+                "    catch { $result[$path] = 'refused: ' + $_.Exception.Message }",
+                "}",
+                "[Console]::Out.Write(($result | ConvertTo-Json -Compress))",
+                "",
+            ]
+        )
+        system = os.environ.get("SystemRoot", r"C:\Windows")
+        powershell = os.path.join(
+            system, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="rewindle-canary-folder-", ignore_cleanup_errors=True
+        ) as temp:
+            script = Path(temp) / "probe.ps1"
+            script.write_text(probe, encoding="ascii", newline="\n")
+            completed = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(script),
+                ],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        result = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertEqual(
+            "/C/ProgramData/ResticBackuper/Canary",
+            result["C:\\ProgramData\\ResticBackuper\\Canary\\backup-canary.txt"],
+        )
+        self.assertEqual("/D/Data", result["D:\\Data\\backup-canary.txt"])
+        self.assertEqual(
+            "refused: The canary must be inside a folder, not at the root of a drive.",
+            result["C:\\backup-canary.txt"],
+        )
+        self.assertEqual(
+            "refused: The canary must use a local drive-letter path.",
+            result["\\\\server\\share\\Canary\\backup-canary.txt"],
+        )
 
     def test_every_child_gets_an_allow_listed_environment(self):
         # The task runs elevated with an environment built from the user's

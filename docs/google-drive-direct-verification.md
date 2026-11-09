@@ -85,8 +85,13 @@ following:
    normalized to UTC; the protected last-success snapshot must be among the
    newest timestamps.
 5. Restic restores the protected canary from the complete snapshot ID through
-   the `rclone:` backend with `--no-lock`, `--no-cache`, and `--verify`.
-6. The restored canary has the expected byte length and SHA-256.
+   the `rclone:` backend with `--no-lock`, `--no-cache`, and `--verify`. It
+   selects the canary's own folder (`<snapshot ID>:<folder>`), so only the
+   canary lands in the protected run folder. Restoring the file with
+   `--include` would also recreate each parent folder with its original owner
+   and ACL, which the run folder's ACL check rejects.
+6. The restored canary has the expected byte length and SHA-256, and nothing
+   else was restored.
 
 Native stdout and stderr are copied from process byte streams into protected
 files. This avoids Windows PowerShell 5.1 text redirection changing JSON or

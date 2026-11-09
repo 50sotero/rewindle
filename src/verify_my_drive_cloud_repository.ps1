@@ -446,6 +446,22 @@ function Convert-ToResticSnapshotPath {
     return '/' + $drive + '/' + $tail
 }
 
+function Get-CanaryFolderSnapshotPath {
+    param([Parameter(Mandatory)] [string]$CanaryPath)
+
+    # The check restores the canary's own folder through Restic's
+    # snapshotID:subfolder selector, so that folder can't be a drive root:
+    # selecting one would restore everything backed up from that drive.
+    $folder = [System.IO.Path]::GetDirectoryName(
+        [System.IO.Path]::GetFullPath($CanaryPath)
+    )
+    if ([string]::IsNullOrEmpty($folder) -or
+        $folder -eq [System.IO.Path]::GetPathRoot($folder)) {
+        throw 'The canary must be inside a folder, not at the root of a drive.'
+    }
+    return Convert-ToResticSnapshotPath -Path $folder
+}
+
 function Write-NewJson {
     param(
         [Parameter(Mandatory)] [string]$Path,
@@ -863,6 +879,9 @@ if ($CanarySnapshotPath -cne $derivedCanarySnapshotPath) {
     throw 'The explicit canary snapshot path does not match the configured canary.'
 }
 Assert-NormalFile -Path $canaryReferenceFull | Out-Null
+$canaryFolderSnapshotPath = Get-CanaryFolderSnapshotPath `
+    -CanaryPath $canaryReferenceFull
+$canaryLeaf = Split-Path -Leaf $canaryReferenceFull
 
 $resticExecutable = [System.IO.Path]::GetFullPath(
     [string]$config.restic_executable
@@ -1235,12 +1254,17 @@ try {
     $referenceItem = Get-Item -LiteralPath $canaryReferenceFull -Force
     $expectedCanaryBytes = [long]$referenceItem.Length
     $expectedCanarySha256 = Get-Sha256Hex -Path $canaryReferenceFull
+    # Restore the canary's own folder through Restic's snapshotID:subfolder
+    # selector, as the backup's canary check does, so only the canary lands in
+    # the run folder. Restoring the file with --include also recreated each
+    # parent folder with the source's owner and ACL: C:\ProgramData is
+    # SYSTEM-owned and lets Users write, so the protected-tree check below
+    # failed, and the folder it left behind failed every later run at its start.
     Invoke-RequiredNative `
         -Executable $resticExecutable `
         -Arguments ($resticCloudCommon + @(
-            'restore', $SnapshotId,
+            'restore', ($SnapshotId + ':' + $canaryFolderSnapshotPath),
             '--target', $restoreTarget,
-            '--include', $CanarySnapshotPath,
             '--verify'
         )) `
         -StdoutPath $restoreStdout `
@@ -1248,8 +1272,16 @@ try {
         -Environment $cloudEnvironment `
         -Operation 'Independent direct-cloud Restic restore'
 
-    $relativeCanary = $CanarySnapshotPath.TrimStart('/').Replace('/', '\')
-    $restoredCanary = Join-Path $restoreTarget $relativeCanary
+    $restoredEntries = @(Get-ChildItem -LiteralPath $restoreTarget -Force)
+    if ($restoredEntries.Count -ne 1 -or
+        -not [string]::Equals(
+            $restoredEntries[0].Name,
+            $canaryLeaf,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'The direct-cloud restore must bring back the canary and nothing else.'
+    }
+    $restoredCanary = Join-Path $restoreTarget $canaryLeaf
     Assert-NormalFile -Path $restoredCanary | Out-Null
     $restoredItem = Get-Item -LiteralPath $restoredCanary -Force
     $restoredSha256 = Get-Sha256Hex -Path $restoredCanary
