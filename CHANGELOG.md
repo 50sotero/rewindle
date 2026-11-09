@@ -116,28 +116,27 @@ ones a home user reads without a glossary.
 
 ### Fixed
 
-- **The nightly Google Drive check can unlock its Google Drive connection.**
-  The check reads Google Drive through rclone, whose saved connection is locked
-  with a password that a small helper hands over when the check starts. A
-  mistake in how the check wrote the helper's command asked rclone to start a
-  program named `{0}` instead of Windows PowerShell, so every check stopped
-  within seconds, before it read anything from Google Drive, and no check could
-  pass. The command now starts Windows PowerShell with the helper, and a test
-  runs the check's own code to make sure it does.
+- **The nightly Google Drive check can open its Google Drive connection.** The
+  check keeps its Google Drive connection locked, and a small helper unlocks it
+  each time the check starts. A mistake in the check started the wrong program
+  instead of that helper, so every check stopped within seconds, before it
+  looked at the copy in Google Drive, and the dashboard went on showing the
+  off-site copy as not set up. The check now starts the helper correctly.
 - **The nightly Google Drive check can pass.** The check proves the copy in
   Google Drive can be restored by restoring a small test file from it, and the
   backup program also rebuilt each folder above that file with its original
   owner and permissions. C:\ProgramData belongs to Windows and lets every user
-  add files to it, so the check's own safety test rejected its work folder. The
-  first check failed at its very end, the folders it left behind made every
-  later check fail at its start, and the dashboard went on showing the off-site
-  copy as not set up. The check now restores only the test file's own folder,
-  as each backup does when it tests a restore, and stops if anything else comes
-  back. If you set the check up with an earlier version, sign in as the person
-  who set it up, open `C:\ProgramData\ResticBackuperCloudVerification\runs` in
-  File Explorer, delete the folders inside it and approve the administrator
-  prompt. Keep the `runs` folder itself, and if Windows offers to give you
-  access to a folder, cancel instead.
+  add files to it, so the check's own safety test rejected its work folder. A
+  check that got that far failed at its very end, the folders it left behind
+  made every later check fail at its start, and the dashboard went on showing
+  the off-site copy as not set up. The check now restores only the test file's
+  own folder, as each backup does when it tests a restore, and stops if
+  anything else comes back. If you set the check up with an earlier version,
+  sign in as the person who set it up, open
+  `C:\ProgramData\ResticBackuperCloudVerification\runs` in File Explorer,
+  delete the folders inside it and approve the administrator prompt. Keep the
+  `runs` folder itself, and if Windows offers to give you access to a folder,
+  cancel instead.
 - **The automatic backup no longer moves by an hour when the clocks change.**
   Setup wrote the backup time in UTC, which Windows keeps at one UTC moment all
   year, so a backup set for 02:00 ran at 01:00 all winter. The dashboard took

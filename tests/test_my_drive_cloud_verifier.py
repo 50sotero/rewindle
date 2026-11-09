@@ -64,21 +64,20 @@ def run_windows_powershell(probe: str) -> subprocess.CompletedProcess:
 
 
 def split_password_command(command: str) -> list[str]:
-    """Splits a password command the way rclone reads RCLONE_PASSWORD_COMMAND:
-    fields separated by spaces, with double quotes around a field that holds
-    spaces (Go's encoding/csv with a space as the separator)."""
+    """Splits a password command roughly the way rclone reads
+    RCLONE_PASSWORD_COMMAND: Go's encoding/csv with a space as the separator,
+    so double quotes group a field that holds spaces. Python's csv differs
+    from Go's only for a quote inside a field and for repeated spaces (an
+    empty field), so both are refused here instead of modelled."""
     rows = list(
-        csv.reader(
-            [command],
-            delimiter=" ",
-            quotechar='"',
-            skipinitialspace=True,
-            strict=True,
-        )
+        csv.reader([command], delimiter=" ", quotechar='"', strict=True)
     )
     if len(rows) != 1:
         raise ValueError(f"not one command line: {command!r}")
-    return rows[0]
+    fields = rows[0]
+    if any(not field or '"' in field for field in fields):
+        raise ValueError(f"an empty field or a stray quote: {command!r}")
+    return fields
 
 
 def native_launches(text: str) -> list[str]:
@@ -284,12 +283,13 @@ class MyDriveCloudVerifierScriptTests(unittest.TestCase):
         # Runs the verifier's own lines in Windows PowerShell 5.1. -f binds
         # tighter than +, so a format string split with + was formatted only
         # after the +: rclone was asked to start a program named {0}, could not
-        # unlock its configuration, and every check failed in seconds. Each
-        # command is split the way rclone splits RCLONE_PASSWORD_COMMAND.
+        # unlock its configuration, and every check failed in seconds. The
+        # paths hold spaces, as a -CloudVerificationRoot may, so the quotes
+        # around every path are exercised too.
         values = {
             "powershellExecutable": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
-            "rclonePasswordHelperPath": r"C:\ProgramData\ResticBackuperCloudVerification\reveal-rclone-config-password.ps1",
-            "rcloneCredentialPath": r"C:\ProgramData\ResticBackuperCloudVerification\rclone-config-password.clixml",
+            "rclonePasswordHelperPath": r"C:\ProgramData\Cloud Check\reveal-rclone-config-password.ps1",
+            "rcloneCredentialPath": r"C:\ProgramData\Cloud Check\rclone-config-password.clixml",
             "pythonExecutable": r"C:\Program Files\ResticBackuper\Python\python.exe",
             "secretStore": r"C:\Program Files\ResticBackuper\secret_store.py",
             "secretFile": r"C:\ProgramData\ResticBackuper\repository-password.dpapi.json",
@@ -323,6 +323,11 @@ class MyDriveCloudVerifierScriptTests(unittest.TestCase):
             ],
             split_password_command(result["rclone"]),
         )
+        # Restic splits RESTIC_PASSWORD_COMMAND with its own splitter, in
+        # which a backslash outside quotes separates fields. The model above
+        # agrees with it here only because every path is double-quoted.
+        for name in ("pythonExecutable", "secretStore", "secretFile"):
+            self.assertIn(f'"{values[name]}"', result["restic"])
         self.assertEqual(
             [
                 values["pythonExecutable"],
@@ -340,10 +345,17 @@ class MyDriveCloudVerifierScriptTests(unittest.TestCase):
     def test_no_format_string_is_split_with_plus_before_f(self):
         # 'a {0} ' + 'b {1}' -f $x, $y formats only 'b {1}': -f binds tighter
         # than +. A format string split over two literals must be joined in
-        # parentheses first, as the rclone password command now is.
-        trap = re.compile(r"(?i)['\"]\s*\+\s*['\"][^\n]*?['\"]\s*-f\b")
-        for folder in ("src", "installer", "build"):
-            for path in sorted((PROJECT / folder).rglob("*.ps1")):
+        # parentheses first, as the rclone password command now is. This
+        # catches that shape (a literal, +, then a literal followed by -f);
+        # generated folders such as node_modules are not the project's code.
+        trap = re.compile(
+            r"(?i)['\"]\s*\+\s*(?:'[^'\n]*'|\"[^\"\n]*\")\s*-f\b"
+        )
+        generated = {"node_modules", "dist", "bin", "obj", ".packages"}
+        for folder in ("src", "installer", "build", "tests"):
+            for path in sorted((PROJECT / folder).rglob("*.ps*1")):
+                if generated.intersection(path.relative_to(PROJECT).parts):
+                    continue
                 with self.subTest(path=path.relative_to(PROJECT).as_posix()):
                     text = path.read_text(encoding="utf-8")
                     match = trap.search(text)
