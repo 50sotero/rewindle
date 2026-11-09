@@ -116,6 +116,14 @@ ones a home user reads without a glossary.
 
 ### Fixed
 
+- **The nightly Google Drive check can unlock its Google Drive connection.**
+  The check reads Google Drive through rclone, whose saved connection is locked
+  with a password that a small helper hands over when the check starts. A
+  mistake in how the check wrote the helper's command asked rclone to start a
+  program named `{0}` instead of Windows PowerShell, so every check stopped
+  within seconds, before it read anything from Google Drive, and no check could
+  pass. The command now starts Windows PowerShell with the helper, and a test
+  runs the check's own code to make sure it does.
 - **The nightly Google Drive check can pass.** The check proves the copy in
   Google Drive can be restored by restoring a small test file from it, and the
   backup program also rebuilt each folder above that file with its original

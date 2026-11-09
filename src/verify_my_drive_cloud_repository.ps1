@@ -1092,9 +1092,12 @@ try {
         ).FullName
     ) 'System32\WindowsPowerShell\v1.0\powershell.exe'
     Assert-NormalFile -Path $powershellExecutable | Out-Null
+    # -f binds tighter than +, so the two halves are joined before -f. Without
+    # these inner parentheses only the second half was formatted: rclone was
+    # asked to start a program named {0}, and every check failed in seconds.
     $rclonePasswordCommand = (
-        '"{0}" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass ' +
-        '-File "{1}" -CredentialPath "{2}"' -f
+        ('"{0}" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass ' +
+        '-File "{1}" -CredentialPath "{2}"') -f
         $powershellExecutable,
         ([System.IO.Path]::GetFullPath($rclonePasswordHelperPath)),
         ([System.IO.Path]::GetFullPath($rcloneCredentialPath))
