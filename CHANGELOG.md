@@ -116,12 +116,13 @@ ones a home user reads without a glossary.
 
 ### Fixed
 
-- **The nightly Google Drive check can open its Google Drive connection.** The
-  check keeps its Google Drive connection locked, and a small helper unlocks it
-  each time the check starts. A mistake in the check started the wrong program
-  instead of that helper, so every check stopped within seconds, before it
-  looked at the copy in Google Drive, and the dashboard went on showing the
-  off-site copy as not set up. The check now starts the helper correctly.
+- **The nightly Google Drive check can unlock its Google Drive connection.**
+  The check keeps its Google Drive connection locked, and a small password
+  helper unlocks it each time the check starts. A mistake in the check asked
+  Windows to start a program that does not exist instead of that helper, so
+  every check stopped within seconds, before it looked at the copy in Google
+  Drive, and the dashboard went on showing the off-site copy as not set up.
+  The check now starts the password helper correctly.
 - **The nightly Google Drive check can pass.** The check proves the copy in
   Google Drive can be restored by restoring a small test file from it, and the
   backup program also rebuilt each folder above that file with its original

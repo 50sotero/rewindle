@@ -67,8 +67,9 @@ def split_password_command(command: str) -> list[str]:
     """Splits a password command roughly the way rclone reads
     RCLONE_PASSWORD_COMMAND: Go's encoding/csv with a space as the separator,
     so double quotes group a field that holds spaces. Python's csv differs
-    from Go's only for a quote inside a field and for repeated spaces (an
-    empty field), so both are refused here instead of modelled."""
+    from Go's for a quote inside an unquoted field (Go refuses it), so that is
+    refused here. An empty field (a leading, trailing or doubled space) is
+    refused too: Restic's splitter would drop it, and it is always a typo."""
     rows = list(
         csv.reader([command], delimiter=" ", quotechar='"', strict=True)
     )
@@ -324,8 +325,10 @@ class MyDriveCloudVerifierScriptTests(unittest.TestCase):
             split_password_command(result["rclone"]),
         )
         # Restic splits RESTIC_PASSWORD_COMMAND with its own splitter, in
-        # which a backslash outside quotes separates fields. The model above
-        # agrees with it here only because every path is double-quoted.
+        # which a backslash outside quotes separates fields and a quote right
+        # after a backslash does not close. The model above agrees with it
+        # here only because every path is double-quoted and none ends in a
+        # backslash (they are all files).
         for name in ("pythonExecutable", "secretStore", "secretFile"):
             self.assertIn(f'"{values[name]}"', result["restic"])
         self.assertEqual(
