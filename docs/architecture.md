@@ -382,8 +382,10 @@ the cloud path from the protected repository and My Drive configuration, and
 authenticates both the local mount and Google Drive API view as the same Restic
 repository. It requires an exact case-sensitive path, length, MD5, SHA-256, and
 provider-object-ID inventory before restoring the protected canary through the
-`rclone:` backend. That restore bypasses DriveFS and uses the complete snapshot
-ID from the latest successful backup.
+`rclone:` backend. That restore bypasses DriveFS, uses the complete snapshot ID
+from the latest successful backup, and selects the canary's own folder
+(`<snapshot ID>:<folder>`), so no parent folder is recreated in the protected
+run folder.
 
 Rclone, its encrypted configuration, its CurrentUser-DPAPI configuration
 password, and the packaged reveal helper are copied into
