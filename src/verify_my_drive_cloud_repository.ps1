@@ -32,6 +32,26 @@ $env:PSModulePath = $trustedModuleRoot
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# What the check is doing, for the failure record it leaves when it stops (see the trap below the functions).
+$script:checkStep = 'checking_setup'
+$script:checkFailureDetail = $null
+$script:failureRecordTarget = $null
+
+# Task Scheduler stops the task after 12 hours. The check stops itself well before that, so it can say why.
+$checkTimeBudget = [TimeSpan]::FromHours(11)
+# A check that Windows starts at sign-in or wake-up, to make up for a night the PC was off or asleep, can start before
+# Google Drive for desktop and the network are back. It waits for them this long.
+$googleDriveWait = [TimeSpan]::FromMinutes(30)
+$networkWait = [TimeSpan]::FromMinutes(15)
+# On such a late start the missed backup starts at about the same moment; it gets this long to take the run lock first.
+$backupHeadStart = [TimeSpan]::FromMinutes(15)
+# How long the check waits for a backup (or a protected change) that holds the run lock.
+$backupWait = [TimeSpan]::FromHours(6)
+# Runs kept besides the new one (and the one that holds the latest proof); older run folders are removed.
+$previousRunsKept = 4
+# Google Drive's SHA-256 checksums, which the inventory compares, need rclone 1.65.0 or later.
+$minimumRcloneVersion = [Version]'1.65.0'
+
 function Test-SamePath {
     param(
         [Parameter(Mandatory)] [string]$Left,
@@ -647,13 +667,148 @@ function Get-ReadOnlyRemoteSpec {
     return $RemoteName + ',scope=drive.readonly,root_folder_id=' + $RootFolderId
 }
 
+function Get-RemainingMilliseconds {
+    param([Parameter(Mandatory)] [DateTime]$DeadlineUtc)
+
+    $milliseconds = ($DeadlineUtc - [DateTime]::UtcNow).TotalMilliseconds
+    return [int][Math]::Max(0, [Math]::Min([double][int]::MaxValue, $milliseconds))
+}
+
+function Get-NativeProcessTree {
+    # The processes that this one started, and the ones they started, as exact process IDs with their start times.
+    # Windows gives the ID of a process that has exited to new processes, so a process counts as a child only when it
+    # started after the parent it names (the second of slack covers the two clocks' different precision).
+    param(
+        [Parameter(Mandatory)] [int]$RootId,
+        [Parameter(Mandatory)] [DateTime]$RootStarted
+    )
+
+    $processes = @(CimCmdlets\Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
+    $tree = [System.Collections.Generic.List[object]]::new()
+    $pending = [System.Collections.Generic.Queue[object]]::new()
+    $pending.Enqueue([pscustomobject]@{ Id = $RootId; Started = $RootStarted })
+    while ($pending.Count -gt 0) {
+        $parent = $pending.Dequeue()
+        foreach ($candidate in $processes) {
+            $started = $candidate.CreationDate
+            if ([int]$candidate.ParentProcessId -ne [int]$parent.Id -or
+                [int]$candidate.ProcessId -eq [int]$parent.Id -or
+                $null -eq $started -or
+                ([DateTime]$started) -lt ([DateTime]$parent.Started).AddSeconds(-1)) {
+                continue
+            }
+            $child = [pscustomobject]@{
+                Id = [int]$candidate.ProcessId
+                Started = [DateTime]$started
+            }
+            $tree.Add($child)
+            $pending.Enqueue($child)
+        }
+    }
+    return ,$tree.ToArray()
+}
+
+function Stop-ExactProcess {
+    # Stops one process by its exact ID, and only while that ID still names the process that started at that time.
+    param(
+        [Parameter(Mandatory)] [int]$Id,
+        [Parameter(Mandatory)] [DateTime]$Started
+    )
+
+    $process = $null
+    try {
+        $process = [System.Diagnostics.Process]::GetProcessById($Id)
+    }
+    catch {
+        return
+    }
+    try {
+        if (-not $process.HasExited -and
+            [Math]::Abs(($process.StartTime - $Started).TotalSeconds) -lt 1) {
+            $process.Kill()
+        }
+    }
+    catch { }
+    finally {
+        $process.Dispose()
+    }
+}
+
+function Stop-NativeProcessTree {
+    # Stops a native step that ran past its deadline, and everything it started (Restic starts rclone), each by its
+    # exact process ID. The children are listed first, while their parent is still there to name them.
+    param([Parameter(Mandatory)] [System.Diagnostics.Process]$Process)
+
+    $tree = @()
+    try {
+        $tree = Get-NativeProcessTree -RootId $Process.Id -RootStarted $Process.StartTime
+    }
+    catch { }
+    try {
+        if (-not $Process.HasExited) {
+            $Process.Kill()
+        }
+    }
+    catch { }
+    foreach ($child in $tree) {
+        Stop-ExactProcess -Id ([int]$child.Id) -Started ([DateTime]$child.Started)
+    }
+}
+
+function Format-PlainDuration {
+    param([Parameter(Mandatory)] [TimeSpan]$Duration)
+
+    $minutes = [long][Math]::Max(1, [Math]::Round($Duration.TotalMinutes))
+    $hours = [long][Math]::Floor($minutes / 60)
+    $rest = $minutes % 60
+    $parts = @()
+    if ($hours -eq 1) { $parts += '1 hour' }
+    elseif ($hours -gt 1) { $parts += ('{0} hours' -f $hours) }
+    if ($rest -eq 1) { $parts += '1 minute' }
+    elseif ($rest -gt 1) { $parts += ('{0} minutes' -f $rest) }
+    return ($parts -join ' ')
+}
+
+function Get-NativeTimeoutSeconds {
+    # How long one native step may run: a fixed allowance, plus time for the repository's size at a slow but working
+    # rate, and never past the end of the check's own time. A step that has no time left stops the check.
+    param(
+        [Parameter(Mandatory)] [double]$BaseSeconds,
+        [Parameter(Mandatory)] [DateTime]$CheckDeadlineUtc,
+        [long]$Bytes = 0,
+        [double]$BytesPerSecond = 0,
+        [long]$Files = 0,
+        [double]$SecondsPerFile = 0
+    )
+
+    $seconds = $BaseSeconds
+    if ($Bytes -gt 0 -and $BytesPerSecond -gt 0) {
+        $seconds += $Bytes / $BytesPerSecond
+    }
+    if ($Files -gt 0 -and $SecondsPerFile -gt 0) {
+        $seconds += $Files * $SecondsPerFile
+    }
+    $left = ($CheckDeadlineUtc - [DateTime]::UtcNow).TotalSeconds
+    if ($left -lt 1) {
+        Stop-Check `
+            -Message 'The check used up its time before this step could start.' `
+            -ReasonCode 'out_of_time' `
+            -Reason (
+                'The check ran out of time before ' + (Get-CheckStepLabel -Step $script:checkStep) + '.'
+            ) `
+            -NextStep 'Leave this PC on, awake and online overnight. Rewindle checks again tonight.'
+    }
+    return [int][Math]::Ceiling([Math]::Min($seconds, $left))
+}
+
 function Invoke-NativeToFiles {
     param(
         [Parameter(Mandatory)] [string]$Executable,
         [Parameter(Mandatory)] [string[]]$Arguments,
         [Parameter(Mandatory)] [string]$StdoutPath,
         [Parameter(Mandatory)] [string]$StderrPath,
-        [Parameter(Mandatory)] [System.Collections.IDictionary]$Environment
+        [Parameter(Mandatory)] [System.Collections.IDictionary]$Environment,
+        [Parameter(Mandatory)] [ValidateRange(1, 2147483)] [int]$TimeoutSeconds
     )
 
     foreach ($path in @($StdoutPath, $StderrPath)) {
@@ -700,7 +855,37 @@ function Invoke-NativeToFiles {
         }
         $stdoutTask = $process.StandardOutput.BaseStream.CopyToAsync($stdout)
         $stderrTask = $process.StandardError.BaseStream.CopyToAsync($stderr)
-        [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask))
+        $copies = [System.Threading.Tasks.Task[]]@($stdoutTask, $stderrTask)
+        # Every step has a deadline sized for it (see Get-NativeTimeoutSeconds). The output is complete once the program
+        # and everything it started have closed it, so both waits count against the same deadline.
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        $finished = $process.WaitForExit(
+            (Get-RemainingMilliseconds -DeadlineUtc $deadline)
+        ) -and [System.Threading.Tasks.Task]::WaitAll(
+            $copies,
+            (Get-RemainingMilliseconds -DeadlineUtc $deadline)
+        )
+        if (-not $finished) {
+            Stop-NativeProcessTree -Process $process
+            try { [void][System.Threading.Tasks.Task]::WaitAll($copies, 10000) } catch { }
+            # A step whose deadline was the end of the check's own time ran out of that time, not of its own.
+            $checkDeadline = Get-Variable -Name 'checkDeadlineUtc' -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+            if ($checkDeadline -is [DateTime] -and [DateTime]::UtcNow.AddSeconds(5) -ge $checkDeadline) {
+                Stop-Check `
+                    -Message 'A native verification step was stopped when the check used up its time.' `
+                    -ReasonCode 'out_of_time' `
+                    -Reason ('The check ran out of time while ' + (Get-CheckStepLabel -Step $script:checkStep) + '.') `
+                    -NextStep 'Leave this PC on, awake and online overnight. Rewindle checks again tonight.'
+            }
+            Stop-Check `
+                -Message ('A native verification step did not finish within {0} seconds and was stopped.' -f $TimeoutSeconds) `
+                -ReasonCode 'timed_out' `
+                -Reason (
+                    'The check stopped because ' + (Get-CheckStepLabel -Step $script:checkStep) +
+                    ' took longer than ' + (Format-PlainDuration -Duration ([TimeSpan]::FromSeconds($TimeoutSeconds))) + '.'
+                ) `
+                -NextStep 'Leave this PC on, awake and online overnight. Rewindle checks again tonight.'
+        }
         $process.WaitForExit()
         $stdout.Flush($true)
         $stderr.Flush($true)
@@ -720,7 +905,8 @@ function Invoke-RequiredNative {
         [Parameter(Mandatory)] [string]$StdoutPath,
         [Parameter(Mandatory)] [string]$StderrPath,
         [Parameter(Mandatory)] [System.Collections.IDictionary]$Environment,
-        [Parameter(Mandatory)] [string]$Operation
+        [Parameter(Mandatory)] [string]$Operation,
+        [Parameter(Mandatory)] [ValidateRange(1, 2147483)] [int]$TimeoutSeconds
     )
 
     $exitCode = Invoke-NativeToFiles `
@@ -728,13 +914,15 @@ function Invoke-RequiredNative {
         -Arguments $Arguments `
         -StdoutPath $StdoutPath `
         -StderrPath $StderrPath `
-        -Environment $Environment
+        -Environment $Environment `
+        -TimeoutSeconds $TimeoutSeconds
     if ($exitCode -ne 0) {
         throw "$Operation failed closed with exit code $exitCode. Review its private run log."
     }
 }
 
 function Enter-ProtectedRunLock {
+    # The run lock, or $null while a backup or a protected change holds it.
     param([Parameter(Mandatory)] [string]$Path)
 
     $item = Assert-NormalFile -Path $Path
@@ -759,9 +947,50 @@ function Enter-ProtectedRunLock {
         $stream.Lock(0, 1)
         return $stream
     }
+    catch [System.IO.IOException] {
+        $stream.Dispose()
+        # A lock violation means a backup or a protected change holds the lock. Any other error is a real one.
+        if (($_.Exception.HResult -band 0xFFFF) -eq 33) {
+            return $null
+        }
+        throw
+    }
     catch {
         $stream.Dispose()
         throw
+    }
+}
+
+function Enter-ProtectedRunLockWhenFree {
+    # A backup or a protected change holds the run lock while it runs; the check waits for it instead of giving up.
+    # Each try takes the lock at once if it is free and gives it back nothing otherwise, as the backup's own try does.
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [DateTime]$DeadlineUtc,
+        [double]$PollSeconds = 30
+    )
+
+    $waitStartedUtc = [DateTime]::UtcNow
+    while ($true) {
+        $stream = Enter-ProtectedRunLock -Path $Path
+        if ($null -ne $stream) {
+            return $stream
+        }
+        $remaining = Get-RemainingMilliseconds -DeadlineUtc $DeadlineUtc
+        if ($remaining -le 0) {
+            Stop-Check `
+                -Message 'A backup or protected change held the run lock until the check stopped waiting.' `
+                -ReasonCode 'backup_still_running' `
+                -Reason (
+                    'A backup was still running after ' +
+                    (Format-PlainDuration -Duration ($DeadlineUtc - $waitStartedUtc)) +
+                    ", so the check couldn't start."
+                ) `
+                -NextStep 'Open Activity to see whether a backup is stuck. Rewindle checks again tonight.'
+        }
+        [System.Threading.Thread]::Sleep(
+            [int][Math]::Min([double]$remaining, $PollSeconds * 1000)
+        )
     }
 }
 
@@ -782,6 +1011,628 @@ function Assert-SafeCloudPath {
             $_ -in @('', '.', '..') -or $_ -match '[\x00-\x1f]'
         }).Count -gt 0) {
         throw 'The cloud repository path is invalid.'
+    }
+}
+
+function Get-CheckStepLabel {
+    # What the check was doing at each step, in words for the dashboard ("It stopped while ...").
+    param([Parameter(Mandatory)] [string]$Step)
+
+    switch -CaseSensitive ($Step) {
+        'checking_setup' { return 'checking its own setup' }
+        'waiting_for_google_drive' { return 'waiting for Google Drive for desktop' }
+        'waiting_for_network' { return 'waiting for an internet connection' }
+        'waiting_for_backup' { return 'waiting for a backup to finish' }
+        'checking_latest_backup' { return 'checking your latest backup' }
+        'checking_rclone' { return 'starting its Google Drive tool (rclone)' }
+        'opening_local_backup' { return 'opening your backup in the Google Drive folder on this PC' }
+        'connecting_to_google_drive' { return 'connecting to your backup in Google Drive' }
+        'listing_google_drive' { return "listing your backup's files in Google Drive" }
+        'comparing_files' { return 'comparing the files in Google Drive with your backup on this PC' }
+        'listing_cloud_backups' { return 'listing the backups in Google Drive' }
+        'test_restore' { return 'restoring a test file from Google Drive' }
+        'saving_result' { return 'saving its result' }
+    }
+    return 'checking the copy in Google Drive'
+}
+
+function Set-CheckStep {
+    param([Parameter(Mandatory)] [string]$Step)
+
+    $script:checkStep = $Step
+    $script:checkFailureDetail = $null
+}
+
+function New-CheckFailureDetail {
+    param(
+        [Parameter(Mandatory)] [string]$ReasonCode,
+        [Parameter(Mandatory)] [string]$Reason,
+        [Parameter(Mandatory)] [string]$NextStep
+    )
+
+    return [pscustomobject][ordered]@{
+        reason_code = $ReasonCode
+        reason = $Reason
+        next_step = $NextStep
+    }
+}
+
+function Stop-Check {
+    # Stops the check with a reason the person can act on. The message goes to the task's own error output; the reason
+    # and the next step go to the failure record the dashboard shows (see the trap below the functions).
+    param(
+        [Parameter(Mandatory)] [string]$Message,
+        [Parameter(Mandatory)] [string]$ReasonCode,
+        [Parameter(Mandatory)] [string]$Reason,
+        [Parameter(Mandatory)] [string]$NextStep
+    )
+
+    $script:checkFailureDetail = New-CheckFailureDetail `
+        -ReasonCode $ReasonCode `
+        -Reason $Reason `
+        -NextStep $NextStep
+    throw $Message
+}
+
+function Get-CheckFailureDescription {
+    # The plain reason and next step for a check that stopped at this step, unless the place that stopped it gave its own.
+    param(
+        [Parameter(Mandatory)] [string]$Step,
+        [AllowNull()] [object]$Detail
+    )
+
+    if ($null -ne $Detail) {
+        return $Detail
+    }
+    $again = 'Rewindle checks again tonight.'
+    $report = 'If this keeps happening, choose Save problem report in Settings.'
+    $setUpAgain = "Set up the Google Drive check again, as Rewindle's guide to Google Drive describes."
+    $online = 'Make sure this PC is online overnight. ' + $again
+    switch -CaseSensitive ($Step) {
+        'checking_setup' {
+            return New-CheckFailureDetail -ReasonCode 'setup_changed' -NextStep $setUpAgain -Reason (
+                'Something the check needs on this PC is missing or has changed since the check was set up.')
+        }
+        'waiting_for_google_drive' {
+            return New-CheckFailureDetail -ReasonCode 'google_drive_not_ready' -Reason (
+                "Google Drive for desktop wasn't ready.") -NextStep (
+                'Make sure Google Drive for desktop is running and signed in. ' + $again)
+        }
+        'waiting_for_network' {
+            return New-CheckFailureDetail -ReasonCode 'offline' -Reason (
+                'This PC had no internet connection.') -NextStep (
+                'Leave this PC connected to the internet overnight. ' + $again)
+        }
+        'waiting_for_backup' {
+            # A backup that runs too long has words of its own (see Enter-ProtectedRunLockWhenFree).
+            return New-CheckFailureDetail -ReasonCode 'run_lock_unusable' -NextStep ($again + ' ' + $report) -Reason (
+                "Rewindle couldn't tell whether a backup was running.")
+        }
+        'checking_latest_backup' {
+            return New-CheckFailureDetail -ReasonCode 'latest_backup_unusable' -Reason (
+                "Your latest backup couldn't be matched with the backup in Google Drive.") -NextStep (
+                'Choose Back up now, or wait for the next automatic backup. The check after it covers it.')
+        }
+        'checking_rclone' {
+            return New-CheckFailureDetail -ReasonCode 'rclone_failed' -NextStep $setUpAgain -Reason (
+                "The program the check uses to read Google Drive (rclone) didn't start.")
+        }
+        'opening_local_backup' {
+            return New-CheckFailureDetail -ReasonCode 'local_backup_unreadable' -Reason (
+                "Rewindle couldn't open your backup in the Google Drive folder on this PC.") -NextStep (
+                'Make sure Google Drive for desktop is running and signed in. ' + $again)
+        }
+        'connecting_to_google_drive' {
+            return New-CheckFailureDetail -ReasonCode 'google_drive_unreachable' -Reason (
+                "Rewindle couldn't open your backup directly in Google Drive. The connection or the check's " +
+                "Google sign-in didn't work.") -NextStep (
+                "Make sure this PC is online overnight. If this keeps happening, the check's Google sign-in " +
+                "needs to be set up again, as Rewindle's guide to Google Drive describes.")
+        }
+        'listing_google_drive' {
+            return New-CheckFailureDetail -ReasonCode 'google_drive_list_failed' -NextStep $online -Reason (
+                "Rewindle couldn't list your backup's files in Google Drive.")
+        }
+        'comparing_files' {
+            return New-CheckFailureDetail -ReasonCode 'compare_failed' -NextStep ($again + ' ' + $report) -Reason (
+                "Rewindle couldn't compare the files in Google Drive with your backup on this PC.")
+        }
+        'listing_cloud_backups' {
+            return New-CheckFailureDetail -ReasonCode 'google_drive_backups_unlisted' -NextStep $online -Reason (
+                "Rewindle couldn't list the backups in Google Drive.")
+        }
+        'test_restore' {
+            return New-CheckFailureDetail -ReasonCode 'test_restore_failed' -NextStep ($again + ' ' + $report) -Reason (
+                "A test restore of a small file from Google Drive didn't work.")
+        }
+        'saving_result' {
+            return New-CheckFailureDetail -ReasonCode 'result_not_saved' -NextStep $again -Reason (
+                "The check finished, but Rewindle couldn't save its result.")
+        }
+    }
+    return New-CheckFailureDetail -ReasonCode 'check_failed' -NextStep ($again + ' ' + $report) -Reason (
+        'The check stopped before it finished.')
+}
+
+function Format-FileCount {
+    param([Parameter(Mandatory)] [long]$Count)
+
+    if ($Count -eq 1) {
+        return '1 file'
+    }
+    return $Count.ToString('N0', [Globalization.CultureInfo]::InvariantCulture) + ' files'
+}
+
+function Get-InventoryFailureDetail {
+    # The plain reason for what the inventory helper found, or $null for a category that has no words of its own.
+    param(
+        [Parameter(Mandatory)] [string]$Category,
+        [Parameter(Mandatory)] [long]$Count
+    )
+
+    $again = 'Rewindle checks again tonight.'
+    $report = 'If this keeps happening, choose Save problem report in Settings.'
+    $upload = 'Leave this PC on with Google Drive for desktop running until it has uploaded everything. ' + $again
+    $fileCount = [Math]::Max([long]1, $Count)
+    $files = Format-FileCount -Count $fileCount
+    switch -CaseSensitive ($Category) {
+        'cloud_files_missing' {
+            if ($fileCount -eq 1) {
+                $reason = "1 file of your backup isn't in Google Drive yet."
+            }
+            else {
+                $reason = "$files of your backup aren't in Google Drive yet."
+            }
+            return New-CheckFailureDetail -ReasonCode $Category -NextStep $upload -Reason $reason
+        }
+        'cloud_files_extra' {
+            return New-CheckFailureDetail -ReasonCode $Category -Reason (
+                "Google Drive has $files in your backup folder that the backup on this PC doesn't have.") -NextStep (
+                'Make sure nothing else changes your backup folder in Google Drive. ' + $again + ' ' + $report)
+        }
+        'cloud_size_mismatch' {
+            if ($fileCount -eq 1) {
+                $reason = (
+                    "1 file in Google Drive isn't the same size as on this PC. Google Drive for desktop may still " +
+                    'be uploading it.')
+            }
+            else {
+                $reason = (
+                    "$files in Google Drive aren't the same size as on this PC. Google Drive for desktop may still " +
+                    'be uploading them.')
+            }
+            return New-CheckFailureDetail -ReasonCode $Category -NextStep $upload -Reason $reason
+        }
+        'cloud_content_mismatch' {
+            if ($fileCount -eq 1) {
+                $reason = "1 file in Google Drive doesn't match the one on this PC."
+            }
+            else {
+                $reason = "$files in Google Drive don't match the ones on this PC."
+            }
+            return New-CheckFailureDetail -ReasonCode $Category -NextStep ($again + ' ' + $report) -Reason $reason
+        }
+        'local_repository_changed' {
+            return New-CheckFailureDetail -ReasonCode $Category -NextStep $again -Reason (
+                'Your backup changed while it was being checked.')
+        }
+    }
+    return $null
+}
+
+function Write-CheckFailureRecord {
+    # The record of a check that stopped, for the dashboard: when, at which step, why in plain words, and what to do. It
+    # replaces the one before; a check that passes removes it (see Remove-CheckFailureRecord).
+    param(
+        [Parameter(Mandatory)] [System.Collections.IDictionary]$Target,
+        [Parameter(Mandatory)] [string]$Step,
+        [AllowNull()] [object]$Detail,
+        [AllowEmptyString()] [string]$Message = ''
+    )
+
+    $description = Get-CheckFailureDescription -Step $Step -Detail $Detail
+    # The error itself, on one line and bounded, for anyone who looks at the file.
+    $technical = ([regex]::Replace($Message, '[\x00-\x1f]+', ' ')).Trim()
+    if ($technical.Length -gt 500) {
+        $technical = $technical.Substring(0, 500)
+    }
+    $record = [ordered]@{
+        schema_version = 1
+        record_kind = 'direct_my_drive_cloud_check_failure'
+        state = 'failed'
+        run_id = [string]$Target['RunId']
+        started_utc = ([DateTime]$Target['StartedUtc']).ToString('o')
+        failed_utc = [DateTime]::UtcNow.ToString('o')
+        step = $Step
+        step_label = Get-CheckStepLabel -Step $Step
+        reason_code = [string]$description.reason_code
+        reason = [string]$description.reason
+        next_step = [string]$description.next_step
+        technical_detail = $technical
+        plan_id = $Target['PlanId']
+        config_generation = $Target['ConfigGeneration']
+    }
+    Write-AtomicJson -Path ([string]$Target['Path']) -Value $record
+    Assert-ProtectedAcl `
+        -Path ([string]$Target['Path']) `
+        -CurrentUserSid ([string]$Target['CurrentUserSid'])
+}
+
+function Remove-CheckFailureRecord {
+    param([Parameter(Mandatory)] [string]$Path)
+
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        [System.IO.File]::Delete($Path)
+    }
+}
+
+function Assert-RecordableEvidenceFolder {
+    # First of all, the two protected folders a failure record goes to: the cloud-verification root and its evidence
+    # folder. Only these are looked at here (the whole tree is checked further on), so a problem anywhere else can still
+    # be recorded, and nothing is ever written where the task's user could have put a link.
+    param(
+        [Parameter(Mandatory)] [string]$Root,
+        [Parameter(Mandatory)] [string]$EvidenceRoot,
+        [Parameter(Mandatory)] [string]$CurrentUserSid
+    )
+
+    Assert-NormalDirectory -Path $Root | Out-Null
+    Assert-ProtectedAcl `
+        -Path $Root `
+        -CurrentUserSid $CurrentUserSid `
+        -RequireProtectedInheritance
+    Assert-NormalDirectory -Path $EvidenceRoot | Out-Null
+    Assert-ProtectedAcl `
+        -Path $EvidenceRoot `
+        -CurrentUserSid $CurrentUserSid
+}
+
+function Wait-Until {
+    # Polls the condition until it holds ($true) or the deadline passes ($false).
+    param(
+        [Parameter(Mandatory)] [scriptblock]$Condition,
+        [Parameter(Mandatory)] [DateTime]$DeadlineUtc,
+        [Parameter(Mandatory)] [double]$PollSeconds
+    )
+
+    while ($true) {
+        if ([bool](& $Condition)) {
+            return $true
+        }
+        $remaining = Get-RemainingMilliseconds -DeadlineUtc $DeadlineUtc
+        if ($remaining -le 0) {
+            return $false
+        }
+        [System.Threading.Thread]::Sleep(
+            [int][Math]::Min([double]$remaining, $PollSeconds * 1000)
+        )
+    }
+}
+
+function Wait-ForMyDriveRepository {
+    # Google Drive for desktop puts the Google Drive folder back a little after sign-in, and a check that Windows starts
+    # then must not fail for that. It waits for the folder and the repository in it.
+    param(
+        [Parameter(Mandatory)] [string]$MyDriveRoot,
+        [Parameter(Mandatory)] [string]$Repository,
+        [Parameter(Mandatory)] [DateTime]$DeadlineUtc,
+        [double]$PollSeconds = 15
+    )
+
+    $repositoryConfig = Join-Path $Repository 'config'
+    $ready = Wait-Until -DeadlineUtc $DeadlineUtc -PollSeconds $PollSeconds -Condition {
+        [System.IO.Directory]::Exists($MyDriveRoot) -and
+            [System.IO.File]::Exists($repositoryConfig)
+    }
+    if ($ready) {
+        return
+    }
+    $again = 'Rewindle checks again tonight.'
+    if (-not [System.IO.Directory]::Exists($MyDriveRoot)) {
+        Stop-Check `
+            -Message "The streamed My Drive root did not appear in time: $MyDriveRoot" `
+            -ReasonCode 'google_drive_folder_missing' `
+            -Reason (
+                "Your Google Drive folder ($MyDriveRoot) wasn't there. Google Drive for desktop may not have been " +
+                'running, or it may use another drive letter now.') `
+            -NextStep (
+                'Make sure Google Drive for desktop starts when you sign in, stays signed in and keeps the drive ' +
+                'letter it had when the check was set up. ' + $again)
+    }
+    Stop-Check `
+        -Message "The repository did not appear below the streamed My Drive root in time: $Repository" `
+        -ReasonCode 'backup_folder_missing' `
+        -Reason "Your backup folder ($Repository) wasn't in your Google Drive folder." `
+        -NextStep (
+            'Make sure Google Drive for desktop is signed in to the Google account that holds your backups. ' + $again)
+}
+
+function Test-GoogleDriveReachable {
+    # Whether Windows has a network and can look up Google Drive's address within 10 seconds. Nothing is sent to Google.
+    if (-not [System.Net.NetworkInformation.NetworkInterface]::GetIsNetworkAvailable()) {
+        return $false
+    }
+    try {
+        $lookup = [System.Net.Dns]::GetHostAddressesAsync('www.googleapis.com')
+        if (-not $lookup.Wait(10000)) {
+            return $false
+        }
+        return @($lookup.Result).Count -gt 0
+    }
+    catch {
+        return $false
+    }
+}
+
+function Wait-ForNetwork {
+    param(
+        [Parameter(Mandatory)] [DateTime]$DeadlineUtc,
+        [double]$PollSeconds = 15
+    )
+
+    $ready = Wait-Until -DeadlineUtc $DeadlineUtc -PollSeconds $PollSeconds -Condition {
+        Test-GoogleDriveReachable
+    }
+    if (-not $ready) {
+        Stop-Check `
+            -Message 'Google Drive could not be reached before the check stopped waiting.' `
+            -ReasonCode 'offline' `
+            -Reason "This PC couldn't reach Google Drive's servers." `
+            -NextStep 'Leave this PC connected to the internet overnight. Rewindle checks again tonight.'
+    }
+}
+
+function Get-LatestBackupStartUtc {
+    # When the latest backup started, from the backup's own status file, or $null when that can't be read.
+    param([Parameter(Mandatory)] [string]$StatusPath)
+
+    try {
+        if (-not [System.IO.File]::Exists($StatusPath)) {
+            return $null
+        }
+        $item = Get-Item -LiteralPath $StatusPath -Force
+        if ($item.PSIsContainer -or
+            ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
+            $item.Length -gt 4MB) {
+            return $null
+        }
+        $status = Read-Utf8Json -Path $StatusPath
+        if ($null -eq $status -or
+            $status.PSObject.Properties.Name -notcontains 'started_utc') {
+            return $null
+        }
+        $parsed = [DateTime]::MinValue
+        if ([DateTime]::TryParse(
+            [string]$status.started_utc,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::AdjustToUniversal -bor
+                [Globalization.DateTimeStyles]::AssumeUniversal,
+            [ref]$parsed
+        )) {
+            return [DateTime]::SpecifyKind($parsed, [DateTimeKind]::Utc)
+        }
+    }
+    catch { }
+    return $null
+}
+
+function Wait-ForBackupHeadStart {
+    # After a night the PC was off or asleep, Windows starts the missed backup and this check at about the same moment,
+    # and the one that takes the run lock second gives up: a backup that can't start waits for the next night. So while
+    # the latest backup is more than 20 hours old (a backup is due, or was missed), the check gives a backup time to start
+    # first. Until a backup starts or that time is up it only reads the backup's status file: trying the run lock could
+    # itself be what stops the backup.
+    param(
+        [Parameter(Mandatory)] [string]$StatusPath,
+        [Parameter(Mandatory)] [DateTime]$CheckStartedUtc,
+        [Parameter(Mandatory)] [TimeSpan]$HeadStart,
+        [double]$PollSeconds = 15
+    )
+
+    $latestStartUtc = Get-LatestBackupStartUtc -StatusPath $StatusPath
+    if ($null -ne $latestStartUtc -and
+        ($CheckStartedUtc - $latestStartUtc) -lt [TimeSpan]::FromHours(20)) {
+        return $false
+    }
+    [void](Wait-Until `
+        -DeadlineUtc ([DateTime]::UtcNow.Add($HeadStart)) `
+        -PollSeconds $PollSeconds `
+        -Condition {
+            $currentStartUtc = Get-LatestBackupStartUtc -StatusPath $StatusPath
+            $null -ne $currentStartUtc -and
+                ($null -eq $latestStartUtc -or $currentStartUtc -gt $latestStartUtc)
+        })
+    return $true
+}
+
+function Measure-LocalRepository {
+    # The repository's file count and size, from the folder listing alone (no file is read): the native steps' deadlines
+    # are sized from them. Links are not followed.
+    param([Parameter(Mandatory)] [string]$Path)
+
+    $files = 0L
+    $bytes = 0L
+    $pending = [System.Collections.Generic.Stack[System.IO.DirectoryInfo]]::new()
+    $pending.Push([System.IO.DirectoryInfo]::new($Path))
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        foreach ($entry in $directory.EnumerateFileSystemInfos()) {
+            if ($entry -is [System.IO.DirectoryInfo]) {
+                if (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
+                    $pending.Push($entry)
+                }
+                continue
+            }
+            $files++
+            $bytes += ([System.IO.FileInfo]$entry).Length
+        }
+    }
+    return [pscustomobject][ordered]@{
+        files = $files
+        bytes = $bytes
+    }
+}
+
+function ConvertFrom-RcloneVersionText {
+    # The version on the first line of `rclone version` ("rclone v1.74.4", or "rclone v1.66.0-beta.7731.6a8ddbcc4").
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string]$Text)
+
+    $firstLine = ([string](($Text -split "`n", 2)[0])).Trim()
+    if ($firstLine -cnotmatch (
+        '^rclone v(?<major>[0-9]{1,4})\.(?<minor>[0-9]{1,4})\.(?<patch>[0-9]{1,6})' +
+        '(?:-[0-9A-Za-z.+-]{1,120})?$'
+    )) {
+        throw 'The rclone version could not be read.'
+    }
+    return [Version]::new(
+        [int]$Matches['major'],
+        [int]$Matches['minor'],
+        [int]$Matches['patch']
+    )
+}
+
+function Get-RunIdFromProofPath {
+    # The run that holds a proof (runs\<run id>\verification-proof.json), or an empty string.
+    param([AllowEmptyString()] [string]$ProofPath)
+
+    if ([string]::IsNullOrWhiteSpace($ProofPath)) {
+        return ''
+    }
+    $runId = Split-Path -Leaf (Split-Path -Parent $ProofPath)
+    if ($runId -cmatch '^[0-9]{8}T[0-9]{9}Z-[0-9a-f]{8}$') {
+        return $runId
+    }
+    return ''
+}
+
+function Remove-OldCheckRuns {
+    # Each run keeps its proof, its native logs and its restored test file in a protected folder of its own. Only the
+    # newest few are kept, with the one that holds the latest proof; the others are removed, so the folder (and the
+    # permission check of all of it at the start of every run) stays small. Run IDs begin with their UTC start time, so
+    # they sort by age. Anything else in the folder is left alone. Runs from before this version also kept a copy of the
+    # encrypted rclone configuration, which the kept runs lose now.
+    param(
+        [Parameter(Mandatory)] [string]$RunsRoot,
+        [Parameter(Mandatory)] [int]$Keep,
+        [AllowEmptyString()] [string]$KeepRunId = ''
+    )
+
+    $names = [System.Collections.Generic.List[string]]::new()
+    foreach ($item in @(Get-ChildItem -LiteralPath $RunsRoot -Force)) {
+        if ($item.PSIsContainer -and
+            ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0 -and
+            $item.Name -cmatch '^[0-9]{8}T[0-9]{9}Z-[0-9a-f]{8}$') {
+            $names.Add($item.Name)
+        }
+    }
+    $sorted = $names.ToArray()
+    [Array]::Sort($sorted, [System.StringComparer]::Ordinal)
+    [Array]::Reverse($sorted)
+    # Housekeeping never stops a check: whatever can't be removed now (a file still in use) is tried again next time.
+    for ($index = 0; $index -lt $sorted.Length; $index++) {
+        $runPath = Join-Path $RunsRoot $sorted[$index]
+        if ($index -lt $Keep -or $sorted[$index] -ceq $KeepRunId) {
+            try { Remove-RunFile -Path (Join-Path $runPath 'rclone-readonly.conf') } catch { }
+            continue
+        }
+        try { Remove-RunFolder -Path $runPath } catch { }
+    }
+}
+
+function Remove-RunFile {
+    # Deletes one file of a run, read-only or not, if it is there.
+    param([Parameter(Mandatory)] [string]$Path)
+
+    $file = [System.IO.FileInfo]::new($Path)
+    if (-not $file.Exists) {
+        return
+    }
+    if (($file.Attributes -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
+        $file.Attributes = $file.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
+    }
+    $file.Delete()
+}
+
+function Remove-RunFolder {
+    # Deletes one run's folder with everything in it. Read-only entries are made writable first; links are removed, never
+    # followed.
+    param([Parameter(Mandatory)] [string]$Path)
+
+    $pending = [System.Collections.Generic.Stack[System.IO.DirectoryInfo]]::new()
+    $pending.Push([System.IO.DirectoryInfo]::new($Path))
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        foreach ($entry in $directory.EnumerateFileSystemInfos()) {
+            if (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                continue
+            }
+            if (($entry.Attributes -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
+                $entry.Attributes = $entry.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
+            }
+            if ($entry -is [System.IO.DirectoryInfo]) {
+                $pending.Push($entry)
+            }
+        }
+    }
+    [System.IO.Directory]::Delete($Path, $true)
+}
+
+# Every error from here on, from this script's own checks and from the native steps alike, stops the check. Once the
+# folder for the failure record has been found safe (see Assert-RecordableEvidenceFolder), the check first leaves a
+# record of where it stopped and why, for the dashboard. The error then ends the task as before.
+trap {
+    if ($null -ne $script:failureRecordTarget) {
+        try {
+            Write-CheckFailureRecord `
+                -Target $script:failureRecordTarget `
+                -Step $script:checkStep `
+                -Detail $script:checkFailureDetail `
+                -Message ([string]$_.Exception.Message)
+        }
+        catch {
+            # Not even that could be written. Task Scheduler still records the task's error.
+        }
+    }
+    break
+}
+
+$checkStartedUtc = [DateTime]::UtcNow
+$checkDeadlineUtc = $checkStartedUtc.Add($checkTimeBudget)
+$runId = $checkStartedUtc.ToString('yyyyMMddTHHmmssfffZ') + '-' +
+    ([Guid]::NewGuid().ToString('N').Substring(0, 8))
+$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$currentUserSid = $identity.User.Value
+$cloudVerificationRootFull = [System.IO.Path]::GetFullPath(
+    $CloudVerificationRoot
+).TrimEnd('\')
+$canonicalCloudVerificationRoot = [System.IO.Path]::Combine(
+    [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::CommonApplicationData
+    ),
+    'ResticBackuperCloudVerification'
+)
+if (-not $ValidateOnly -and
+    -not (Test-SamePath `
+        -Left $cloudVerificationRootFull `
+        -Right $canonicalCloudVerificationRoot)) {
+    throw 'Production cloud verification is fixed to protected ProgramData storage.'
+}
+$runsRoot = Join-Path $cloudVerificationRootFull 'runs'
+$evidenceRoot = Join-Path $cloudVerificationRootFull 'evidence'
+$latestProofPath = Join-Path $evidenceRoot 'latest-verification.json'
+$failureRecordPath = Join-Path $evidenceRoot 'latest-failure.json'
+if (-not $ValidateOnly) {
+    Assert-RecordableEvidenceFolder `
+        -Root $cloudVerificationRootFull `
+        -EvidenceRoot $evidenceRoot `
+        -CurrentUserSid $currentUserSid
+    $script:failureRecordTarget = @{
+        Path = $failureRecordPath
+        CurrentUserSid = $currentUserSid
+        RunId = $runId
+        StartedUtc = $checkStartedUtc
+        PlanId = $null
+        ConfigGeneration = $null
     }
 }
 
@@ -837,6 +1688,14 @@ Assert-DescendantPath `
     -Path $localRepositoryFull `
     -Parent $myDriveRootFull `
     -Message 'The live repository must be strictly below the streamed My Drive root.'
+if (-not $ValidateOnly) {
+    Set-CheckStep 'waiting_for_google_drive'
+    Wait-ForMyDriveRepository `
+        -MyDriveRoot $myDriveRootFull `
+        -Repository $localRepositoryFull `
+        -DeadlineUtc ([DateTime]::UtcNow.Add($googleDriveWait))
+    Set-CheckStep 'checking_setup'
+}
 Assert-NormalDirectory -Path $myDriveRootFull | Out-Null
 Assert-NormalDirectory -Path $localRepositoryFull | Out-Null
 Assert-NormalFile -Path (Join-Path $localRepositoryFull 'config') | Out-Null
@@ -899,23 +1758,7 @@ $secretStore = Join-Path (
 $inventoryHelper = Join-Path $PSScriptRoot 'verify_cloud_repository_inventory.py'
 $runLockPath = Join-Path $stateDirectory 'run.lock'
 $lastSuccessPath = Join-Path $stateDirectory 'last-success.json'
-$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-$currentUserSid = $identity.User.Value
-$cloudVerificationRootFull = [System.IO.Path]::GetFullPath(
-    $CloudVerificationRoot
-).TrimEnd('\')
-$canonicalCloudVerificationRoot = [System.IO.Path]::Combine(
-    [Environment]::GetFolderPath(
-        [Environment+SpecialFolder]::CommonApplicationData
-    ),
-    'ResticBackuperCloudVerification'
-)
-if (-not $ValidateOnly -and
-    -not (Test-SamePath `
-        -Left $cloudVerificationRootFull `
-        -Right $canonicalCloudVerificationRoot)) {
-    throw 'Production cloud verification is fixed to protected ProgramData storage.'
-}
+$backupStatusPath = Join-Path $stateDirectory 'status.json'
 if ((Test-PathsOverlap `
         -Left $cloudVerificationRootFull `
         -Right $myDriveRootFull) -or
@@ -939,8 +1782,6 @@ $rcloneCredentialPath = Join-Path (
 $rclonePasswordHelperPath = Join-Path (
     $cloudVerificationRootFull
 ) 'reveal-rclone-config-password.ps1'
-$runsRoot = Join-Path $cloudVerificationRootFull 'runs'
-$evidenceRoot = Join-Path $cloudVerificationRootFull 'evidence'
 Assert-NormalDirectory -Path $runsRoot | Out-Null
 Assert-NormalDirectory -Path $evidenceRoot | Out-Null
 foreach ($requiredFile in @(
@@ -974,6 +1815,10 @@ if (-not [Guid]::TryParseExact(
     throw 'The protected configuration plan identity or generation is invalid.'
 }
 $configGeneration = [long]$config.config_generation
+if ($null -ne $script:failureRecordTarget) {
+    $script:failureRecordTarget['PlanId'] = $parsedPlanId.ToString('D')
+    $script:failureRecordTarget['ConfigGeneration'] = $configGeneration
+}
 
 if ($ValidateOnly) {
     [ordered]@{
@@ -997,8 +1842,30 @@ if ($ValidateOnly) {
     return
 }
 
-$runId = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '-' +
-    ([Guid]::NewGuid().ToString('N').Substring(0, 8))
+$latestProofRunId = ''
+try {
+    if (Test-Path -LiteralPath $latestProofPath -PathType Leaf) {
+        $latestProofDocument = Read-Utf8Json -Path $latestProofPath
+        if ($null -ne $latestProofDocument -and
+            $latestProofDocument.PSObject.Properties.Name -contains 'immutable_proof') {
+            $latestProofRunId = Get-RunIdFromProofPath `
+                -ProofPath ([string]$latestProofDocument.immutable_proof)
+        }
+    }
+}
+catch {
+    $latestProofRunId = ''
+}
+# The whole folder passed its permission check above, so nothing in an old run can be a link the task's user made.
+# Housekeeping never stops a check.
+try {
+    Remove-OldCheckRuns `
+        -RunsRoot $runsRoot `
+        -Keep $previousRunsKept `
+        -KeepRunId $latestProofRunId
+}
+catch { }
+
 $runDirectory = Join-Path $runsRoot $runId
 $restoreTarget = Join-Path $runDirectory 'restore'
 [System.IO.Directory]::CreateDirectory($restoreTarget) | Out-Null
@@ -1030,7 +1897,8 @@ Assert-ProtectedAcl `
 $cloudInventoryPath = Join-Path $runDirectory 'cloud-inventory.json'
 $inventoryProofPath = Join-Path $runDirectory 'inventory-proof.json'
 $finalProofPath = Join-Path $runDirectory 'verification-proof.json'
-$latestProofPath = Join-Path $evidenceRoot 'latest-verification.json'
+$rcloneVersionStdout = Join-Path $runDirectory 'rclone-version.stdout.log'
+$rcloneVersionStderr = Join-Path $runDirectory 'rclone-version.stderr.log'
 $localCatStdout = Join-Path $runDirectory 'restic-local-cat-config.stdout.json'
 $localCatStderr = Join-Path $runDirectory 'restic-local-cat-config.stderr.log'
 $cloudCatStdout = Join-Path $runDirectory 'restic-cloud-cat-config.stdout.json'
@@ -1045,10 +1913,73 @@ $restoreStderr = Join-Path $runDirectory 'restic-cloud-restore.stderr.log'
 
 $runLock = $null
 try {
-    $runLock = Enter-ProtectedRunLock -Path $runLockPath
+    # The program that reads Google Drive must report Google Drive's SHA-256 checksums, which the inventory compares;
+    # rclone does from 1.65.0 on. This is checked before anything that takes long.
+    Set-CheckStep 'checking_rclone'
+    $rcloneVersionEnvironment = New-NativeChildEnvironment `
+        -TemporaryDirectory $nativeTemporaryDirectory `
+        -Settings ([ordered]@{
+            RCLONE_ASK_PASSWORD = 'false'
+        })
+    Invoke-RequiredNative `
+        -Executable $rcloneExecutable `
+        -Arguments @('version') `
+        -StdoutPath $rcloneVersionStdout `
+        -StderrPath $rcloneVersionStderr `
+        -Environment $rcloneVersionEnvironment `
+        -Operation 'The rclone version check' `
+        -TimeoutSeconds (Get-NativeTimeoutSeconds -BaseSeconds 120 -CheckDeadlineUtc $checkDeadlineUtc)
+    $rcloneVersionItem = Assert-NormalFile -Path $rcloneVersionStdout
+    if ($rcloneVersionItem.Length -gt 64KB) {
+        throw 'The rclone version output is unexpectedly large.'
+    }
+    $rcloneVersion = ConvertFrom-RcloneVersionText -Text (
+        [System.IO.File]::ReadAllText(
+            $rcloneVersionStdout,
+            [System.Text.UTF8Encoding]::new($false, $false)
+        )
+    )
+    if ($rcloneVersion -lt $minimumRcloneVersion) {
+        Stop-Check `
+            -Message (
+                'rclone {0} is older than {1}, the first version that reports Google Drive SHA-256 checksums.' -f
+                $rcloneVersion, $minimumRcloneVersion
+            ) `
+            -ReasonCode 'rclone_too_old' `
+            -Reason (
+                ("The check's copy of rclone is version {0}, but it needs {1} or later to read Google Drive's " +
+                'file checksums.') -f $rcloneVersion, $minimumRcloneVersion
+            ) `
+            -NextStep (
+                ("Set up the Google Drive check again with rclone {0} or later, as Rewindle's guide to " +
+                'Google Drive describes.') -f $minimumRcloneVersion
+            )
+    }
+
+    Set-CheckStep 'waiting_for_network'
+    Wait-ForNetwork -DeadlineUtc ([DateTime]::UtcNow.Add($networkWait))
+
+    Set-CheckStep 'waiting_for_backup'
+    [void](Wait-ForBackupHeadStart `
+        -StatusPath $backupStatusPath `
+        -CheckStartedUtc $checkStartedUtc `
+        -HeadStart $backupHeadStart)
+    $backupWaitDeadlineUtc = [DateTime]::UtcNow.Add($backupWait)
+    if ($backupWaitDeadlineUtc -gt $checkDeadlineUtc) {
+        $backupWaitDeadlineUtc = $checkDeadlineUtc
+    }
+    $runLock = Enter-ProtectedRunLockWhenFree `
+        -Path $runLockPath `
+        -DeadlineUtc $backupWaitDeadlineUtc
+
+    Set-CheckStep 'checking_latest_backup'
     $configSha256 = Get-Sha256Hex -Path $configPathFull
     if ($configSha256 -cne $preLockConfigSha256) {
-        throw 'The protected backup configuration changed while verification acquired the run lock.'
+        Stop-Check `
+            -Message 'The protected backup configuration changed while verification acquired the run lock.' `
+            -ReasonCode 'settings_changed' `
+            -Reason 'Your backup settings changed while the check was waiting to start.' `
+            -NextStep 'Rewindle checks again tonight.'
     }
 
     $lastSuccess = Read-Utf8Json -Path $lastSuccessPath
@@ -1063,7 +1994,11 @@ try {
         [string]$lastSuccess.repository_storage_mode -cne
             'google_drivefs_stream' -or
         $lastSnapshotId -cnotmatch '^[0-9a-f]{64}$') {
-        throw 'The latest successful backup evidence does not match the active My Drive repository.'
+        Stop-Check `
+            -Message 'The latest successful backup evidence does not match the active My Drive repository.' `
+            -ReasonCode 'no_verified_backup' `
+            -Reason "There's no finished, verified backup of your current backup settings yet." `
+            -NextStep 'Choose Back up now, or wait for the next automatic backup. The check after it covers it.'
     }
     if ([string]::IsNullOrWhiteSpace($SnapshotId)) {
         $SnapshotId = $lastSnapshotId
@@ -1082,7 +2017,13 @@ try {
                 -ErrorAction Stop
         )
         if ($repositoryLocks.Count -gt 0) {
-            throw 'The Restic repository contains a lock; cloud verification requires an idle repository.'
+            Stop-Check `
+                -Message 'The Restic repository contains a lock; cloud verification requires an idle repository.' `
+                -ReasonCode 'repository_locked' `
+                -Reason 'Your backup was still marked as in use, as happens when a backup stops part way.' `
+                -NextStep (
+                    'Choose Check recovery readiness on Protection; if it finds leftover locks, choose Repair stale ' +
+                    'locks. Rewindle checks again tonight.')
         }
     }
 
@@ -1125,6 +2066,20 @@ try {
         -RemoteName $RemoteName `
         -RootFolderId $CloudRootFolderId
 
+    # Each native step's deadline is sized from the repository: its file count for the Google Drive listing, its bytes
+    # for the steps that read it (the inventory helper reads all of it through Google Drive for desktop, which downloads
+    # it). The rates are slow on purpose, so a deadline only stops a step that is stuck.
+    Set-CheckStep 'opening_local_backup'
+    try {
+        $localRepositorySize = Measure-LocalRepository -Path $localRepositoryFull
+    }
+    catch {
+        # Only the deadlines are sized from this. Without it, each step may use the rest of the check's time.
+        $localRepositorySize = [pscustomobject][ordered]@{
+            files = 10000000L
+            bytes = 1PB
+        }
+    }
     Invoke-RequiredNative `
         -Executable $resticExecutable `
         -Arguments @(
@@ -1137,9 +2092,11 @@ try {
         -StdoutPath $localCatStdout `
         -StderrPath $localCatStderr `
         -Environment $cloudEnvironment `
-        -Operation 'Local Restic repository authentication'
+        -Operation 'Local Restic repository authentication' `
+        -TimeoutSeconds (Get-NativeTimeoutSeconds -BaseSeconds 900 -CheckDeadlineUtc $checkDeadlineUtc)
     $localConfig = Read-Utf8Json -Path $localCatStdout
 
+    Set-CheckStep 'connecting_to_google_drive'
     $remoteRepository = 'rclone:' + $readOnlyRemote + ':' + $CloudRepositoryPath
     $resticCloudCommon = @(
         '--repo', $remoteRepository,
@@ -1154,7 +2111,8 @@ try {
         -StdoutPath $cloudCatStdout `
         -StderrPath $cloudCatStderr `
         -Environment $cloudEnvironment `
-        -Operation 'Direct-cloud Restic repository authentication'
+        -Operation 'Direct-cloud Restic repository authentication' `
+        -TimeoutSeconds (Get-NativeTimeoutSeconds -BaseSeconds 900 -CheckDeadlineUtc $checkDeadlineUtc)
     $cloudConfig = Read-Utf8Json -Path $cloudCatStdout
 
     $localRepositoryId = [string]$localConfig.id
@@ -1162,16 +2120,31 @@ try {
     if ($localRepositoryId -cnotmatch '^[0-9a-f]{64}$' -or
         $cloudRepositoryId -cnotmatch '^[0-9a-f]{64}$' -or
         $localRepositoryId -cne $cloudRepositoryId) {
-        throw 'The local and direct-cloud Restic repository identities do not match.'
+        Stop-Check `
+            -Message 'The local and direct-cloud Restic repository identities do not match.' `
+            -ReasonCode 'repository_mismatch' `
+            -Reason "The backup in Google Drive isn't the same backup as the one in the Google Drive folder on this PC." `
+            -NextStep (
+                'Make sure Google Drive for desktop is signed in to the Google account the check was set up with. ' +
+                'If this keeps happening, choose Save problem report in Settings.')
     }
     if ($ExpectedRepositoryId -and
         $localRepositoryId -cne $ExpectedRepositoryId) {
-        throw 'The authenticated repository does not match ExpectedRepositoryId.'
+        Stop-Check `
+            -Message 'The authenticated repository does not match ExpectedRepositoryId.' `
+            -ReasonCode 'repository_not_expected' `
+            -Reason "The backup in your Google Drive folder isn't the one the check was set up for." `
+            -NextStep "Set up the Google Drive check again, as Rewindle's guide to Google Drive describes."
     }
     if ([string]$lastSuccess.repository_id -cne $localRepositoryId) {
-        throw 'The latest successful backup is bound to a different repository identity.'
+        Stop-Check `
+            -Message 'The latest successful backup is bound to a different repository identity.' `
+            -ReasonCode 'no_verified_backup' `
+            -Reason "There's no finished, verified backup of your current backup settings yet." `
+            -NextStep 'Choose Back up now, or wait for the next automatic backup. The check after it covers it.'
     }
 
+    Set-CheckStep 'listing_google_drive'
     Invoke-RequiredNative `
         -Executable $rcloneExecutable `
         -Arguments @(
@@ -1185,8 +2158,14 @@ try {
         -StdoutPath $cloudInventoryPath `
         -StderrPath $rcloneStderr `
         -Environment $cloudEnvironment `
-        -Operation 'Direct Google Drive inventory'
+        -Operation 'Direct Google Drive inventory' `
+        -TimeoutSeconds (Get-NativeTimeoutSeconds `
+            -BaseSeconds 1800 `
+            -Files $localRepositorySize.files `
+            -SecondsPerFile 1 `
+            -CheckDeadlineUtc $checkDeadlineUtc)
 
+    Set-CheckStep 'comparing_files'
     $inventoryHelperExit = Invoke-NativeToFiles `
         -Executable $pythonExecutable `
         -Arguments @(
@@ -1200,17 +2179,39 @@ try {
         ) `
         -StdoutPath $inventoryHelperStdout `
         -StderrPath $inventoryHelperStderr `
-        -Environment $helperEnvironment
+        -Environment $helperEnvironment `
+        -TimeoutSeconds (Get-NativeTimeoutSeconds `
+            -BaseSeconds 1800 `
+            -Bytes $localRepositorySize.bytes `
+            -BytesPerSecond 2MB `
+            -CheckDeadlineUtc $checkDeadlineUtc)
     if ($inventoryHelperExit -ne 0) {
         $category = 'inventory_verification_failed_closed'
+        $categoryCount = 0L
         try {
             $helperResult = Read-Utf8Json -Path $inventoryHelperStdout
-            if ([string]$helperResult.category -match '^[a-z0-9_]{1,80}$') {
+            $helperFields = @($helperResult.PSObject.Properties.Name)
+            if ($helperFields -contains 'category' -and
+                [string]$helperResult.category -match '^[a-z0-9_]{1,80}$') {
                 $category = [string]$helperResult.category
+            }
+            if ($helperFields -contains 'count' -and
+                ($helperResult.count -is [int] -or $helperResult.count -is [long]) -and
+                [long]$helperResult.count -ge 0) {
+                $categoryCount = [long]$helperResult.count
             }
         }
         catch { }
-        throw "Direct Google Drive inventory verification failed closed: $category."
+        $inventoryMessage = "Direct Google Drive inventory verification failed closed: $category."
+        $inventoryDetail = Get-InventoryFailureDetail -Category $category -Count $categoryCount
+        if ($null -eq $inventoryDetail) {
+            throw $inventoryMessage
+        }
+        Stop-Check `
+            -Message $inventoryMessage `
+            -ReasonCode ([string]$inventoryDetail.reason_code) `
+            -Reason ([string]$inventoryDetail.reason) `
+            -NextStep ([string]$inventoryDetail.next_step)
     }
     $inventoryProof = Read-Utf8Json -Path $inventoryProofPath
     if ([string]$inventoryProof.state -cne 'verified' -or
@@ -1219,13 +2220,15 @@ try {
         throw 'The inventory helper did not publish complete exact-match evidence.'
     }
 
+    Set-CheckStep 'listing_cloud_backups'
     Invoke-RequiredNative `
         -Executable $resticExecutable `
         -Arguments ($resticCloudCommon + @('snapshots', '--json')) `
         -StdoutPath $snapshotStdout `
         -StderrPath $snapshotStderr `
         -Environment $cloudEnvironment `
-        -Operation 'Direct-cloud Restic snapshot listing'
+        -Operation 'Direct-cloud Restic snapshot listing' `
+        -TimeoutSeconds (Get-NativeTimeoutSeconds -BaseSeconds 1800 -CheckDeadlineUtc $checkDeadlineUtc)
     $snapshotItem = Assert-NormalFile -Path $snapshotStdout
     if ($snapshotItem.Length -lt 2 -or $snapshotItem.Length -gt 64MB) {
         throw 'The direct-cloud Restic snapshot listing is empty or unexpectedly large.'
@@ -1248,12 +2251,19 @@ try {
         }
     }
     if (-not $latestSnapshotMatches) {
-        throw (
-            'The latest successfully verified backup is not the latest ' +
-            'snapshot in the direct-cloud repository.'
-        )
+        Stop-Check `
+            -Message (
+                'The latest successfully verified backup is not the latest ' +
+                'snapshot in the direct-cloud repository.'
+            ) `
+            -ReasonCode 'latest_backup_not_in_google_drive' `
+            -Reason "Google Drive doesn't have your latest backup yet." `
+            -NextStep (
+                'Leave this PC on with Google Drive for desktop running until it has uploaded everything. ' +
+                'Rewindle checks again tonight.')
     }
 
+    Set-CheckStep 'test_restore'
     $referenceItem = Get-Item -LiteralPath $canaryReferenceFull -Force
     $expectedCanaryBytes = [long]$referenceItem.Length
     $expectedCanarySha256 = Get-Sha256Hex -Path $canaryReferenceFull
@@ -1273,8 +2283,15 @@ try {
         -StdoutPath $restoreStdout `
         -StderrPath $restoreStderr `
         -Environment $cloudEnvironment `
-        -Operation 'Independent direct-cloud Restic restore'
+        -Operation 'Independent direct-cloud Restic restore' `
+        -TimeoutSeconds (Get-NativeTimeoutSeconds `
+            -BaseSeconds 1800 `
+            -Bytes $localRepositorySize.bytes `
+            -BytesPerSecond 32MB `
+            -CheckDeadlineUtc $checkDeadlineUtc)
 
+    $testRestoreMismatch = 'A test file restored from Google Drive did not match the original on this PC.'
+    $testRestoreNextStep = 'Rewindle checks again tonight. If this keeps happening, choose Save problem report in Settings.'
     $restoredEntries = @(Get-ChildItem -LiteralPath $restoreTarget -Force)
     if ($restoredEntries.Count -ne 1 -or
         -not [string]::Equals(
@@ -1282,7 +2299,11 @@ try {
             $canaryLeaf,
             [System.StringComparison]::OrdinalIgnoreCase
         )) {
-        throw 'The direct-cloud restore must bring back the canary and nothing else.'
+        Stop-Check `
+            -Message 'The direct-cloud restore must bring back the canary and nothing else.' `
+            -ReasonCode 'test_restore_mismatch' `
+            -Reason $testRestoreMismatch `
+            -NextStep $testRestoreNextStep
     }
     $restoredCanary = Join-Path $restoreTarget $canaryLeaf
     Assert-NormalFile -Path $restoredCanary | Out-Null
@@ -1290,10 +2311,20 @@ try {
     $restoredSha256 = Get-Sha256Hex -Path $restoredCanary
     if ([long]$restoredItem.Length -ne $expectedCanaryBytes -or
         $restoredSha256 -cne $expectedCanarySha256) {
-        throw 'The direct-cloud restored canary failed its length or SHA-256 check.'
+        Stop-Check `
+            -Message 'The direct-cloud restored canary failed its length or SHA-256 check.' `
+            -ReasonCode 'test_restore_mismatch' `
+            -Reason $testRestoreMismatch `
+            -NextStep $testRestoreNextStep
     }
+
+    Set-CheckStep 'checking_setup'
     if ((Get-Sha256Hex -Path $configPathFull) -cne $configSha256) {
-        throw 'The protected backup configuration changed during cloud verification.'
+        Stop-Check `
+            -Message 'The protected backup configuration changed during cloud verification.' `
+            -ReasonCode 'settings_changed' `
+            -Reason 'Your backup settings changed while the check was running.' `
+            -NextStep 'Rewindle checks again tonight.'
     }
     [void](Read-VerifiedAssetManifest `
         -Root $cloudVerificationRootFull `
@@ -1302,6 +2333,7 @@ try {
         -Root $cloudVerificationRootFull `
         -CurrentUserSid $currentUserSid
 
+    Set-CheckStep 'saving_result'
     $proof = [ordered]@{
         schema_version = 2
         proof_kind = 'direct_my_drive_cloud_repository_verification'
@@ -1354,7 +2386,11 @@ try {
         restore_target = $restoreTarget
         restored_canary = $restoredCanary
         run_lock_held = $true
-        rclone_scope = 'drive.readonly'
+        # The scope the check asks Google for on every call. It cannot narrow what the stored sign-in was granted when
+        # it was made, and the check does not look that up, so the proof does not claim it.
+        rclone_scope_requested = 'drive.readonly'
+        rclone_token_scope_verified = $false
+        rclone_version = $rcloneVersion.ToString()
         native_capture_mode = 'binary_stream_copy'
         cloud_verification_assets_manifest_sha256 = (
             Get-Sha256Hex -Path (
@@ -1379,6 +2415,10 @@ try {
     Assert-ProtectedAcl `
         -Path $latestProofPath `
         -CurrentUserSid $currentUserSid
+    # A check that passed leaves no failure record behind (the dashboard also goes by the times, should this fail), and
+    # nothing after this point is a failure of the check.
+    try { Remove-CheckFailureRecord -Path $failureRecordPath } catch { }
+    $script:failureRecordTarget = $null
     Write-Output $latestProofPath
 }
 finally {
@@ -1386,5 +2426,8 @@ finally {
     foreach ($directory in @($nativeTemporaryDirectory, $rcloneCacheDirectory)) {
         try { [System.IO.Directory]::Delete($directory, $true) } catch { }
     }
+    # The per-run copy of the encrypted rclone configuration (in which rclone may have refreshed its sign-in) is needed
+    # only while rclone runs.
+    try { Remove-RunFile -Path $rcloneRunConfig } catch { }
     Exit-ProtectedRunLock -Stream $runLock
 }

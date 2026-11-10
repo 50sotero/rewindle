@@ -50,7 +50,8 @@ The cloud asset root is Administrators-owned, has protected inheritance, gives
 SYSTEM and Administrators full control, and gives the scheduled user read and
 execute access only when not elevated. Reparse points and unmanifested asset
 names fail closed. Rclone receives a protected per-run configuration copy so an
-OAuth token refresh cannot alter the immutable master configuration.
+OAuth token refresh cannot alter the immutable master configuration. The copy
+is deleted when its run ends.
 
 The task runs elevated, but Windows gives it the signed-in user's environment
 variables, which any program the user runs can change. Rclone and Restic read
@@ -113,6 +114,86 @@ It accepts only schema 2, post-activation, direct-cloud evidence. A new backup
 attempt, plan or generation change, repository move, repository-ID change, or
 new snapshot makes the old proof stale. Legacy local-mirror status cannot
 produce a green off-site state.
+
+## Waits, deadlines and failure records
+
+The task starts at 03:00. When the PC is off, asleep or signed out then,
+Windows starts it at the next sign-in or wake-up, often before Google Drive
+for desktop and the network are back, and together with the backup Windows
+starts to make up for the same night. So the verifier first waits, within
+limits, for what it needs:
+
+1. Google Drive for desktop's folder and the repository in it, up to 30
+   minutes.
+2. A network that can look up Google Drive's address, up to 15 minutes. Only
+   the DNS lookup is made (each one for at most 10 seconds); nothing is sent
+   to Google.
+3. A due or missed backup. While the latest backup started more than 20 hours
+   earlier, the check gives a backup up to 15 minutes to start first.
+   Meanwhile it reads only the backup's `status.json` and does not try the run
+   lock: the backup takes the lock without waiting and gives up until the next
+   night if it is held.
+4. The run lock, which a running backup holds, up to 6 hours. Only a lock
+   violation counts as held; any other error opening the lock stops the check.
+
+Each Restic, rclone and Python step then has a deadline sized from the
+repository, measured from its folder listing alone: a fixed allowance plus one
+second per file for the Google Drive listing, 2 MiB/s for the inventory helper
+(which reads every repository file through Google Drive for desktop, which
+downloads it) and 32 MiB/s for the direct-cloud restore. If the listing fails,
+the deadlines are not sized and each step may use the rest of the check's
+time. No Restic, rclone or Python step runs past 11 hours after the check
+started, before Task Scheduler's own 12-hour limit; one stopped there is
+recorded as out of time.
+A step that runs past its deadline is stopped together with every process it
+started (Restic starts rclone), each by its exact process ID and start time.
+
+Before any long step, the verifier runs `rclone version` and refuses rclone
+older than 1.65.0, the first release that reports Google Drive's SHA-256
+checksums. The proof records the version, and `rclone_scope_requested`
+(`drive.readonly`) with `rclone_token_scope_verified: false`: the scope is
+requested on every call, but the verifier does not find out what the stored
+token was granted when it was created (see below).
+
+When a check stops for any reason after its evidence folder has passed its
+permission check (the first thing it does), it replaces
+`evidence\latest-failure.json`:
+
+```json
+{
+  "schema_version": 1,
+  "record_kind": "direct_my_drive_cloud_check_failure",
+  "state": "failed",
+  "run_id": "20261110T030001123Z-1a2b3c4d",
+  "started_utc": "2026-11-10T03:00:01.1234567Z",
+  "failed_utc": "2026-11-10T03:02:11.1234567Z",
+  "step": "listing_google_drive",
+  "step_label": "listing your backup's files in Google Drive",
+  "reason_code": "google_drive_list_failed",
+  "reason": "Rewindle couldn't list your backup's files in Google Drive.",
+  "next_step": "Make sure this PC is online overnight. Rewindle checks again tonight.",
+  "technical_detail": "Direct Google Drive inventory failed closed with exit code 1. ...",
+  "plan_id": "<plan GUID, or null before the plan was read>",
+  "config_generation": 3
+}
+```
+
+The steps are `checking_setup`, `waiting_for_google_drive`,
+`waiting_for_network`, `waiting_for_backup`, `checking_latest_backup`,
+`checking_rclone`, `opening_local_backup`, `connecting_to_google_drive`,
+`listing_google_drive`, `comparing_files`, `listing_cloud_backups`,
+`test_restore` and `saving_result`. A check that passes deletes the record
+after it writes the new proof. Should that deletion fail, the record is older
+than the proof, so a reader should trust it only when its `failed_utc` is later
+than the proof's `verified_utc`. The task itself still ends with an error, as
+before.
+
+Every run keeps its own folder under `runs\` (its proof, native logs and the
+restored canary). After the start-of-run permission check of the whole tree,
+the verifier keeps the folders of the four runs before it (with its own, five)
+and the one that holds the latest proof, and removes the others, so that check
+stays short. Removing is best effort: a file still in use stays until a later
+run, and never stops the check.
 
 ## Provision the verification task
 
