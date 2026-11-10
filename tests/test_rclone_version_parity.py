@@ -5,7 +5,9 @@ the installer would then set up a check that refuses its own rclone, or the chec
 
 This test loads both copies the way PowerShell does (its parser, not a pattern match on the text), feeds them the same
 `rclone version` outputs in one Windows PowerShell 5.1 run, and fails when they read any of them differently or when
-the two oldest versions differ. It also fails, rather than passes empty, when a function or a version is missing.
+the two oldest versions differ. It also fails, rather than passes empty, when a function or a version is missing,
+and when a script's call site no longer gets its version from that reader (a third, looser parse inlined there would
+otherwise go unseen).
 """
 
 import base64
@@ -24,6 +26,19 @@ VERIFIER = PROJECT / "src" / "verify_my_drive_cloud_repository.ps1"
 
 OLDEST_ALLOWED = "1.65.0"
 REFUSED = "refused"
+
+# Whether each plain version is older than the oldest allowed one. They differ from it in the major number (0, 2), in
+# the minor number alone with more digits (1.100.0 is newer than 1.65.0 as a number, older as text), and by one patch.
+TOO_OLD = {
+    "0.99.0": True,
+    "1.64.2": True,
+    "1.64.9": True,
+    "1.65.0": False,
+    "1.65.1": False,
+    "1.74.4": False,
+    "1.100.0": False,
+    "2.0.0": False,
+}
 
 # Anchors for the shared reader: what a few inputs must give on both sides, so that two readers that both accept
 # everything, or both refuse everything, cannot pass.
@@ -56,7 +71,9 @@ for version in ("1.74.4", "1.65.0", "1.64.2"):
     add_case("plain " + version + " with CRLF", "rclone v" + version + "\r\n", version)
     add_case("full output of " + version + " with LF", full_output("rclone v" + version, "\n"), version)
     add_case("full output of " + version + " with CRLF", full_output("rclone v" + version, "\r\n"), version)
-add_case("full output without a final line break", full_output("rclone v1.74.4", "\n").rstrip("\n"), "1.74.4")
+for version in ("1.64.9", "1.65.1", "0.99.0", "2.0.0", "1.100.0"):
+    add_case("plain " + version, "rclone v" + version, version)
+add_case("full output without a final line break",full_output("rclone v1.74.4", "\n").rstrip("\n"), "1.74.4")
 add_case("full output with lone CR line breaks", full_output("rclone v1.74.4", "\r"))
 add_case(
     "full output with mixed line breaks", "rclone v1.74.4\r\n- os/arch: amd64\n- go/version: go1.25.3\r\n", "1.74.4"
@@ -94,6 +111,16 @@ add_case("suffix of 121 characters", "rclone v1.66.0-" + "a" * 121 + "\n")
 add_case("empty suffix", "rclone v1.66.0-\n")
 add_case("suffix with a space", "rclone v1.66.0-beta 1\n")
 add_case("plus metadata without a hyphen", "rclone v1.66.0+build.5\n")
+add_case("beta with a hyphenated branch name", "rclone v1.66.0-beta.7731.6a8ddbcc4.fix-sftp-hang\n", "1.66.0")
+add_case("suffix with a doubled hyphen", "rclone v1.66.0--beta\n")
+for character, name in (
+    ("_", "an underscore"),
+    ("/", "a slash"),
+    ("~", "a tilde"),
+    (":", "a colon"),
+    ("@", "an at sign"),
+):
+    add_case("suffix with " + name, "rclone v1.66.0-beta.1" + character + "x\n")
 
 # Not a full version, or not worded like rclone's own first line.
 add_case("major and minor only", "rclone v1.74", REFUSED)
@@ -145,8 +172,9 @@ if len(set(LABELS)) != len(LABELS):
     raise AssertionError("two inputs of the version parity test share a label")
 
 # Runs in Windows PowerShell 5.1. It reads the two scripts with PowerShell's own parser, takes the reader and the
-# oldest allowed version out of each by its syntax tree (evaluating nothing but the [Version]'x.y.z' literal), runs
-# both readers on every input, and prints one JSON document that holds only ASCII.
+# oldest allowed version out of each by its syntax tree (evaluating nothing but the [Version]'x.y.z' literal), checks
+# that each call site gets its version from the reader, runs both readers on every input, and prints one JSON document
+# that holds only ASCII.
 PROBE = r"""using namespace System.Management.Automation.Language
 
 [CmdletBinding()]
@@ -245,6 +273,84 @@ function Get-MinimumVersion {
     return Get-VersionLiteral -Assignment $assignments[0] -Label $Label
 }
 
+function Get-AssignedCommandName {
+    param($Assignment)
+
+    # The command on the right side of `$x = Name -Arg ...` (a pipeline of one command, or the command itself), or ''.
+    $right = $Assignment.Right
+    if ($right -is [PipelineAst] -and $right.PipelineElements.Count -eq 1) {
+        $right = $right.PipelineElements[0]
+    }
+    if ($right -is [CommandAst]) {
+        return [string]$right.GetCommandName()
+    }
+    return ''
+}
+
+function Test-AssignedFromCommand {
+    param($Tree, [string]$VariableName, [string]$CommandName, [string]$Label)
+
+    if ($null -eq $Tree) {
+        return
+    }
+    $assignments = @($Tree.FindAll({ $args[0] -is [AssignmentStatementAst] }, $true) |
+        Where-Object { $_.Left -is [VariableExpressionAst] -and ($_.Left.VariablePath.UserPath -ieq $VariableName) })
+    if ($assignments.Count -ne 1) {
+        Add-Problem "$Label assigns `$$VariableName $($assignments.Count) times; it must be assigned exactly once."
+        return
+    }
+    if ((Get-AssignedCommandName -Assignment $assignments[0]) -ine $CommandName) {
+        Add-Problem "$Label does not get `$$VariableName from ${CommandName}: $($assignments[0].Extent.Text)"
+    }
+}
+
+function Test-ReturnsOnlyFromCommand {
+    param($FunctionAst, [string]$CommandName, [string]$Label)
+
+    if ($null -eq $FunctionAst) {
+        return
+    }
+    $returns = @($FunctionAst.FindAll({ $args[0] -is [ReturnStatementAst] }, $true))
+    $others = @($returns | Where-Object {
+        $pipeline = $_.Pipeline
+        -not ($pipeline -is [PipelineAst] -and $pipeline.PipelineElements.Count -eq 1 -and
+            $pipeline.PipelineElements[0] -is [CommandAst] -and
+            ([string]$pipeline.PipelineElements[0].GetCommandName()) -ieq $CommandName)
+    })
+    if ($returns.Count -eq 0 -or $others.Count -gt 0) {
+        Add-Problem (
+            "$Label must return only the result of $CommandName; it has $($returns.Count) return statements, " +
+            "$($others.Count) of them from something else."
+        )
+    }
+}
+
+function Test-CalledWithVariable {
+    param($Tree, [string]$CommandName, [string]$ParameterName, [string]$VariableName, [string]$Label)
+
+    if ($null -eq $Tree) {
+        return
+    }
+    $calls = @($Tree.FindAll({ $args[0] -is [CommandAst] }, $true) |
+        Where-Object { ([string]$_.GetCommandName()) -ieq $CommandName })
+    if ($calls.Count -ne 1) {
+        Add-Problem "$Label calls $CommandName $($calls.Count) times; it must call it exactly once."
+        return
+    }
+    $elements = @($calls[0].CommandElements)
+    $passes = $false
+    for ($i = 0; $i -lt $elements.Count - 1; $i++) {
+        if ($elements[$i] -is [CommandParameterAst] -and $elements[$i].ParameterName -ieq $ParameterName -and
+            $elements[$i + 1] -is [VariableExpressionAst] -and
+            ($elements[$i + 1].VariablePath.UserPath -ieq $VariableName)) {
+            $passes = $true
+        }
+    }
+    if (-not $passes) {
+        Add-Problem "$Label does not call $CommandName with -$ParameterName `$${VariableName}: $($calls[0].Extent.Text)"
+    }
+}
+
 function New-Invoker {
     param($FunctionAst, [string]$Call)
 
@@ -299,6 +405,18 @@ if ($null -ne $verifierTree) {
         )
     }
 }
+
+# Each script feeds its decision from the shared reader: the verifier's `$rcloneVersion` is the reader's result, the
+# installer's Get-RcloneVersion returns only the reader's result, and the installer passes what it got to the check.
+Test-AssignedFromCommand -Tree $verifierTree -VariableName 'rcloneVersion' `
+    -CommandName 'ConvertFrom-RcloneVersionText' -Label 'The verifier'
+$installerGetter = Get-OneFunction -Tree $installerTree -Name 'Get-RcloneVersion' -Label 'installer'
+Test-ReturnsOnlyFromCommand -FunctionAst $installerGetter -CommandName 'ConvertFrom-RcloneVersionText' `
+    -Label 'The installer Get-RcloneVersion'
+Test-AssignedFromCommand -Tree $installerTree -VariableName 'rcloneVersion' -CommandName 'Get-RcloneVersion' `
+    -Label 'The installer'
+Test-CalledWithVariable -Tree $installerTree -CommandName 'Assert-RcloneVersionAllowed' -ParameterName 'Version' `
+    -VariableName 'rcloneVersion' -Label 'The installer'
 
 $installerRead = New-Invoker -FunctionAst $installerReader -Call ' -Text $args[0]'
 $verifierRead = New-Invoker -FunctionAst $verifierReader -Call ' -Text $args[0]'
@@ -498,9 +616,12 @@ class RcloneVersionParityTests(unittest.TestCase):
                     if installer["too_old"]:
                         self.assertIn("older than", installer["refusal"])
                 decided[label] = (installer["too_old"], verifier["too_old"])
-        self.assertEqual((True, True), decided["plain 1.64.2"], "1.64.2 is older than the oldest allowed version")
-        self.assertEqual((False, False), decided["plain 1.65.0"], "1.65.0 is the oldest allowed version")
-        self.assertEqual((False, False), decided["plain 1.74.4"])
+        for version, too_old in TOO_OLD.items():
+            self.assertEqual(
+                (too_old, too_old),
+                decided["plain " + version],
+                f"{version} should be {'older than' if too_old else 'no older than'} the oldest allowed version",
+            )
         self.assertGreaterEqual(len(decided), 25)
 
 
