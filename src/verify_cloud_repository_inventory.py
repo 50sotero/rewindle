@@ -114,7 +114,12 @@ def hash_local_files(
         try:
             length, md5, sha256 = _hash_file(local_file.path)
         except FileNotFoundError as error:
-            # Removed since the listing: the repository changed while it was checked.
+            # Removed since the listing, from a folder that is still there: the
+            # repository changed while it was checked. A file whose folder went too
+            # (Google Drive for desktop quit and took its drive letter with it) says
+            # nothing about the backup, so that stays the generic failure.
+            if not local_file.path.parent.is_dir():
+                raise
             raise InventoryError("local_repository_changed") from error
         if length != local_file.size:
             raise InventoryError("local_repository_changed")

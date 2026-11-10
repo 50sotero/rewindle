@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -274,6 +275,41 @@ class CloudRepositoryInventoryTests(unittest.TestCase):
             with self.assertRaises(VERIFIER.InventoryError) as context:
                 self.verify_document(self.cloud_document())
         self.assertEqual("local_repository_changed", context.exception.category)
+
+    def test_a_file_whose_folder_went_too_is_not_called_a_changed_backup(self):
+        # Google Drive for desktop quitting takes its drive letter, so every folder
+        # goes with the file. That says nothing about the backup: the result is the
+        # generic failure, not "your backup changed while it was being checked".
+        real_hash_file = VERIFIER._hash_file
+
+        def remove_folder_then_hash(path: Path):
+            if path.name == "pack":
+                shutil.rmtree(path.parent)
+            return real_hash_file(path)
+
+        cloud_path = self.root / "cloud.json"
+        cloud_path.write_text(json.dumps(self.cloud_document()), encoding="utf-8")
+        output = io.StringIO()
+        with mock.patch.object(
+            VERIFIER, "_hash_file", side_effect=remove_folder_then_hash
+        ):
+            with redirect_stdout(output):
+                result = VERIFIER.main(
+                    (
+                        "--local-repository",
+                        str(self.repository),
+                        "--cloud-inventory",
+                        str(cloud_path),
+                        "--proof",
+                        str(self.root / "proof.json"),
+                    )
+                )
+        self.assertEqual(1, result)
+        self.assertEqual(
+            "inventory_verification_failed_closed",
+            json.loads(output.getvalue())["category"],
+        )
+        self.assertFalse((self.root / "proof.json").exists())
 
 
 if __name__ == "__main__":
