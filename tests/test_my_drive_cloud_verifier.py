@@ -1,3 +1,4 @@
+import base64
 import csv
 import hashlib
 import json
@@ -453,7 +454,18 @@ class MyDriveCloudVerifierScriptTests(unittest.TestCase):
         self.assertIn("Import-Clixml -LiteralPath", PASSWORD_HELPER)
         self.assertIn("SecureStringToBSTR", PASSWORD_HELPER)
         self.assertIn("ZeroFreeBSTR", PASSWORD_HELPER)
-        self.assertIn("[Console]::Out.WriteLine($plainText)", PASSWORD_HELPER)
+        # The password leaves as UTF-8 bytes on the raw output stream (rclone reads UTF-8; the console's encoding would
+        # change any letter outside English), and lives only in arrays that are cleared, never in a string.
+        self.assertIn("[Runtime.InteropServices.Marshal]::Copy($pointer, $passwordChars", PASSWORD_HELPER)
+        self.assertIn("[System.Text.UTF8Encoding]::new($false, $true).GetBytes($passwordChars)", PASSWORD_HELPER)
+        self.assertIn("[Console]::OpenStandardOutput()", PASSWORD_HELPER)
+        self.assertIn("[Array]::Clear($passwordBytes, 0, $passwordBytes.Length)", PASSWORD_HELPER)
+        self.assertIn("[Array]::Clear($passwordChars, 0, $passwordChars.Length)", PASSWORD_HELPER)
+        self.assertIn("$secret.Dispose()", PASSWORD_HELPER)
+        for unsafe in ("PtrToStringBSTR", "[Console]::Out", "Write-Output", "Write-Host", "$plainText"):
+            self.assertNotIn(unsafe, PASSWORD_HELPER)
+        # Windows PowerShell 5.1 reads a script without a byte order mark in the ANSI code page.
+        self.assertTrue(PASSWORD_HELPER.isascii(), "the password helper must be ASCII only")
         self.assertNotIn("Write-Verbose", PASSWORD_HELPER)
         for relative in (
             "build/Build-Release.ps1",
@@ -1222,28 +1234,64 @@ class MyDriveCloudVerifierRunFolderTests(unittest.TestCase):
                 self.assertFalse((runs / name / "rclone-readonly.conf").exists())
 
 
-# The SHA-256 of the rclone password helper as it ships. The build packages the file byte for byte, so a checkout with LF
-# line endings (local builds) and one with CRLF (CI's, which builds the published releases) give the two hashes.
-# Setting up the nightly Google Drive check pins the helper's hash in the protected assets-manifest.json. After an update
-# (an uninstall and an install), registering the check again refuses a packaged helper with any other hash, and
-# -ProvisionAssets refuses an assets folder that is already there, so a PC that had the check set up would lose it.
-SHIPPED_PASSWORD_HELPER_SHA256 = (
-    "690001286d10be7ae62d4e5d89814c2b1597b84134537e66979ea72a94f9189a",  # LF
-    "1b15c85d39b67f1bc2f385e64a7f692e63360f737fe768b28cd110d87503ff15",  # CRLF
-)
+def known_password_helper_generations() -> dict[str, int]:
+    """The installer's list of every password helper Rewindle shipped (Get-KnownPasswordHelperGenerations), by hash."""
+    installer = (PROJECT / "src" / "install_google_drive_sync_task.ps1").read_text(encoding="utf-8")
+    start = installer.index("function Get-KnownPasswordHelperGenerations {")
+    body = installer[start : installer.index("\n}", start)]
+    entries = re.findall(r"@\((\d+), '([0-9a-f]{64})'\)", body)
+    generations = {sha256: int(generation) for generation, sha256 in entries}
+    if len(generations) != len(entries):
+        raise AssertionError("a helper hash appears twice in Get-KnownPasswordHelperGenerations")
+    return generations
 
 
 class PackagedPasswordHelperTests(unittest.TestCase):
-    def test_the_packaged_password_helper_is_one_existing_installs_accept(self):
-        helper = PROJECT / "src" / "reveal-rclone-config-password.ps1"
-        self.assertIn(
-            hashlib.sha256(helper.read_bytes()).hexdigest(),
-            SHIPPED_PASSWORD_HELPER_SHA256,
-            "src/reveal-rclone-config-password.ps1 is not a shipped version. Every PC that set up the nightly Google "
-            "Drive check pinned the helper's SHA-256 in its protected assets-manifest.json. After an update, registering "
-            "the check again refuses any other helper, and -ProvisionAssets refuses the assets that are already there. "
-            "Changing the helper needs an upgrade path for existing installs first.",
-        )
+    """Setting up the nightly Google Drive check pins the password helper's SHA-256 in the protected
+    assets-manifest.json. After an update, registering the check again replaces the protected copy only when the
+    installer knows it as an earlier helper Rewindle shipped (Get-KnownPasswordHelperGenerations in
+    src/install_google_drive_sync_task.ps1), and keeps it as it is when it is the packaged one's generation. The build
+    packages the file byte for byte, so a checkout with LF line endings (local builds) and one with CRLF (CI's, which
+    builds the releases) give two hashes of each helper."""
+
+    def test_the_packaged_helper_is_the_newest_known_generation(self):
+        generations = known_password_helper_generations()
+        newest = max(generations.values())
+        helper = (PROJECT / "src" / "reveal-rclone-config-password.ps1").read_bytes()
+        lf = helper.replace(b"\r\n", b"\n")
+        for label, data in (("as checked out", helper), ("with LF", lf), ("with CRLF", lf.replace(b"\n", b"\r\n"))):
+            with self.subTest(label):
+                self.assertEqual(
+                    newest,
+                    generations.get(hashlib.sha256(data).hexdigest()),
+                    "src/reveal-rclone-config-password.ps1 changed. Add the SHA-256 of the new file with LF and with "
+                    f"CRLF line endings to Get-KnownPasswordHelperGenerations as generation {newest + 1}, so that "
+                    "registering the check again moves PCs that run the earlier helper to it.",
+                )
+
+    def test_every_generation_has_its_lf_and_crlf_form(self):
+        generations = known_password_helper_generations()
+        counts = {}
+        for generation in generations.values():
+            counts[generation] = counts.get(generation, 0) + 1
+        self.assertEqual(list(range(1, max(counts) + 1)), sorted(counts))
+        self.assertEqual({2}, set(counts.values()))
+
+    def test_every_earlier_helper_keeps_its_generation(self):
+        # The earlier helpers themselves, as git stores them: both forms of each must stay in the list with their
+        # generation, or PCs that run them could no longer be brought up to date.
+        generations = known_password_helper_generations()
+        fixture = json.loads((PROJECT / "tests" / "fixtures" / "earlier-password-helpers.json").read_text("ascii"))
+        self.assertEqual([1, 2, 3], [entry["generation"] for entry in fixture["helpers"]])
+        for entry in fixture["helpers"]:
+            with self.subTest(generation=entry["generation"]):
+                lf = base64.b64decode(entry["base64_lf"])
+                self.assertEqual(entry["bytes_lf"], len(lf))
+                self.assertEqual(entry["sha256_lf"], hashlib.sha256(lf).hexdigest())
+                self.assertEqual(entry["sha256_crlf"], hashlib.sha256(lf.replace(b"\n", b"\r\n")).hexdigest())
+                self.assertEqual(entry["generation"], generations.get(entry["sha256_lf"]))
+                self.assertEqual(entry["generation"], generations.get(entry["sha256_crlf"]))
+                self.assertLess(entry["generation"], max(generations.values()))
 
 
 if __name__ == "__main__":

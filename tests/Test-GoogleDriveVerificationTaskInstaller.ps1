@@ -448,6 +448,12 @@ try {
     Assert-True ($null -eq $result.rclone_version) (
         'assets without a recorded rclone version reported one'
     )
+    Assert-True ([string]$result.password_helper_refresh -ceq 'not_needed') (
+        'assets that hold the packaged password helper reported a refresh'
+    )
+    Assert-True ($null -eq $result.password_helper_previous_sha256) (
+        'assets that hold the packaged password helper named one to replace'
+    )
     Assert-True (
         [string]::IsNullOrWhiteSpace([string]$result.local_mirror_destination)
     ) 'a local mirror destination was emitted'
@@ -498,6 +504,106 @@ try {
         'the recorded rclone version was not reported'
     )
     Write-Utf8 -Path $assetManifestPath -Text $assetManifestText
+
+    # The assets keep the password helper from when they were set up. One of the packaged helper's generation, in either
+    # line ending, stays; an earlier one Rewindle shipped is replaced when the task is registered, which -ValidateOnly
+    # reports without changing anything; anything else is refused, -ValidateOnly or not.
+    $earlierHelpers = @((
+        [System.IO.File]::ReadAllText((Join-Path $projectRoot 'tests\fixtures\earlier-password-helpers.json')) |
+            ConvertFrom-Json
+    ).helpers)
+    $generation2Helper = [Convert]::FromBase64String(
+        [string](@($earlierHelpers | Where-Object { [int]$_.generation -eq 2 })[0].base64_lf)
+    )
+    $cloudHelper = Join-Path $cloudRoot 'reveal-rclone-config-password.ps1'
+    $runtimeHelper = Join-Path $runtime 'reveal-rclone-config-password.ps1'
+    $packagedHelperBytes = [System.IO.File]::ReadAllBytes($runtimeHelper)
+    function Get-CloudRootSnapshot {
+        return (@(
+            Get-ChildItem -LiteralPath $cloudRoot -Recurse -Force |
+                Sort-Object FullName |
+                ForEach-Object {
+                    if ($_.PSIsContainer) { $_.FullName + '\' } else { $_.FullName + '=' + (Get-Sha256 -Path $_.FullName) }
+                }
+        ) -join "`n")
+    }
+    function Invoke-HelperValidation {
+        return Invoke-Validation `
+            -Installer $installedInstaller `
+            -Runtime $runtime `
+            -Configuration $configPath `
+            -CloudRoot $cloudRoot
+    }
+
+    [System.IO.File]::WriteAllBytes($cloudHelper, $generation2Helper)
+    Write-AssetManifest -Root $cloudRoot
+    $pinnedSnapshot = Get-CloudRootSnapshot
+    $earlierHelper = Invoke-HelperValidation
+    Assert-True ($earlierHelper.ExitCode -eq 0) (
+        "validation with an earlier shipped password helper failed: $($earlierHelper.Output)"
+    )
+    $earlierHelperResult = $earlierHelper.Output | ConvertFrom-Json
+    Assert-True ([string]$earlierHelperResult.password_helper_refresh -ceq 'needed') (
+        'an earlier shipped password helper was not reported as needing a refresh'
+    )
+    Assert-True (
+        [string]$earlierHelperResult.password_helper_previous_sha256 -ceq (Get-Sha256 -Path $cloudHelper)
+    ) 'the password helper to be replaced was not named'
+    Assert-True ((Get-CloudRootSnapshot) -ceq $pinnedSnapshot) (
+        'validation changed the protected assets'
+    )
+
+    # A refresh cut short after it had replaced the helper: registering again would finish it.
+    [System.IO.File]::WriteAllBytes($cloudHelper, $packagedHelperBytes)
+    $cutShort = Invoke-HelperValidation
+    Assert-True ($cutShort.ExitCode -eq 0) (
+        "validation of a refresh cut short failed: $($cutShort.Output)"
+    )
+    Assert-True ([string]($cutShort.Output | ConvertFrom-Json).password_helper_refresh -ceq 'needed') (
+        'a refresh cut short was not reported as needing to be finished'
+    )
+
+    # The packaged helper with the other line endings is the same generation: nothing to do.
+    $packagedHelperText = [System.Text.Encoding]::ASCII.GetString($packagedHelperBytes)
+    $otherLineEndings = if ($packagedHelperText.Contains("`r`n")) {
+        $packagedHelperText.Replace("`r`n", "`n")
+    } else {
+        $packagedHelperText.Replace("`n", "`r`n")
+    }
+    [System.IO.File]::WriteAllBytes($cloudHelper, [System.Text.Encoding]::ASCII.GetBytes($otherLineEndings))
+    Write-AssetManifest -Root $cloudRoot
+    $sameGeneration = Invoke-HelperValidation
+    Assert-True ($sameGeneration.ExitCode -eq 0) (
+        "validation with the packaged helper in other line endings failed: $($sameGeneration.Output)"
+    )
+    Assert-True ([string]($sameGeneration.Output | ConvertFrom-Json).password_helper_refresh -ceq 'not_needed') (
+        'the packaged helper in other line endings was reported as needing a refresh'
+    )
+
+    # A helper no Rewindle shipped is refused.
+    [System.IO.File]::WriteAllBytes(
+        $cloudHelper,
+        [byte[]]($packagedHelperBytes + [System.Text.Encoding]::ASCII.GetBytes("# changed`n"))
+    )
+    Write-AssetManifest -Root $cloudRoot
+    $unknownHelper = Invoke-HelperValidation
+    Assert-True ($unknownHelper.ExitCode -ne 0) 'a password helper no Rewindle shipped was accepted'
+    Assert-True ($unknownHelper.Output -match 'no version of Rewindle shipped') (
+        "the unknown password helper refusal was unclear: $($unknownHelper.Output)"
+    )
+
+    # Assets set up by a newer Rewindle than the one installed are refused.
+    [System.IO.File]::WriteAllBytes($cloudHelper, $packagedHelperBytes)
+    Write-AssetManifest -Root $cloudRoot
+    [System.IO.File]::WriteAllBytes($runtimeHelper, $generation2Helper)
+    Write-RuntimeManifest -Runtime $runtime
+    $newerAssets = Invoke-HelperValidation
+    Assert-True ($newerAssets.ExitCode -ne 0) 'assets from a newer Rewindle were accepted'
+    Assert-True ($newerAssets.Output -match 'newer version of Rewindle') (
+        "the newer assets refusal was unclear: $($newerAssets.Output)"
+    )
+    [System.IO.File]::WriteAllBytes($runtimeHelper, $packagedHelperBytes)
+    Write-RuntimeManifest -Runtime $runtime
 
     # A program folder without the task launcher cannot run the task.
     $launcherBytes = [System.IO.File]::ReadAllBytes($launcherFixture)

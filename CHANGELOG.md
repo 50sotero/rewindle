@@ -313,6 +313,18 @@ ones a home user reads without a glossary.
   when there are more than 1,000 of them; for those, the backup behaves as it
   did before. If WSL puts a real file or folder where one of them was while
   the backup runs, that backup ends as incomplete rather than miss it quietly.
+- **The nightly Google Drive check survives an update that changes its
+  password helper.** The check keeps its own copy of the small helper that
+  hands rclone its configuration password. After an update, registering the
+  check again stopped whenever the new version's helper was different, even
+  in line endings only, and the only way on was to set the check up from
+  scratch. Registering it again now swaps in the new helper while no backup or
+  check is running, keeps the earlier copy in the check's evidence folder, and
+  changes nothing when the copy is a helper no version of Rewindle shipped or
+  comes from a newer version. The helper also hands over a password with
+  letters outside English, such as an accented letter or the euro sign, the
+  way rclone reads it; before, rclone received the wrong bytes and could not
+  open its configuration.
 
 ### Security
 
@@ -322,9 +334,7 @@ ones a home user reads without a glossary.
   command and so runs with those rights. Setup's elevated step, the nightly
   Google Drive check, its password helper and its task installer now limit
   PowerShell to Windows' own modules before they run any command, and the
-  backup service's other elevated steps now do it first too. The Google Drive
-  check's password helper changed, so registering that check again needs
-  `-ProvisionAssets`.
+  backup service's other elevated steps now do it first too.
 - **Nothing that runs as administrator is built in your own temporary folder
   any more.** The installer, the uninstaller and moving the backup location
   compiled small Windows helpers in your temporary folder and then loaded them

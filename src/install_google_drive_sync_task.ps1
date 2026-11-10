@@ -440,7 +440,12 @@ function Write-NewUtf8Json {
 }
 
 function Read-VerifiedAssetManifest {
-    param([Parameter(Mandatory)] [string]$Root)
+    param(
+        [Parameter(Mandatory)] [string]$Root,
+        # Lets the password helper's file differ from its record, which a refresh cut short leaves behind, so that
+        # Get-PasswordHelperRefreshPlan can tell whether this installer can finish it. Every other check still applies.
+        [switch]$AllowPasswordHelperMismatch
+    )
 
     $manifestPath = Join-Path $Root 'assets-manifest.json'
     $manifestItem = Assert-NormalFile -Path $manifestPath
@@ -475,9 +480,16 @@ function Read-VerifiedAssetManifest {
         $item = Assert-NormalFile -Path $path
         if (($record.bytes -isnot [int] -and
                 $record.bytes -isnot [long]) -or
-            [long]$record.bytes -ne $item.Length -or
-            [string]$record.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
-            (Get-Sha256Hex -Path $path) -cne [string]$record.sha256) {
+            [string]$record.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw "Cloud-verification asset size or hash mismatch: $name"
+        }
+        $actualSha256 = Get-Sha256Hex -Path $path
+        if ($actualSha256 -ceq [string]$record.sha256 -and [long]$record.bytes -eq $item.Length) {
+            continue
+        }
+        if (-not ($AllowPasswordHelperMismatch -and
+                $name -ceq 'reveal-rclone-config-password.ps1' -and
+                $actualSha256 -cne [string]$record.sha256)) {
             throw "Cloud-verification asset size or hash mismatch: $name"
         }
     }
@@ -590,7 +602,10 @@ function Install-ProtectedCloudAssets {
     )
 
     if (Test-Path -LiteralPath $Target) {
-        throw 'Refusing to overwrite existing protected cloud-verification assets.'
+        throw (
+            'Refusing to overwrite existing protected cloud-verification assets. To keep using them, register the ' +
+            'check without -ProvisionAssets; that also brings their password helper up to date.'
+        )
     }
     if ($RemoteName -notmatch '^[A-Za-z0-9._-]{1,80}$') {
         throw 'The read-only rclone remote name is invalid.'
@@ -707,6 +722,445 @@ function Install-ProtectedCloudAssets {
             )) {
             Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
         }
+    }
+}
+
+function Get-KnownPasswordHelperGenerations {
+    # Every rclone password helper Rewindle has shipped, oldest first, by the SHA-256 of the file as each kind of build has
+    # it: local builds check it out with LF line endings, release builds with CRLF. Both forms of one helper are the same
+    # generation. tests/test_my_drive_cloud_verifier.py fails until a changed helper is added here as the next one.
+    $generations = [System.Collections.Generic.Dictionary[string, int]]::new([System.StringComparer]::Ordinal)
+    foreach ($entry in @(
+        # 1: 0.2.0-alpha.1 and 0.2.0-alpha.2.
+        @(1, '5f30dafbc8512db3c97f1dbed0fc0bc99db528d6110d517e28926ff7ef395b2a'),
+        @(1, '092c8263d9377b5ff1facd3217ca683dc026a82ba83d1429cea67510dc2a1496'),
+        # 2: loads PowerShell modules only from Windows' own folder.
+        @(2, '690001286d10be7ae62d4e5d89814c2b1597b84134537e66979ea72a94f9189a'),
+        @(2, '1b15c85d39b67f1bc2f385e64a7f692e63360f737fe768b28cd110d87503ff15'),
+        # 3: wrote the password as UTF-8; on a development branch for a few hours only.
+        @(3, '6731d28baedd9535771de9974ed731fdc163cef73554b76ea6f172bf0b344a09'),
+        @(3, '726b33761dc2b67344367fcd3d47e1f1080e3d61dc5e5c6720a6979c4c39f154'),
+        # 4: writes the password as UTF-8 and never holds it in a string.
+        @(4, '406bec4929ecc496903afa2ba1ace63b9c89d887afb996b045dc1b41275457e7'),
+        @(4, 'd0aa6277c005fbc3c171c868d8036e23d94944afbd1d6d611ea4b8d36a220a83')
+    )) {
+        $generations.Add([string]$entry[1], [int]$entry[0])
+    }
+    # The comma keeps PowerShell from handing the dictionary back one entry at a time.
+    return , $generations
+}
+
+function Get-PasswordHelperRefreshPlan {
+    # What registering the check again does with the protected password helper:
+    #   current  - the assets hold the packaged helper's generation, in either line ending; nothing changes.
+    #   refresh  - they hold an earlier generation; Update-ProtectedPasswordHelper puts the packaged helper in.
+    #   finish   - a refresh was cut short after it had replaced the helper; only the manifest's record is brought up to date.
+    #   newer, unknown, packaged_unknown - refused: assets from a newer Rewindle; a helper no Rewindle shipped, or a state no
+    #   refresh leaves; a packaged helper missing from the list.
+    # RecordedSha256 is the helper's hash in assets-manifest.json, PresentSha256 the hash of the helper file in the assets
+    # root, PackagedSha256 the hash of the helper in the protected runtime.
+    param(
+        [Parameter(Mandatory)] [string]$RecordedSha256,
+        [Parameter(Mandatory)] [string]$PresentSha256,
+        [Parameter(Mandatory)] [string]$PackagedSha256,
+        [Parameter(Mandatory)] [System.Collections.IDictionary]$Generations
+    )
+
+    if (-not $Generations.ContainsKey($PackagedSha256)) {
+        return 'packaged_unknown'
+    }
+    if (-not $Generations.ContainsKey($RecordedSha256) -or -not $Generations.ContainsKey($PresentSha256)) {
+        return 'unknown'
+    }
+    $packaged = [int]$Generations[$PackagedSha256]
+    $recorded = [int]$Generations[$RecordedSha256]
+    $present = [int]$Generations[$PresentSha256]
+    if ($PresentSha256 -ceq $RecordedSha256) {
+        if ($recorded -eq $packaged) {
+            return 'current'
+        }
+        if ($recorded -lt $packaged) {
+            return 'refresh'
+        }
+        return 'newer'
+    }
+    # The helper file is not the one recorded. Only a refresh cut short between its two steps leaves that, and then the
+    # file is a later generation than the record.
+    if ($present -le $recorded) {
+        return 'unknown'
+    }
+    if ($present -eq $packaged) {
+        return 'finish'
+    }
+    if ($present -lt $packaged) {
+        return 'refresh'
+    }
+    return 'newer'
+}
+
+function Assert-PasswordHelperPlanAllowed {
+    param(
+        [Parameter(Mandatory)] [string]$Plan,
+        [Parameter(Mandatory)] [string]$Root
+    )
+
+    if ($Plan -ceq 'packaged_unknown') {
+        throw (
+            'This version of Rewindle does not recognise its own rclone password helper. Reinstall Rewindle, then ' +
+            'register the check again.'
+        )
+    }
+    if ($Plan -ceq 'newer') {
+        throw (
+            'The protected rclone assets were set up by a newer version of Rewindle, so they were left as they are. ' +
+            'Install that version or a later one, then register the check again.'
+        )
+    }
+    if ($Plan -ceq 'unknown') {
+        $unknown = (
+            'The protected rclone assets hold a password helper that no version of Rewindle shipped, so they were ' +
+            'left as they are. Move {0} aside, then set up the check again with -ProvisionAssets, as Rewindle''s ' +
+            'guide to Google Drive describes.'
+        )
+        throw ($unknown -f $Root)
+    }
+    if ($Plan -cnotin @('current', 'refresh', 'finish')) {
+        throw "Unexpected password helper plan: $Plan"
+    }
+}
+
+function Get-Sha256HexOfBytes {
+    param([Parameter(Mandatory)] [byte[]]$Bytes)
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($sha256.ComputeHash($Bytes)) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+
+function Write-NewFileBytes {
+    # A new file that holds exactly these bytes, written through to the disk before this returns.
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [byte[]]$Bytes
+    )
+
+    $stream = [System.IO.FileStream]::new(
+        $Path,
+        [System.IO.FileMode]::CreateNew,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None,
+        4096,
+        [System.IO.FileOptions]::WriteThrough
+    )
+    try {
+        $stream.Write($Bytes, 0, $Bytes.Length)
+        $stream.Flush($true)
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
+function New-RefreshedAssetManifest {
+    # The manifest as it was, every field in its order, with the helper's size and hash changed.
+    param(
+        [Parameter(Mandatory)] [object]$Manifest,
+        [Parameter(Mandatory)] [string]$HelperName,
+        [Parameter(Mandatory)] [long]$HelperBytes,
+        [Parameter(Mandatory)] [string]$HelperSha256
+    )
+
+    $value = [ordered]@{}
+    foreach ($property in $Manifest.PSObject.Properties) {
+        if ($property.Name -cne 'files') {
+            $value[$property.Name] = $property.Value
+            continue
+        }
+        $value['files'] = @(
+            foreach ($record in @($property.Value)) {
+                $copy = [ordered]@{}
+                foreach ($field in $record.PSObject.Properties) {
+                    $copy[$field.Name] = $field.Value
+                }
+                if ([string]$record.name -ceq $HelperName) {
+                    $copy['bytes'] = $HelperBytes
+                    $copy['sha256'] = $HelperSha256
+                }
+                $copy
+            }
+        )
+    }
+    return $value
+}
+
+function Enter-ProtectedRunLock {
+    # The run lock that backups and the check take, or $null while one of them, or another protected change, holds it.
+    # The same open and byte lock as the check's own; the file and its permissions stay as they are.
+    param([Parameter(Mandatory)] [string]$Path)
+
+    $item = Assert-NormalFile -Path $Path
+    if ($item.Length -lt 1) {
+        throw 'The protected run-lock handshake is empty.'
+    }
+    try {
+        $stream = [System.IO.File]::Open(
+            $Path,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::ReadWrite
+        )
+    }
+    catch [System.IO.IOException] {
+        # A sharing violation: another program has the file open and shares it with no one.
+        if (($_.Exception.HResult -band 0xFFFF) -eq 32) {
+            return $null
+        }
+        throw
+    }
+    try {
+        $stream.Lock(0, 1)
+        return $stream
+    }
+    catch [System.IO.IOException] {
+        $stream.Dispose()
+        # A lock violation means a backup or a protected change holds the lock. Any other error is a real one.
+        if (($_.Exception.HResult -band 0xFFFF) -eq 33) {
+            return $null
+        }
+        throw
+    }
+    catch {
+        $stream.Dispose()
+        throw
+    }
+}
+
+function Exit-ProtectedRunLock {
+    param([System.IO.FileStream]$Stream)
+
+    if ($null -eq $Stream) { return }
+    try { $Stream.Unlock(0, 1) } finally { $Stream.Dispose() }
+}
+
+function Get-InstallerNativeMethods {
+    # MoveFileExW, emitted in memory (Reflection.Emit, run only) and never compiled, as Manage-Repository.ps1 does:
+    # csc.exe would work through %TEMP%, which the user's own programs can change while this runs elevated.
+    $cached = Get-Variable -Name 'installerNativeMethods' -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    if ($null -ne $cached) {
+        return $cached
+    }
+    $assemblyName = [Reflection.AssemblyName]::new(
+        'ResticBackuper.GoogleDriveCheckInstaller.Native.' + [Guid]::NewGuid().ToString('N')
+    )
+    $assembly = [Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly(
+        $assemblyName,
+        [Reflection.Emit.AssemblyBuilderAccess]::Run
+    )
+    $module = $assembly.DefineDynamicModule($assemblyName.Name)
+    $type = $module.DefineType(
+        'ResticBackuper.GoogleDriveCheckInstaller.NativeMethods',
+        [Reflection.TypeAttributes]'Public, Class, Sealed, Abstract'
+    )
+    $dllImport = [Runtime.InteropServices.DllImportAttribute]
+    $method = $type.DefineMethod(
+        'MoveFileExW',
+        [Reflection.MethodAttributes]'Public, Static, PinvokeImpl, HideBySig',
+        [bool],
+        [Type[]]@([string], [string], [uint32])
+    )
+    $method.SetCustomAttribute([Reflection.Emit.CustomAttributeBuilder]::new(
+        $dllImport.GetConstructor([Type[]]@([string])),
+        [object[]]@('kernel32.dll'),
+        [Reflection.FieldInfo[]]@(
+            $dllImport.GetField('SetLastError'),
+            $dllImport.GetField('CallingConvention'),
+            $dllImport.GetField('CharSet'),
+            $dllImport.GetField('EntryPoint'),
+            $dllImport.GetField('ExactSpelling')
+        ),
+        [object[]]@(
+            $true,
+            [Runtime.InteropServices.CallingConvention]::Winapi,
+            [Runtime.InteropServices.CharSet]::Unicode,
+            'MoveFileExW',
+            $true
+        )
+    ))
+    $native = $type.CreateType()
+    Set-Variable -Name 'installerNativeMethods' -Scope Script -Value $native
+    return $native
+}
+
+function Move-FileReplacing {
+    # Renames Source over Target, on the same volume, in one step: Target always names the old file or the new one, never
+    # nothing, which File.Replace does not promise. A file that another program has open just then is tried again.
+    param(
+        [Parameter(Mandatory)] [string]$Source,
+        [Parameter(Mandatory)] [string]$Target
+    )
+
+    $native = Get-InstallerNativeMethods
+    # MOVEFILE_REPLACE_EXISTING (1) and MOVEFILE_WRITE_THROUGH (8).
+    $flags = [uint32]9
+    for ($attempt = 1; $true; $attempt++) {
+        if ($native::MoveFileExW($Source, $Target, $flags)) {
+            return
+        }
+        $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        # Access denied, a sharing violation or a lock violation: usually another program reading the file at that moment.
+        if ($attempt -ge 5 -or $code -notin @(5, 32, 33)) {
+            $failed = 'Could not replace {0}: {1}'
+            throw ($failed -f $Target, [ComponentModel.Win32Exception]::new($code).Message)
+        }
+        [System.Threading.Thread]::Sleep(200)
+    }
+}
+
+function Update-ProtectedPasswordHelper {
+    # Brings the protected assets to the packaged password helper (plan 'refresh'), or finishes a refresh that was cut
+    # short after it had replaced the helper (plan 'finish'). Only the helper and assets-manifest.json change.
+    #
+    # The files they replace are kept in a new folder under evidence\, where the check looks only at permissions. The
+    # replacements are written into that folder first, so they take the same permissions as everything else under the
+    # assets root, and are checked before anything is swapped. The swaps happen while the run lock is held, so no backup
+    # or check runs meanwhile, and each is one rename. If the manifest cannot be swapped after the helper was, the earlier
+    # helper goes back; if even that fails, registering the check again finishes the refresh.
+    param(
+        [Parameter(Mandatory)] [string]$Root,
+        [Parameter(Mandatory)] [ValidateSet('refresh', 'finish')] [string]$Plan,
+        [Parameter(Mandatory)] [string]$HelperName,
+        [Parameter(Mandatory)] [string]$PackagedHelperPath,
+        [Parameter(Mandatory)] [string]$PackagedHelperSha256,
+        [Parameter(Mandatory)] [System.Collections.IDictionary]$Generations,
+        [Parameter(Mandatory)] [string]$RunLockPath,
+        [Parameter(Mandatory)] [string]$CurrentUserSid
+    )
+
+    $changed = 'The protected rclone assets changed while this setup ran, so they were left as they are. Run it again.'
+    $manifestPath = Join-Path $Root 'assets-manifest.json'
+    $helperPath = Join-Path $Root $HelperName
+    $evidence = Join-Path $Root 'evidence'
+    Assert-NormalDirectory -Path $evidence | Out-Null
+    foreach ($path in @($manifestPath, $helperPath, $PackagedHelperPath)) {
+        if ((Assert-NormalFile -Path $path).Length -gt 1MB) {
+            throw "Unexpectedly large protected file: $path"
+        }
+    }
+
+    # Each file is read once: the bytes that are checked are the bytes that are kept and written.
+    $manifestBytes = [System.IO.File]::ReadAllBytes($manifestPath)
+    $helperBytes = [System.IO.File]::ReadAllBytes($helperPath)
+    $manifestSha256 = Get-Sha256HexOfBytes -Bytes $manifestBytes
+    $presentSha256 = Get-Sha256HexOfBytes -Bytes $helperBytes
+    $manifest = [System.Text.UTF8Encoding]::new($false, $true).GetString($manifestBytes) | ConvertFrom-Json
+    $records = @(@($manifest.files) | Where-Object { [string]$_.name -ceq $HelperName })
+    if ($records.Count -ne 1) {
+        throw $changed
+    }
+    $recordedSha256 = [string]$records[0].sha256
+    if ((Get-PasswordHelperRefreshPlan `
+            -RecordedSha256 $recordedSha256 `
+            -PresentSha256 $presentSha256 `
+            -PackagedSha256 $PackagedHelperSha256 `
+            -Generations $Generations) -cne $Plan) {
+        throw $changed
+    }
+    if ($Plan -ceq 'refresh') {
+        $newHelperBytes = [System.IO.File]::ReadAllBytes($PackagedHelperPath)
+        if ((Get-Sha256HexOfBytes -Bytes $newHelperBytes) -cne $PackagedHelperSha256) {
+            throw 'The packaged rclone password helper changed while this setup ran. Run it again.'
+        }
+    }
+    else {
+        $newHelperBytes = $helperBytes
+    }
+    $newHelperSha256 = Get-Sha256HexOfBytes -Bytes $newHelperBytes
+    # Written as the installer writes every manifest (Write-NewUtf8Json): UTF-8 without a byte order mark, then a line break.
+    $newManifest = New-RefreshedAssetManifest `
+        -Manifest $manifest `
+        -HelperName $HelperName `
+        -HelperBytes $newHelperBytes.Length `
+        -HelperSha256 $newHelperSha256
+    $newManifestBytes = [System.Text.UTF8Encoding]::new($false).GetBytes(
+        ($newManifest | ConvertTo-Json -Depth 7) + [Environment]::NewLine
+    )
+    $newManifestSha256 = Get-Sha256HexOfBytes -Bytes $newManifestBytes
+
+    $stamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ', [Globalization.CultureInfo]::InvariantCulture)
+    $copy = Join-Path $evidence ('password-helper-' + $stamp + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    if (Test-Path -LiteralPath $copy) {
+        throw "Refusing to reuse a protected folder: $copy"
+    }
+    $stagedHelper = Join-Path $copy ($HelperName + '.new')
+    $stagedManifest = Join-Path $copy 'assets-manifest.json.new'
+    $lock = $null
+    $swapStarted = $false
+    try {
+        [System.IO.Directory]::CreateDirectory($copy) | Out-Null
+        Write-NewFileBytes -Path (Join-Path $copy 'assets-manifest.json.previous') -Bytes $manifestBytes
+        if ($Plan -ceq 'refresh') {
+            Write-NewFileBytes -Path (Join-Path $copy ($HelperName + '.previous')) -Bytes $helperBytes
+            Write-NewFileBytes -Path $stagedHelper -Bytes $newHelperBytes
+        }
+        Write-NewFileBytes -Path $stagedManifest -Bytes $newManifestBytes
+        # A file keeps its permissions when it is renamed, so the new ones must meet the check's rules already.
+        Assert-ProtectedTreeAcl -Path $Root -CurrentUserSid $CurrentUserSid
+
+        $lock = Enter-ProtectedRunLock -Path $RunLockPath
+        if ($null -eq $lock) {
+            throw (
+                'A backup, the Google Drive check or another protected change is running, so the protected rclone ' +
+                'assets were left as they are. Register the check again once it has finished.'
+            )
+        }
+        if ((Get-Sha256Hex -Path $manifestPath) -cne $manifestSha256 -or
+            (Get-Sha256Hex -Path $helperPath) -cne $presentSha256) {
+            throw $changed
+        }
+        $swapStarted = $true
+        if ($Plan -ceq 'refresh') {
+            Move-FileReplacing -Source $stagedHelper -Target $helperPath
+        }
+        Move-FileReplacing -Source $stagedManifest -Target $manifestPath
+        if ((Get-Sha256Hex -Path $helperPath) -cne $newHelperSha256 -or
+            (Get-Sha256Hex -Path $manifestPath) -cne $newManifestSha256) {
+            throw 'The refreshed rclone password helper could not be confirmed. Register the check again.'
+        }
+    }
+    finally {
+        if ($swapStarted -and $Plan -ceq 'refresh') {
+            # The helper was swapped and the manifest was not: the earlier helper goes back, so the two agree again.
+            try {
+                if ((Get-Sha256Hex -Path $helperPath) -ceq $newHelperSha256 -and
+                    (Get-Sha256Hex -Path $manifestPath) -ceq $manifestSha256) {
+                    $rollback = Join-Path $copy ($HelperName + '.rollback')
+                    Write-NewFileBytes -Path $rollback -Bytes $helperBytes
+                    Move-FileReplacing -Source $rollback -Target $helperPath
+                }
+            }
+            catch {
+                Write-Warning (
+                    'The earlier rclone password helper could not be put back (' + $_.Exception.Message + '). ' +
+                    'Registering the check again finishes the update.'
+                )
+            }
+        }
+        Exit-ProtectedRunLock -Stream $lock
+        if (-not $swapStarted) {
+            # Nothing was swapped: the folder holds only copies made here.
+            Remove-Item -LiteralPath $copy -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    return [pscustomobject]@{
+        RecordedHelperSha256 = $recordedSha256
+        HelperSha256 = $newHelperSha256
+        PreviousManifestSha256 = $manifestSha256
+        ManifestSha256 = $newManifestSha256
+        PreviousCopy = $copy
     }
 }
 
@@ -1056,8 +1510,11 @@ elseif ($ProvisionAssets) {
 }
 else {
     Assert-NormalDirectory -Path $cloudVerificationRootFull | Out-Null
+    # The helper's file may differ from its record here only so that the plan below can recognise a refresh that was cut
+    # short; the plan refuses anything else.
     $assetManifest = Read-VerifiedAssetManifest `
-        -Root $cloudVerificationRootFull
+        -Root $cloudVerificationRootFull `
+        -AllowPasswordHelperMismatch
     if (-not $ValidateOnly) {
         Assert-ProtectedTreeAcl `
             -Path $cloudVerificationRootFull `
@@ -1069,6 +1526,11 @@ if ($null -ne $assetManifest -and
     [string]$assetManifest.task_user_sid -cne $userSid) {
     throw 'Protected rclone assets are bound to another Windows account.'
 }
+# The protected assets keep a copy of the password helper from when they were set up. A helper of the packaged one's
+# generation, in either line ending, stays; an earlier one Rewindle shipped is replaced when the task is registered
+# (Update-ProtectedPasswordHelper, below); anything else is refused, also under -ValidateOnly.
+$passwordHelperPlan = $null
+$recordedPasswordHelperSha256 = $null
 if ($null -ne $assetManifest) {
     $assetHelperRecords = @(
         $assetManifest.files |
@@ -1076,11 +1538,16 @@ if ($null -ne $assetManifest) {
                 [string]$_.name -ceq $passwordHelperName
             }
     )
-    if ($assetHelperRecords.Count -ne 1 -or
-        [string]$assetHelperRecords[0].sha256 -cne
-            $packagedPasswordHelperSha256) {
+    if ($assetHelperRecords.Count -ne 1) {
         throw 'Protected rclone assets do not contain the packaged password helper.'
     }
+    $recordedPasswordHelperSha256 = [string]$assetHelperRecords[0].sha256
+    $passwordHelperPlan = Get-PasswordHelperRefreshPlan `
+        -RecordedSha256 $recordedPasswordHelperSha256 `
+        -PresentSha256 (Get-Sha256Hex -Path (Join-Path $cloudVerificationRootFull $passwordHelperName)) `
+        -PackagedSha256 $packagedPasswordHelperSha256 `
+        -Generations (Get-KnownPasswordHelperGenerations)
+    Assert-PasswordHelperPlanAllowed -Plan $passwordHelperPlan -Root $cloudVerificationRootFull
 }
 # The task starts the check through the task launcher, which runs the verifier in Windows PowerShell without a window
 # (Task Scheduler starting powershell.exe itself shows a console window for a moment, even with -WindowStyle Hidden) and
@@ -1135,6 +1602,21 @@ $validation = [ordered]@{
     } else {
         $null
     }
+    # 'needed' when registering the task replaces the protected password helper (and the one it replaces is named),
+    # 'performed' once it has, 'not_needed' when the assets already hold the packaged helper's generation.
+    password_helper_refresh = if ($null -eq $passwordHelperPlan) {
+        $null
+    } elseif ($passwordHelperPlan -ceq 'current') {
+        'not_needed'
+    } else {
+        'needed'
+    }
+    password_helper_previous_sha256 = if ($null -ne $passwordHelperPlan -and $passwordHelperPlan -cne 'current') {
+        $recordedPasswordHelperSha256
+    } else {
+        $null
+    }
+    password_helper_previous_copy = $null
     action_execute = $launcherPath
     action_arguments = $arguments
     action_working_directory = $protectedRootFull
@@ -1177,6 +1659,39 @@ if (Test-Path -LiteralPath $taskEvidencePath -PathType Leaf) {
         $taskEvidencePath,
         [System.Text.Encoding]::UTF8
     )
+}
+
+# After an update that changed the password helper, the protected assets still hold the earlier one. It is replaced
+# here, after every check above and before the task is registered, and the assets are then checked again as they are.
+if ($null -ne $passwordHelperPlan -and $passwordHelperPlan -cne 'current') {
+    $knownPasswordHelpers = Get-KnownPasswordHelperGenerations
+    $passwordHelperRefresh = Update-ProtectedPasswordHelper `
+        -Root $cloudVerificationRootFull `
+        -Plan $passwordHelperPlan `
+        -HelperName $passwordHelperName `
+        -PackagedHelperPath $passwordHelperPath `
+        -PackagedHelperSha256 $packagedPasswordHelperSha256 `
+        -Generations $knownPasswordHelpers `
+        -RunLockPath $runLockPath `
+        -CurrentUserSid $userSid
+    $assetManifest = Read-VerifiedAssetManifest -Root $cloudVerificationRootFull
+    Assert-ProtectedTreeAcl `
+        -Path $cloudVerificationRootFull `
+        -CurrentUserSid $userSid
+    $refreshedHelperSha256 = Get-Sha256Hex -Path (Join-Path $cloudVerificationRootFull $passwordHelperName)
+    if ((Get-PasswordHelperRefreshPlan `
+            -RecordedSha256 $refreshedHelperSha256 `
+            -PresentSha256 $refreshedHelperSha256 `
+            -PackagedSha256 $packagedPasswordHelperSha256 `
+            -Generations $knownPasswordHelpers) -cne 'current') {
+        throw 'The refreshed rclone password helper could not be confirmed. Register the check again.'
+    }
+    $validation.asset_manifest_sha256 = Get-Sha256Hex -Path (
+        Join-Path $cloudVerificationRootFull 'assets-manifest.json'
+    )
+    $validation.password_helper_refresh = 'performed'
+    $validation.password_helper_previous_sha256 = $passwordHelperRefresh.RecordedHelperSha256
+    $validation.password_helper_previous_copy = $passwordHelperRefresh.PreviousCopy
 }
 
 $action = ScheduledTasks\New-ScheduledTaskAction `
