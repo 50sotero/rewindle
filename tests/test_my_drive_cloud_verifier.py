@@ -1137,7 +1137,13 @@ class RclonePasswordHelperEncodingTests(unittest.TestCase):
             helper.write_bytes((PROJECT / "src" / "reveal-rclone-config-password.ps1").read_bytes())
             credential = Path(temp) / "rclone-config-password.clixml"
             characters = ", ".join(f"0x{ord(character):04x}" for character in password)
+            # Started from PowerShell 7 (as CI's test step is), Windows PowerShell inherits PowerShell 7's module
+            # folders and cannot load ConvertTo-SecureString from them, so the probe uses Windows' own, as the helper
+            # does, and stops at the first error.
             made = run_windows_powershell(
+                "$env:PSModulePath = [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell', "
+                "'v1.0', 'Modules')\n"
+                "$ErrorActionPreference = 'Stop'\n"
                 "$secret = ConvertTo-SecureString ([string]::new([char[]]@("
                 + characters
                 + "))) -AsPlainText -Force\n"
@@ -1146,6 +1152,7 @@ class RclonePasswordHelperEncodingTests(unittest.TestCase):
                 + "\n"
             )
             self.assertEqual(0, made.returncode, made.stderr)
+            self.assertTrue(credential.is_file(), made.stderr)
             completed = subprocess.run(
                 [
                     powershell,
