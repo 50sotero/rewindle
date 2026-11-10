@@ -153,10 +153,13 @@ class BackupRangeSourceTests(unittest.TestCase):
         self.assertIn("const changes = result?.isBackup ? activeDetails?.changesDisplay?.trim() || undefined : undefined;", modal)
         self.assertIn('<DetailStat label="Files" value={counted(activeDetails.filesDisplay)} icon={<FileText size={13} />} sub={changes} hint={changes ? CHANGES_HINT : undefined} />', modal)
         self.assertIn('{sub && <span className="run-detail-stat-sub">{sub}</span>}', modal)
-        # Why a backup after a change to the plan counts everything as new: adding or removing a folder, and moving the backups.
+        # Why a backup after adding or removing a folder counts everything as new. A move of the backups no longer does:
+        # with the same folders on the same drives, the first backup after it builds on the last one (backup.py,
+        # earlier_generation_parent).
         hint = re.search(r"const CHANGES_HINT = '([^']*)';", modal)
         self.assertIsNotNone(hint)
-        self.assertIn("add or remove a folder, or move your backups", hint.group(1))
+        self.assertIn("The first backup after you add or remove a folder counts every file as new;", hint.group(1))
+        self.assertNotIn("move your backups", hint.group(1))
         css = read(WEB / "styles" / "app.css")
         for rule in (".run-detail-stat-sub", ".backup-destinations .location-facts", ".backup-range-line", ".restore-range"):
             self.assertIn(rule, css)

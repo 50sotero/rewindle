@@ -80,9 +80,10 @@ function DetailStat({ label, value, icon, hint, sub }: { label: string; value: s
   </div>;
 }
 
-// What new, changed and unchanged mean, and why a backup after a change to the plan counts every file as new: the plan is part of
-// what a backup is compared with, so the first one after it has nothing to compare with, while the data itself is not copied again.
-const CHANGES_HINT = 'New: not in the previous backup of these folders. Changed: edited since then. Unchanged: already saved. The first backup after you add or remove a folder, or move your backups, counts every file as new; only data that wasn’t already saved is copied.';
+// What new, changed and unchanged mean, and why a backup after a folder is added or removed counts every file as new: the folders
+// are part of what a backup is compared with, so the first one after that has nothing to compare with, while the data itself is not
+// copied again. A move of the backups, a reinstall or an update with the same folders on the same drives builds on the last backup.
+const CHANGES_HINT = 'New: not in the previous backup of these folders. Changed: edited since then. Unchanged: already saved. The first backup after you add or remove a folder counts every file as new; only data that wasn’t already saved is copied.';
 
 // `why` is the tooltip while the button is off, so it never just sits there greyed out with no reason.
 function DetailIconButton({ label, children, onClick, disabled = false, why }: {
