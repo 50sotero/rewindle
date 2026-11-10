@@ -313,7 +313,7 @@ branded Rewindle release.
 
 | Component | Responsibility | Write scope |
 | --- | --- | --- |
-| `ResticBackuperTaskLauncher.exe` | Supervises the scheduled Python/Restic process and ties descendants to a kill-on-close job object | None directly |
+| `ResticBackuperTaskLauncher.exe` | Supervises the scheduled Python/Restic process, and the nightly Google Drive check's Windows PowerShell, without a window, and ties descendants to a kill-on-close job object | None directly |
 | Embedded Python and `backup.py` | Validates configuration, drives Restic, verifies results, records status | Repository through Restic; protected state |
 | `restic.exe` | Creates encrypted snapshots, checks the repository, and restores data | Repository and explicit restore target |
 | `ResticBackuperDashboard.exe` | Selects the engine profile; reads status, logs, history, and configured sources; requests every protected change through UAC and checks each result; validates and requests the fixed backup task after confirmation | Its own per-user presentation store and user-selected diagnostic ZIPs; no configuration or repository writes |

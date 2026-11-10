@@ -30,6 +30,8 @@ namespace ResticBackuper.TaskLauncher
         private const string CancelEventPrefix = "Local\\ResticBackuper.Cancel.";
         private const string CancelEventSddl =
             "O:BAG:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)";
+        private const string GoogleDriveCheckOption = "--google-drive-check";
+        private const string ExpectedRepositoryIdOption = "--expected-repository-id";
 
         private static IntPtr activeCancellationEvent = IntPtr.Zero;
         private static WindowProcedure windowProcedureRoot;
@@ -37,7 +39,17 @@ namespace ResticBackuper.TaskLauncher
         [STAThread]
         private static int Main(string[] args)
         {
-            if (args.Length != 0)
+            // No arguments: the backup task. "--google-drive-check
+            // --expected-repository-id <id>": the nightly Google Drive check task.
+            string expectedRepositoryId = null;
+            if (args.Length == 3
+                && string.Equals(args[0], GoogleDriveCheckOption, StringComparison.Ordinal)
+                && string.Equals(args[1], ExpectedRepositoryIdOption, StringComparison.Ordinal)
+                && IsRepositoryId(args[2]))
+            {
+                expectedRepositoryId = args[2];
+            }
+            else if (args.Length != 0)
             {
                 return 64;
             }
@@ -52,6 +64,11 @@ namespace ResticBackuper.TaskLauncher
                 return 65;
             }
 
+            if (expectedRepositoryId != null)
+            {
+                return RunGoogleDriveCheck(runtime, expectedRepositoryId);
+            }
+
             string python = Path.Combine(runtime, "Python", "python.exe");
             string backup = Path.Combine(runtime, "backup.py");
             string config = Path.Combine(runtime, "backup-config.json");
@@ -60,11 +77,9 @@ namespace ResticBackuper.TaskLauncher
                 return 66;
             }
 
-            IntPtr job = IntPtr.Zero;
             IntPtr window = IntPtr.Zero;
             IntPtr environment = IntPtr.Zero;
             string windowClass = null;
-            ProcessInformation process = new ProcessInformation();
             CancellationChannel channel = null;
             try
             {
@@ -79,6 +94,175 @@ namespace ResticBackuper.TaskLauncher
                     return 77;
                 }
 
+                string launcherStartFileTime = GetCurrentProcessStartFileTime();
+                environment = BuildChildEnvironment(
+                    channel,
+                    GetCurrentProcessId(),
+                    launcherStartFileTime);
+                string commandLine = Quote(python)
+                    + " -I -S -B -u " + Quote(backup)
+                    + " --config " + Quote(config)
+                    + " --scheduled";
+                return RunInKillOnCloseJob(python, commandLine, environment, runtime);
+            }
+            catch (Win32Exception)
+            {
+                return 74;
+            }
+            catch (IOException)
+            {
+                return 75;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return 76;
+            }
+            catch (CryptographicException)
+            {
+                return 78;
+            }
+            finally
+            {
+                if (environment != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(environment);
+                }
+                if (window != IntPtr.Zero)
+                {
+                    DestroyWindow(window);
+                }
+                if (!string.IsNullOrEmpty(windowClass))
+                {
+                    UnregisterClass(windowClass, GetModuleHandle(null));
+                }
+                activeCancellationEvent = IntPtr.Zero;
+                if (channel != null)
+                {
+                    channel.Dispose();
+                }
+                GC.KeepAlive(windowProcedureRoot);
+            }
+        }
+
+        private static int RunGoogleDriveCheck(string runtime, string expectedRepositoryId)
+        {
+            // The check is a Windows PowerShell script. Task Scheduler used to
+            // start powershell.exe itself, and a console program started that
+            // way opens a console window for a moment, even with -WindowStyle
+            // Hidden (with Windows Terminal as the default terminal, a whole
+            // terminal window). Started from here it never has a window, and
+            // ending this launcher ends the script with every rclone, Restic
+            // and Python process it started. Every error ends in an exit code:
+            // an exception left unhandled could show an error window.
+            IntPtr environment = IntPtr.Zero;
+            try
+            {
+                string powershell = Path.Combine(
+                    Environment.SystemDirectory,
+                    "WindowsPowerShell",
+                    "v1.0",
+                    "powershell.exe");
+                string verifier = Path.Combine(runtime, "verify_my_drive_cloud_repository.ps1");
+                string config = Path.Combine(runtime, "backup-config.json");
+                if (!File.Exists(powershell) || !File.Exists(verifier) || !File.Exists(config))
+                {
+                    return 66;
+                }
+                string cloudVerificationRoot = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                    "ResticBackuperCloudVerification");
+
+                environment = BuildGoogleDriveCheckEnvironment();
+                return RunInKillOnCloseJob(
+                    powershell,
+                    BuildGoogleDriveCheckCommandLine(
+                        powershell,
+                        verifier,
+                        config,
+                        cloudVerificationRoot,
+                        expectedRepositoryId),
+                    environment,
+                    runtime);
+            }
+            catch (Win32Exception)
+            {
+                return 74;
+            }
+            catch (IOException)
+            {
+                return 75;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return 76;
+            }
+            catch (ArgumentException)
+            {
+                return 64;
+            }
+            catch (Exception)
+            {
+                // Anything else, such as running out of memory: the check
+                // could not be started.
+                return 74;
+            }
+            finally
+            {
+                if (environment != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(environment);
+                }
+            }
+        }
+
+        private static string BuildGoogleDriveCheckCommandLine(
+            string powershell,
+            string verifier,
+            string config,
+            string cloudVerificationRoot,
+            string expectedRepositoryId)
+        {
+            if (!IsRepositoryId(expectedRepositoryId))
+            {
+                throw new ArgumentException("The repository ID is not 64 lowercase hexadecimal digits.");
+            }
+            return Quote(powershell)
+                + " -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "
+                + Quote(verifier)
+                + " -ConfigPath " + Quote(config)
+                + " -CloudVerificationRoot " + Quote(cloudVerificationRoot)
+                + " -ExpectedRepositoryId " + expectedRepositoryId;
+        }
+
+        private static bool IsRepositoryId(string value)
+        {
+            if (value == null || value.Length != 64)
+            {
+                return false;
+            }
+            foreach (char item in value)
+            {
+                if (!((item >= '0' && item <= '9') || (item >= 'a' && item <= 'f')))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static int RunInKillOnCloseJob(
+            string application,
+            string commandLine,
+            IntPtr environment,
+            string currentDirectory)
+        {
+            // Starts the program suspended and without a window, puts it in a
+            // job that ends with this launcher, and waits for it. Returns its
+            // exit code, or one of this launcher's own (67 to 73).
+            IntPtr job = IntPtr.Zero;
+            ProcessInformation process = new ProcessInformation();
+            try
+            {
                 job = CreateJobObject(IntPtr.Zero, null);
                 if (job == IntPtr.Zero)
                 {
@@ -108,27 +292,18 @@ namespace ResticBackuper.TaskLauncher
                     Marshal.FreeHGlobal(informationPointer);
                 }
 
-                string launcherStartFileTime = GetCurrentProcessStartFileTime();
-                environment = BuildChildEnvironment(
-                    channel,
-                    GetCurrentProcessId(),
-                    launcherStartFileTime);
-                string commandLine = Quote(python)
-                    + " -I -S -B -u " + Quote(backup)
-                    + " --config " + Quote(config)
-                    + " --scheduled";
                 StartupInfo startup = new StartupInfo();
                 startup.Size = (uint)Marshal.SizeOf(startup);
                 StringBuilder mutableCommandLine = new StringBuilder(commandLine);
                 if (!CreateProcess(
-                    python,
+                    application,
                     mutableCommandLine,
                     IntPtr.Zero,
                     IntPtr.Zero,
                     false,
                     CreateNoWindow | CreateSuspended | CreateUnicodeEnvironment,
                     environment,
-                    runtime,
+                    currentDirectory,
                     ref startup,
                     out process))
                 {
@@ -163,28 +338,8 @@ namespace ResticBackuper.TaskLauncher
                 }
                 return unchecked((int)exitCode);
             }
-            catch (Win32Exception)
-            {
-                return 74;
-            }
-            catch (IOException)
-            {
-                return 75;
-            }
-            catch (UnauthorizedAccessException)
-            {
-                return 76;
-            }
-            catch (CryptographicException)
-            {
-                return 78;
-            }
             finally
             {
-                if (environment != IntPtr.Zero)
-                {
-                    Marshal.FreeHGlobal(environment);
-                }
                 if (process.ThreadHandle != IntPtr.Zero)
                 {
                     CloseHandle(process.ThreadHandle);
@@ -196,23 +351,9 @@ namespace ResticBackuper.TaskLauncher
                 if (job != IntPtr.Zero)
                 {
                     // Closing this non-inherited handle kills any descendant that
-                    // survived its direct Python supervisor.
+                    // survived its direct supervisor.
                     CloseHandle(job);
                 }
-                if (window != IntPtr.Zero)
-                {
-                    DestroyWindow(window);
-                }
-                if (!string.IsNullOrEmpty(windowClass))
-                {
-                    UnregisterClass(windowClass, GetModuleHandle(null));
-                }
-                activeCancellationEvent = IntPtr.Zero;
-                if (channel != null)
-                {
-                    channel.Dispose();
-                }
-                GC.KeepAlive(windowProcedureRoot);
             }
         }
 
@@ -306,6 +447,42 @@ namespace ResticBackuper.TaskLauncher
             // user's profile, which the user can change without approval, and
             // Python, Restic and rclone all read settings from it. Every value
             // below comes from the Windows API or from this run.
+            SortedDictionary<string, string> variables = NewWindowsVariables();
+            // The engine binds a Google Drive backup to this user's DriveFS cache.
+            string localAppData = Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData);
+            if (!string.IsNullOrEmpty(localAppData))
+            {
+                variables["LOCALAPPDATA"] = localAppData;
+            }
+            variables["RESTICBACKUPER_CANCEL_EVENT_NAME"] = channel.EventName;
+            variables["RESTICBACKUPER_CANCEL_CHANNEL_ID"] = channel.ChannelId;
+            variables["RESTICBACKUPER_CANCEL_CHANNEL_FINGERPRINT"] =
+                channel.ChannelFingerprint;
+            variables["RESTICBACKUPER_LAUNCHER_PID"] =
+                launcherPid.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            variables["RESTICBACKUPER_LAUNCHER_START_FILETIME"] = launcherStartFileTime;
+            return ToEnvironmentBlock(variables);
+        }
+
+        private static IntPtr BuildGoogleDriveCheckEnvironment()
+        {
+            // As for the backup, nothing is copied from this process's
+            // environment. Windows PowerShell gets Windows' own values, Windows'
+            // own module folder and Windows' temporary folder; the check builds
+            // the environment of every rclone, Restic and Python process it
+            // starts itself.
+            SortedDictionary<string, string> variables = NewWindowsVariables();
+            string system = Environment.SystemDirectory;
+            variables["PSModulePath"] = Path.Combine(system, "WindowsPowerShell\\v1.0\\Modules");
+            string temporary = Path.Combine(Path.GetDirectoryName(system), "Temp");
+            variables["TEMP"] = temporary;
+            variables["TMP"] = temporary;
+            return ToEnvironmentBlock(variables);
+        }
+
+        private static SortedDictionary<string, string> NewWindowsVariables()
+        {
             SortedDictionary<string, string> variables =
                 new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             string system = Environment.SystemDirectory;
@@ -333,21 +510,11 @@ namespace ResticBackuper.TaskLauncher
             {
                 variables["PROCESSOR_ARCHITECTURE"] = architecture;
             }
-            // The engine binds a Google Drive backup to this user's DriveFS cache.
-            string localAppData = Environment.GetFolderPath(
-                Environment.SpecialFolder.LocalApplicationData);
-            if (!string.IsNullOrEmpty(localAppData))
-            {
-                variables["LOCALAPPDATA"] = localAppData;
-            }
-            variables["RESTICBACKUPER_CANCEL_EVENT_NAME"] = channel.EventName;
-            variables["RESTICBACKUPER_CANCEL_CHANNEL_ID"] = channel.ChannelId;
-            variables["RESTICBACKUPER_CANCEL_CHANNEL_FINGERPRINT"] =
-                channel.ChannelFingerprint;
-            variables["RESTICBACKUPER_LAUNCHER_PID"] =
-                launcherPid.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            variables["RESTICBACKUPER_LAUNCHER_START_FILETIME"] = launcherStartFileTime;
+            return variables;
+        }
 
+        private static IntPtr ToEnvironmentBlock(SortedDictionary<string, string> variables)
+        {
             StringBuilder block = new StringBuilder();
             foreach (KeyValuePair<string, string> item in variables)
             {

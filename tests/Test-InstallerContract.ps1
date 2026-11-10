@@ -531,6 +531,19 @@ function Invoke-InstallCycle {
         $cloudLeftover = Read-ProgressFeed (Get-HandoffPath 'uninstall-cloud-leftover.txt')
         Assert-True (@($cloudLeftover[$cloudLeftover.Count - 1].removed.scheduled_tasks) -contains 'ResticBackuperGoogleDriveSync') "$Label : the leftover cleanup reports the Google Drive task as removed"
         Assert-True ($null -eq (Get-ScheduledTask -TaskName 'ResticBackuperGoogleDriveSync' -ErrorAction SilentlyContinue)) "$Label : the leftover Google Drive task is gone"
+
+        # The same task as this version registers it, starting the check through the task launcher.
+        Register-ScheduledTask -TaskName 'ResticBackuperGoogleDriveSync' -TaskPath '\' `
+            -Action (New-ScheduledTaskAction -Execute (Join-Path $installRoot 'ResticBackuperTaskLauncher.exe') -Argument ('--google-drive-check --expected-repository-id ' + ('ab' * 32)) -WorkingDirectory $installRoot) `
+            -Principal (New-ScheduledTaskPrincipal -UserId $AdministratorUser.Name -LogonType Interactive) | Out-Null
+        $run = Invoke-AsUserElevated -User $AdministratorUser -Name 'uninstall-launcher-cloud-leftover' -Template $progressTemplate -Values @{
+            HANDOFF = Join-Path $handoff 'uninstall-launcher-cloud-leftover.txt'; SCRIPT = (Join-Path $bundle 'payload\Uninstall-ResticBackuper.ps1'); POWERSHELL = $windowsPowerShell; ARGUMENTS = ''
+        }
+        Show-Run $run
+        Assert-Equal 0 $run.ExitCode "$Label : an uninstall clears a leftover Google Drive verification task that starts the task launcher"
+        $launcherCloudLeftover = Read-ProgressFeed (Get-HandoffPath 'uninstall-launcher-cloud-leftover.txt')
+        Assert-True (@($launcherCloudLeftover[$launcherCloudLeftover.Count - 1].removed.scheduled_tasks) -contains 'ResticBackuperGoogleDriveSync') "$Label : the leftover cleanup reports the launcher-started Google Drive task as removed"
+        Assert-True ($null -eq (Get-ScheduledTask -TaskName 'ResticBackuperGoogleDriveSync' -ErrorAction SilentlyContinue)) "$Label : the leftover launcher-started Google Drive task is gone"
     }
 
     # Leave a clean machine for the next cycle: the data an uninstall keeps is removed here, because this test created it.

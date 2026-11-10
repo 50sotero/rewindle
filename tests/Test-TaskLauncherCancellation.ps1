@@ -179,10 +179,275 @@ foreach ($name in $expected.Keys) {
     }
 }
 
+# The Google Drive check task starts the check's Windows PowerShell through the launcher too, so it never has a window.
+# Its environment is Windows' own as well: nothing planted reaches it, and it gets no cancellation identity.
+$buildCheckEnvironment = $programType.GetMethod('BuildGoogleDriveCheckEnvironment', $binding)
+$buildCheckCommandLine = $programType.GetMethod('BuildGoogleDriveCheckCommandLine', $binding)
+$isRepositoryId = $programType.GetMethod('IsRepositoryId', $binding)
+if ($null -eq $buildCheckEnvironment -or $null -eq $buildCheckCommandLine -or $null -eq $isRepositoryId) {
+    throw 'The task launcher has no Google Drive check mode.'
+}
+$saved = @{}
+$block = [IntPtr]::Zero
+$checkChild = [ordered]@{}
+try {
+    foreach ($name in $planted.Keys) {
+        $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+        [Environment]::SetEnvironmentVariable($name, $planted[$name], 'Process')
+    }
+    $block = [IntPtr]$buildCheckEnvironment.Invoke($null, @())
+}
+finally {
+    foreach ($name in $planted.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process')
+    }
+}
+try {
+    $offset = 0
+    while ($true) {
+        $entry = [Runtime.InteropServices.Marshal]::PtrToStringUni([IntPtr]::Add($block, $offset))
+        if ([string]::IsNullOrEmpty($entry)) {
+            break
+        }
+        $separator = $entry.IndexOf('=')
+        $checkChild[$entry.Substring(0, $separator)] = $entry.Substring($separator + 1)
+        $offset += ($entry.Length + 1) * 2
+    }
+}
+finally {
+    [Runtime.InteropServices.Marshal]::FreeHGlobal($block)
+}
+$checkExpected = [ordered]@{
+    ComSpec = (Join-Path $system 'cmd.exe')
+    NUMBER_OF_PROCESSORS = [string][Environment]::ProcessorCount
+    OS = 'Windows_NT'
+    PATH = (@($system, $windows, (Join-Path $system 'Wbem'), (Join-Path $system 'WindowsPowerShell\v1.0')) -join ';')
+    PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC'
+    PSModulePath = (Join-Path $system 'WindowsPowerShell\v1.0\Modules')
+    SystemDrive = $windows.Substring(0, 2)
+    SystemRoot = $windows
+    TEMP = (Join-Path $windows 'Temp')
+    TMP = (Join-Path $windows 'Temp')
+    windir = $windows
+}
+$actualNames = @($checkChild.Keys | Sort-Object)
+$expectedNames = @($checkExpected.Keys | Sort-Object)
+if (($actualNames -join ',') -ne ($expectedNames -join ',')) {
+    throw ('The Google Drive check environment names are wrong: ' + ($actualNames -join ', '))
+}
+foreach ($name in $checkExpected.Keys) {
+    if ($checkChild[$name] -cne $checkExpected[$name]) {
+        throw "The Google Drive check environment has the wrong $name value: $($checkChild[$name])"
+    }
+}
+
+$fixtureId = '0123456789abcdef' * 4
+$commandLine = [string]$buildCheckCommandLine.Invoke(
+    $null,
+    @(
+        'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe',
+        'C:\Program Files\ResticBackuper\verify_my_drive_cloud_repository.ps1',
+        'C:\Program Files\ResticBackuper\backup-config.json',
+        'C:\ProgramData\ResticBackuperCloudVerification',
+        $fixtureId
+    )
+)
+$expectedCommandLine = (
+    '"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive ' +
+    '-ExecutionPolicy Bypass -File "C:\Program Files\ResticBackuper\verify_my_drive_cloud_repository.ps1" ' +
+    '-ConfigPath "C:\Program Files\ResticBackuper\backup-config.json" ' +
+    '-CloudVerificationRoot "C:\ProgramData\ResticBackuperCloudVerification" -ExpectedRepositoryId ' + $fixtureId
+)
+if ($commandLine -cne $expectedCommandLine) {
+    throw "The Google Drive check command line is wrong: $commandLine"
+}
+foreach ($case in @(
+    @($fixtureId, $true),
+    @($fixtureId.ToUpperInvariant(), $false),
+    @($fixtureId.Substring(1), $false),
+    @(($fixtureId + '0'), $false),
+    @(($fixtureId.Substring(1) + '"'), $false),
+    @(($fixtureId.Substring(1) + 'g'), $false),
+    @('', $false)
+)) {
+    if ([bool]$isRepositoryId.Invoke($null, @([string]$case[0])) -ne [bool]$case[1]) {
+        throw "The launcher judged the repository ID '$($case[0])' wrongly."
+    }
+}
+$refused = $false
+try {
+    [void]$buildCheckCommandLine.Invoke($null, @('a', 'b', 'c', 'd', ($fixtureId.Substring(1) + ' ')))
+}
+catch {
+    $inner = $_.Exception
+    while ($null -ne $inner -and $inner -isnot [ArgumentException]) {
+        $inner = $inner.InnerException
+    }
+    $refused = $null -ne $inner
+}
+if (-not $refused) {
+    throw 'The launcher built a Google Drive check command line around an invalid repository ID.'
+}
+
+# The built launcher itself, started without a window. Outside Program Files it stops at its runtime check (65), which
+# it reaches only with arguments it accepts; anything else stops it at once (64).
+function Invoke-Launcher {
+    param([string[]]$Arguments)
+
+    $info = [Diagnostics.ProcessStartInfo]::new($buildResult.executable)
+    $info.Arguments = ($Arguments -join ' ')
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $process = [Diagnostics.Process]::Start($info)
+    try {
+        if (-not $process.WaitForExit(30000)) {
+            $process.Kill()
+            throw 'The task launcher did not exit.'
+        }
+        return $process.ExitCode
+    }
+    finally {
+        $process.Dispose()
+    }
+}
+foreach ($case in @(
+    @(@(), 65),
+    @(@('--google-drive-check', '--expected-repository-id', $fixtureId), 65),
+    @(@('--google-drive-check', '--expected-repository-id', $fixtureId.ToUpperInvariant()), 64),
+    @(@('--google-drive-check', '--expected-repository-id'), 64),
+    @(@('--expected-repository-id', $fixtureId, '--google-drive-check'), 64),
+    @(@('--google-drive-check', '--expected-repository-id', $fixtureId, '--scheduled'), 64),
+    @(@('--GOOGLE-DRIVE-CHECK', '--expected-repository-id', $fixtureId), 64)
+)) {
+    $exitCode = Invoke-Launcher -Arguments ([string[]]$case[0])
+    if ($exitCode -ne [int]$case[1]) {
+        throw "The task launcher exited with $exitCode, not $($case[1]), for arguments: $($case[0] -join ' ')"
+    }
+}
+
+# The whole start of a check, from a stand-in program folder: Windows PowerShell runs the stand-in verifier there, with
+# the check's arguments and the allow-listed environment, and its exit code becomes the launcher's.
+$runCheck = $programType.GetMethod('RunGoogleDriveCheck', $binding)
+if ($null -eq $runCheck) {
+    throw 'The task launcher cannot start a Google Drive check.'
+}
+# An error on the way ends in an exit code, never an exception: the launcher has no window, and an exception left
+# unhandled could show an error window.
+$guardedExit = [int]$runCheck.Invoke($null, [object[]]@('C:\no|such folder', [string]$fixtureId))
+if ($guardedExit -ne 64) {
+    throw "The launcher returned $guardedExit, not 64, for a program folder it cannot name."
+}
+$runCheckStart = $source.IndexOf('private static int RunGoogleDriveCheck(')
+$runCheckEnd = $source.IndexOf('private static string BuildGoogleDriveCheckCommandLine(')
+if ($runCheckStart -lt 0 -or $runCheckEnd -le $runCheckStart -or
+    $source.Substring($runCheckStart, $runCheckEnd - $runCheckStart) -notmatch
+        'catch \(ArgumentException\)[\s\S]+catch \(Exception\)\s*\{[^}]*return 74;') {
+    throw 'Any other error starting a Google Drive check must end in exit code 74.'
+}
+# The program folder's name has a space, as Program Files does.
+$standInRuntime = Join-Path ([IO.Path]::GetTempPath()) ('rewindle launcher check ' + [Guid]::NewGuid().ToString('N'))
+[void][IO.Directory]::CreateDirectory($standInRuntime)
+try {
+    [IO.File]::WriteAllText((Join-Path $standInRuntime 'backup-config.json'), '{}')
+    [IO.File]::WriteAllText(
+        (Join-Path $standInRuntime 'verify_my_drive_cloud_repository.ps1'),
+        @'
+param([string]$ConfigPath, [string]$CloudVerificationRoot, [string]$ExpectedRepositoryId)
+# A program the check leaves running, without a window: the launcher must end it with the check.
+$childInfo = [Diagnostics.ProcessStartInfo]::new(
+    (Join-Path ([Environment]::SystemDirectory) 'ping.exe'),
+    '-n 120 127.0.0.1')
+$childInfo.UseShellExecute = $false
+$childInfo.CreateNoWindow = $true
+$child = [Diagnostics.Process]::Start($childInfo)
+$seen = [ordered]@{
+    config = $ConfigPath
+    root = $CloudVerificationRoot
+    id = $ExpectedRepositoryId
+    directory = [Environment]::CurrentDirectory
+    temp = [string]$env:TEMP
+    planted = [string]$env:RESTIC_PASSWORD_COMMAND + [string]$env:PYTHONPATH + [string]$env:RCLONE_CONFIG_PLANTED_TYPE
+    cancel = [string]$env:RESTICBACKUPER_CANCEL_EVENT_NAME
+    child = [string]$child.Id
+    child_started = [string]$child.StartTime.ToFileTimeUtc()
+}
+[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'seen.json'), ($seen | ConvertTo-Json -Compress))
+exit 7
+'@
+    )
+    $plantedForCheck = [ordered]@{
+        RESTIC_PASSWORD_COMMAND = 'C:\planted\evil.cmd'
+        PYTHONPATH = 'C:\planted'
+        RCLONE_CONFIG_PLANTED_TYPE = 'sftp'
+        TEMP = 'C:\planted'
+        TMP = 'C:\planted'
+    }
+    $saved = @{}
+    try {
+        foreach ($name in $plantedForCheck.Keys) {
+            $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+            [Environment]::SetEnvironmentVariable($name, $plantedForCheck[$name], 'Process')
+        }
+        $checkExit = [int]$runCheck.Invoke($null, [object[]]@([string]$standInRuntime, [string]$fixtureId))
+    }
+    finally {
+        foreach ($name in $plantedForCheck.Keys) {
+            [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process')
+        }
+    }
+    if ($checkExit -ne 7) {
+        throw "The launcher returned $checkExit, not the check's own exit code 7."
+    }
+    $seen = [IO.File]::ReadAllText((Join-Path $standInRuntime 'seen.json')) | ConvertFrom-Json
+    $expectedSeen = [ordered]@{
+        config = (Join-Path $standInRuntime 'backup-config.json')
+        root = (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'ResticBackuperCloudVerification')
+        id = $fixtureId
+        directory = $standInRuntime
+        temp = (Join-Path $windows 'Temp')
+        planted = ''
+        cancel = ''
+    }
+    foreach ($name in $expectedSeen.Keys) {
+        if ([string]$seen.$name -cne [string]$expectedSeen[$name]) {
+            throw "The check started with the wrong $name : $($seen.$name)"
+        }
+    }
+
+    # The program the check left running ended with it.
+    $leftover = Get-Process -Id ([int]$seen.child) -ErrorAction SilentlyContinue
+    if ($null -ne $leftover) {
+        try {
+            $outlived = $false
+            try {
+                # Only the process the check started counts: by now its ID may name another one.
+                $outlived = [string]$leftover.StartTime.ToFileTimeUtc() -ceq [string]$seen.child_started -and
+                    -not $leftover.WaitForExit(10000)
+            }
+            catch {
+                # It ended while it was being looked at.
+            }
+            if ($outlived) {
+                $leftover.Kill()
+                throw 'A program the Google Drive check started outlived it: the launcher did not end it.'
+            }
+        }
+        finally {
+            $leftover.Dispose()
+        }
+    }
+}
+finally {
+    Remove-Item -LiteralPath $standInRuntime -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 [pscustomobject]@{
     passed = $true
     wm_close_runtime_signal = 'passed'
     child_environment = 'allow-listed'
+    google_drive_check_environment = 'allow-listed'
+    google_drive_check_arguments = 'checked'
+    google_drive_check_leftovers = 'ended with the check'
     executable = $buildResult.executable
     bytes = $buildResult.bytes
     sha256 = $buildResult.sha256
