@@ -1496,7 +1496,184 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
     }
 
     # ====================================================================================================================
-    # 13. Rolling back a failed install: what it started stops first, runtime-manifest.json goes last, and the folder is checked
+    # 13. Which configuration generation a reinstall over kept state writes
+    # ====================================================================================================================
+    # The generation a reinstall keeps only when the latest verified backup is of the highest generation on record and was made
+    # with exactly the scope being written: the same folders on the same drives, exclusion list, computer and backup location,
+    # a location that already holds the repository. Anything else starts the next generation, as every reinstall did before.
+    . ([scriptblock]::Create((Get-InstallerFunctionText -Name @('Get-NormalizedPath', 'Get-PreservedPlanIdentity', 'Get-ContinuedConfigGeneration'))))
+    $continuedRoot = Join-Path $workspace 'continued'
+    $continuedSources = @(
+        (Join-Path $continuedRoot 'Users\Person\Documents'),
+        (Join-Path $continuedRoot 'Photos'),
+        (Join-Path $continuedRoot 'ProgramData\ResticBackuper\canary')
+    )
+    $continuedBackups = Join-Path $continuedRoot 'Backups'
+    # The installed exclusion list, and its SHA-256 as backup.py records it (bytes hashed here, not with Get-FileHash).
+    $continuedExcludeFile = Join-Path $continuedRoot 'Program Files\ResticBackuper\excludes.txt'
+    Write-Text -Path $continuedExcludeFile -Text "**/node_modules`n**/__pycache__`n"
+    $continuedExcludes = -join ([Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes($continuedExcludeFile)) | ForEach-Object { $_.ToString('x2') })
+    $otherExcludeFile = Join-Path $continuedRoot 'other\excludes.txt'
+    Write-Text -Path $otherExcludeFile -Text "**/node_modules`n"
+    $continuedSnapshot = 'c' * 64
+    # The configuration as the install builds it (the fields the comparison reads).
+    function New-ContinuedConfiguration {
+        param([string[]]$Sources = $continuedSources, [hashtable]$Serials = @{}, [string]$ExcludeFile = $continuedExcludeFile)
+        $identities = [ordered]@{}
+        foreach ($source in $Sources) {
+            $serial = if ($Serials.ContainsKey($source)) { $Serials[$source] } else { 'A1B2C3D4' }
+            $identities[$source] = [ordered]@{ expected_volume_serial = $serial }
+        }
+        return [ordered]@{
+            schema_version = 1
+            plan_id = $planId
+            config_generation = 1
+            repository = $continuedBackups
+            repository_storage_mode = 'local_ntfs'
+            repository_volume_serial = '0BADF00D'
+            exclude_file = $ExcludeFile
+            hostname = 'REWINDLE-PC'
+            sources = @($Sources)
+            source_identities = $identities
+        }
+    }
+    # last-success.json as backup.py writes it after a verified backup (the fields the comparison reads).
+    function New-VerifiedBackupRecord {
+        param([long]$Generation = 3)
+        return [ordered]@{
+            schema_version = 1
+            state = 'success'
+            verification_complete = $true
+            plan_id = $planId
+            config_generation = $Generation
+            snapshot_id = $continuedSnapshot
+            hostname = 'REWINDLE-PC'
+            tag = 'scheduled'
+            repository = $continuedBackups
+            repository_storage_mode = 'local_ntfs'
+            repository_volume_serial = '0BADF00D'
+            exclude_file_sha256 = $continuedExcludes
+            sources = @($continuedSources)
+            source_identities = @(foreach ($source in $continuedSources) {
+                [ordered]@{
+                    configured_path = $source; canonical_path = $source; readiness = 'ready'; expected_volume_serial = 'A1B2C3D4'
+                    observed_volume_serial = 'A1B2C3D4'; volume_identity = 'match'; overall_status = 'ready'
+                }
+            })
+        }
+    }
+    function Get-Continued {
+        param($Record = (New-VerifiedBackupRecord), [long]$Highest = 3, [bool]$RepositoryKept = $true,
+            $Configuration = (New-ContinuedConfiguration))
+        # Read back through JSON, as Get-PreservedPlanIdentity reads it from the state folder.
+        $evidence = if ($null -eq $Record) { $null } elseif ($Record -is [string]) { $Record | ConvertFrom-Json } else { $Record | ConvertTo-Json -Depth 6 | ConvertFrom-Json }
+        $preserved = [pscustomobject]@{ plan_id = $planId; config_generation = $Highest; last_success = $evidence }
+        return (Get-ContinuedConfigGeneration -PreservedPlan $preserved -Configuration $Configuration -RepositoryKept $RepositoryKept)
+    }
+    function Edit-VerifiedBackupRecord {
+        param([scriptblock]$Change)
+        $record = New-VerifiedBackupRecord
+        & $Change $record
+        return $record
+    }
+
+    # --- the same scope keeps the generation ---
+    Assert-Equal 3 (Get-Continued) 'a reinstall with the same choices keeps the generation of the latest verified backup'
+    Assert-Equal 3 (Get-Continued -Record (Edit-VerifiedBackupRecord { param($r) $r.state = 'success_unchanged' })) 'an unchanged verified backup counts the same'
+    Assert-Equal 3 (Get-Continued -Record (Edit-VerifiedBackupRecord {
+        param($r)
+        $r.hostname = 'rewindle-pc'
+        $r.repository = $continuedBackups.ToUpperInvariant() + '\'
+        $r.repository_volume_serial = '0badf00d'
+        $r.sources = @($continuedSources[2].ToUpperInvariant(), $continuedSources[0], ($continuedSources[1] + '\'))
+        foreach ($item in $r.source_identities) { $item.configured_path = $item.configured_path.ToLowerInvariant(); $item.observed_volume_serial = 'a1b2c3d4' }
+    })) 'names compare as Windows compares them, in any order'
+
+    # --- anything else starts the next generation ---
+    Assert-Equal 4 (Get-Continued -Record $null) 'no verified backup on record starts the next generation'
+    Assert-Equal 4 (Get-Continued -RepositoryKept $false) 'a backup location that holds no repository yet starts the next generation'
+    Assert-Equal 4 (Get-Continued -Record (New-VerifiedBackupRecord -Generation 2)) 'a verified backup older than the newest generation on record (a folder change or a move since) starts the next one'
+    Assert-Equal 4 (Get-Continued -Configuration (New-ContinuedConfiguration -ExcludeFile $otherExcludeFile)) 'another exclusion list starts the next generation'
+    Assert-Equal 4 (Get-Continued -Configuration (New-ContinuedConfiguration -ExcludeFile (Join-Path $continuedRoot 'missing\excludes.txt'))) 'an exclusion list that can''t be read starts the next generation'
+    $bumps = [ordered]@{
+        'a failed run' = { param($r) $r.state = 'failed' }
+        'an incomplete run' = { param($r) $r.state = 'partial' }
+        'verification not finished' = { param($r) $r.verification_complete = $false }
+        'verification recorded as text' = { param($r) $r.verification_complete = 'true' }
+        'a generation recorded as text' = { param($r) $r.config_generation = '3' }
+        'no snapshot' = { param($r) $r.snapshot_id = $null }
+        'a short snapshot ID' = { param($r) $r.snapshot_id = 'cccccccc' }
+        'another computer' = { param($r) $r.hostname = 'OTHER-PC' }
+        'another backup location' = { param($r) $r.repository = Join-Path $continuedRoot 'Elsewhere' }
+        'a backup location that is not a path' = { param($r) $r.repository = 'Backups' }
+        'another storage kind' = { param($r) $r.repository_storage_mode = 'google_drivefs_stream' }
+        'another drive under the backup location' = { param($r) $r.repository_volume_serial = '12345678' }
+        'one folder fewer then' = { param($r) $r.sources = @($continuedSources[0], $continuedSources[2]) }
+        'one folder more then' = { param($r) $r.sources = @($continuedSources + (Join-Path $continuedRoot 'Music')) }
+        'another folder then' = { param($r) $r.sources = @((Join-Path $continuedRoot 'Music'), $continuedSources[1], $continuedSources[2]) }
+        'a folder listed twice' = { param($r) $r.sources = @($continuedSources[0], $continuedSources[0], $continuedSources[2]) }
+        'folders as one text' = { param($r) $r.sources = $continuedSources -join ';' }
+        'a folder on another drive then' = { param($r) $r.source_identities[1].observed_volume_serial = '0BADC0DE' }
+        'a drive that did not match' = { param($r) $r.source_identities[1].volume_identity = 'mismatch' }
+        'a folder whose drive was not checked' = { param($r) $r.source_identities = @($r.source_identities[0], $r.source_identities[2]) }
+        'a drive check listed twice' = { param($r) $r.source_identities = @($r.source_identities[0], $r.source_identities[0], $r.source_identities[2]) }
+        'a drive check without its serial' = { param($r) $r.source_identities[0].Remove('observed_volume_serial') }
+        'no exclusion list' = { param($r) $r.Remove('exclude_file_sha256') }
+        'no folders' = { param($r) $r.Remove('sources') }
+    }
+    foreach ($label in $bumps.Keys) {
+        Assert-Equal 4 (Get-Continued -Record (Edit-VerifiedBackupRecord $bumps[$label])) "the next generation after $label"
+    }
+    Assert-Equal 4 (Get-Continued -Record '{"state": "success"}') 'a record that says too little starts the next generation'
+    Assert-Equal 4 (Get-Continued -Record '[]') 'a record that is not one starts the next generation'
+    $moreFolders = @($continuedSources + (Join-Path $continuedRoot 'Music'))
+    Assert-Equal 4 (Get-Continued -Configuration (New-ContinuedConfiguration -Sources $moreFolders)) 'a folder added at the reinstall starts the next generation'
+    Assert-Equal 4 (Get-Continued -Configuration (New-ContinuedConfiguration -Sources $continuedSources[0, 2])) 'a folder left out at the reinstall starts the next generation'
+    Assert-Equal 4 (Get-Continued -Configuration (New-ContinuedConfiguration -Serials @{ $continuedSources[0] = '0BADC0DE' })) 'a folder now on another drive starts the next generation'
+    $otherPc = New-ContinuedConfiguration
+    $otherPc['hostname'] = 'OTHER-PC'
+    Assert-Equal 4 (Get-Continued -Configuration $otherPc) 'another computer name starts the next generation'
+    $otherLocation = New-ContinuedConfiguration
+    $otherLocation['repository'] = Join-Path $continuedRoot 'Elsewhere'
+    Assert-Equal 4 (Get-Continued -Configuration $otherLocation) 'another backup location starts the next generation'
+    $otherKind = New-ContinuedConfiguration
+    $otherKind['repository_storage_mode'] = 'google_drivefs_stream'
+    Assert-Equal 4 (Get-Continued -Configuration $otherKind) 'another kind of backup location starts the next generation'
+
+    # --- from the state folder an uninstall keeps, through Get-PreservedPlanIdentity ---
+    & {
+        $stateRoot = Join-Path $workspace 'continued-state\ResticBackuper'
+        $PlanOnly = $false
+        function Get-FeedOwnerSid { param([string]$Path) return 'S-1-5-32-544' }
+        New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
+        Write-Text -Path (Join-Path $stateRoot 'plan-state.json') -Text (ConvertTo-Json -InputObject ([ordered]@{ schema_version = 1; plan_id = $planId; config_generation = 3; updated_utc = '2026-11-09T02:00:00Z' }))
+        Write-Text -Path (Join-Path $stateRoot 'last-success.json') -Text (ConvertTo-Json -InputObject (New-VerifiedBackupRecord) -Depth 6)
+        Write-Text -Path (Join-Path $stateRoot 'status.json') -Text (ConvertTo-Json -InputObject (New-VerifiedBackupRecord) -Depth 6)
+        $kept = Get-PreservedPlanIdentity
+        Assert-Equal @($planId, 3, $continuedSnapshot) @($kept.plan_id, $kept.config_generation, $kept.last_success.snapshot_id) 'the kept plan comes with its latest verified backup'
+        $continued = Get-ContinuedConfigGeneration -PreservedPlan $kept -Configuration (New-ContinuedConfiguration) -RepositoryKept $true
+        Assert-Equal 3 $continued 'a reinstall over a backed-up installation, with the same choices, keeps its generation'
+
+        # A run of a newer generation failed since (a folder was added, then the PC was reinstalled before a backup worked).
+        $failed = New-VerifiedBackupRecord -Generation 4
+        $failed.state = 'failed'
+        $failed.verification_complete = $false
+        Write-Text -Path (Join-Path $stateRoot 'status.json') -Text (ConvertTo-Json -InputObject $failed -Depth 6)
+        $kept = Get-PreservedPlanIdentity
+        Assert-Equal 4 $kept.config_generation 'the newest generation on record is the failed run''s'
+        $continued = Get-ContinuedConfigGeneration -PreservedPlan $kept -Configuration (New-ContinuedConfiguration) -RepositoryKept $true
+        Assert-Equal 5 $continued 'with a verified backup only of an older generation, the reinstall starts the next one'
+
+        # Only the plan, as Test-InstallerContract.ps1 records it: no backup has been verified.
+        Remove-Item -LiteralPath (Join-Path $stateRoot 'last-success.json'), (Join-Path $stateRoot 'status.json')
+        $kept = Get-PreservedPlanIdentity
+        Assert-True ($null -eq $kept.last_success) 'without last-success.json no verified backup comes with the kept plan'
+        $continued = Get-ContinuedConfigGeneration -PreservedPlan $kept -Configuration (New-ContinuedConfiguration) -RepositoryKept $true
+        Assert-Equal 4 $continued 'without a verified backup the reinstall starts the next generation, as before'
+    }
+
+    # ====================================================================================================================
+    # 14. Rolling back a failed install: what it started stops first, runtime-manifest.json goes last, and the folder is checked
     # ====================================================================================================================
     # The rollback helpers run in this process against a fixture program folder. Copies of the system's ping program stand in
     # for the dashboard, under a name no real program uses, and no scheduled task is ever looked up.
@@ -1703,6 +1880,7 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
         native_calls_compile_nothing = 'passed'
         downloaded_program_held = 'passed'
         kept_repository = 'passed'
+        continued_generation = 'passed'
         rollback = 'passed'
     }
 }

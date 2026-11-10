@@ -186,7 +186,23 @@ rclone, Restic and its inventory helper as described below.
 
 `backup.py` obtains a single-run lock, validates the configured repository
 volume and available space, and invokes Restic with the exact source and
-exclusion set. After a run is verified, and before its finish time is taken,
+exclusion set. Restic compares each file with an earlier backup, its parent,
+and reads again only the files whose size, modification or change time differ.
+It looks for that parent only among the backups of the current plan generation
+(`--group-by host,paths,tags`, and every snapshot carries its generation's tag),
+and keeps no new backup when nothing changed (`--skip-if-unchanged`). The first
+backup of a generation finds none there, so after a reinstall or an update that
+starts a new generation, or a move of the backup location, `backup.py` names the
+latest verified backup (`last-success.json`) as the parent instead, when that
+backup is of the same plan and an earlier generation, from this computer, of
+exactly the configured folders on the same volumes, in the repository the run
+has just authenticated, and its snapshot is still listed with those identities.
+That run always keeps its backup, since the generation needs one of its own, and
+records the parent as `earlier_generation_parent` in `status.json`. A different
+exclusion list doesn't prevent it: Restic reads every file the parent doesn't
+hold, and a parent never decides what is backed up.
+
+After a run is verified, and before its finish time is taken,
 it adds up the size of the repository folder and records it as
 `repository_bytes_after` in `status.json` and `last-success.json`, for the
 dashboard. That walk is read-only, never enters a link, junction or other
@@ -535,6 +551,20 @@ also bound to its expected volume serial. The backup preflight rejects an
 offline source, a mismatched volume, nested/overlapping source topology, and by
 default a cloud placeholder that is not locally materialized. These checks
 prevent a reused drive letter or stale approval from silently changing scope.
+
+A folder change and a move of the backup location start the next generation.
+A reinstall over the state an uninstall keeps continues the plan, and keeps its
+generation when the latest verified backup is of the highest generation on
+record and was made with exactly the scope being installed: the same folders on
+the same volumes, exclusion list, computer, backup location, storage kind and
+volume, in a location that already holds the repository. The evidence bound to
+that generation then stays valid (the verified backup the Google Drive check,
+the off-site copy and recovery readiness require, restore drills, key changes,
+an anomaly review), and the next backup finds its parent. A restore drill thus
+still counts after an update that keeps the scope: it showed that the recovery
+key restores these folders from this repository, which the update doesn't
+change, and the first backup after it restores its canary with the updated
+Restic. Otherwise the reinstall starts the next generation.
 
 Cloud-placeholder classification uses per-call Win32 extended-length paths, so
 included names beyond `MAX_PATH` remain classifiable without changing the

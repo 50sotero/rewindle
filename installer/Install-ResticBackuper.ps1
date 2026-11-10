@@ -2509,12 +2509,15 @@ function Assert-StateFolderOwner {
 # named by last-success.json and status.json. A reinstall continues that plan, because the engine refuses every backup whose
 # configured plan_id differs from it, or whose config_generation is lower than the highest one recorded
 # (validate_and_record_plan_state in restic_common.py, whose checks this mirrors). Returns $null when there is no such state,
-# or in plan mode when this account can't read the state folder (the elevated install reads it and checks again).
+# or in plan mode when this account can't read the state folder (the elevated install reads it and checks again). Otherwise
+# also returns the latest verified backup's record (last_success, $null when there is none), which
+# Get-ContinuedConfigGeneration compares with the new configuration.
 function Get-PreservedPlanIdentity {
     # Nothing is read from a state folder that Administrators or SYSTEM don't own.
     Assert-StateFolderOwner
     $planIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $highest = [long]0
+    $lastSuccess = $null
     $unreadable = 'Rewindle''s saved backup state from an earlier installation can''t be used, so setup can''t continue that backup plan. Move the folder ' + $stateRoot + ' somewhere else to start a new one, then run setup again.'
     foreach ($name in @('plan-state.json', 'last-success.json', 'status.json')) {
         $path = Join-Path $stateRoot $name
@@ -2552,6 +2555,7 @@ function Get-PreservedPlanIdentity {
         }
         [void]$planIds.Add($planId)
         if ([long]$generation -gt $highest) { $highest = [long]$generation }
+        if ($name -eq 'last-success.json') { $lastSuccess = $document }
     }
     if ($planIds.Count -eq 0) {
         return $null
@@ -2560,7 +2564,95 @@ function Get-PreservedPlanIdentity {
         Stop-InstallValidation -Code 'preserved_state_inconsistent' -Field 'environment' -Message $unreadable `
             -Console "The kept backup state names more than one backup plan: $stateRoot" -Path $stateRoot
     }
-    return [pscustomobject]@{ plan_id = @($planIds)[0]; config_generation = $highest }
+    return [pscustomobject]@{ plan_id = @($planIds)[0]; config_generation = $highest; last_success = $lastSuccess }
+}
+
+# The configuration generation a reinstall over kept state writes. A generation names one backup scope: the folders and the
+# drives they are on, the exclusion list, this computer, and the backup location. A backup looks for the one before it only
+# within its generation (backup.py: --group-by host,paths,tags, with the generation's tag), and the Google Drive check, the
+# off-site copy, recovery readiness, the anomaly review and restore drills accept evidence of the current generation only. So
+# when the latest verified backup is of the highest generation the kept state records, and was made with exactly the scope of
+# the configuration being written, in the backup location this install reuses, the reinstall keeps that generation: the next
+# backup reads only what changed, and nothing already checked has to be checked again. Anything else, or anything that can't
+# be read, starts the next generation, as every reinstall did before (and backup.py's first backup of it compares its files
+# with that latest verified backup when the folders, their drives, this computer and the repository are the same).
+# validate_and_record_plan_state refuses a lower generation either way.
+function Get-ContinuedConfigGeneration {
+    param(
+        [Parameter(Mandatory = $true)]$PreservedPlan,
+        [Parameter(Mandatory = $true)][Collections.IDictionary]$Configuration,
+        [Parameter(Mandatory = $true)][bool]$RepositoryKept
+    )
+    $highest = [long]$PreservedPlan.config_generation
+    $next = $highest + 1
+    try {
+        $evidence = $PreservedPlan.last_success
+        if (-not $RepositoryKept -or $evidence -isnot [Management.Automation.PSCustomObject]) { return $next }
+        # The exclusion list just installed, hashed as backup.py hashes it for exclude_file_sha256.
+        $excludeSha256 = (Get-FileHash -LiteralPath ([string]$Configuration['exclude_file']) -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+        $properties = $evidence.PSObject.Properties
+        foreach ($name in @('state', 'verification_complete', 'config_generation', 'snapshot_id', 'hostname', 'repository',
+                'repository_storage_mode', 'repository_volume_serial', 'exclude_file_sha256', 'sources', 'source_identities')) {
+            if ($null -eq $properties[$name]) { return $next }
+        }
+        $ignoreCase = [StringComparison]::OrdinalIgnoreCase
+        if ($evidence.state -cnotin @('success', 'success_unchanged') -or
+            $evidence.verification_complete -isnot [bool] -or -not $evidence.verification_complete -or
+            -not ($evidence.config_generation -is [int] -or $evidence.config_generation -is [long]) -or
+            [long]$evidence.config_generation -ne $highest -or
+            $evidence.snapshot_id -isnot [string] -or $evidence.snapshot_id -cnotmatch '^[0-9a-f]{64}$' -or
+            $evidence.hostname -isnot [string] -or
+            -not [string]::Equals($evidence.hostname, [string]$Configuration['hostname'], $ignoreCase) -or
+            $evidence.repository -isnot [string] -or
+            -not [string]::Equals((Get-NormalizedPath -Path $evidence.repository),
+                (Get-NormalizedPath -Path ([string]$Configuration['repository'])), $ignoreCase) -or
+            $evidence.repository_storage_mode -isnot [string] -or
+            $evidence.repository_storage_mode -cne [string]$Configuration['repository_storage_mode'] -or
+            $evidence.repository_volume_serial -isnot [string] -or
+            -not [string]::Equals($evidence.repository_volume_serial, [string]$Configuration['repository_volume_serial'], $ignoreCase) -or
+            $evidence.exclude_file_sha256 -isnot [string] -or $evidence.exclude_file_sha256 -cne $excludeSha256) {
+            return $next
+        }
+        # The same folders, each on the drive it was on (the volume serial every backup checks it against).
+        $configured = @($Configuration['sources'])
+        $identities = $Configuration['source_identities']
+        $drives = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($source in $configured) {
+            $serial = [string]$identities[$source]['expected_volume_serial']
+            if ([string]::IsNullOrEmpty($serial)) { return $next }
+            $drives[(Get-NormalizedPath -Path $source)] = $serial
+        }
+        if ($drives.Count -eq 0 -or $drives.Count -ne $configured.Count -or
+            $evidence.sources -isnot [Array] -or $evidence.sources.Count -ne $drives.Count -or
+            $evidence.source_identities -isnot [Array] -or $evidence.source_identities.Count -ne $drives.Count) {
+            return $next
+        }
+        $backedUp = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($source in $evidence.sources) {
+            if ($source -isnot [string]) { return $next }
+            $path = Get-NormalizedPath -Path $source
+            if (-not $drives.ContainsKey($path) -or -not $backedUp.Add($path)) { return $next }
+        }
+        $checked = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($record in $evidence.source_identities) {
+            if ($record -isnot [Management.Automation.PSCustomObject]) { return $next }
+            $fields = $record.PSObject.Properties
+            if ($null -eq $fields['configured_path'] -or $null -eq $fields['volume_identity'] -or
+                $null -eq $fields['observed_volume_serial'] -or $record.configured_path -isnot [string] -or
+                $record.volume_identity -cne 'match' -or $record.observed_volume_serial -isnot [string]) {
+                return $next
+            }
+            $path = Get-NormalizedPath -Path $record.configured_path
+            if (-not $drives.ContainsKey($path) -or -not $checked.Add($path) -or
+                -not [string]::Equals($drives[$path], $record.observed_volume_serial, $ignoreCase)) {
+                return $next
+            }
+        }
+        return $highest
+    }
+    catch {
+        return $next
+    }
 }
 
 function Resolve-ProtectedBindings {
@@ -3485,9 +3577,9 @@ try {
     $configPath = Join-Path $installRoot 'backup-config.json'
     $configuration = [ordered]@{
         schema_version = 1
-        # A reinstall over kept state continues its plan with a newer configuration (see Get-PreservedPlanIdentity).
+        # A reinstall over kept state continues its plan (see Get-PreservedPlanIdentity), in the generation set below.
         plan_id = $(if ($null -ne $preservedPlan) { $preservedPlan.plan_id } else { [Guid]::NewGuid().ToString('D') })
-        config_generation = $(if ($null -ne $preservedPlan) { $preservedPlan.config_generation + 1 } else { 1 })
+        config_generation = 1
         repository = $repositoryPath
         repository_storage_mode = $RepositoryStorageMode
         repository_volume_serial = $volume.serial
@@ -3521,6 +3613,12 @@ try {
     if ($RepositoryStorageMode -eq 'google_drivefs_stream') {
         $configuration['drivefs_my_drive_root'] = $DriveFsMyDriveRoot
         $configuration['drivefs_cache_directory'] = $DriveFsCacheDirectory
+    }
+    if ($null -ne $preservedPlan) {
+        # The same generation when nothing the backups cover changed, the next one otherwise. It reads the exclusion list
+        # just installed, which the payload manifest has checked.
+        $configuration['config_generation'] = Get-ContinuedConfigGeneration -PreservedPlan $preservedPlan `
+            -Configuration $configuration -RepositoryKept $repositoryPreviouslyInitialized
     }
     Write-Utf8NoBom -Path $configPath -Text ($configuration | ConvertTo-Json -Depth 5)
     $runtimeManifest = New-RuntimeManifest -Root $installRoot -Version $version

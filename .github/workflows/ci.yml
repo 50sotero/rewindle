@@ -175,11 +175,22 @@ jobs:
       # against the release built above: what it leaves out with the shipped exclusion list and with the file each backup
       # generates for WSL links, also with --use-fs-snapshot (as installed backups run; this runner is elevated). With the
       # variable set, a missing restic.exe, a WSL special file Windows refuses to create or a VSS run that cannot happen
-      # fails the step instead of skipping. It comes last, so a failure here hides no other check, and it runs whenever the
-      # release was built, so a failed check after the build does not hide this one.
+      # fails the step instead of skipping. It and the step after it come last, so a failure here hides no other check, and
+      # both run whenever the release was built, so a failed check after the build does not hide them.
       - name: Check what the pinned Restic leaves out
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: pwsh
         env:
           REWINDLE_REQUIRE_PINNED_RESTIC: "1"
         run: python -m unittest -v tests.test_unarchivable_links tests.test_exclusions
+
+      # The first backup of a new configuration generation (after a reinstall or an update that changed what is backed up, or a
+      # move of the backup location) compares its files with the latest verified backup instead of reading every file again.
+      # Checked with the pinned restic.exe in a throwaway repository, which the unit-test step skips; with the variable set, a
+      # missing restic.exe fails the step instead. Like the step above, it runs whenever the release was built.
+      - name: Check that a new generation's first backup reads only what changed
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        env:
+          REWINDLE_REQUIRE_PINNED_RESTIC: "1"
+        run: python -m unittest -v tests.test_generation_parent
