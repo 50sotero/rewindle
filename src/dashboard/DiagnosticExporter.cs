@@ -108,6 +108,17 @@ namespace ResticBackuper.Dashboard
                     skipped,
                     "my-drive-latest-verification.json",
                     directCloudVerification);
+                // The record the nightly check leaves beside the proof when it fails (an engine that writes none has no path).
+                string directCloudFailure = EngineProfile.Current.CloudVerificationFailurePath();
+                if (!string.IsNullOrEmpty(directCloudFailure))
+                {
+                    AddProtectedDocument(
+                        documents,
+                        redactor,
+                        skipped,
+                        "my-drive-latest-failure.json",
+                        directCloudFailure);
+                }
                 AddProtectedDocument(
                     documents,
                     redactor,

@@ -305,6 +305,8 @@ export interface DashboardState {
     provider?: string;
     /** True when a check that is waiting (`Stale`) or running (`InProgress`) is overdue: none has worked for about two days. Additive. */
     checkOverdue?: boolean;
+    /** What to do about a check that failed (`Failed`): the check's own next step, or the host's. Empty for every other state. Additive: an older host does not send it. */
+    nextStep?: string;
   };
   /**
    * `next` says what the Restore page offers when restoring is not available: 'refresh' (read the installation again), 'setup' (run

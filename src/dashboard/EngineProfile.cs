@@ -95,6 +95,9 @@ namespace ResticBackuper.Dashboard
         public string CloudVerificationDirectoryName { get; private set; }
         // The latest direct cloud proof, relative to the cloud-verification folder.
         public string CloudVerificationProofRelativePath { get; private set; }
+        // The record the nightly check leaves when it fails, relative to the cloud-verification folder, or null when the engine's check
+        // leaves none (the earlier personal edition's writes only its proof).
+        public string CloudVerificationFailureRelativePath { get; private set; }
         public string RestoreDrillsDirectoryName { get; private set; }
         // The protected recovery-tools folder under ProgramData that the engine uses for a streamed Google Drive
         // repository, or null when the engine keeps recovery tools only where the plan configures them.
@@ -378,6 +381,25 @@ namespace ResticBackuper.Dashboard
                 : Path.Combine(programData, CloudVerificationDirectoryName, CloudVerificationProofRelativePath);
         }
 
+        // The failure record of the nightly check, or an empty string when the engine writes none or ProgramData cannot be located.
+        internal string CloudVerificationFailurePath()
+        {
+            string programData = FolderRoots.ProgramData;
+            return string.IsNullOrEmpty(CloudVerificationFailureRelativePath) || string.IsNullOrWhiteSpace(programData)
+                ? string.Empty
+                : Path.Combine(programData, CloudVerificationDirectoryName, CloudVerificationFailureRelativePath);
+        }
+
+        // The same record's path beside a proof read from another place (the dashboard's tests point the proof at a temporary file),
+        // or an empty string when the engine writes none.
+        internal string CloudVerificationFailurePathBeside(string proofPath)
+        {
+            string folder = string.IsNullOrWhiteSpace(proofPath) ? null : Path.GetDirectoryName(proofPath);
+            return string.IsNullOrEmpty(CloudVerificationFailureRelativePath) || string.IsNullOrEmpty(folder)
+                ? string.Empty
+                : Path.Combine(folder, Path.GetFileName(CloudVerificationFailureRelativePath));
+        }
+
         // The engine's fixed protected recovery-tools folder, or an empty string when it has none or ProgramData cannot
         // be located. The plan's own recovery_tools_directory is read separately.
         internal string ProtectedRecoveryToolsDirectory()
@@ -550,6 +572,7 @@ namespace ResticBackuper.Dashboard
             profile.LauncherFileName = "ResticBackuperTaskLauncher.exe";
             profile.DashboardExecutableName = "ResticBackuperDashboard.exe";
             profile.CloudVerificationProofRelativePath = Path.Combine("evidence", "latest-verification.json");
+            profile.CloudVerificationFailureRelativePath = Path.Combine("evidence", "latest-failure.json");
             profile.IsolatedWebViewDirectoryName = "ResticBackuperDashboardBeautifulUIWebView2";
             profile.EngineVersionFileName = "VERSION";
             profile.RecoveryToolsDirectoryName = "ResticBackuperRecoveryTools";

@@ -2266,14 +2266,16 @@ namespace ResticBackuper.Dashboard
             offsite["title"] = settingsOffsiteStatus == null
                 ? string.Empty
                 : settingsOffsiteStatus.Text ?? string.Empty;
-            offsite["detail"] = settingsOffsiteDetail == null
-                ? string.Empty
-                : settingsOffsiteDetail.Text ?? string.Empty;
             offsite["evidence"] = settingsOffsiteEvidence == null
                 ? string.Empty
                 : settingsOffsiteEvidence.Text ?? string.Empty;
             OffsiteStatusView status = snapshot == null || !string.IsNullOrEmpty(webTelemetryError)
                 ? null : snapshot.OffsiteStatus;
+            // The page shows a failed check's next step on a line of its own (nextStep below), so the details go without the next
+            // step the settings card adds to them, which the page would otherwise show twice.
+            offsite["detail"] = status != null && status.Kind == OffsiteStatusKind.Failed
+                ? status.StatusDetail ?? string.Empty
+                : settingsOffsiteDetail == null ? string.Empty : settingsOffsiteDetail.Text ?? string.Empty;
             offsite["kind"] = status == null ? "StatusUnavailable" : status.Kind.ToString();
             offsite["checkedAt"] = status != null && status.LastUpdatedLocal.HasValue
                 ? status.LastUpdatedLocal.Value.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture)
@@ -2285,6 +2287,8 @@ namespace ResticBackuper.Dashboard
             // The provider is named only when the evidence names one (a direct My Drive proof is Google Drive's); the page
             // otherwise says "off-site copy" and nothing more.
             offsite["provider"] = status == null ? string.Empty : status.ProviderLabel ?? string.Empty;
+            // What to do about a check that failed (empty for every other state); the page words its own when it is empty.
+            offsite["nextStep"] = status == null ? string.Empty : status.NextStep ?? string.Empty;
             return offsite;
         }
 

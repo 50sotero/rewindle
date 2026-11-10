@@ -132,6 +132,7 @@ an engine. Two profiles are built in:
 | Backup task and launcher | `ResticBackuper`, `ResticBackuperTaskLauncher.exe` | `ResticPersonalBackup`, `ResticBackupTaskLauncher.exe` |
 | Request domains and schemas | `ResticBackuper.*` | `ResticPersonalBackup.*` |
 | Direct cloud proof | `ResticBackuperCloudVerification\evidence\latest-verification.json`, also bound to its evidence and asset manifest | `ResticPersonalBackupCloudVerification\latest-verification.json` |
+| Failed cloud check | `ResticBackuperCloudVerification\evidence\latest-failure.json`, shown when it is newer than the proof and about the installed plan | None: the legacy check leaves no failure record |
 | Anomaly review | An acknowledgement; Google Drive upload is never paused | An approval that releases one generation for off-site promotion |
 | Restore approvals | One per restore session (advertised by `engine-capabilities.json`) | One per step |
 | Clean-up of old backups | Through `Manage-Retention.ps1` (advertised by `engine-capabilities.json`) | Not available: the card says so and nothing is read |
@@ -329,6 +330,14 @@ these user-facing rules when you change the dashboard:
   each show their own evidence and time, on Protection and in Settings. The
   off-site card names a provider only when the evidence names one; without an
   off-site copy it is one quiet line, "Off-site copy · Not set up (optional)".
+- **A failed Google Drive check is shown, with a next step, and "verified" has a
+  maximum age.** The nightly check's failure record (when it is newer than the
+  last proof, and about the installed plan rather than one from before
+  Rewindle was set up again or the backup moved) turns the Off-site copy card
+  to **Failed**, with the reason, the step it stopped at and what to do. A
+  proof that still covers the latest backup counts as verified for two days
+  after the check that wrote it, then the card says the copy hasn't been
+  checked lately.
 - **An accepted request is not a verified backup.** Only the engine's protected
   status can report a run as verified. If Windows accepts **Back up now** but no
   run appears, the app says so instead of claiming success.
