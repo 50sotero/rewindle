@@ -66,7 +66,22 @@ namespace {namespace}
             result["provider"] = status.ProviderLabel;
             result["check_overdue"] = status.CheckOverdue;
             result["next_step"] = status.NextStep;
-            Console.WriteLine(new JavaScriptSerializer().Serialize(result));
+            // Characters outside ASCII go out as JSON escapes, so the output reads the same in any console code page (in a
+            // UTF-8 console an ellipsis came back as three characters).
+            string json = new JavaScriptSerializer().Serialize(result);
+            System.Text.StringBuilder ascii = new System.Text.StringBuilder(json.Length);
+            foreach (char character in json)
+            {{
+                if (character > 126)
+                {{
+                    ascii.Append("\\\\u").Append(((int)character).ToString("x4"));
+                }}
+                else
+                {{
+                    ascii.Append(character);
+                }}
+            }}
+            Console.WriteLine(ascii.ToString());
             return 0;
         }}
     }}
@@ -920,7 +935,8 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
         self.assertNotRegex(result["detail"] + result["next_step"], "[\r\t\u2028\u2029\u0085]")
         self.assertLess(len(lines[1]), 600, lines[1])
         self.assertNotIn("\n", result["next_step"])
-        self.assertLessEqual(len(result["next_step"]), 320)
+        self.assertEqual(320, len(result["next_step"]), result["next_step"])
+        self.assertTrue(result["next_step"].endswith("word\u2026"), result["next_step"])
         self.assertTrue(result["next_step"].startswith("Do this. Then that. word word"), result["next_step"])
         hidden = self.invoke(
             failure=self.failure_record(
