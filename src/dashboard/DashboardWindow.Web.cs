@@ -2285,6 +2285,8 @@ namespace ResticBackuper.Dashboard
             // The provider is named only when the evidence names one (a direct My Drive proof is Google Drive's); the page
             // otherwise says "off-site copy" and nothing more.
             offsite["provider"] = status == null ? string.Empty : status.ProviderLabel ?? string.Empty;
+            // What to do about a check that failed (empty for every other state); the page words its own when it is empty.
+            offsite["nextStep"] = status == null ? string.Empty : status.NextStep ?? string.Empty;
             return offsite;
         }
 

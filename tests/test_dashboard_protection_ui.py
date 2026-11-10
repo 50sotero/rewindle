@@ -559,6 +559,10 @@ class ProtectionCardSourceTests(unittest.TestCase):
         self.assertIn("nextStep: cloudOverdue ? cloudOverdue.nextStep", self.cards)
         self.assertNotIn("cloudWaiting", self.cards)
 
+    def test_a_failed_off_site_check_shows_the_next_step_the_host_sent(self) -> None:
+        # The host sends the check's own next step with a failure; the card's sentence is the fallback for a host that sends none.
+        self.assertIn("cloud.kind === 'Failed' ? cloud.nextStep?.trim() || `Make sure ${provider || 'the off-site location'} is available.", self.cards)
+
     def test_the_local_card_is_neutral_while_windows_catches_up(self) -> None:
         self.assertIn("CatchingUp: 'Catching up'", self.cards)
         self.assertIn("freshness.state === 'CatchingUp' ? 'neutral'", self.cards)

@@ -340,6 +340,9 @@ namespace ResticBackuper.Dashboard
         // The provider the off-site evidence comes from ("Google Drive" for a direct My Drive proof), or empty when no
         // evidence names one. The page names a provider only when this does.
         public string ProviderLabel { get; internal set; }
+        // What to do about the status, in a sentence, or empty when the status asks for nothing. Set for a check that failed (the
+        // check's own next step, or ours): a failure is never shown without one.
+        public string NextStep { get; internal set; }
 
         public string SnapshotShort
         {
@@ -367,6 +370,7 @@ namespace ResticBackuper.Dashboard
             FileCount = -1;
             ByteCount = -1;
             ProviderLabel = string.Empty;
+            NextStep = string.Empty;
         }
     }
 
@@ -389,6 +393,14 @@ namespace ResticBackuper.Dashboard
         private const string BinaryStreamCaptureMode = "binary_stream_copy";
         // The provider a direct My Drive proof is evidence from: the DriveFS stream is Google Drive for desktop.
         private const string DriveFsProviderLabel = "Google Drive";
+        // The record the nightly check writes beside its proof when it fails (see BuildOffsiteFailureStatus).
+        private const string DirectCloudFailureRecordKind = "direct_my_drive_cloud_check_failure";
+        private const string OffsiteFailedLabel = "The check of the Google Drive copy failed";
+        private const string OffsiteDetailHidden =
+            "The details of this problem are hidden because they may include sign-in information.";
+        // What to do about a failed check whose record names no next step of its own.
+        private const string OffsiteFailureDefaultNextStep =
+            "Make sure Google Drive for desktop is running and this PC is online overnight. Rewindle checks again tonight.";
         // How old the last off-site check that worked may get before a waiting or running check is overdue. The check runs
         // every night at 03:00, so two days is a missed night and then some.
         internal static readonly TimeSpan OffsiteCheckOverdueAfter = TimeSpan.FromHours(48);
@@ -411,6 +423,7 @@ namespace ResticBackuper.Dashboard
         private readonly string anomalyAcknowledgementPath;
         private readonly string protectedOffsiteStatusPath;
         private readonly string directCloudVerificationPath;
+        private readonly string offsiteFailureRecordPath;
         private readonly string legacyLocalOffsiteStatusPath;
         private readonly bool allowPersistence;
         private readonly string dashboardDirectory;
@@ -490,6 +503,11 @@ namespace ResticBackuper.Dashboard
                 !string.IsNullOrWhiteSpace(localOffsiteStatusPathOverride)
                     ? Path.GetFullPath(localOffsiteStatusPathOverride)
                     : EngineProfile.Current.CloudVerificationProofPath();
+            // The failure record sits beside the proof (empty for an engine whose check writes none).
+            this.offsiteFailureRecordPath =
+                !string.IsNullOrWhiteSpace(localOffsiteStatusPathOverride)
+                    ? EngineProfile.Current.CloudVerificationFailurePathBeside(this.directCloudVerificationPath)
+                    : EngineProfile.Current.CloudVerificationFailurePath();
             this.legacyLocalOffsiteStatusPath = EngineProfile.Current.LegacyLocalSyncStatusPath();
             this.dashboardDirectory = EngineProfile.Current.DashboardDataDirectory();
             this.historyPath = string.IsNullOrEmpty(this.dashboardDirectory)
@@ -521,6 +539,9 @@ namespace ResticBackuper.Dashboard
                 JsonReadResult anomalyAcknowledgementRead = ReadJsonObject(
                     anomalyAcknowledgementPath);
                 JsonReadResult offsiteStatusRead = ReadPreferredOffsiteStatus();
+                JsonReadResult offsiteFailureRead = ReadJsonObject(
+                    offsiteFailureRecordPath,
+                    MaximumOffsiteJsonLength);
                 bool historyChanged = false;
 
                 if (dryRunRead.Document != null)
@@ -543,6 +564,7 @@ namespace ResticBackuper.Dashboard
                 TelemetrySnapshot snapshot = BuildSnapshot(statusRead, dryRunRead);
                 snapshot.OffsiteStatus = BuildOffsiteStatus(
                     offsiteStatusRead,
+                    offsiteFailureRead,
                     statusRead.Document,
                     lastSuccessRead.Document);
                 ApplyAnomalyAcknowledgement(
@@ -588,6 +610,9 @@ namespace ResticBackuper.Dashboard
                 JsonReadResult anomalyAcknowledgementRead = ReadJsonObject(
                     anomalyAcknowledgementPath);
                 JsonReadResult offsiteStatusRead = ReadPreferredOffsiteStatus();
+                JsonReadResult offsiteFailureRead = ReadJsonObject(
+                    offsiteFailureRecordPath,
+                    MaximumOffsiteJsonLength);
                 JsonReadResult historyRead = string.IsNullOrEmpty(historyPath)
                     ? JsonReadResult.Missing()
                     : ReadJsonObject(historyPath);
@@ -628,6 +653,7 @@ namespace ResticBackuper.Dashboard
                 result["offsite_status"] = SelfTestFileResult(offsiteStatusRead);
                 OffsiteStatusView offsite = BuildOffsiteStatus(
                     offsiteStatusRead,
+                    offsiteFailureRead,
                     statusRead.Document,
                     lastSuccessRead.Document);
                 result["offsite_model"] = new Dictionary<string, object>
@@ -1044,9 +1070,17 @@ namespace ResticBackuper.Dashboard
 
         private OffsiteStatusView BuildOffsiteStatus(
             JsonReadResult read,
+            JsonReadResult failureRead,
             IDictionary<string, object> currentStatus,
             IDictionary<string, object> lastSuccess)
         {
+            // A check that failed after the last one that worked is what the card is about, whatever the proof still says.
+            OffsiteStatusView failed = BuildOffsiteFailureStatus(read, failureRead);
+            if (failed != null)
+            {
+                return failed;
+            }
+
             OffsiteStatusView result = new OffsiteStatusView();
             if (!read.Exists)
             {
@@ -1114,7 +1148,7 @@ namespace ResticBackuper.Dashboard
             if (state == "failed")
             {
                 result.Kind = OffsiteStatusKind.Failed;
-                result.StatusLabel = "The check of the Google Drive copy failed";
+                result.StatusLabel = OffsiteFailedLabel;
                 string failedDetail = CleanOffsiteDetail(
                     string.IsNullOrWhiteSpace(errorMessage)
                         ? statusMessage
@@ -1396,6 +1430,18 @@ namespace ResticBackuper.Dashboard
                     "Your latest backup is newer than the last check of the Google Drive copy that worked, on {0}.");
             }
 
+            // A proof that covers the latest backup is good for OffsiteCheckOverdueAfter, not for ever: the check runs every night, so
+            // one that has not worked for two days is not running or keeps failing, and "verified" would be a claim nobody has checked
+            // lately. It then reads as a check that is overdue, with what to do.
+            if (IsOffsiteCheckOverdue(verifiedUtc))
+            {
+                return StaleOffsiteStatus(
+                    result,
+                    verifiedUtc,
+                    "The last check of the Google Drive copy is more than two days old. The next check will renew it.",
+                    "The last check that worked, on {0}, covered your latest backup.");
+            }
+
             result.PlanId = planId;
             result.ConfigGeneration = configGeneration;
             result.RepositoryId = repositoryId;
@@ -1412,6 +1458,79 @@ namespace ResticBackuper.Dashboard
             result.StatusDetail =
                 "Google Drive holds a complete copy of your backups, and a test restore from Google Drive worked.";
             return result;
+        }
+
+        // The nightly check's failure record (latest-failure.json beside the proof), as the card shows it: the check failed, why, where it
+        // stopped, and what to do. Null when there is nothing to show: no record, one that is not exactly the record (it shows no error:
+        // the proof stands alone), or one that is not newer than the last check that worked. The check deletes the record after a pass,
+        // but a delete can fail, so the times are compared and a pass after the failure wins. The time of the last check that worked is
+        // the proof's verified_utc whenever the proof is a direct proof that has one, whatever its other bindings say.
+        private static OffsiteStatusView BuildOffsiteFailureStatus(JsonReadResult proofRead, JsonReadResult failureRead)
+        {
+            if (failureRead == null || failureRead.Document == null)
+            {
+                return null;
+            }
+            IDictionary<string, object> record = failureRead.Document;
+            long schemaVersion;
+            DateTime failedUtc;
+            if (!TryGetJsonInteger(record, "schema_version", 1, out schemaVersion)
+                || schemaVersion != 1
+                || !string.Equals(ExactText(record, "record_kind"), DirectCloudFailureRecordKind, StringComparison.Ordinal)
+                || !string.Equals(ExactText(record, "state"), "failed", StringComparison.Ordinal)
+                || !TryGetUtc(record, "failed_utc", out failedUtc))
+            {
+                return null;
+            }
+
+            DateTime verifiedUtc = DateTime.MinValue;
+            bool proofHasTime = false;
+            bool lastCheckWorked = false;
+            if (proofRead != null && proofRead.Document != null)
+            {
+                IDictionary<string, object> proof = proofRead.Document;
+                if (GetLong(proof, "schema_version", -1) == 2
+                    && string.Equals(GetString(proof, "proof_kind", string.Empty), DirectCloudProofKind, StringComparison.Ordinal)
+                    && TryGetUtc(proof, "verified_utc", out verifiedUtc))
+                {
+                    proofHasTime = true;
+                    lastCheckWorked = GetString(proof, "state", string.Empty).Trim().ToLowerInvariant() == "verified";
+                }
+            }
+            else if (proofRead != null
+                && proofRead.Exists
+                && (proofRead.Reason == JsonReadResult.ReasonLocked || proofRead.Reason == JsonReadResult.ReasonChanging))
+            {
+                // The proof is held or being replaced for a moment, so when the last check worked is not known and a failure is not
+                // claimed to be the newer one. The card says it can't read the status yet, and the next refresh settles it.
+                return null;
+            }
+            if (proofHasTime && failedUtc <= verifiedUtc)
+            {
+                return null;
+            }
+
+            string reason = CleanOffsiteFailureText(ExactText(record, "reason"));
+            string stepLabel = CleanOffsiteFailureText(ExactText(record, "step_label")).TrimEnd('.', ' ');
+            string nextStep = CleanOffsiteFailureText(ExactText(record, "next_step"));
+            // A step or a next step that would have to be hidden is left out: "while (details hidden)" says nothing.
+            bool namesStep = stepLabel.Length > 0 && stepLabel != OffsiteDetailHidden.TrimEnd('.');
+            bool namesNextStep = nextStep.Length > 0 && nextStep != OffsiteDetailHidden;
+
+            OffsiteStatusView failed = new OffsiteStatusView();
+            failed.Kind = OffsiteStatusKind.Failed;
+            failed.ProviderLabel = DriveFsProviderLabel;
+            failed.LastUpdatedLocal = failedUtc.ToLocalTime();
+            failed.StatusLabel = OffsiteFailedLabel;
+            failed.StatusDetail =
+                (reason.Length == 0 ? "The check did not succeed." : reason) +
+                "\nIt stopped on " + FormatOffsiteTime(failedUtc) +
+                (namesStep ? " while " + stepLabel : string.Empty) + "." +
+                (proofHasTime && lastCheckWorked
+                    ? " The last check that worked was on " + FormatOffsiteTime(verifiedUtc) + "."
+                    : " No check of the Google Drive copy has worked yet.");
+            failed.NextStep = namesNextStep ? nextStep : OffsiteFailureDefaultNextStep;
+            return failed;
         }
 
         // What to do about an off-site check that is overdue: the check runs at night as the signed-in person, and gives way to
@@ -1672,9 +1791,34 @@ namespace ResticBackuper.Dashboard
                     || value.IndexOf("RESTIC_", StringComparison.OrdinalIgnoreCase) >= 0
                     || value.IndexOf("recovery key", StringComparison.OrdinalIgnoreCase) >= 0))
             {
-                return "The details of this problem are hidden because they may include sign-in information.";
+                return OffsiteDetailHidden;
             }
             return CleanDisplayText(value, 320);
+        }
+
+        // Text taken from the check's failure record, as one bounded line: control characters and Unicode line breaks become spaces,
+        // and what is left goes through CleanOffsiteDetail (which keeps credential details out and cuts it to a few lines' worth).
+        // Empty when there is nothing to show.
+        private static string CleanOffsiteFailureText(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return string.Empty;
+            }
+            // Only the start of it can be shown, so only the start is looked at.
+            int length = Math.Min(value.Length, 2048);
+            char[] plain = new char[length];
+            for (int index = 0; index < length; index++)
+            {
+                char character = value[index];
+                bool control = character < ' '
+                    || (character >= '\u007f' && character <= '\u009f')
+                    || character == '\u2028'
+                    || character == '\u2029';
+                plain[index] = control ? ' ' : character;
+            }
+            string text = new string(plain);
+            return string.IsNullOrWhiteSpace(text) ? string.Empty : CleanOffsiteDetail(text);
         }
 
         // No readable status: nothing is known about a backup, so none is called failed (a file that cannot be read for a moment

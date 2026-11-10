@@ -6909,8 +6909,13 @@ namespace ResticBackuper.Dashboard
                 status = new OffsiteStatusView();
             }
 
+            // A check that failed says what to do about it on a line of its own, in the same plain style (the web page words
+            // it as the card's next step, and keeps this text as the details).
+            string offsiteDetail = status.Kind == OffsiteStatusKind.Failed && !string.IsNullOrEmpty(status.NextStep)
+                ? status.StatusDetail + "\n" + status.NextStep
+                : status.StatusDetail;
             settingsOffsiteStatus.Text = status.StatusLabel;
-            settingsOffsiteDetail.Text = status.StatusDetail;
+            settingsOffsiteDetail.Text = offsiteDetail;
             if (status.CheckOverdue)
             {
                 // A check that is waiting or running is calm, until none has worked for two days.
@@ -6974,7 +6979,7 @@ namespace ResticBackuper.Dashboard
                 "Off-site copy status: " + status.StatusLabel);
             AutomationProperties.SetName(
                 settingsOffsiteDetail,
-                "Off-site copy detail: " + status.StatusDetail);
+                "Off-site copy detail: " + offsiteDetail);
             AutomationProperties.SetName(
                 settingsOffsiteEvidence,
                 "Off-site copy evidence: " + settingsOffsiteEvidence.Text);

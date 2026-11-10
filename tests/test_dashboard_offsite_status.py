@@ -65,6 +65,7 @@ namespace {namespace}
             result["has_updated"] = status.LastUpdatedLocal.HasValue;
             result["provider"] = status.ProviderLabel;
             result["check_overdue"] = status.CheckOverdue;
+            result["next_step"] = status.NextStep;
             Console.WriteLine(new JavaScriptSerializer().Serialize(result));
             return 0;
         }}
@@ -142,8 +143,10 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
             "schema_version": 1,
             "state": "success",
             "verification_complete": True,
-            "started_utc": "2026-07-28T23:45:00Z",
-            "finished_utc": "2026-07-29T00:05:00Z",
+            # Times are relative to now, because a proof that still covers the latest backup stops counting once it is two days
+            # old. Every ordering the tests rely on is kept: the backup starts, finishes, and the proof is verified after it.
+            "started_utc": ago(hours=3),
+            "finished_utc": ago(hours=2, minutes=40),
             "run_id": "20260729T014500-a1b2c3d4",
             "plan_id": PLAN_ID,
             "config_generation": 2,
@@ -162,7 +165,7 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
             "proof_kind": "direct_my_drive_cloud_repository_verification",
             "run_id": "20260729T001500000Z-a1b2c3d4",
             "state": "verified",
-            "verified_utc": "2026-07-29T00:15:00Z",
+            "verified_utc": ago(hours=2, minutes=30),
             "verification_mode": "google_drive_api_readonly_rclone_backend",
             "verification_phase": "post_activation",
             "plan_id": PLAN_ID,
@@ -214,6 +217,39 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
         }
 
     @staticmethod
+    def failure_record(**overrides) -> dict:
+        """The record the nightly check leaves beside its proof when it fails (latest-failure.json)."""
+        result = {
+            "schema_version": 1,
+            "record_kind": "direct_my_drive_cloud_check_failure",
+            "state": "failed",
+            "run_id": "20261110T030001123Z-1a2b3c4d",
+            "started_utc": ago(hours=1, minutes=2),
+            "failed_utc": ago(hours=1),
+            "step": "listing_google_drive",
+            "step_label": "listing your backup's files in Google Drive",
+            "reason_code": "native_failed",
+            "reason": "Rewindle couldn't list your backup's files in Google Drive.",
+            "next_step": "Make sure this PC is online and Google Drive for desktop is signed in. Rewindle checks again tonight.",
+            "plan_id": PLAN_ID,
+            "config_generation": 2,
+        }
+        result.update(overrides)
+        return result
+
+    @staticmethod
+    def legacy_proof(**overrides) -> dict:
+        """A proof in the shape the earlier personal edition's verifier writes (no asset binding)."""
+        proof = DashboardOffsiteStatusTests.direct_proof(**overrides)
+        for field in (
+            "immutable_proof_sha256",
+            "cloud_verification_assets_manifest_sha256",
+            "native_capture_mode",
+        ):
+            proof.pop(field)
+        return proof
+
+    @staticmethod
     def installed_plan(repository: str, state: Path) -> dict:
         # The installed backup-config.json the proof is bound to; SourceConfiguration.Load validates every field here.
         source = r"C:\Users\you\Documents"
@@ -236,12 +272,15 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
         current=None,
         engine=None,
         configured_repository=REPOSITORY_PATH,
+        failure=None,
+        failure_raw: str = None,
     ) -> dict:
         """Runs the reader against a disposable engine root.
 
         The proof is written where the active engine reads it (ProgramData under the root) and the installed plan
         where it is installed (Program Files under the root), so nothing outside the temporary folder is looked at.
-        `configured_repository=None` installs no plan.
+        `configured_repository=None` installs no plan. `failure` (or `failure_raw`, text written as it is) is the check's failure
+        record, written beside the proof whichever engine is active, so an engine that does not read one is seen ignoring it.
         """
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -260,6 +299,11 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
                 proof_path.write_text(proof_raw, encoding="utf-8")
             elif proof is not None:
                 proof_path.write_text(json.dumps(proof), encoding="utf-8")
+            failure_path = proof_path.parent / "latest-failure.json"
+            if failure_raw is not None:
+                failure_path.write_text(failure_raw, encoding="utf-8")
+            elif failure is not None:
+                failure_path.write_text(json.dumps(failure), encoding="utf-8")
             if configured_repository is not None:
                 install = engine_root / "ProgramFiles" / product
                 install.mkdir(parents=True)
@@ -354,7 +398,7 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
         current = self.backup_evidence(
             state="backing_up",
             verification_complete=False,
-            started_utc="2026-07-29T00:20:00Z",
+            started_utc=ago(hours=2, minutes=20),
             finished_utc=None,
             snapshot_id=None,
         )
@@ -386,7 +430,7 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
 
     def test_proof_timestamp_must_follow_the_bound_backup(self) -> None:
         result = self.invoke(
-            proof=self.direct_proof(verified_utc="2026-07-28T23:00:00Z")
+            proof=self.direct_proof(verified_utc=ago(hours=4))
         )
         self.assertEqual("Stale", result["kind"])
         self.assertIn("newer than the last check", result["detail"])
@@ -623,7 +667,9 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
         self.assertFalse(ahead["check_overdue"])
 
     def test_only_a_waiting_or_running_check_can_be_overdue(self) -> None:
-        verified = self.invoke(proof=self.direct_proof(verified_utc=ago(days=3)), last_success=self.backup_evidence(finished_utc=ago(days=4)))
+        # A verified copy that was checked tonight is not overdue (one last checked three days ago is not verified any more: it is
+        # a waiting check that is overdue, see test_a_verified_copy_that_has_not_been_checked_for_two_days_is_no_longer_verified).
+        verified = self.invoke(proof=self.direct_proof(verified_utc=ago(hours=2)))
         self.assertEqual("RestoreVerified", verified["kind"])
         self.assertFalse(verified["check_overdue"])
         failed = self.invoke(proof=self.direct_proof(state="failed", verified_utc=ago(days=3)))
@@ -645,6 +691,285 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
         )
         self.assertEqual("Stale", result["kind"])
         self.assertTrue(result["check_overdue"])
+
+    # A copy that was verified and still covers the latest backup used to stay "verified" for ever when no newer backup came: a check
+    # that stops running, or keeps failing, left the card green. It is verified for two days after the last check that worked.
+    def test_a_verified_copy_that_has_not_been_checked_for_two_days_is_no_longer_verified(self) -> None:
+        # The proof covers the latest backup exactly (same plan, generation, repository and snapshot, verified after it finished).
+        covered = self.backup_evidence(started_utc=ago(days=4), finished_utc=ago(days=3, hours=1))
+        for engine, proof in (("rewindle", self.direct_proof), ("legacy", self.legacy_proof)):
+            with self.subTest(engine=engine):
+                result = self.invoke(
+                    proof=proof(verified_utc=ago(days=3)),
+                    last_success=covered,
+                    engine="legacy" if engine == "legacy" else None,
+                )
+                self.assertEqual("Stale", result["kind"])
+                self.assertTrue(result["check_overdue"])
+                self.assertTrue(result["label"].startswith("The Google Drive copy hasn"), result["label"])
+                self.assertTrue(result["label"].endswith("t been checked lately"), result["label"])
+                self.assertIn("The last check that worked, on ", result["detail"])
+                self.assertIn(", covered your latest backup. No check has worked since.", result["detail"])
+                self.assertIn("Leave this PC on and signed in overnight", result["detail"])
+                self.assertNotIn("The next check will", result["detail"])
+                self.assertFalse(result["restore_verified"])
+                self.assertFalse(result["provider_confirmed"])
+                self.assertEqual("Google Drive", result["provider"])
+                self.assertTrue(result["has_updated"])
+
+    def test_a_verified_copy_checked_within_two_days_stays_verified(self) -> None:
+        for label, delta in {
+            "two_hours": {"hours": 2},
+            "just_inside_two_days": {"hours": 47},
+        }.items():
+            with self.subTest(label=label):
+                result = self.invoke(
+                    proof=self.direct_proof(verified_utc=ago(**delta)),
+                    last_success=self.backup_evidence(started_utc=ago(days=4), finished_utc=ago(days=3)),
+                )
+                self.assertEqual("RestoreVerified", result["kind"])
+                self.assertEqual("Google Drive copy verified", result["label"])
+                self.assertFalse(result["check_overdue"])
+                self.assertTrue(result["restore_verified"])
+        past = self.invoke(
+            proof=self.direct_proof(verified_utc=ago(hours=49)),
+            last_success=self.backup_evidence(started_utc=ago(days=4), finished_utc=ago(days=3)),
+        )
+        self.assertEqual("Stale", past["kind"])
+        self.assertTrue(past["check_overdue"])
+
+    # What the nightly check writes when it fails, and the card shows: Failed, the reason, where it stopped, and what to do. Until a
+    # first check passed the card used to say "Not set up (optional)", and after one it said nothing about a failure for two days.
+    def test_a_failed_check_before_any_check_worked_is_shown_with_its_reason_and_next_step(self) -> None:
+        result = self.invoke(failure=self.failure_record())
+        self.assertEqual("Failed", result["kind"])
+        self.assertEqual("The check of the Google Drive copy failed", result["label"])
+        self.assertEqual("Google Drive", result["provider"])
+        self.assertFalse(result["check_overdue"])
+        self.assertTrue(result["has_updated"])
+        self.assertFalse(result["restore_verified"])
+        self.assertFalse(result["provider_confirmed"])
+        lines = result["detail"].split("\n")
+        self.assertEqual(2, len(lines), result["detail"])
+        self.assertEqual("Rewindle couldn't list your backup's files in Google Drive.", lines[0])
+        self.assertRegex(
+            lines[1],
+            r"^It stopped on .+ while listing your backup's files in Google Drive\. No check of the Google Drive copy has worked yet\.$",
+        )
+        self.assertEqual(
+            "Make sure this PC is online and Google Drive for desktop is signed in. Rewindle checks again tonight.",
+            result["next_step"],
+        )
+
+    def test_a_failed_check_newer_than_the_last_good_one_is_shown_and_names_that_one(self) -> None:
+        result = self.invoke(
+            proof=self.direct_proof(verified_utc=ago(hours=5)),
+            last_success=self.backup_evidence(started_utc=ago(hours=7), finished_utc=ago(hours=6)),
+            failure=self.failure_record(),
+        )
+        self.assertEqual("Failed", result["kind"])
+        self.assertEqual("The check of the Google Drive copy failed", result["label"])
+        self.assertEqual("Google Drive", result["provider"])
+        self.assertFalse(result["check_overdue"])
+        self.assertFalse(result["restore_verified"])
+        self.assertFalse(result["provider_confirmed"])
+        self.assertTrue(result["has_updated"])
+        self.assertRegex(result["detail"], r" The last check that worked was on .+\.$")
+        self.assertNotIn("has worked yet", result["detail"])
+        self.assertEqual(
+            "Make sure this PC is online and Google Drive for desktop is signed in. Rewindle checks again tonight.",
+            result["next_step"],
+        )
+
+    def test_a_failed_check_without_a_check_that_worked_says_none_has(self) -> None:
+        # Only a proof that says "verified" is a check that worked: a proof that failed or is still running is not.
+        for state in ("failed", "verifying"):
+            with self.subTest(state=state):
+                result = self.invoke(
+                    proof=self.direct_proof(state=state, verified_utc=ago(hours=5)),
+                    failure=self.failure_record(),
+                )
+                self.assertEqual("Failed", result["kind"])
+                self.assertIn("No check of the Google Drive copy has worked yet.", result["detail"])
+                self.assertNotIn("The last check that worked", result["detail"])
+
+    def test_a_failed_check_older_than_the_last_good_one_changes_nothing(self) -> None:
+        stamp = ago(hours=3)
+        for label, failed_utc in {
+            "older": ago(hours=6),
+            "same_moment": stamp,
+        }.items():
+            with self.subTest(label=label):
+                result = self.invoke(
+                    proof=self.direct_proof(verified_utc=stamp),
+                    last_success=self.backup_evidence(started_utc=ago(hours=5), finished_utc=ago(hours=4)),
+                    failure=self.failure_record(failed_utc=failed_utc),
+                )
+                self.assertEqual("RestoreVerified", result["kind"])
+                self.assertEqual("Google Drive copy verified", result["label"])
+                self.assertEqual("", result["next_step"])
+                self.assertTrue(result["restore_verified"])
+
+    def test_the_proofs_time_is_used_whatever_its_other_bindings_say(self) -> None:
+        # A proof of another snapshot (Stale) or another path (StatusUnavailable) still says when a check last worked: a failure
+        # older than that is a night that was fixed since, and one that is newer is what the card is about.
+        for label, mutation, kind in (
+            ("other_snapshot", {"snapshot_id": "6" * 64}, "Stale"),
+            ("other_path", {"local_repository": r"H:\My Drive\Other\Repository"}, "StatusUnavailable"),
+        ):
+            with self.subTest(label=label, case="older failure"):
+                result = self.invoke(
+                    proof=self.direct_proof(verified_utc=ago(hours=3), **mutation),
+                    failure=self.failure_record(failed_utc=ago(hours=5)),
+                )
+                self.assertEqual(kind, result["kind"])
+                self.assertEqual("", result["next_step"])
+            with self.subTest(label=label, case="newer failure"):
+                result = self.invoke(
+                    proof=self.direct_proof(verified_utc=ago(hours=5), **mutation),
+                    failure=self.failure_record(failed_utc=ago(hours=3)),
+                )
+                self.assertEqual("Failed", result["kind"])
+                self.assertIn("The last check that worked was on", result["detail"])
+        # A proof that is not a direct proof at all (or has no readable time) has no time to compare, so the failure stands.
+        for label, mutation in (
+            ("no_time", {"verified_utc": "not a time"}),
+            ("old_schema", {"schema_version": 1}),
+            ("other_kind", {"proof_kind": "something_else"}),
+        ):
+            with self.subTest(label=label):
+                result = self.invoke(
+                    proof=self.direct_proof(**mutation),
+                    failure=self.failure_record(failed_utc=ago(days=10)),
+                )
+                self.assertEqual("Failed", result["kind"])
+                self.assertIn("No check of the Google Drive copy has worked yet.", result["detail"])
+
+    def test_a_damaged_proof_does_not_hide_a_failed_check(self) -> None:
+        result = self.invoke(proof_raw="{not-json", failure=self.failure_record())
+        self.assertEqual("Failed", result["kind"])
+        self.assertIn("No check of the Google Drive copy has worked yet.", result["detail"])
+        retired = self.invoke(protected=self.legacy_mirror_status(), failure=self.failure_record())
+        self.assertEqual("Failed", retired["kind"])
+
+    def test_a_record_that_is_not_exactly_the_failure_record_is_ignored(self) -> None:
+        mutations = {
+            "schema_two": {"schema_version": 2},
+            "schema_text": {"schema_version": "1"},
+            "schema_missing": {"schema_version": None},
+            "kind_other": {"record_kind": "direct_my_drive_cloud_repository_verification"},
+            "kind_case": {"record_kind": "Direct_My_Drive_Cloud_Check_Failure"},
+            "kind_missing": {"record_kind": None},
+            "state_other": {"state": "verified"},
+            "state_case": {"state": "Failed"},
+            "state_missing": {"state": None},
+            "time_unreadable": {"failed_utc": "yesterday evening"},
+            "time_missing": {"failed_utc": None},
+            "time_empty": {"failed_utc": ""},
+        }
+        for label, mutation in mutations.items():
+            record = {key: value for key, value in self.failure_record(**mutation).items() if value is not None}
+            with self.subTest(label=label, proof="none"):
+                result = self.invoke(failure=record)
+                self.assertEqual("NotConfigured", result["kind"])
+                self.assertEqual("", result["next_step"])
+            with self.subTest(label=label, proof="verified"):
+                result = self.invoke(proof=self.direct_proof(), failure=record)
+                self.assertEqual("RestoreVerified", result["kind"])
+                self.assertEqual("", result["next_step"])
+        for label, raw in {
+            "not_json": "{not-json",
+            "array": "[]",
+            "text": '"failed"',
+            "empty": "",
+        }.items():
+            with self.subTest(label=label, proof="none"):
+                self.assertEqual("NotConfigured", self.invoke(failure_raw=raw)["kind"])
+            with self.subTest(label=label, proof="verified"):
+                self.assertEqual("RestoreVerified", self.invoke(proof=self.direct_proof(), failure_raw=raw)["kind"])
+
+    def test_the_legacy_profile_does_not_look_for_a_failure_record(self) -> None:
+        # The record is written beside the Rewindle proof only; the legacy profile's proof shape stays as it is.
+        nothing = self.invoke(failure=self.failure_record(), engine="legacy")
+        self.assertEqual("NotConfigured", nothing["kind"])
+        self.assertEqual("", nothing["next_step"])
+        verified = self.invoke(
+            proof=self.legacy_proof(verified_utc=ago(hours=5)),
+            last_success=self.backup_evidence(started_utc=ago(hours=7), finished_utc=ago(hours=6)),
+            failure=self.failure_record(),
+            engine="legacy",
+        )
+        self.assertEqual("RestoreVerified", verified["kind"])
+        self.assertEqual("", verified["next_step"])
+
+    def test_text_taken_from_a_failure_record_is_one_bounded_line(self) -> None:
+        # The reason, the step and the next step are shown to the person. They cannot add lines or take unbounded room, and nothing that
+        # looks like a credential detail is passed on.
+        long_text = "word " * 400
+        result = self.invoke(
+            failure=self.failure_record(
+                reason="First line.\r\nSecond line.\nThird\tline\u2028Fourth.\u0085Fifth.",
+                step_label=long_text,
+                next_step="Do this.\nThen that.\r\n" + long_text,
+            )
+        )
+        self.assertEqual("Failed", result["kind"])
+        lines = result["detail"].split("\n")
+        self.assertEqual(2, len(lines), result["detail"])
+        self.assertEqual("First line. Second line. Third line Fourth. Fifth.", lines[0])
+        self.assertNotRegex(result["detail"] + result["next_step"], "[\r\t\u2028\u2029\u0085]")
+        self.assertLess(len(lines[1]), 600, lines[1])
+        self.assertNotIn("\n", result["next_step"])
+        self.assertLessEqual(len(result["next_step"]), 320)
+        self.assertTrue(result["next_step"].startswith("Do this. Then that. word word"), result["next_step"])
+        hidden = self.invoke(
+            failure=self.failure_record(
+                reason="The RESTIC_PASSWORD_COMMAND helper failed and the DPAPI blob was bad.",
+                step_label="reading the recovery key",
+                next_step="Open the password file.",
+            )
+        )
+        self.assertEqual("Failed", hidden["kind"])
+        for text in (hidden["detail"], hidden["next_step"]):
+            self.assertNotIn("RESTIC_", text)
+            self.assertNotIn("DPAPI", text)
+            self.assertNotIn("password", text.lower())
+            self.assertNotIn("recovery key", text)
+        # The reason says its details are hidden; a step or a next step that would have to be hidden is left out, because "while
+        # (details hidden)" and "next: (details hidden)" say nothing, and the person still gets a next step.
+        lines = hidden["detail"].split("\n")
+        self.assertEqual(2, len(lines), hidden["detail"])
+        self.assertEqual("The details of this problem are hidden because they may include sign-in information.", lines[0])
+        self.assertNotIn(" while ", lines[1])
+        self.assertNotIn("hidden", lines[1])
+        self.assertEqual(
+            "Make sure Google Drive for desktop is running and this PC is online overnight. Rewindle checks again tonight.",
+            hidden["next_step"],
+        )
+
+    def test_a_failure_record_with_missing_words_still_says_what_to_do(self) -> None:
+        for label, record in {
+            "empty": self.failure_record(reason="", step_label="", next_step=""),
+            "blank": self.failure_record(reason="   ", step_label=" \n ", next_step="\t"),
+            "absent": {
+                key: value
+                for key, value in self.failure_record().items()
+                if key not in ("reason", "step_label", "next_step")
+            },
+            "not_text": self.failure_record(reason=7, step_label={"a": 1}, next_step=["b"]),
+        }.items():
+            with self.subTest(label=label):
+                result = self.invoke(failure=record)
+                self.assertEqual("Failed", result["kind"])
+                lines = result["detail"].split("\n")
+                self.assertEqual(2, len(lines), result["detail"])
+                self.assertEqual("The check did not succeed.", lines[0])
+                self.assertRegex(lines[1], r"^It stopped on .+\. No check of the Google Drive copy has worked yet\.$")
+                self.assertNotIn(" while ", lines[1])
+                self.assertEqual(
+                    "Make sure Google Drive for desktop is running and this PC is online overnight. Rewindle checks again tonight.",
+                    result["next_step"],
+                )
 
     def test_fixture_proof_for_another_repository_than_the_plan_is_refused(self) -> None:
         # Consistent with itself and with the backup telemetry, but not with the installed plan: refused.
@@ -683,6 +1008,31 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
         self.assertIn("PostActivationVerificationPhase", telemetry)
         self.assertIn("directCloudVerification", diagnostic)
         self.assertIn("my-drive-latest-verification.json", diagnostic)
+
+    def test_a_failed_check_reaches_the_page_and_the_settings_card_with_its_next_step(self) -> None:
+        profiles = (DASHBOARD / "EngineProfile.cs").read_text(encoding="utf-8")
+        telemetry = TELEMETRY_SOURCE.read_text(encoding="utf-8")
+        window = WINDOW_SOURCE.read_text(encoding="utf-8")
+        host = (DASHBOARD / "DashboardWindow.Web.cs").read_text(encoding="utf-8")
+        types = (DASHBOARD / "web" / "src" / "native-types.ts").read_text(encoding="utf-8")
+        card = (DASHBOARD / "web" / "components" / "primitives" / "ProtectionHealth.tsx").read_text(encoding="utf-8")
+        # Only the Rewindle profile names a failure record (beside its proof); the legacy profile has none to look for.
+        rewindle = profiles[profiles.index("private static EngineProfile CreateRewindle()"):profiles.index("private static EngineProfile CreateLegacy()")]
+        legacy = profiles[profiles.index("private static EngineProfile CreateLegacy()"):profiles.index("private static EngineProfile CreateCommon(")]
+        self.assertIn('profile.CloudVerificationFailureRelativePath = Path.Combine("evidence", "latest-failure.json");', rewindle)
+        self.assertNotIn("CloudVerificationFailureRelativePath", legacy)
+        self.assertIn("EngineProfile.Current.CloudVerificationFailurePath()", telemetry)
+        self.assertIn("EngineProfile.Current.CloudVerificationFailurePathBeside(this.directCloudVerificationPath)", telemetry)
+        # The record is read with the bounded reader and only counts when it is exactly the record.
+        self.assertRegex(telemetry, r"ReadJsonObject\(\s*offsiteFailureRecordPath,\s*MaximumOffsiteJsonLength\)")
+        self.assertIn('"direct_my_drive_cloud_check_failure"', telemetry)
+        # The host sends the next step (empty when there is none), the page types it as additive and uses it for a failed check, and the
+        # settings card shows it under the details.
+        self.assertIn('offsite["nextStep"] = status == null ? string.Empty : status.NextStep ?? string.Empty;', host)
+        self.assertRegex(types, r"/\*\* [^\n]*Additive: an older host does not send it\. \*/\n\s+nextStep\?: string;")
+        self.assertIn("cloud.kind === 'Failed' ? cloud.nextStep?.trim() || `Make sure", card)
+        self.assertIn("status.Kind == OffsiteStatusKind.Failed && !string.IsNullOrEmpty(status.NextStep)", window)
+        self.assertIn('"Off-site copy detail: " + offsiteDetail', window)
 
 
 if __name__ == "__main__":

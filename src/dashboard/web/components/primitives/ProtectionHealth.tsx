@@ -179,7 +179,7 @@ export function protectionHealthItems(state: DashboardState, context: HealthCont
       timestampLabel: cloudTone === 'success' ? 'Last verified' : 'Last checked',
       // Rewindle checks the off-site copy by itself (nothing on this page starts that check), so there is no button and nothing to wait for.
       nextStep: cloudOverdue ? cloudOverdue.nextStep
-        : cloud.kind === 'Failed' ? `Make sure ${provider || 'the off-site location'} is available. Rewindle checks again automatically.`
+        : cloud.kind === 'Failed' ? cloud.nextStep?.trim() || `Make sure ${provider || 'the off-site location'} is available. Rewindle checks again automatically.`
         : cloud.kind === 'StatusUnavailable' ? 'Rewindle checks again automatically. The details below say what it found.' : '',
       reason: cloudProblem ? briefReason(cloud.detail) : '',
       evidence: cloudOptional ? undefined : [cloud.title, cloud.detail, cloud.evidence].filter(Boolean).join('\n\n'),
