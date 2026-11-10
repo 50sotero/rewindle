@@ -55,6 +55,11 @@ labels. Releases before 0.2.0 were published under the name ResticBackuper.
   and is not offered while a backup is running or about to start (the Find a
   file tab says why). It is not available with the earlier personal edition of
   the backup service.
+- Tests: one test (`tests/test_rclone_version_parity.py`) ties together the two
+  places that read `rclone version`, the nightly Google Drive check and the
+  installer that sets it up. It gives both the same outputs and fails if they
+  read any of them differently, or if either one's oldest allowed rclone is not
+  1.65.0, so the two can't drift apart unnoticed.
 
 ### Changed
 
