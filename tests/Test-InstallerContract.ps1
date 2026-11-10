@@ -477,6 +477,9 @@ function Invoke-InstallCycle {
         Assert-Equal 0 $run.ExitCode "$Label : a reinstall over the kept state exits 0"
         $reconfigured = [IO.File]::ReadAllText((Join-Path $installRoot 'backup-config.json')) | ConvertFrom-Json
         Assert-Equal $configuration.plan_id $reconfigured.plan_id "$Label : the reinstall continues the kept backup plan"
+        # Newer because no backup was verified above (only plan-state.json is recorded): a reinstall keeps the generation
+        # only when last-success.json shows a verified backup of exactly the same scope (Get-ContinuedConfigGeneration,
+        # which Test-InstallPlan.ps1 checks).
         Assert-True ([long]$reconfigured.config_generation -gt [long]$configuration.config_generation) "$Label : with a newer configuration generation"
         $engineCheck = @(& (Join-Path $installRoot 'Python\python.exe') -I -S -B -c "import json, sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import restic_common; config = json.loads(Path(sys.argv[1], 'backup-config.json').read_text(encoding='utf-8')); restic_common.validate_and_record_plan_state(config, Path(config['state_directory'])); print('accepted')" $installRoot 2>&1)
         Write-Host ($engineCheck -join [Environment]::NewLine)

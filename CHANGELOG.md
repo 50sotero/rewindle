@@ -116,6 +116,18 @@ ones a home user reads without a glossary.
 
 ### Fixed
 
+- **An update or a reinstall no longer makes the next backup read every file
+  again.** Every update is installed as a reinstall, and after each one the
+  next backup read all your folders again to add almost nothing (about two
+  hours on a PC with 114 GiB of files). Until it finished, the nightly Google
+  Drive check wouldn't run, and Recovery readiness asked for a new backup and
+  a new restore drill. A reinstall or update that keeps your folders, this PC
+  and your backup location now carries on from your last checked backup, so
+  none of that happens. When something else changed, such as the list of files
+  Rewindle leaves out, or after you move your backups to another place, the
+  first backup afterwards still reads only the files that changed since your
+  last checked backup, as long as it backs up the same folders on the same
+  drives.
 - **The nightly Google Drive check can unlock its Google Drive connection.**
   The check keeps its Google Drive connection locked, and a small password
   helper unlocks it each time the check starts. A mistake in the check asked

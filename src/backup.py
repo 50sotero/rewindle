@@ -136,6 +136,110 @@ def select_snapshot(
     return max(matches, key=lambda item: item.get("time", ""))
 
 
+def _source_volumes(records: Any) -> dict[str, str] | None:
+    """Each source's volume serial, from preflight records that all matched; None otherwise."""
+    if not isinstance(records, list) or not records:
+        return None
+    volumes: dict[str, str] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            return None
+        path = record.get("canonical_path")
+        serial = record.get("observed_volume_serial")
+        if (
+            record.get("volume_identity") != "match"
+            or not isinstance(path, str)
+            or not path
+            or not isinstance(serial, str)
+            or not serial
+        ):
+            return None
+        volumes[ntpath.normcase(ntpath.normpath(path))] = serial.upper()
+    return volumes if len(volumes) == len(records) else None
+
+
+def earlier_generation_parent(
+    config: dict[str, Any],
+    tag: str,
+    prior_success: dict[str, Any] | None,
+    repository_id: str,
+    source_records: Any,
+    snapshots: Any,
+) -> dict[str, Any] | None:
+    """The backup that the first run of a new generation compares its files with.
+
+    A backup finds the one before it only within its own generation (--group-by
+    host,paths,tags, and every snapshot carries its generation's tag). A
+    reinstall or an update that changes the backup's scope (a new exclusion
+    list, say), or that can't show it didn't, and a move of the backup location
+    start a new generation, so its first backup would find none and read every
+    file again. It doesn't need to when the latest verified backup
+    (last-success.json, in the protected state folder) is of this plan and an
+    earlier generation, from this computer, of exactly these folders on the
+    same volumes, into this same repository, and its snapshot is still there
+    with those identities. Restic then reads only the files whose size,
+    modification or change time differ from that snapshot, as it does between
+    two backups of one generation. The exclusion list may differ: Restic reads
+    every file the snapshot doesn't hold, and a parent never decides what is
+    backed up.
+    Returns that snapshot from the listing, or None.
+    """
+    if not isinstance(prior_success, dict):
+        return None
+    generation = prior_success.get("config_generation")
+    hostname = prior_success.get("hostname")
+    sources = prior_success.get("sources")
+    snapshot_id = prior_success.get("snapshot_id")
+    if (
+        # A tuple: a corrupt state that is a list or an object never raises.
+        prior_success.get("state") not in ("success", "success_unchanged")
+        or prior_success.get("verification_complete") is not True
+        or prior_success.get("plan_id") != config["plan_id"]
+        or not _is_plain_int(generation)
+        or not 1 <= generation < config["config_generation"]
+        or not isinstance(hostname, str)
+        or hostname.casefold() != config["hostname"].casefold()
+        or not _is_repository_id(repository_id)
+        or prior_success.get("repository_id") != repository_id
+        or not _is_repository_id(snapshot_id)
+        or not isinstance(sources, list)
+        or any(not isinstance(source, str) for source in sources)
+        or normalized_paths(sources) != normalized_paths(config["sources"])
+    ):
+        return None
+    current_volumes = _source_volumes(source_records)
+    if (
+        current_volumes is None
+        or len(current_volumes) != len(config["sources"])
+        or _source_volumes(prior_success.get("source_identities")) != current_volumes
+    ):
+        return None
+    if not isinstance(snapshots, list):
+        return None
+    listed = [
+        snapshot
+        for snapshot in snapshots
+        if isinstance(snapshot, dict) and snapshot.get("id") == snapshot_id
+    ]
+    if len(listed) != 1:
+        return None
+    snapshot = listed[0]
+    tags = snapshot.get("tags")
+    paths = snapshot.get("paths")
+    if (
+        not isinstance(snapshot.get("hostname"), str)
+        or snapshot["hostname"].casefold() != config["hostname"].casefold()
+        or not isinstance(tags, list)
+        or tag not in tags
+        or snapshot_plan_identity(tags) != (config["plan_id"], generation)
+        or not isinstance(paths, list)
+        or any(not isinstance(path, str) for path in paths)
+        or normalized_paths(paths) != normalized_paths(config["sources"])
+    ):
+        return None
+    return snapshot
+
+
 def restic_literal_exclude(path_text: str) -> str:
     """The exclusion-file line that matches exactly this path, and nothing else.
 
@@ -895,6 +999,10 @@ def _run_locked(
         # How many backups the Restore list offers after this run, and how far back
         # they go (summarize_restorable_snapshots). Display only.
         "snapshot_inventory": None,
+        # The first backup of a new generation names the earlier backup Restic
+        # compares its files with (earlier_generation_parent): its snapshot ID
+        # and generation. None for every other run.
+        "earlier_generation_parent": None,
         # The WSL links and special files this run leaves out because Restic
         # cannot store them, and those it could not (unarchivable_exclusions).
         "unarchivable_links": None,
@@ -1056,6 +1164,37 @@ def _run_locked(
             status["prior_matching_snapshot_count"] = len(
                 prior_matching_snapshot_ids
             )
+            # A generation with no backup yet starts from the latest verified
+            # backup of an earlier one, when nothing it reads has moved.
+            earlier_parent = (
+                None
+                if prior_matching_snapshot_ids
+                else earlier_generation_parent(
+                    config,
+                    tag,
+                    prior_success,
+                    status["repository_id"],
+                    status["source_identities"],
+                    prior_snapshots,
+                )
+            )
+            if earlier_parent is not None:
+                status["earlier_generation_parent"] = {
+                    "snapshot_id": earlier_parent["id"],
+                    "config_generation": prior_success["config_generation"],
+                }
+                atomic_write_json(status_path, status)
+                log_handle.write(
+                    json.dumps(
+                        {
+                            "wrapper_event": "parent_from_earlier_generation",
+                            "run_id": run_id,
+                            "utc": utc_now(),
+                            **status["earlier_generation_parent"],
+                        }
+                    )
+                    + "\n"
+                )
             cancellation_checkpoint(cancellation, on_cancellation)
 
             canary = Path(config["canary_file"])
@@ -1084,7 +1223,14 @@ def _run_locked(
                     else []
                 ),
                 "--exclude-caches",
-                "--skip-if-unchanged",
+                # Named, the earlier backup replaces the parent --group-by would
+                # find. The first backup of a generation is always kept, even
+                # with nothing changed: the generation needs a backup of its own.
+                *(
+                    ["--parent", earlier_parent["id"]]
+                    if earlier_parent is not None
+                    else ["--skip-if-unchanged"]
+                ),
                 "--no-scan",
                 "--read-concurrency",
                 str(int(config.get("read_concurrency", 2))),

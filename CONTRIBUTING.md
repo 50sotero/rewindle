@@ -123,9 +123,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Test-SetupWindow.p
 
 Notes:
 
-- `test_key_rotation`, and the pinned-Restic tests in `test_exclusions` and
-  `test_unarchivable_links`, run the real `restic.exe` from the release build
-  output and are skipped until you have run `Build-Release.ps1`.
+- `test_key_rotation`, and the pinned-Restic tests in `test_exclusions`,
+  `test_generation_parent` and `test_unarchivable_links`, run the real
+  `restic.exe` from the release build output and are skipped until you have
+  run `Build-Release.ps1`.
 - The PowerShell suites live in `tests\*.ps1`. They build disposable fixtures
   in your temporary folder and do not change an installed copy.
 - `-SkipInstalledChecks` keeps the dashboard regressions from reading an

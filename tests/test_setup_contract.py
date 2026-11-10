@@ -490,6 +490,61 @@ class StateFolderOwnerTests(unittest.TestCase):
         self.assertIn("New-ProtectedDirectorySecurity -UserSid $UserSid", self.defined["Set-ProtectedDirectory"])
 
 
+class ContinuedGenerationTests(unittest.TestCase):
+    """A reinstall over kept state keeps the configuration generation only for the same backup scope, so its first backup
+    finds the one before it instead of reading every file again. Test-InstallPlan.ps1 runs Get-ContinuedConfigGeneration
+    itself; these check what the install hands it."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.text = read(INSTALLER)
+        cls.defined = functions(cls.text)
+        cls.payload = cls.text.split("Start-InstallPhase 'payload'", 1)[1].split("Complete-InstallPhase 'payload'", 1)[0]
+
+    def test_a_new_plan_starts_at_one_and_a_kept_plan_asks_which_generation(self) -> None:
+        self.assertIn("        config_generation = 1\n", self.payload)
+        self.assertNotIn("config_generation + 1", self.payload)
+        # The block of its own, not the plan_id line's inline "$(if ($null -ne $preservedPlan) {".
+        kept = self.payload.index("\n    if ($null -ne $preservedPlan) {\n")
+        call = self.payload.index(
+            "$configuration['config_generation'] = Get-ContinuedConfigGeneration -PreservedPlan $preservedPlan"
+        )
+        self.assertEqual(-1, self.payload.find("\n    }\n", kept, call), "the call is inside that block")
+        # Every field it compares is set first, and the file is written with its answer.
+        for earlier in ("source_identities = $sourceIdentities", "$configuration['drivefs_cache_directory']"):
+            with self.subTest(earlier=earlier):
+                self.assertLess(self.payload.index(earlier), call)
+        self.assertLess(call, self.payload.index("Write-Utf8NoBom -Path $configPath"))
+
+    def test_it_compares_the_installed_exclusion_list_and_a_reused_repository(self) -> None:
+        call = self.payload.split("Get-ContinuedConfigGeneration -PreservedPlan $preservedPlan", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("-RepositoryKept $repositoryPreviouslyInitialized", call)
+        self.assertLess(
+            self.payload.index("Assert-TreeMatchesManifest -Root $installRoot"),
+            self.payload.index("Get-ContinuedConfigGeneration"),
+        )
+        # Hashed as backup.py hashes it for exclude_file_sha256, inside the try: a list it can't read means the next generation.
+        body = self.defined["Get-ContinuedConfigGeneration"]
+        hashing = body.index(
+            "(Get-FileHash -LiteralPath ([string]$Configuration['exclude_file']) -Algorithm SHA256 -ErrorAction Stop)"
+            ".Hash.ToLowerInvariant()"
+        )
+        self.assertLess(body.index("    try {\n"), hashing)
+
+    def test_the_latest_verified_backup_comes_with_the_kept_plan(self) -> None:
+        body = self.defined["Get-PreservedPlanIdentity"]
+        self.assertIn("if ($name -eq 'last-success.json') { $lastSuccess = $document }", body)
+        self.assertIn("last_success = $lastSuccess", body)
+
+    def test_anything_it_cannot_read_starts_the_next_generation(self) -> None:
+        body = self.defined["Get-ContinuedConfigGeneration"]
+        self.assertIn("$next = $highest + 1", body)
+        self.assertTrue(body.rstrip().endswith("catch {\n        return $next\n    }"))
+        # It never answers lower than the highest generation on record, which the engine would refuse.
+        returned = set(re.findall(r"return (\$\w+)", body))
+        self.assertEqual({"$next", "$highest"}, returned)
+
+
 class FailedInstallRollbackTests(unittest.TestCase):
     """A late failure stops what the install started before it removes the program folder, removes runtime-manifest.json last,
     and says Setup undid its changes only when the folder is gone. Test-InstallPlan.ps1 runs the helpers themselves."""
