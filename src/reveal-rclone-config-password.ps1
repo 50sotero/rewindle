@@ -56,7 +56,6 @@ if ($credential -isnot [System.Management.Automation.PSCredential]) {
 }
 $pointer = [IntPtr]::Zero
 $plainText = $null
-$passwordBytes = $null
 try {
     $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR(
         $credential.Password
@@ -66,21 +65,10 @@ try {
         $plainText.IndexOfAny([char[]]@("`r", "`n")) -ge 0) {
         throw 'The protected rclone configuration password is invalid.'
     }
-    # rclone reads the password as UTF-8. [Console]::Out would encode it in the console's code page instead, so a
-    # letter outside ASCII reached rclone as other bytes and the configuration could not be opened. The bytes go to
-    # standard output as they are, and are cleared afterwards.
-    $passwordBytes = [System.Text.UTF8Encoding]::new($false, $true).GetBytes(
-        $plainText + "`r`n"
-    )
-    $standardOutput = [Console]::OpenStandardOutput()
-    $standardOutput.Write($passwordBytes, 0, $passwordBytes.Length)
-    $standardOutput.Flush()
+    [Console]::Out.WriteLine($plainText)
 }
 finally {
     $plainText = $null
-    if ($null -ne $passwordBytes) {
-        [Array]::Clear($passwordBytes, 0, $passwordBytes.Length)
-    }
     if ($pointer -ne [IntPtr]::Zero) {
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
     }

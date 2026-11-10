@@ -1110,7 +1110,7 @@ function Get-CheckFailureDescription {
         }
         'checking_latest_backup' {
             return New-CheckFailureDetail -ReasonCode 'latest_backup_unusable' -Reason (
-                "Your latest backup couldn't be matched with the backup in Google Drive.") -NextStep (
+                "Rewindle couldn't read the details of your latest backup.") -NextStep (
                 'Choose Back up now, or wait for the next automatic backup. The check after it covers it.')
         }
         'checking_rclone' {
@@ -1347,13 +1347,19 @@ function Wait-ForMyDriveRepository {
             'Make sure Google Drive for desktop is signed in to the Google account that holds your backups. ' + $again)
 }
 
+function Start-GoogleDriveLookup {
+    # Starts looking up Google Drive's address. It is a function of its own so that a test can stand in a lookup that
+    # never ends.
+    return [System.Net.Dns]::GetHostAddressesAsync('www.googleapis.com')
+}
+
 function Test-GoogleDriveReachable {
     # Whether Windows has a network and can look up Google Drive's address within 10 seconds. Nothing is sent to Google.
     if (-not [System.Net.NetworkInformation.NetworkInterface]::GetIsNetworkAvailable()) {
         return $false
     }
     try {
-        $lookup = [System.Net.Dns]::GetHostAddressesAsync('www.googleapis.com')
+        $lookup = Start-GoogleDriveLookup
         if (-not $lookup.Wait(10000)) {
             return $false
         }
@@ -1782,6 +1788,13 @@ $rcloneCredentialPath = Join-Path (
 $rclonePasswordHelperPath = Join-Path (
     $cloudVerificationRootFull
 ) 'reveal-rclone-config-password.ps1'
+# Windows PowerShell, which rclone starts to run the password helper. It is checked here with the other programs, so a
+# missing one is never put down to the backup in the Google Drive folder.
+$powershellExecutable = Join-Path (
+    [System.IO.Directory]::GetParent(
+        [Environment]::SystemDirectory
+    ).FullName
+) 'System32\WindowsPowerShell\v1.0\powershell.exe'
 Assert-NormalDirectory -Path $runsRoot | Out-Null
 Assert-NormalDirectory -Path $evidenceRoot | Out-Null
 foreach ($requiredFile in @(
@@ -1795,7 +1808,8 @@ foreach ($requiredFile in @(
     $rcloneExecutable,
     $rcloneConfigMaster,
     $rcloneCredentialPath,
-    $rclonePasswordHelperPath
+    $rclonePasswordHelperPath,
+    $powershellExecutable
 )) {
     Assert-NormalFile -Path $requiredFile | Out-Null
 }
@@ -2007,6 +2021,9 @@ try {
         throw 'SnapshotId must match the latest successfully verified backup.'
     }
 
+    # From here the check reads the backup in the Google Drive folder, which goes away when Google Drive for desktop
+    # quits.
+    Set-CheckStep 'opening_local_backup'
     $repositoryLocksPath = Join-Path $localRepositoryFull 'locks'
     if (Test-Path -LiteralPath $repositoryLocksPath -PathType Container) {
         $repositoryLocks = @(
@@ -2027,12 +2044,6 @@ try {
         }
     }
 
-    $powershellExecutable = Join-Path (
-        [System.IO.Directory]::GetParent(
-            [Environment]::SystemDirectory
-        ).FullName
-    ) 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    Assert-NormalFile -Path $powershellExecutable | Out-Null
     # -f binds tighter than +, so the two halves are joined before -f. Without
     # these inner parentheses only the second half was formatted: rclone was
     # asked to start a program named {0}, and every check failed in seconds.
@@ -2069,7 +2080,6 @@ try {
     # Each native step's deadline is sized from the repository: its file count for the Google Drive listing, its bytes
     # for the steps that read it (the inventory helper reads all of it through Google Drive for desktop, which downloads
     # it). The rates are slow on purpose, so a deadline only stops a step that is stuck.
-    Set-CheckStep 'opening_local_backup'
     try {
         $localRepositorySize = Measure-LocalRepository -Path $localRepositoryFull
     }

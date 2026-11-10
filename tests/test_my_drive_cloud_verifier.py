@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -452,10 +453,7 @@ class MyDriveCloudVerifierScriptTests(unittest.TestCase):
         self.assertIn("Import-Clixml -LiteralPath", PASSWORD_HELPER)
         self.assertIn("SecureStringToBSTR", PASSWORD_HELPER)
         self.assertIn("ZeroFreeBSTR", PASSWORD_HELPER)
-        # The password leaves as UTF-8 bytes, which are cleared afterwards (see the UTF-8 test below).
-        self.assertIn("[Console]::OpenStandardOutput()", PASSWORD_HELPER)
-        self.assertIn("[Array]::Clear($passwordBytes, 0, $passwordBytes.Length)", PASSWORD_HELPER)
-        self.assertNotIn("[Console]::Out.WriteLine($plainText)", PASSWORD_HELPER)
+        self.assertIn("[Console]::Out.WriteLine($plainText)", PASSWORD_HELPER)
         self.assertNotIn("Write-Verbose", PASSWORD_HELPER)
         for relative in (
             "build/Build-Release.ps1",
@@ -539,6 +537,8 @@ class MyDriveCloudVerifierFailureRecordTests(unittest.TestCase):
     def test_every_native_step_is_named_before_it_runs(self):
         expected = {
             "@('version')": "checking_rclone",
+            # The lock listing reads the Google Drive folder, which goes away when Google Drive for desktop quits.
+            "$repositoryLocksPath = Join-Path $localRepositoryFull 'locks'": "opening_local_backup",
             "'cat',\n            'config'": "opening_local_backup",
             "@('cat', 'config')": "connecting_to_google_drive",
             "'lsjson'": "listing_google_drive",
@@ -555,6 +555,17 @@ class MyDriveCloudVerifierFailureRecordTests(unittest.TestCase):
         steps = set(re.findall(r"Set-CheckStep '([a-z_]+)'", SCRIPT))
         for step in steps:
             self.assertIn(f"'{step}' {{ return", labels)
+        # What is left in the latest-backup step reads files on this PC, so its words don't blame Google Drive.
+        descriptions = powershell_function(SCRIPT, "Get-CheckFailureDescription")
+        latest = descriptions[descriptions.index("        'checking_latest_backup' {") :]
+        latest = latest[: latest.index("\n        }\n")]
+        self.assertNotIn("Google Drive", latest)
+        # Windows PowerShell, which rclone starts for the password, is checked with the other programs before any step
+        # reads the backup, so a missing one is never put down to the backup in the Google Drive folder.
+        required = SCRIPT[SCRIPT.index("foreach ($requiredFile in @(") :]
+        required = required[: required.index(")) {")]
+        self.assertRegex(required, r"(?m)^    \$powershellExecutable,?$")
+        self.assertNotIn("Assert-NormalFile -Path $powershellExecutable", SCRIPT)
 
     @unittest.skipUnless(sys.platform == "win32", "Windows PowerShell 5.1 is Windows-only")
     def test_the_record_says_when_where_and_why_in_plain_words(self):
@@ -752,6 +763,93 @@ class MyDriveCloudVerifierWaitTests(unittest.TestCase):
         waiting = waiting[: waiting.index("\n        }\n")]
         self.assertIn("'run_lock_unusable'", waiting)
         self.assertNotIn("Open Activity", waiting)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows PowerShell 5.1 is Windows-only")
+    def test_the_network_wait_ends_when_google_drive_answers_or_records_offline(self):
+        probe = "\n".join(
+            [
+                PROBE_HEADER,
+                powershell_functions(
+                    SCRIPT,
+                    "Get-RemainingMilliseconds",
+                    "Wait-Until",
+                    "New-CheckFailureDetail",
+                    "Stop-Check",
+                    "Wait-ForNetwork",
+                ),
+                "$result = [ordered]@{}",
+                # Google Drive answers at the third look.
+                "$script:looks = 0",
+                "function Test-GoogleDriveReachable { $script:looks++; return $script:looks -ge 3 }",
+                "$watch = [Diagnostics.Stopwatch]::StartNew()",
+                "Wait-ForNetwork -DeadlineUtc ([DateTime]::UtcNow.AddSeconds(60)) -PollSeconds 0.1",
+                "$result.answered_looks = $script:looks",
+                "$result.answered_seconds = $watch.Elapsed.TotalSeconds",
+                # It never answers.
+                "$script:looks = 0",
+                "function Test-GoogleDriveReachable { $script:looks++; return $false }",
+                "$watch.Restart()",
+                "try { Wait-ForNetwork -DeadlineUtc ([DateTime]::UtcNow.AddSeconds(1)) -PollSeconds 0.2; "
+                "$result.gave_up = $false }",
+                "catch { $result.gave_up = $true; $result.reason_code = $script:checkFailureDetail.reason_code; "
+                "$result.reason = $script:checkFailureDetail.reason; "
+                "$result.next_step = $script:checkFailureDetail.next_step }",
+                "$result.unanswered_looks = $script:looks",
+                "$result.unanswered_seconds = $watch.Elapsed.TotalSeconds",
+                "[Console]::Out.Write(($result | ConvertTo-Json -Compress))",
+                "",
+            ]
+        )
+        result = run_probe_json(self, probe)
+        self.assertEqual(3, result["answered_looks"])
+        self.assertLess(result["answered_seconds"], 5)
+        self.assertTrue(result["gave_up"])
+        self.assertEqual("offline", result["reason_code"])
+        self.assertEqual("This PC couldn't reach Google Drive's servers.", result["reason"])
+        self.assertEqual(
+            "Leave this PC connected to the internet overnight. Rewindle checks again tonight.",
+            result["next_step"],
+        )
+        self.assertGreaterEqual(result["unanswered_looks"], 2)
+        self.assertGreaterEqual(result["unanswered_seconds"], 0.9)
+        self.assertLess(result["unanswered_seconds"], 10)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows PowerShell 5.1 is Windows-only")
+    def test_a_google_drive_lookup_that_takes_over_10_seconds_counts_as_unreachable(self):
+        probe = "\n".join(
+            [
+                PROBE_HEADER,
+                powershell_function(SCRIPT, "Test-GoogleDriveReachable"),
+                "$result = [ordered]@{}",
+                "$result.network = [System.Net.NetworkInformation.NetworkInterface]::GetIsNetworkAvailable()",
+                "$script:lookups = 0",
+                "function Start-GoogleDriveLookup { $script:lookups++; return $script:lookup.Task }",
+                # A lookup that never ends.
+                "$script:lookup = [System.Threading.Tasks.TaskCompletionSource[object]]::new()",
+                "$watch = [Diagnostics.Stopwatch]::StartNew()",
+                "$result.hanging = Test-GoogleDriveReachable",
+                "$result.hanging_seconds = $watch.Elapsed.TotalSeconds",
+                # A lookup that found Google Drive's address, and one that failed.
+                "$script:lookup = [System.Threading.Tasks.TaskCompletionSource[object]]::new()",
+                "$script:lookup.SetResult([System.Net.IPAddress[]]@([System.Net.IPAddress]::Loopback))",
+                "$result.found = Test-GoogleDriveReachable",
+                "$script:lookup = [System.Threading.Tasks.TaskCompletionSource[object]]::new()",
+                "$script:lookup.SetException([System.Net.Sockets.SocketException]::new(11001))",
+                "$result.failed = Test-GoogleDriveReachable",
+                "$result.lookups = $script:lookups",
+                "[Console]::Out.Write(($result | ConvertTo-Json -Compress))",
+                "",
+            ]
+        )
+        result = run_probe_json(self, probe)
+        if not result["network"]:
+            self.skipTest("Windows reports no network, so the check starts no lookup.")
+        self.assertEqual(3, result["lookups"])
+        self.assertFalse(result["hanging"])
+        self.assertGreaterEqual(result["hanging_seconds"], 9.5)
+        self.assertLess(result["hanging_seconds"], 15)
+        self.assertTrue(result["found"])
+        self.assertFalse(result["failed"])
 
     @unittest.skipUnless(sys.platform == "win32", "Windows PowerShell 5.1 is Windows-only")
     def test_a_due_or_missed_backup_gets_a_head_start(self):
@@ -1124,56 +1222,28 @@ class MyDriveCloudVerifierRunFolderTests(unittest.TestCase):
                 self.assertFalse((runs / name / "rclone-readonly.conf").exists())
 
 
-class RclonePasswordHelperEncodingTests(unittest.TestCase):
-    @unittest.skipUnless(sys.platform == "win32", "Windows PowerShell 5.1 is Windows-only")
-    def test_a_password_outside_ascii_reaches_rclone_as_utf8(self):
-        # rclone reads the password command's output as UTF-8. Through [Console]::Out it came in the console's code
-        # page (437 or 850 on most PCs), so a letter outside ASCII changed and the configuration could not be opened.
-        password = "p\u00e4ss-\u00c5\u20ac"
-        system = os.environ.get("SystemRoot", r"C:\Windows")
-        powershell = os.path.join(system, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-        with tempfile.TemporaryDirectory(prefix="rewindle-password-helper-") as temp:
-            helper = Path(temp) / "reveal-rclone-config-password.ps1"
-            helper.write_bytes((PROJECT / "src" / "reveal-rclone-config-password.ps1").read_bytes())
-            credential = Path(temp) / "rclone-config-password.clixml"
-            characters = ", ".join(f"0x{ord(character):04x}" for character in password)
-            # Started from PowerShell 7 (as CI's test step is), Windows PowerShell inherits PowerShell 7's module
-            # folders and cannot load ConvertTo-SecureString from them, so the probe uses Windows' own, as the helper
-            # does, and stops at the first error.
-            made = run_windows_powershell(
-                "$env:PSModulePath = [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell', "
-                "'v1.0', 'Modules')\n"
-                "$ErrorActionPreference = 'Stop'\n"
-                "$secret = ConvertTo-SecureString ([string]::new([char[]]@("
-                + characters
-                + "))) -AsPlainText -Force\n"
-                "[pscredential]::new('rclone-config', $secret) | Export-Clixml -LiteralPath "
-                + ps_literal(str(credential))
-                + "\n"
-            )
-            self.assertEqual(0, made.returncode, made.stderr)
-            self.assertTrue(credential.is_file(), made.stderr)
-            completed = subprocess.run(
-                [
-                    powershell,
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    str(helper),
-                    "-CredentialPath",
-                    str(credential),
-                ],
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                timeout=120,
-                check=False,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertEqual(password.encode("utf-8") + b"\r\n", completed.stdout)
+# The SHA-256 of the rclone password helper as it ships. The build packages the file byte for byte, so a checkout with LF
+# line endings (local builds) and one with CRLF (CI's, which builds the published releases) give the two hashes.
+# Setting up the nightly Google Drive check pins the helper's hash in the protected assets-manifest.json. After an update
+# (an uninstall and an install), registering the check again refuses a packaged helper with any other hash, and
+# -ProvisionAssets refuses an assets folder that is already there, so a PC that had the check set up would lose it.
+SHIPPED_PASSWORD_HELPER_SHA256 = (
+    "690001286d10be7ae62d4e5d89814c2b1597b84134537e66979ea72a94f9189a",  # LF
+    "1b15c85d39b67f1bc2f385e64a7f692e63360f737fe768b28cd110d87503ff15",  # CRLF
+)
+
+
+class PackagedPasswordHelperTests(unittest.TestCase):
+    def test_the_packaged_password_helper_is_one_existing_installs_accept(self):
+        helper = PROJECT / "src" / "reveal-rclone-config-password.ps1"
+        self.assertIn(
+            hashlib.sha256(helper.read_bytes()).hexdigest(),
+            SHIPPED_PASSWORD_HELPER_SHA256,
+            "src/reveal-rclone-config-password.ps1 is not a shipped version. Every PC that set up the nightly Google "
+            "Drive check pinned the helper's SHA-256 in its protected assets-manifest.json. After an update, registering "
+            "the check again refuses any other helper, and -ProvisionAssets refuses the assets that are already there. "
+            "Changing the helper needs an upgrade path for existing installs first.",
+        )
 
 
 if __name__ == "__main__":
