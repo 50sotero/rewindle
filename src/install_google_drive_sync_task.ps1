@@ -49,8 +49,6 @@ $launcherName = 'ResticBackuperTaskLauncher.exe'
 $runtimeManifestName = 'runtime-manifest.json'
 $primaryTaskEvidenceName = 'scheduled-task.xml'
 $taskEvidenceName = 'google-drive-verification-task.xml'
-# The check compares Google Drive's SHA-256 checksums, which rclone reports from this version on.
-$minimumRcloneVersion = [Version]'1.65.0'
 
 function Test-SamePath {
     param(
@@ -573,6 +571,18 @@ function Get-RcloneVersion {
     }
 }
 
+function Assert-RcloneVersionAllowed {
+    # The check compares Google Drive's SHA-256 checksums, which rclone reports from 1.65.0 on. An older rclone could never
+    # pass it, so it is refused.
+    param([Parameter(Mandatory)] [Version]$Version)
+
+    $minimum = [Version]'1.65.0'
+    if ($Version -lt $minimum) {
+        $tooOld = 'rclone {0} is older than {1}, the first version that reports Google Drive SHA-256 checksums.'
+        throw ($tooOld -f $Version, $minimum)
+    }
+}
+
 function Install-ProtectedCloudAssets {
     param(
         [Parameter(Mandatory)] [string]$Target,
@@ -662,10 +672,7 @@ function Install-ProtectedCloudAssets {
         # The protected copy that will run is asked for its version, which the manifest records. An rclone too old to
         # report Google Drive's SHA-256 checksums could never pass the check.
         $rcloneVersion = Get-RcloneVersion -Executable (Join-Path $stage 'rclone.exe')
-        if ($rcloneVersion -lt $minimumRcloneVersion) {
-            $tooOld = 'rclone {0} is older than {1}, the first version that reports Google Drive SHA-256 checksums.'
-            throw ($tooOld -f $rcloneVersion, $minimumRcloneVersion)
-        }
+        Assert-RcloneVersionAllowed -Version $rcloneVersion
         Write-NewUtf8Json `
             -Path (Join-Path $stage 'assets-manifest.json') `
             -Value ([ordered]@{
@@ -1001,13 +1008,8 @@ $canonicalCloudVerificationRoot = [System.IO.Path]::Combine(
     ),
     'ResticBackuperCloudVerification'
 )
-if (-not $ValidateOnly -and
-    -not (Test-SamePath `
-        -Left $cloudVerificationRootFull `
-        -Right $canonicalCloudVerificationRoot)) {
-    throw 'Production cloud-verification assets are fixed to protected ProgramData storage.'
-}
-# The task launcher starts the check only from its own Program Files folder.
+# The task launcher starts the check only from its own Program Files folder. This comes first: a runtime anywhere else is
+# refused whatever cloud-verification root it was given.
 $canonicalProtectedRoot = [System.IO.Path]::Combine(
     [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles),
     'ResticBackuper'
@@ -1017,6 +1019,12 @@ if (-not $ValidateOnly -and
         -Left $protectedRootFull `
         -Right $canonicalProtectedRoot)) {
     throw 'The verification task runs only from the Program Files runtime.'
+}
+if (-not $ValidateOnly -and
+    -not (Test-SamePath `
+        -Left $cloudVerificationRootFull `
+        -Right $canonicalCloudVerificationRoot)) {
+    throw 'Production cloud-verification assets are fixed to protected ProgramData storage.'
 }
 if ($ProvisionAssets -and $ValidateOnly) {
     $validationAssets = @(

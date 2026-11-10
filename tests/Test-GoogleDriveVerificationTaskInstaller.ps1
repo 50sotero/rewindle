@@ -120,9 +120,16 @@ function Invoke-Validation {
         [Parameter(Mandatory)] [string]$Installer,
         [Parameter(Mandatory)] [string]$Runtime,
         [Parameter(Mandatory)] [string]$Configuration,
-        [Parameter(Mandatory)] [string]$CloudRoot
+        [Parameter(Mandatory)] [string]$CloudRoot,
+        # Runs the installer as setup does, without -ValidateOnly; only for runs it must refuse before it changes anything.
+        [switch]$WithoutValidateOnly
     )
 
+    # An array, splatted as whole arguments (a string would be splatted one character at a time).
+    [string[]]$mode = @()
+    if (-not $WithoutValidateOnly) {
+        $mode = @('-ValidateOnly')
+    }
     $priorPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
@@ -137,7 +144,7 @@ function Invoke-Validation {
                 -ProtectedRoot $Runtime `
                 -ConfigPath $Configuration `
                 -CloudVerificationRoot $CloudRoot `
-                -ValidateOnly 2>&1 |
+                @mode 2>&1 |
                 Out-String
         ).Trim()
         $exitCode = $LASTEXITCODE
@@ -208,7 +215,8 @@ foreach ($functionName in @(
     'Assert-RegisteredTaskDefinition',
     'Write-AtomicTaskEvidence',
     'ConvertFrom-RcloneVersionText',
-    'Get-RcloneVersion'
+    'Get-RcloneVersion',
+    'Assert-RcloneVersionAllowed'
 )) {
     $definitions = @(
         $installerAst.FindAll(
@@ -452,6 +460,26 @@ try {
             $verificationTaskEvidenceHash
     ) 'validation changed the verification task evidence'
 
+    # Run as setup runs it, without -ValidateOnly, the installer registers the task only from the Program Files runtime,
+    # the one folder the task launcher starts the check from. This fixture runtime is elsewhere, so it stops there, before
+    # it reads the cloud-verification root, provisions anything or registers a task.
+    $outsideProgramFiles = Invoke-Validation `
+        -Installer $installedInstaller `
+        -Runtime $runtime `
+        -Configuration $configPath `
+        -CloudRoot $cloudRoot `
+        -WithoutValidateOnly
+    Assert-True ($outsideProgramFiles.ExitCode -ne 0) (
+        'the installer accepted a runtime outside Program Files'
+    )
+    Assert-True (
+        $outsideProgramFiles.Output.Contains('The verification task runs only from the Program Files runtime.')
+    ) "a runtime outside Program Files was not refused for that reason: $($outsideProgramFiles.Output)"
+    Assert-True (
+        (Get-Sha256 -Path $verificationTaskEvidence) -ceq
+            $verificationTaskEvidenceHash
+    ) 'the refused installer run changed the verification task evidence'
+
     # The rclone version recorded when the assets were provisioned is reported.
     $assetManifestPath = Join-Path $cloudRoot 'assets-manifest.json'
     $assetManifestText = [System.IO.File]::ReadAllText($assetManifestPath)
@@ -568,20 +596,19 @@ try {
     ) 'primary and verification task evidence paths are not distinct'
 
     # Provisioning asks the protected copy of rclone for its version before the manifest is written, refuses one older
-    # than 1.65.0 (the first to report Google Drive SHA-256 checksums) and records it.
+    # than 1.65.0 (Assert-RcloneVersionAllowed, run against the stand-ins below) and records it.
     $copyAt = $installerText.IndexOf('foreach ($entry in $sources.GetEnumerator())')
     $versionAt = $installerText.IndexOf(
         '$rcloneVersion = Get-RcloneVersion -Executable (Join-Path $stage ''rclone.exe'')'
     )
-    $refuseAt = $installerText.IndexOf('if ($rcloneVersion -lt $minimumRcloneVersion) {')
+    $refuseAt = $installerText.IndexOf('Assert-RcloneVersionAllowed -Version $rcloneVersion')
     $manifestAt = $installerText.IndexOf('-Path (Join-Path $stage ''assets-manifest.json'')')
     Assert-True (
         $copyAt -gt 0 -and $versionAt -gt $copyAt -and $refuseAt -gt $versionAt -and $manifestAt -gt $refuseAt
     ) 'provisioning does not check the staged rclone version before writing the manifest'
     Assert-True (
-        $installerText.Contains('$minimumRcloneVersion = [Version]''1.65.0''') -and
         $installerText.Contains('rclone_version = $rcloneVersion.ToString()')
-    ) 'provisioning does not refuse rclone before 1.65.0 or record its version'
+    ) 'provisioning does not record the rclone version'
 
     foreach ($case in @(
         @("rclone v1.74.4`r`n- os/version: Microsoft Windows 11 (64 bit)`r`n", '1.74.4'),
@@ -634,6 +661,28 @@ try {
         [Environment]::SetEnvironmentVariable('RCLONE_CONFIG_PLANTED_TYPE', $savedPlanted, 'Process')
     }
     Assert-True ((Get-RcloneVersion -Executable $old) -lt [Version]'1.65.0') 'an old rclone version was misread'
+    # An rclone older than 1.65.0, the first to report Google Drive SHA-256 checksums, could never pass the check: it is
+    # refused, with the reason. 1.65.0 and later are accepted.
+    $refusal = $null
+    try {
+        Assert-RcloneVersionAllowed -Version (Get-RcloneVersion -Executable $old)
+    }
+    catch {
+        $refusal = $_.Exception.Message
+    }
+    Assert-True (
+        $refusal -ceq 'rclone 1.64.2 is older than 1.65.0, the first version that reports Google Drive SHA-256 checksums.'
+    ) "an rclone older than 1.65.0 was not refused: $refusal"
+    foreach ($allowed in @((Get-RcloneVersion -Executable $current), [Version]'1.65.0')) {
+        $refusal = $null
+        try {
+            Assert-RcloneVersionAllowed -Version $allowed
+        }
+        catch {
+            $refusal = $_.Exception.Message
+        }
+        Assert-True ($null -eq $refusal) "rclone $allowed was refused: $refusal"
+    }
     $failed = $false
     try {
         [void](Get-RcloneVersion -Executable $failing)
