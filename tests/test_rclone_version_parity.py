@@ -73,7 +73,7 @@ for version in ("1.74.4", "1.65.0", "1.64.2"):
     add_case("full output of " + version + " with CRLF", full_output("rclone v" + version, "\r\n"), version)
 for version in ("1.64.9", "1.65.1", "0.99.0", "2.0.0", "1.100.0"):
     add_case("plain " + version, "rclone v" + version, version)
-add_case("full output without a final line break",full_output("rclone v1.74.4", "\n").rstrip("\n"), "1.74.4")
+add_case("full output without a final line break", full_output("rclone v1.74.4", "\n").rstrip("\n"), "1.74.4")
 add_case("full output with lone CR line breaks", full_output("rclone v1.74.4", "\r"))
 add_case(
     "full output with mixed line breaks", "rclone v1.74.4\r\n- os/arch: amd64\n- go/version: go1.25.3\r\n", "1.74.4"
@@ -484,10 +484,11 @@ def run_probe():
     }
     system = os.environ.get("SystemRoot", r"C:\Windows")
     powershell = os.path.join(system, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-    environment = dict(os.environ)
     # A test run from PowerShell 7 hands that PowerShell's module folders down; 5.1 cannot load its own modules from
-    # them. Only Windows' own folder is allowed, as the scripts under test do for themselves.
-    environment["PSModulePath"] = os.path.join(system, "System32", "WindowsPowerShell", "v1.0", "Modules")
+    # them. Only Windows' own folder is allowed, as the scripts under test do for themselves. The inherited key is
+    # dropped first, whatever its case, so the child's environment holds one PSModulePath.
+    environment = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+    environment["PSModulePath"] =os.path.join(system, "System32", "WindowsPowerShell", "v1.0", "Modules")
     with tempfile.TemporaryDirectory(prefix="rewindle-version-parity-", ignore_cleanup_errors=True) as temp:
         script = Path(temp) / "probe.ps1"
         data = Path(temp) / "payload.json"
@@ -542,7 +543,8 @@ class RcloneVersionParityTests(unittest.TestCase):
         self.assertEqual(
             [],
             self.report["problems"],
-            "the version check cannot be compared: a reader or an oldest allowed version is missing or not plain",
+            "the version check cannot be compared: a reader, an oldest allowed version or a call site is missing or not "
+            "as expected",
         )
         self.assertEqual(len(CASES), len(self.report["results"]), "the probe did not read every input")
         return self.report
@@ -570,7 +572,11 @@ class RcloneVersionParityTests(unittest.TestCase):
                     verifier["ok"],
                     f"one script reads this input and the other refuses it: installer {installer}, verifier {verifier}",
                 )
-                self.assertEqual(installer["version"], verifier["version"])
+                self.assertEqual(
+                    installer["version"],
+                    verifier["version"],
+                    f"installer read {installer['version']}, verifier read {verifier['version']}",
+                )
                 if installer["message"] != verifier["message"]:
                     different_wording.append((label, installer["message"], verifier["message"]))
         # The wording of a refusal is each script's own business: it is reported, not compared.
@@ -601,9 +607,13 @@ class RcloneVersionParityTests(unittest.TestCase):
 
     def test_both_scripts_require_the_same_oldest_version_1_65_0(self):
         report = self.complete_report()
-        self.assertEqual(report["installer_minimum"], report["verifier_minimum"])
-        self.assertEqual(OLDEST_ALLOWED, report["installer_minimum"])
-        self.assertEqual(OLDEST_ALLOWED, report["verifier_minimum"])
+        self.assertEqual(
+            report["installer_minimum"],
+            report["verifier_minimum"],
+            f"installer minimum {report['installer_minimum']}, verifier minimum {report['verifier_minimum']}",
+        )
+        self.assertEqual(OLDEST_ALLOWED, report["installer_minimum"], "the installer's oldest allowed version")
+        self.assertEqual(OLDEST_ALLOWED, report["verifier_minimum"], "the verifier's oldest allowed version")
 
     def test_1_64_2_and_1_65_0_are_decided_the_same_way_by_both_scripts(self):
         decided = {}
@@ -612,7 +622,11 @@ class RcloneVersionParityTests(unittest.TestCase):
                 with self.subTest(label):
                     self.assertIsNotNone(installer["too_old"], f"the installer made no decision about {label}")
                     self.assertIsNotNone(verifier["too_old"], f"the verifier made no decision about {label}")
-                    self.assertEqual(installer["too_old"], verifier["too_old"])
+                    self.assertEqual(
+                        installer["too_old"],
+                        verifier["too_old"],
+                        f"installer too old: {installer['too_old']}, verifier too old: {verifier['too_old']}",
+                    )
                     if installer["too_old"]:
                         self.assertIn("older than", installer["refusal"])
                 decided[label] = (installer["too_old"], verifier["too_old"])
