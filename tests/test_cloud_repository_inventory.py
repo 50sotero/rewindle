@@ -3,9 +3,11 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from unittest import mock
 
 
 MODULE_PATH = (
@@ -132,6 +134,182 @@ class CloudRepositoryInventoryTests(unittest.TestCase):
         with self.assertRaises(VERIFIER.InventoryError) as context:
             VERIFIER.cloud_inventory(duplicate_id)
         self.assertEqual("cloud_identity_duplicate", context.exception.category)
+
+    def verify_document(self, document: list[dict]) -> dict:
+        cloud_path = self.root / "cloud.json"
+        cloud_path.write_text(json.dumps(document), encoding="utf-8")
+        return VERIFIER.verify(self.repository, cloud_path)
+
+    def assert_fails_before_hashing(
+        self,
+        document: list[dict],
+        category: str,
+        count: int,
+    ) -> None:
+        with mock.patch.object(
+            VERIFIER, "_hash_file", wraps=VERIFIER._hash_file
+        ) as hash_file:
+            with self.assertRaises(VERIFIER.InventoryError) as context:
+                self.verify_document(document)
+        self.assertEqual(category, context.exception.category)
+        self.assertEqual(count, context.exception.count)
+        hash_file.assert_not_called()
+
+    def test_cloud_listing_missing_a_file_fails_before_any_file_is_hashed(self):
+        document = self.cloud_document()
+        del document[1]
+        self.assert_fails_before_hashing(document, "cloud_files_missing", 1)
+
+    def test_extra_cloud_file_fails_before_any_file_is_hashed(self):
+        document = self.cloud_document()
+        document.append(cloud_item("keys/extra", b"extra", "cloud-extra"))
+        self.assert_fails_before_hashing(document, "cloud_files_extra", 1)
+
+    def test_size_difference_fails_before_any_file_is_hashed(self):
+        document = self.cloud_document()
+        document[1]["Size"] += 1
+        self.assert_fails_before_hashing(document, "cloud_size_mismatch", 1)
+
+    def test_size_difference_reports_the_usual_failure_output(self):
+        document = self.cloud_document()
+        document[0]["Size"] -= 1
+        cloud_path = self.root / "cloud.json"
+        proof_path = self.root / "proof.json"
+        cloud_path.write_text(json.dumps(document), encoding="utf-8")
+        output = io.StringIO()
+        with redirect_stdout(output):
+            result = VERIFIER.main(
+                (
+                    "--local-repository",
+                    str(self.repository),
+                    "--cloud-inventory",
+                    str(cloud_path),
+                    "--proof",
+                    str(proof_path),
+                )
+            )
+        self.assertEqual(2, result)
+        self.assertFalse(proof_path.exists())
+        self.assertEqual(
+            {"state": "failed", "category": "cloud_size_mismatch", "count": 1},
+            json.loads(output.getvalue()),
+        )
+
+    def test_hash_difference_with_equal_sizes_still_fails_after_hashing(self):
+        for algorithm, wrong in (("md5", "0" * 32), ("sha256", "f" * 64)):
+            with self.subTest(algorithm=algorithm):
+                document = self.cloud_document()
+                document[1]["Hashes"][algorithm] = wrong
+                with mock.patch.object(
+                    VERIFIER, "_hash_file", wraps=VERIFIER._hash_file
+                ) as hash_file:
+                    with self.assertRaises(VERIFIER.InventoryError) as context:
+                        self.verify_document(document)
+                self.assertEqual("cloud_content_mismatch", context.exception.category)
+                self.assertEqual(1, context.exception.count)
+                self.assertEqual(len(self.contents), hash_file.call_count)
+
+    def test_complete_match_hashes_each_file_once_and_keeps_the_proof(self):
+        expected = {
+            relative: {
+                "size": len(content),
+                "md5": hashlib.md5(content, usedforsecurity=False).hexdigest(),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+            for relative, content in self.contents.items()
+        }
+        resolved = self.repository.resolve()
+        with mock.patch.object(
+            VERIFIER, "_hash_file", wraps=VERIFIER._hash_file
+        ) as hash_file:
+            proof = self.verify_document(self.cloud_document())
+        hashed = sorted(
+            call.args[0].relative_to(resolved).as_posix()
+            for call in hash_file.call_args_list
+        )
+        self.assertEqual(sorted(self.contents), hashed)
+        raw_cloud_inventory = (self.root / "cloud.json").read_bytes()
+        self.assertEqual(
+            {
+                "schema_version": 1,
+                "state": "verified",
+                "exact_file_inventory_verified": True,
+                "path_case_size_md5_sha256_verified": True,
+                "files": len(self.contents),
+                "bytes": sum(len(content) for content in self.contents.values()),
+                "inventory_fingerprint_sha256": VERIFIER._fingerprint(expected),
+                "cloud_objects_with_ids": len(self.contents),
+                "missing_files": 0,
+                "extra_files": 0,
+                "mismatched_files": 0,
+                "cloud_inventory_document_sha256": hashlib.sha256(
+                    raw_cloud_inventory
+                ).hexdigest(),
+            },
+            proof,
+        )
+
+    def test_file_resized_between_size_pass_and_hash_pass_is_refused(self):
+        real_hash_file = VERIFIER._hash_file
+
+        def grow_then_hash(path: Path):
+            if path.name == "pack":
+                with path.open("ab") as stream:
+                    stream.write(b"-appended-after-the-size-pass")
+            return real_hash_file(path)
+
+        with mock.patch.object(VERIFIER, "_hash_file", side_effect=grow_then_hash):
+            with self.assertRaises(VERIFIER.InventoryError) as context:
+                self.verify_document(self.cloud_document())
+        self.assertEqual("local_repository_changed", context.exception.category)
+
+    def test_file_removed_between_size_pass_and_hash_pass_is_refused(self):
+        real_hash_file = VERIFIER._hash_file
+
+        def remove_then_hash(path: Path):
+            if path.name == "pack":
+                path.unlink()
+            return real_hash_file(path)
+
+        with mock.patch.object(VERIFIER, "_hash_file", side_effect=remove_then_hash):
+            with self.assertRaises(VERIFIER.InventoryError) as context:
+                self.verify_document(self.cloud_document())
+        self.assertEqual("local_repository_changed", context.exception.category)
+
+    def test_a_file_whose_folder_went_too_is_not_called_a_changed_backup(self):
+        # Google Drive for desktop quitting takes its drive letter, so every folder
+        # goes with the file. That says nothing about the backup: the result is the
+        # generic failure, not "your backup changed while it was being checked".
+        real_hash_file = VERIFIER._hash_file
+
+        def remove_folder_then_hash(path: Path):
+            if path.name == "pack":
+                shutil.rmtree(path.parent)
+            return real_hash_file(path)
+
+        cloud_path = self.root / "cloud.json"
+        cloud_path.write_text(json.dumps(self.cloud_document()), encoding="utf-8")
+        output = io.StringIO()
+        with mock.patch.object(
+            VERIFIER, "_hash_file", side_effect=remove_folder_then_hash
+        ):
+            with redirect_stdout(output):
+                result = VERIFIER.main(
+                    (
+                        "--local-repository",
+                        str(self.repository),
+                        "--cloud-inventory",
+                        str(cloud_path),
+                        "--proof",
+                        str(self.root / "proof.json"),
+                    )
+                )
+        self.assertEqual(1, result)
+        self.assertEqual(
+            "inventory_verification_failed_closed",
+            json.loads(output.getvalue())["category"],
+        )
+        self.assertFalse((self.root / "proof.json").exists())
 
 
 if __name__ == "__main__":

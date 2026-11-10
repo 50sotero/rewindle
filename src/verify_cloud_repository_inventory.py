@@ -5,6 +5,13 @@ The PowerShell orchestrator produces the rclone inventory so credentials remain
 in process-scoped environment variables and never cross this helper's command
 line. Successful evidence contains only aggregate counts and cryptographic
 fingerprints; object IDs and repository paths remain in the private run folder.
+
+The comparison runs the cheap checks first. The local repository sits in a
+streamed Google Drive folder, so reading a file downloads it. The helper
+therefore lists the local files without reading any of them, compares paths
+and sizes with the Drive inventory, and reads every local file once for
+MD5 and SHA-256 only when those all match. A missing, extra or resized file
+fails in moments instead of after the whole repository has been read.
 """
 
 from __future__ import annotations
@@ -16,7 +23,7 @@ import os
 from pathlib import Path
 import re
 import sys
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping, NamedTuple
 
 
 MD5_PATTERN = re.compile(r"[0-9a-f]{32}")
@@ -63,12 +70,18 @@ def _hash_file(path: Path) -> tuple[int, str, str]:
     return length, md5.hexdigest(), sha256.hexdigest()
 
 
-def local_inventory(repository: Path) -> dict[str, dict[str, Any]]:
+class LocalFile(NamedTuple):
+    path: Path
+    size: int
+
+
+def local_listing(repository: Path) -> dict[str, LocalFile]:
+    """List the local repository by relative path and size, reading no content."""
     repository = repository.resolve(strict=True)
     if not repository.is_dir() or not (repository / "config").is_file():
         raise InventoryError("local_repository_invalid")
 
-    entries: dict[str, dict[str, Any]] = {}
+    entries: dict[str, LocalFile] = {}
     casefolded: set[str] = set()
     for root, directory_names, file_names in os.walk(repository, followlinks=False):
         root_path = Path(root)
@@ -86,15 +99,40 @@ def local_inventory(repository: Path) -> dict[str, dict[str, Any]]:
             if folded in casefolded:
                 raise InventoryError("local_path_collision")
             casefolded.add(folded)
-            length, md5, sha256 = _hash_file(path)
-            entries[relative] = {
-                "size": length,
-                "md5": md5,
-                "sha256": sha256,
-            }
+            entries[relative] = LocalFile(path, path.stat().st_size)
     if not entries:
         raise InventoryError("local_repository_empty")
     return entries
+
+
+def hash_local_files(
+    listing: Mapping[str, LocalFile],
+) -> dict[str, dict[str, Any]]:
+    """Read each listed file once; refuse a file that changed since the listing."""
+    entries: dict[str, dict[str, Any]] = {}
+    for relative, local_file in listing.items():
+        try:
+            length, md5, sha256 = _hash_file(local_file.path)
+        except FileNotFoundError as error:
+            # Removed since the listing, from a folder that is still there: the
+            # repository changed while it was checked. A file whose folder went too
+            # (Google Drive for desktop quit and took its drive letter with it) says
+            # nothing about the backup, so that stays the generic failure.
+            if not local_file.path.parent.is_dir():
+                raise
+            raise InventoryError("local_repository_changed") from error
+        if length != local_file.size:
+            raise InventoryError("local_repository_changed")
+        entries[relative] = {
+            "size": length,
+            "md5": md5,
+            "sha256": sha256,
+        }
+    return entries
+
+
+def local_inventory(repository: Path) -> dict[str, dict[str, Any]]:
+    return hash_local_files(local_listing(repository))
 
 
 def _lower_hash(value: Any, pattern: re.Pattern[str], category: str) -> str:
@@ -182,23 +220,40 @@ def _fingerprint(entries: dict[str, dict[str, Any]]) -> str:
     return digest.hexdigest()
 
 
-def compare_inventories(
-    expected: dict[str, dict[str, Any]],
-    observed: dict[str, dict[str, Any]],
-) -> dict[str, Any]:
-    expected_paths = set(expected)
-    observed_paths = set(observed)
-    missing = expected_paths - observed_paths
-    extra = observed_paths - expected_paths
-    mismatched = {
+def compare_paths_and_sizes(
+    expected: Mapping[str, int],
+    observed: Mapping[str, int],
+) -> None:
+    """Compare relative paths and sizes only; nothing is read from any file."""
+    missing = expected.keys() - observed.keys()
+    extra = observed.keys() - expected.keys()
+    resized = {
         relative
-        for relative in expected_paths & observed_paths
+        for relative in expected.keys() & observed.keys()
         if expected[relative] != observed[relative]
     }
     if missing:
         raise InventoryError("cloud_files_missing", len(missing))
     if extra:
         raise InventoryError("cloud_files_extra", len(extra))
+    if resized:
+        raise InventoryError("cloud_size_mismatch", len(resized))
+
+
+def _sizes(entries: Mapping[str, Mapping[str, Any]]) -> dict[str, int]:
+    return {relative: int(entry["size"]) for relative, entry in entries.items()}
+
+
+def compare_inventories(
+    expected: dict[str, dict[str, Any]],
+    observed: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    compare_paths_and_sizes(_sizes(expected), _sizes(observed))
+    mismatched = {
+        relative
+        for relative in expected
+        if expected[relative] != observed[relative]
+    }
     if mismatched:
         raise InventoryError("cloud_content_mismatch", len(mismatched))
 
@@ -227,10 +282,13 @@ def verify(local_repository: Path, cloud_inventory_path: Path) -> dict[str, Any]
         cloud_document = json.loads(raw_cloud_inventory.decode("utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise InventoryError("cloud_inventory_format") from error
-    proof = compare_inventories(
-        local_inventory(local_repository),
-        cloud_inventory(cloud_document),
+    cloud = cloud_inventory(cloud_document)
+    listing = local_listing(local_repository)
+    compare_paths_and_sizes(
+        {relative: local_file.size for relative, local_file in listing.items()},
+        _sizes(cloud),
     )
+    proof = compare_inventories(hash_local_files(listing), cloud)
     proof["cloud_inventory_document_sha256"] = hashlib.sha256(
         raw_cloud_inventory
     ).hexdigest()
