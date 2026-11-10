@@ -142,10 +142,12 @@ ones a home user reads without a glossary.
   A check that failed left no trace the dashboard could show, so until a first
   check had passed the card said "Not set up (optional)", and after one it
   said nothing was wrong for two days. The card now says the check failed,
-  which step it stopped at, why, and what to do next. "Google Drive copy
-  verified" also no longer lasts for ever when no newer backup comes: once no
-  check has worked for two days, the card says the copy hasn't been checked
-  lately, with what to do about it.
+  which step it stopped at, why, and what to do next. A failure from before
+  Rewindle was set up again, or before the backup moved or its settings
+  changed, isn't shown, and a problem report now includes the check's record
+  of why it stopped. "Google Drive copy verified" also no longer lasts for
+  ever when no newer backup comes: once no check has worked for two days, the
+  card says the copy hasn't been checked lately, with what to do about it.
 - **The automatic backup no longer moves by an hour when the clocks change.**
   Setup wrote the backup time in UTC, which Windows keeps at one UTC moment all
   year, so a backup set for 02:00 ran at 01:00 all winter. The dashboard took

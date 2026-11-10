@@ -1,3 +1,4 @@
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -14,7 +15,8 @@ NAMESPACE = "ResticBackuper.Dashboard"
 TELEMETRY_SOURCE = DASHBOARD / "Telemetry.cs"
 WINDOW_SOURCE = DASHBOARD / "DashboardWindow.cs"
 DIAGNOSTIC_SOURCE = DASHBOARD / "DiagnosticExporter.cs"
-PLAN_ID = "10000000-0000-4000-8000-000000000042"
+# With letters, so a plan ID written in capitals differs from it as text.
+PLAN_ID = "1a2b3c4d-0000-4000-8000-0000000000ef"
 REPOSITORY_ID = "8" * 64
 SNAPSHOT_ID = "4" * 64
 REPOSITORY_PATH = r"G:\My Drive\ResticBackups\Personal"
@@ -23,6 +25,35 @@ REPOSITORY_PATH = r"G:\My Drive\ResticBackups\Personal"
 def ago(**delta) -> str:
     """A moment this long before now, as the engine writes times (UTC, ISO 8601 with Z)."""
     return (datetime.now(timezone.utc) - timedelta(**delta)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@contextmanager
+def held_without_sharing(path: Path):
+    """Keeps the file open for reading with no sharing at all, as a writer that is replacing it does (Windows only)."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    generic_read, no_sharing, open_existing, normal = 0x80000000, 0, 3, 0x80
+    handle = kernel32.CreateFileW(str(path), generic_read, no_sharing, None, open_existing, normal, None)
+    if handle is None or handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        yield
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 HARNESS_SOURCE = """
@@ -289,6 +320,7 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
         configured_repository=REPOSITORY_PATH,
         failure=None,
         failure_raw: str = None,
+        hold_proof: bool = False,
     ) -> dict:
         """Runs the reader against a disposable engine root.
 
@@ -296,6 +328,7 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
         where it is installed (Program Files under the root), so nothing outside the temporary folder is looked at.
         `configured_repository=None` installs no plan. `failure` (or `failure_raw`, text written as it is) is the check's failure
         record, written beside the proof whichever engine is active, so an engine that does not read one is seen ignoring it.
+        `hold_proof` keeps the proof open with no sharing while the reader runs, as a check that is replacing it does.
         """
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -350,13 +383,14 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
                 arguments.append(engine)
             # The dashboard accepts a test root only inside its own temporary folder, so it is given this one.
             environment = dict(os.environ, TMP=tempfile.gettempdir(), TEMP=tempfile.gettempdir())
-            run = subprocess.run(
-                arguments,
-                capture_output=True,
-                text=True,
-                check=False,
-                env=environment,
-            )
+            with held_without_sharing(proof_path) if hold_proof else nullcontext():
+                run = subprocess.run(
+                    arguments,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env=environment,
+                )
             self.assertEqual(0, run.returncode, run.stdout + run.stderr)
             return json.loads(run.stdout)
 
@@ -917,6 +951,44 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
         self.assertEqual("RestoreVerified", verified["kind"])
         self.assertEqual("", verified["next_step"])
 
+    def test_a_failure_record_about_another_plan_or_settings_is_not_shown(self) -> None:
+        # After Rewindle is set up again, the backup moves or its settings change, a record about the plan that is gone is not this
+        # plan's failure. One that names no plan (the check stopped before it read the plan) still counts.
+        for name, overrides in (
+            ("another plan", {"plan_id": "20000000-0000-4000-8000-000000000043"}),
+            ("earlier settings", {"config_generation": 1}),
+            ("a plan that is not a plan ID", {"plan_id": 42}),
+            ("a settings generation that is not a number", {"config_generation": "2"}),
+        ):
+            with self.subTest(record=name):
+                result = self.invoke(failure=self.failure_record(**overrides))
+                self.assertEqual("NotConfigured", result["kind"])
+        for name, overrides in (
+            ("the installed plan, its ID in capitals", {"plan_id": PLAN_ID.upper()}),
+            ("no plan", {"plan_id": None, "config_generation": None}),
+        ):
+            with self.subTest(record=name):
+                result = self.invoke(failure=self.failure_record(**overrides))
+                self.assertEqual("Failed", result["kind"])
+        # Without a readable plan, a record that names a plan is not shown; one that names none still is.
+        self.assertEqual("NotConfigured", self.invoke(failure=self.failure_record(), configured_repository=None)["kind"])
+        self.assertEqual(
+            "Failed",
+            self.invoke(
+                failure=self.failure_record(plan_id=None, config_generation=None),
+                configured_repository=None,
+            )["kind"],
+        )
+
+    @unittest.skipUnless(os.name == "nt", "the proof is held with a Windows file handle")
+    def test_a_proof_held_by_the_check_keeps_a_failure_from_being_claimed_newer(self) -> None:
+        # While the proof is held or being replaced, when the last check worked is not known, so a failure is not claimed to be the
+        # newer one: the card says it can't read the status yet, and the next refresh settles it.
+        held = self.invoke(proof=self.direct_proof(), failure=self.failure_record(), hold_proof=True)
+        self.assertEqual("StatusUnavailable", held["kind"])
+        # The same proof and failure, with the proof free to read: the failure is the newer one, and is shown.
+        self.assertEqual("Failed", self.invoke(proof=self.direct_proof(), failure=self.failure_record())["kind"])
+
     def test_text_taken_from_a_failure_record_is_one_bounded_line(self) -> None:
         # The reason, the step and the next step are shown to the person. They cannot add lines or take unbounded room, and nothing that
         # looks like a credential detail is passed on.
@@ -1024,6 +1096,12 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
         self.assertIn("PostActivationVerificationPhase", telemetry)
         self.assertIn("directCloudVerification", diagnostic)
         self.assertIn("my-drive-latest-verification.json", diagnostic)
+        # A problem report carries the check's failure record too, from the active engine's path (none for an engine that writes
+        # none), and the engine contract names it.
+        self.assertIn("EngineProfile.Current.CloudVerificationFailurePath()", diagnostic)
+        self.assertIn('"my-drive-latest-failure.json"', diagnostic)
+        contract = (PROJECT / "docs" / "engine-contract.md").read_text(encoding="utf-8")
+        self.assertIn("`\u2026CloudVerification\\evidence\\latest-failure.json`", contract)
 
     def test_a_failed_check_reaches_the_page_and_the_settings_card_with_its_next_step(self) -> None:
         profiles = (DASHBOARD / "EngineProfile.cs").read_text(encoding="utf-8")
@@ -1049,6 +1127,14 @@ class DashboardOffsiteStatusTests(unittest.TestCase):
         self.assertIn("cloud.kind === 'Failed' ? cloud.nextStep?.trim() || `Make sure", card)
         self.assertIn("status.Kind == OffsiteStatusKind.Failed && !string.IsNullOrEmpty(status.NextStep)", window)
         self.assertIn('"Off-site copy detail: " + offsiteDetail', window)
+        # The page shows the next step on a line of its own, so a failed check's details reach it without the next step the
+        # settings card adds to them.
+        web_state = host[host.index("private Dictionary<string, object> BuildWebOffsiteState(") :]
+        web_state = web_state[: web_state.index("\n        }\n")]
+        self.assertIn('offsite["detail"] = status != null && status.Kind == OffsiteStatusKind.Failed', web_state)
+        self.assertIn("? status.StatusDetail ?? string.Empty", web_state)
+        # An overdue check always reads as overdue, so the reader has no waiting words for it that could never be shown.
+        self.assertNotIn("more than two days old. The next check will renew it.", telemetry)
 
 
 if __name__ == "__main__":

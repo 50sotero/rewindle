@@ -35,6 +35,7 @@ In the tables below `<P>` stands for the engine's product name (`ResticBackuper`
 | Google Drive verification task (not queried by the dashboard) | `ResticBackuperGoogleDriveSync` | `ResticPersonalBackupGoogleDriveSync` |
 | Cloud-verification folder | `%ProgramData%\ResticBackuperCloudVerification` | `%ProgramData%\ResticPersonalBackupCloudVerification` |
 | Latest direct cloud proof | `…CloudVerification\evidence\latest-verification.json` | `…CloudVerification\latest-verification.json` |
+| Failure record of a check that stopped (shown only when newer than the proof's `verified_utc` and about the installed plan) | `…CloudVerification\evidence\latest-failure.json` | None; that edition's check writes none |
 | Protected recovery tools for a streamed Google Drive repository (a local repository keeps them beside it, as the plan's `recovery_tools_directory` says) | `%ProgramData%\ResticBackuperRecoveryTools` | None; only the plan-configured folder |
 | Recovery-drill targets | `%ProgramData%\ResticBackuper-RestoreDrills\drill-<nonce>` | `%ProgramData%\ResticPersonalBackup-RestoreDrills\drill-<nonce>` |
 | Retired per-user mirror status | `%LOCALAPPDATA%\ResticBackuperGoogleDriveSync\status.json` | `%LOCALAPPDATA%\ResticPersonalBackupGoogleDriveSync\status.json` |

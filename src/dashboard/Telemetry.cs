@@ -1435,10 +1435,9 @@ namespace ResticBackuper.Dashboard
             // lately. It then reads as a check that is overdue, with what to do.
             if (IsOffsiteCheckOverdue(verifiedUtc))
             {
-                return StaleOffsiteStatus(
+                return OverdueOffsiteStatus(
                     result,
                     verifiedUtc,
-                    "The last check of the Google Drive copy is more than two days old. The next check will renew it.",
                     "The last check that worked, on {0}, covered your latest backup.");
             }
 
@@ -1462,9 +1461,10 @@ namespace ResticBackuper.Dashboard
 
         // The nightly check's failure record (latest-failure.json beside the proof), as the card shows it: the check failed, why, where it
         // stopped, and what to do. Null when there is nothing to show: no record, one that is not exactly the record (it shows no error:
-        // the proof stands alone), or one that is not newer than the last check that worked. The check deletes the record after a pass,
-        // but a delete can fail, so the times are compared and a pass after the failure wins. The time of the last check that worked is
-        // the proof's verified_utc whenever the proof is a direct proof that has one, whatever its other bindings say.
+        // the proof stands alone), one that is not newer than the last check that worked, or one about a plan other than the installed
+        // one. The check deletes the record after a pass, but a delete can fail, so the times are compared and a pass after the failure
+        // wins. The time of the last check that worked is the proof's verified_utc whenever the proof is a direct proof that has one,
+        // whatever its other bindings say.
         private static OffsiteStatusView BuildOffsiteFailureStatus(JsonReadResult proofRead, JsonReadResult failureRead)
         {
             if (failureRead == null || failureRead.Document == null)
@@ -1509,6 +1509,12 @@ namespace ResticBackuper.Dashboard
             {
                 return null;
             }
+            // Last, because it reads the installed plan: the card is refreshed every second, and a record the proof already
+            // answers is left out without reading it.
+            if (!FailureRecordIsForInstalledPlan(record))
+            {
+                return null;
+            }
 
             string reason = CleanOffsiteFailureText(ExactText(record, "reason"));
             string stepLabel = CleanOffsiteFailureText(ExactText(record, "step_label")).TrimEnd('.', ' ');
@@ -1533,6 +1539,55 @@ namespace ResticBackuper.Dashboard
             return failed;
         }
 
+        // Whether a failure record is about the installed backup plan. The record names the plan_id and config_generation the check
+        // read. After Rewindle is set up again, the backup moves or its settings change, an older record is about a plan that is gone,
+        // and its failure is not this plan's. A record that names neither (the check stopped before it read the plan) still counts.
+        // The plan is read the way the proof's repository is (SourceConfiguration.Load); without a readable plan, a record that names
+        // one is not shown.
+        private static bool FailureRecordIsForInstalledPlan(IDictionary<string, object> record)
+        {
+            object planValue;
+            object generationValue;
+            bool namesPlan = record.TryGetValue("plan_id", out planValue) && planValue != null;
+            bool namesGeneration = record.TryGetValue("config_generation", out generationValue) && generationValue != null;
+            if (!namesPlan && !namesGeneration)
+            {
+                return true;
+            }
+            SourceConfiguration plan;
+            try
+            {
+                plan = SourceConfiguration.Load();
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+            if (namesPlan)
+            {
+                string recordPlanText = planValue as string;
+                Guid recordPlan;
+                Guid installedPlan;
+                if (recordPlanText == null
+                    || !Guid.TryParse(recordPlanText, out recordPlan)
+                    || !Guid.TryParse(plan.PlanId ?? string.Empty, out installedPlan)
+                    || recordPlan != installedPlan)
+                {
+                    return false;
+                }
+            }
+            if (namesGeneration)
+            {
+                long recordGeneration;
+                if (!TryGetJsonInteger(record, "config_generation", 0, out recordGeneration)
+                    || recordGeneration != plan.ConfigGeneration)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         // What to do about an off-site check that is overdue: the check runs at night as the signed-in person, and gives way to
         // a backup that is running.
         private const string OffsiteCheckOverdueNextStep =
@@ -1547,18 +1602,29 @@ namespace ResticBackuper.Dashboard
             string waitingDetail,
             string overdueReasonFormat)
         {
-            result.Kind = OffsiteStatusKind.Stale;
             if (IsOffsiteCheckOverdue(verifiedUtc))
             {
-                result.CheckOverdue = true;
-                result.StatusLabel = "The Google Drive copy hasn\u2019t been checked lately";
-                result.StatusDetail =
-                    string.Format(CultureInfo.CurrentCulture, overdueReasonFormat, FormatOffsiteTime(verifiedUtc)) +
-                    " No check has worked since.\n" + OffsiteCheckOverdueNextStep;
-                return result;
+                return OverdueOffsiteStatus(result, verifiedUtc, overdueReasonFormat);
             }
+            result.Kind = OffsiteStatusKind.Stale;
             result.StatusLabel = "The Google Drive copy is waiting for its next check";
             result.StatusDetail = waitingDetail;
+            return result;
+        }
+
+        // An off-site copy whose last check that worked is OffsiteCheckOverdueAfter old: no check has worked for a night or more,
+        // and the words say so (the first line says why, the second what to do).
+        private static OffsiteStatusView OverdueOffsiteStatus(
+            OffsiteStatusView result,
+            DateTime verifiedUtc,
+            string reasonFormat)
+        {
+            result.Kind = OffsiteStatusKind.Stale;
+            result.CheckOverdue = true;
+            result.StatusLabel = "The Google Drive copy hasn\u2019t been checked lately";
+            result.StatusDetail =
+                string.Format(CultureInfo.CurrentCulture, reasonFormat, FormatOffsiteTime(verifiedUtc)) +
+                " No check has worked since.\n" + OffsiteCheckOverdueNextStep;
             return result;
         }
 
