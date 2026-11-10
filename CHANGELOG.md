@@ -146,6 +146,13 @@ ones a home user reads without a glossary.
   too), and saving the schedule repairs one an earlier version wrote. Until it
   is saved, the dashboard works out the times that schedule really runs at,
   shows them, and says how to keep it at the same time all year.
+- **The nightly Google Drive check finds a missing or incomplete file in
+  minutes.** The check used to read every file of the backup on this PC, about
+  an hour for 60 GB, before it compared anything with Google Drive, so a file
+  that was missing or incomplete there showed up only at the very end. It now
+  compares the list of files in Google Drive (names and sizes) with the backup
+  on this PC first and stops at once if they differ. The slow comparison of
+  the contents runs only when the two lists match.
 - With the backups overdue or paused, a pending change review now says why the
   **Confirm these changes** button is there.
 - **Confirm these changes works.** After a backup that found far more changes
