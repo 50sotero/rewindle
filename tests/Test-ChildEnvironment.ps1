@@ -86,7 +86,16 @@ function Get-SourceFunctions {
     'ConvertTo-NativeArgument',
     'New-NativeChildEnvironment',
     'Get-ReadOnlyRemoteSpec',
-    'Invoke-NativeToFiles'
+    'Invoke-NativeToFiles',
+    # What Invoke-NativeToFiles uses to keep to its deadline.
+    'Get-RemainingMilliseconds',
+    'Get-NativeProcessTree',
+    'Stop-ExactProcess',
+    'Stop-NativeProcessTree',
+    'Format-PlainDuration',
+    'Get-CheckStepLabel',
+    'New-CheckFailureDetail',
+    'Stop-Check'
 ))))
 . ([scriptblock]::Create((Get-SourceFunctions -Path $installerSource -Names @(
     'Quote-ProcessArgument',
@@ -262,7 +271,8 @@ try {
         -Arguments @('warm-up') `
         -StdoutPath (Join-Path $runFolder 'warm-up.stdout.txt') `
         -StderrPath (Join-Path $runFolder 'warm-up.stderr.txt') `
-        -Environment (New-NativeChildEnvironment -TemporaryDirectory $temporary -Settings $settings))
+        -Environment (New-NativeChildEnvironment -TemporaryDirectory $temporary -Settings $settings) `
+        -TimeoutSeconds 60)
     [void](Get-ReadOnlyRemoteSpec -RemoteName 'ResticBackuperGoogleReadOnly' -RootFolderId 'root')
     [void](Invoke-ProtectedPython -Python $fakeNative -WorkingDirectory $fixtureRoot -Arguments @('warm-up'))
     [IO.File]::Delete($fakeRecord)
@@ -276,7 +286,8 @@ try {
             -Arguments @('lsjson', ($remote + ':' + $cloudPath), '--recursive') `
             -StdoutPath (Join-Path $runFolder 'lsjson.stdout.json') `
             -StderrPath (Join-Path $runFolder 'lsjson.stderr.log') `
-            -Environment $environment
+            -Environment $environment `
+            -TimeoutSeconds 60
     }
     Assert-True ($lsjsonExit -eq 0) 'the fake rclone ran'
     $record = Read-FakeRecord
@@ -294,7 +305,8 @@ try {
             -Arguments @('-I', '-S', '-B', 'C:\fixture\verify_cloud_repository_inventory.py') `
             -StdoutPath (Join-Path $runFolder 'inventory.stdout.json') `
             -StderrPath (Join-Path $runFolder 'inventory.stderr.log') `
-            -Environment $environment
+            -Environment $environment `
+            -TimeoutSeconds 60
     }
     Assert-True ($helperExit -eq 0) 'the fake inventory helper ran'
     Assert-ExactEnvironment -Actual (Read-FakeRecord).Environment -Expected $helperExpected -Label 'the inventory helper'
@@ -330,7 +342,8 @@ try {
             ) `
             -StdoutPath $revealStdout `
             -StderrPath $revealStderr `
-            -Environment $environment
+            -Environment $environment `
+            -TimeoutSeconds 60
     }
     Assert-True ($revealExit -eq 0) ('the rclone password helper runs with the allow-listed environment: ' +
         [IO.File]::ReadAllText($revealStderr))

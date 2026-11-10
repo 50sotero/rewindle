@@ -167,6 +167,21 @@ ones a home user reads without a glossary.
   the contents runs only when the two lists match.
 - With the backups overdue or paused, a pending change review now says why the
   **Confirm these changes** button is there.
+- **The nightly Google Drive check says why it stopped, and copes with a late
+  start.** A check that stopped left no trace of why. Each check that stops
+  now leaves a short record of when it stopped, what it was doing, why in
+  plain words and what to do. When the PC was off or asleep at 03:00, Windows
+  starts the check at the next sign-in, together with the backup it missed.
+  The check then waits for Google Drive for desktop, the internet connection
+  and that backup, instead of failing or making the backup give up until the
+  next night. Each step that runs Restic, rclone or Python has a time limit
+  sized for your backups, and one that hangs is stopped together with
+  everything it started. Before anything slow, the check now refuses an
+  rclone older than 1.65.0, which can't report the checksums it compares. It
+  keeps only its five newest work folders (and the one with the latest
+  proof), and it deletes its working copy of the encrypted rclone settings
+  after each run. Its proof no longer claims that its Google sign-in can only
+  read.
 - **Confirm these changes works.** After a backup that found far more changes
   than usual, confirming them always failed with "ACL inheritance is not
   protected". The review asked for one exact form of permissions on the
