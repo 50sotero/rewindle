@@ -123,6 +123,18 @@ ones a home user reads without a glossary.
   every check stopped within seconds, before it looked at the copy in Google
   Drive, and the dashboard went on showing the off-site copy as not set up.
   The check now starts the password helper correctly.
+- **The nightly Google Drive check no longer opens a window.** Task Scheduler
+  started Windows PowerShell for the check itself, and a program started that
+  way shows a console window for a moment, even when told to hide it. With
+  Windows Terminal as the default terminal a whole terminal window opened, at
+  03:00 or whenever Windows made up for a missed night, over a full-screen
+  game too. The check now starts through the task launcher the backup uses,
+  which runs it without any window and with Windows' own settings only, and
+  ends every program it started when the task is stopped. Setting the check up
+  also records which rclone it uses and refuses one older than 1.65.0, which
+  can't read Google Drive's file checksums. A check set up with an earlier
+  version opens the window until it is set up again, as Rewindle's guide to
+  Google Drive describes.
 - **The nightly Google Drive check can pass.** The check proves the copy in
   Google Drive can be restored by restoring a small test file from it, and the
   backup program also rebuilt each folder above that file with its original

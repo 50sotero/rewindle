@@ -676,6 +676,51 @@ function Assert-OwnedTask {
     return $task
 }
 
+function Get-CloudTaskExpectation {
+    # The action this installation's Google Drive verification task must have. The task starts the check through the task
+    # launcher; a task registered by an earlier version starts Windows PowerShell with the verifier itself. Either is this
+    # installation's. With the repository ID the arguments must be exactly the ones registered; without it (the
+    # configuration that names the repository went with the program folder) a pattern accepts any well-formed ID.
+    param(
+        [Parameter(Mandatory)] [object]$Task,
+        [string]$RepositoryId = ''
+    )
+
+    $launcher = Join-Path $installRoot 'ResticBackuperTaskLauncher.exe'
+    $actions = @($Task.Actions)
+    if ($actions.Count -eq 1 -and
+        -not [string]::IsNullOrWhiteSpace([string]$actions[0].Execute) -and
+        (Get-NormalizedPath ([Environment]::ExpandEnvironmentVariables([string]$actions[0].Execute))) -eq
+            (Get-NormalizedPath $launcher)) {
+        $executable = $launcher
+        $beforeId = '--google-drive-check --expected-repository-id '
+        $afterId = ''
+    }
+    else {
+        $executable = $windowsPowerShell
+        $beforeId = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass ' +
+            '-WindowStyle Hidden -File "' +
+            (Join-Path $installRoot 'verify_my_drive_cloud_repository.ps1') +
+            '" -ConfigPath "' + $configurationPath +
+            '" -CloudVerificationRoot "' + $cloudVerificationRoot +
+            '" -ExpectedRepositoryId "'
+        $afterId = '"'
+    }
+    if ($RepositoryId) {
+        return @{
+            Executable = $executable
+            Arguments = $beforeId + $RepositoryId + $afterId
+            ArgumentsPattern = ''
+        }
+    }
+    # \z, not $: in .NET, $ also matches before a line break at the end.
+    return @{
+        Executable = $executable
+        Arguments = ''
+        ArgumentsPattern = '^' + [regex]::Escape($beforeId) + '[0-9a-f]{64}' + [regex]::Escape($afterId) + '\z'
+    }
+}
+
 function Convert-TaskPrincipalToSid {
     param([string]$UserId)
 
@@ -899,19 +944,13 @@ try {
         -ErrorAction SilentlyContinue
     if ($null -ne $cloudTaskCandidate -and -not $runtimePresent) {
         # Leftovers of a removed program folder: the configuration that names the repository went with it, so the task is
-        # matched on everything else it must hold: this product's verifier and configuration paths, the protected evidence
-        # folder, a well-formed repository ID, and this account as its principal.
-        $cloudArgumentsPattern = '^' + [regex]::Escape(
-            '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass ' +
-            '-WindowStyle Hidden -File "' +
-            (Join-Path $installRoot 'verify_my_drive_cloud_repository.ps1') +
-            '" -ConfigPath "' + $configurationPath +
-            '" -CloudVerificationRoot "' + $cloudVerificationRoot +
-            '" -ExpectedRepositoryId "') + '[0-9a-f]{64}"$'
+        # matched on everything else it must hold: this product's launcher, or its verifier, configuration and protected
+        # evidence folder, a well-formed repository ID, and this account as its principal.
+        $cloudExpectation = Get-CloudTaskExpectation -Task $cloudTaskCandidate
         $cloudTask = Assert-OwnedTask `
             -TaskName $cloudVerificationTaskName `
-            -ExpectedExecutable $windowsPowerShell `
-            -ExpectedArgumentsPattern $cloudArgumentsPattern
+            -ExpectedExecutable $cloudExpectation.Executable `
+            -ExpectedArgumentsPattern $cloudExpectation.ArgumentsPattern
         if ($null -eq $cloudTask -or
             (Convert-TaskPrincipalToSid -UserId ([string]$cloudTask.Principal.UserId)) -cne $currentSid) {
             Stop-UninstallValidation -Code 'cloud_task_not_owned' `
@@ -941,18 +980,11 @@ try {
             Stop-UninstallValidation -Code 'cloud_task_not_owned' -Message $cloudNotOwned `
                 -Console 'The Google Drive verification task repository identity is invalid.'
         }
-        $cloudArguments = (
-            '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass ' +
-            '-WindowStyle Hidden -File "' +
-            (Join-Path $installRoot 'verify_my_drive_cloud_repository.ps1') +
-            '" -ConfigPath "' + $configurationPath +
-            '" -CloudVerificationRoot "' + $cloudVerificationRoot +
-            '" -ExpectedRepositoryId "' + $repositoryId + '"'
-        )
+        $cloudExpectation = Get-CloudTaskExpectation -Task $cloudTaskCandidate -RepositoryId $repositoryId
         $cloudTask = Assert-OwnedTask `
             -TaskName $cloudVerificationTaskName `
-            -ExpectedExecutable $windowsPowerShell `
-            -ExpectedArguments $cloudArguments
+            -ExpectedExecutable $cloudExpectation.Executable `
+            -ExpectedArguments $cloudExpectation.Arguments
         if ($null -eq $cloudTask -or
             (Convert-TaskPrincipalToSid `
                 -UserId ([string]$cloudTask.Principal.UserId)) -cne

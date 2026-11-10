@@ -86,8 +86,12 @@ class BackupAlertsSourceTests(unittest.TestCase):
         self.assertIn("EngineProfile.Current.ReinstallAdvice()", self.alerts)
 
     def test_every_launcher_exit_code_is_explained(self) -> None:
-        main = block(self.launcher, "private static int Main(")
-        codes = {int(code) for code in re.findall(r"return (\d+);", main) if code != "0"}
+        # The backup task's codes come from Main and from the kill-on-close job that runs the backup. The Google Drive
+        # check's own codes are left out: the dashboard never reads that task's result.
+        backup_path = block(self.launcher, "private static int Main(") + block(
+            self.launcher, "private static int RunInKillOnCloseJob("
+        )
+        codes = {int(code) for code in re.findall(r"return (\d+);", backup_path) if code != "0"}
         self.assertGreaterEqual(len(codes), 10, "the launcher no longer returns the codes this test reads")
 
         def listed(name: str) -> set[int]:

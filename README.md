@@ -650,7 +650,7 @@ an installed copy. CI runs most of them on every pull request; see
 | Path | Contents |
 | --- | --- |
 | `src/` | The engine: `backup.py`, `restore.py`, shared Python modules, the `Manage-*.ps1` managers, recovery helpers, the Google Drive verifier, `RECOVERY.md`, default `excludes.txt` and example configurations |
-| `src/task_launcher/` | `ResticBackuperTaskLauncher.exe`, the native supervisor the backup task starts |
+| `src/task_launcher/` | `ResticBackuperTaskLauncher.exe`, the native supervisor the backup task and the Google Drive check task start |
 | `src/dashboard/` | The Rewindle dashboard: WPF host (C#) and React interface (`web/`); see its [README](src/dashboard/README.md) |
 | `installer/` | `Install.cmd`, `Install-ResticBackuper.ps1` and `Uninstall-ResticBackuper.ps1` |
 | `installer/setup/` | Rewindle Setup, the graphical wizard: WPF and WebView2 host (C#); its pages are `src/dashboard/web/src/setup/`; see its [README](installer/setup/README.md) |

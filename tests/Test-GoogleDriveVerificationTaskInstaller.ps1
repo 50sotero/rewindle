@@ -206,7 +206,9 @@ foreach ($functionName in @(
     'Convert-TaskPrincipalToSid',
     'Assert-ProtectedRootAclDescriptor',
     'Assert-RegisteredTaskDefinition',
-    'Write-AtomicTaskEvidence'
+    'Write-AtomicTaskEvidence',
+    'ConvertFrom-RcloneVersionText',
+    'Get-RcloneVersion'
 )) {
     $definitions = @(
         $installerAst.FindAll(
@@ -278,6 +280,8 @@ try {
     Copy-Item `
         -LiteralPath $sourcePasswordHelper `
         -Destination (Join-Path $runtime 'reveal-rclone-config-password.ps1')
+    $launcherFixture = Join-Path $runtime 'ResticBackuperTaskLauncher.exe'
+    Write-Utf8 -Path $launcherFixture -Text 'manifest-authorized task launcher fixture'
     Write-Utf8 `
         -Path (Join-Path $repository 'config') `
         -Text '{"id":"fixture"}'
@@ -417,14 +421,25 @@ try {
         [string]$result.cloud_verification_root -ceq
             [System.IO.Path]::GetFullPath($cloudRoot).TrimEnd('\')
     ) 'protected asset root binding'
+    # The task starts the check through the task launcher, never Windows PowerShell itself, which would show a window.
     Assert-True (
-        [string]$result.action_arguments -match
-            'verify_my_drive_cloud_repository\.ps1'
-    ) 'action omits protected verifier'
+        [string]$result.action_execute -ceq
+            [System.IO.Path]::GetFullPath($launcherFixture)
+    ) 'action does not start the protected task launcher'
+    Assert-True (
+        [string]$result.action_arguments -ceq
+            ('--google-drive-check --expected-repository-id ' + ('a' * 64))
+    ) 'action arguments are not the launcher Google Drive check'
+    Assert-True (
+        [string]$result.action_arguments -notmatch '(?i)(powershell|WindowStyle|-File)'
+    ) 'action still starts Windows PowerShell'
     Assert-True (
         [string]$result.action_arguments -notmatch
             '(?i)(password|credential|secret|DestinationRoot|sync_repository_to_google_drive)'
     ) 'action exposes secrets or the retired mirror'
+    Assert-True ($null -eq $result.rclone_version) (
+        'assets without a recorded rclone version reported one'
+    )
     Assert-True (
         [string]::IsNullOrWhiteSpace([string]$result.local_mirror_destination)
     ) 'a local mirror destination was emitted'
@@ -436,6 +451,43 @@ try {
         (Get-Sha256 -Path $verificationTaskEvidence) -ceq
             $verificationTaskEvidenceHash
     ) 'validation changed the verification task evidence'
+
+    # The rclone version recorded when the assets were provisioned is reported.
+    $assetManifestPath = Join-Path $cloudRoot 'assets-manifest.json'
+    $assetManifestText = [System.IO.File]::ReadAllText($assetManifestPath)
+    $versionedManifest = $assetManifestText | ConvertFrom-Json
+    $versionedManifest | Add-Member -NotePropertyName rclone_version -NotePropertyValue '1.74.4'
+    Write-Utf8 -Path $assetManifestPath -Text ($versionedManifest | ConvertTo-Json -Depth 6)
+    $versioned = Invoke-Validation `
+        -Installer $installedInstaller `
+        -Runtime $runtime `
+        -Configuration $configPath `
+        -CloudRoot $cloudRoot
+    Assert-True ($versioned.ExitCode -eq 0) (
+        "validation with a recorded rclone version failed: $($versioned.Output)"
+    )
+    Assert-True ([string]($versioned.Output | ConvertFrom-Json).rclone_version -ceq '1.74.4') (
+        'the recorded rclone version was not reported'
+    )
+    Write-Utf8 -Path $assetManifestPath -Text $assetManifestText
+
+    # A program folder without the task launcher cannot run the task.
+    $launcherBytes = [System.IO.File]::ReadAllBytes($launcherFixture)
+    Remove-Item -LiteralPath $launcherFixture -Force
+    Write-RuntimeManifest -Runtime $runtime
+    $noLauncher = Invoke-Validation `
+        -Installer $installedInstaller `
+        -Runtime $runtime `
+        -Configuration $configPath `
+        -CloudRoot $cloudRoot
+    Assert-True ($noLauncher.ExitCode -ne 0) (
+        'a runtime without the task launcher was accepted'
+    )
+    Assert-True ($noLauncher.Output -match 'does not authorize: ResticBackuperTaskLauncher\.exe') (
+        "the missing-launcher failure was unclear: $($noLauncher.Output)"
+    )
+    [System.IO.File]::WriteAllBytes($launcherFixture, $launcherBytes)
+    Write-RuntimeManifest -Runtime $runtime
 
     $unexpectedAsset = Join-Path $cloudRoot 'unexpected-helper.ps1'
     Write-Utf8 -Path $unexpectedAsset -Text '# unexpected fixture'
@@ -514,6 +566,93 @@ try {
             '$taskEvidenceName = ''google-drive-verification-task.xml'''
         )
     ) 'primary and verification task evidence paths are not distinct'
+
+    # Provisioning asks the protected copy of rclone for its version before the manifest is written, refuses one older
+    # than 1.65.0 (the first to report Google Drive SHA-256 checksums) and records it.
+    $copyAt = $installerText.IndexOf('foreach ($entry in $sources.GetEnumerator())')
+    $versionAt = $installerText.IndexOf(
+        '$rcloneVersion = Get-RcloneVersion -Executable (Join-Path $stage ''rclone.exe'')'
+    )
+    $refuseAt = $installerText.IndexOf('if ($rcloneVersion -lt $minimumRcloneVersion) {')
+    $manifestAt = $installerText.IndexOf('-Path (Join-Path $stage ''assets-manifest.json'')')
+    Assert-True (
+        $copyAt -gt 0 -and $versionAt -gt $copyAt -and $refuseAt -gt $versionAt -and $manifestAt -gt $refuseAt
+    ) 'provisioning does not check the staged rclone version before writing the manifest'
+    Assert-True (
+        $installerText.Contains('$minimumRcloneVersion = [Version]''1.65.0''') -and
+        $installerText.Contains('rclone_version = $rcloneVersion.ToString()')
+    ) 'provisioning does not refuse rclone before 1.65.0 or record its version'
+
+    foreach ($case in @(
+        @("rclone v1.74.4`r`n- os/version: Microsoft Windows 11 (64 bit)`r`n", '1.74.4'),
+        @('rclone v1.66.0-beta.7731.6a8ddbcc4', '1.66.0'),
+        @("rclone v1.64.2`n", '1.64.2')
+    )) {
+        Assert-True (
+            (ConvertFrom-RcloneVersionText -Text ([string]$case[0])) -eq [Version][string]$case[1]
+        ) "rclone version text was misread: $($case[0])"
+    }
+    foreach ($text in @('', 'hello', 'rclone 1.74.4', 'rclone v1.74', "`nrclone v1.74.4", 'rclone v1.74.4 extra')) {
+        $unreadable = $false
+        try {
+            [void](ConvertFrom-RcloneVersionText -Text $text)
+        }
+        catch {
+            $unreadable = $_.Exception.Message -match 'could not be read'
+        }
+        Assert-True $unreadable "unreadable rclone version text was accepted: $text"
+    }
+
+    # Stand-ins for rclone.exe. The real one runs the same way: without a window, with Windows' own values as its
+    # whole environment, and stopped if it takes too long.
+    $standIns = Join-Path $fixtureRoot 'rclone-stand-ins'
+    [System.IO.Directory]::CreateDirectory($standIns) | Out-Null
+    $current = Join-Path $standIns 'current.cmd'
+    Write-Utf8 -Path $current -Text (
+        "@echo off`r`n" +
+        "if not `"%RCLONE_CONFIG_PLANTED_TYPE%`"==`"`" exit /b 9`r`n" +
+        "if not `"%RCLONE_ASK_PASSWORD%`"==`"false`" exit /b 8`r`n" +
+        "if not `"%1`"==`"version`" exit /b 7`r`n" +
+        "echo rclone v1.74.4`r`n" +
+        "echo - os/version: Microsoft Windows 11 (64 bit)`r`n"
+    )
+    $old = Join-Path $standIns 'old.cmd'
+    Write-Utf8 -Path $old -Text "@echo rclone v1.64.2`r`n"
+    $failing = Join-Path $standIns 'failing.cmd'
+    Write-Utf8 -Path $failing -Text "@echo something went wrong 1>&2`r`n@exit /b 3`r`n"
+    $slow = Join-Path $standIns 'slow.cmd'
+    Write-Utf8 -Path $slow -Text "@ping -n 4 127.0.0.1 >nul`r`n@echo rclone v1.74.4`r`n"
+
+    $savedPlanted = [Environment]::GetEnvironmentVariable('RCLONE_CONFIG_PLANTED_TYPE', 'Process')
+    try {
+        [Environment]::SetEnvironmentVariable('RCLONE_CONFIG_PLANTED_TYPE', 'sftp', 'Process')
+        Assert-True ((Get-RcloneVersion -Executable $current) -eq [Version]'1.74.4') (
+            'rclone version was not read, or ran with an inherited environment'
+        )
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable('RCLONE_CONFIG_PLANTED_TYPE', $savedPlanted, 'Process')
+    }
+    Assert-True ((Get-RcloneVersion -Executable $old) -lt [Version]'1.65.0') 'an old rclone version was misread'
+    $failed = $false
+    try {
+        [void](Get-RcloneVersion -Executable $failing)
+    }
+    catch {
+        $failed = $_.Exception.Message -match 'exit code 3'
+    }
+    Assert-True $failed 'a failing rclone version run was accepted'
+    $timedOut = $false
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        [void](Get-RcloneVersion -Executable $slow -TimeoutSeconds 1)
+    }
+    catch {
+        $timedOut = $_.Exception.Message -match 'within 1 seconds'
+    }
+    Assert-True ($timedOut -and $watch.Elapsed.TotalSeconds -lt 3) (
+        'a stuck rclone version run was not stopped at its time limit'
+    )
 
     $currentSid = (
         [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -650,6 +789,149 @@ try {
         $uninstallerText -match
             'verify_my_drive_cloud_repository\.ps1'
     ) 'uninstaller does not validate the verification-only action'
+    # The uninstaller removes the Google Drive verification task only when it is this installation's: either form of its
+    # action, exactly, from the program folder, in the root task folder. Its own functions run here against stand-in tasks.
+    $uninstallerTokens = $null
+    $uninstallerParseErrors = $null
+    $uninstallerAst = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $projectRoot 'installer\Uninstall-ResticBackuper.ps1'),
+        [ref]$uninstallerTokens,
+        [ref]$uninstallerParseErrors
+    )
+    if ($uninstallerParseErrors.Count -ne 0) {
+        throw 'Uninstaller did not parse before function extraction.'
+    }
+    & {
+        foreach ($functionName in @('Get-NormalizedPath', 'Assert-OwnedTask', 'Get-CloudTaskExpectation')) {
+            $definitions = @(
+                $uninstallerAst.FindAll(
+                    {
+                        param($node)
+                        $node -is
+                            [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                            $node.Name -eq $functionName
+                    },
+                    $true
+                ) | ForEach-Object { $_.Extent.Text }
+            )
+            if ($definitions.Count -ne 1) {
+                throw "Uninstaller function could not be extracted exactly: $functionName"
+            }
+            . ([scriptblock]::Create($definitions[0]))
+        }
+        # Stand-ins: the task Task Scheduler would return, and the uninstaller's refusal.
+        function Get-ScheduledTask {
+            [CmdletBinding()]
+            param([string]$TaskName)
+            return $standInTask
+        }
+        function Stop-UninstallValidation {
+            param([string]$Code, [string]$Message, [string]$Console)
+            throw "refused: $Code"
+        }
+        function New-StandInTask {
+            param(
+                [string]$Execute,
+                [string]$Arguments,
+                [string]$WorkingDirectory = $installRoot,
+                [string]$TaskPath = '\'
+            )
+            return [pscustomobject]@{
+                TaskPath = $TaskPath
+                Actions = @(
+                    [pscustomobject]@{
+                        Execute = $Execute
+                        Arguments = $Arguments
+                        WorkingDirectory = $WorkingDirectory
+                    }
+                )
+            }
+        }
+        function Test-UninstallerOwns {
+            # As the uninstaller asks: by pattern when the program folder is gone, exactly when it names the repository.
+            param([object]$Task, [string]$RepositoryId = '')
+            $standInTask = $Task
+            $expectation = Get-CloudTaskExpectation -Task $Task -RepositoryId $RepositoryId
+            try {
+                if ($RepositoryId) {
+                    $owned = Assert-OwnedTask -TaskName 'ResticBackuperGoogleDriveSync' `
+                        -ExpectedExecutable $expectation.Executable -ExpectedArguments $expectation.Arguments
+                }
+                else {
+                    $owned = Assert-OwnedTask -TaskName 'ResticBackuperGoogleDriveSync' `
+                        -ExpectedExecutable $expectation.Executable `
+                        -ExpectedArgumentsPattern $expectation.ArgumentsPattern
+                }
+            }
+            catch {
+                if ([string]$_.Exception.Message -cne 'refused: task_not_owned') {
+                    throw
+                }
+                return $false
+            }
+            return $null -ne $owned
+        }
+
+        $installRoot = Join-Path $fixtureRoot 'Program Files\ResticBackuper'
+        $windowsPowerShell = $powershell
+        $configurationPath = Join-Path $installRoot 'backup-config.json'
+        $cloudVerificationRoot = Join-Path $fixtureRoot 'ProgramData\ResticBackuperCloudVerification'
+        $launcher = Join-Path $installRoot 'ResticBackuperTaskLauncher.exe'
+        $id = 'ab' * 32
+        $otherId = 'cd' * 32
+        $launcherArguments = '--google-drive-check --expected-repository-id ' + $id
+        $earlierArguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' +
+            (Join-Path $installRoot 'verify_my_drive_cloud_repository.ps1') + '" -ConfigPath "' + $configurationPath +
+            '" -CloudVerificationRoot "' + $cloudVerificationRoot + '" -ExpectedRepositoryId "' + $id + '"'
+        $twoActions = New-StandInTask -Execute $launcher -Arguments $launcherArguments
+        $twoActions.Actions = @($twoActions.Actions[0], $twoActions.Actions[0])
+
+        foreach ($repositoryId in @('', $id)) {
+            $when = if ($repositoryId) { 'with the program folder' } else { 'without the program folder' }
+            Assert-True (
+                Test-UninstallerOwns -Task (New-StandInTask -Execute $launcher -Arguments $launcherArguments) `
+                    -RepositoryId $repositoryId
+            ) "uninstaller does not recognize the task launcher action $when"
+            Assert-True (
+                Test-UninstallerOwns -Task (New-StandInTask -Execute $powershell -Arguments $earlierArguments) `
+                    -RepositoryId $repositoryId
+            ) "uninstaller does not recognize the earlier PowerShell action $when"
+            foreach ($case in @(
+                @('an extra argument', (New-StandInTask -Execute $launcher -Arguments ($launcherArguments + ' --verbose'))),
+                @('a line break after the ID', (New-StandInTask -Execute $launcher -Arguments ($launcherArguments + "`n"))),
+                @('a line break after the earlier action', (
+                    New-StandInTask -Execute $powershell -Arguments ($earlierArguments + "`n"))),
+                @('a short ID', (New-StandInTask -Execute $launcher -Arguments (
+                    $launcherArguments.Substring(0, $launcherArguments.Length - 1)))),
+                @('the launcher with the earlier arguments', (New-StandInTask -Execute $launcher -Arguments $earlierArguments)),
+                @('Windows PowerShell with the launcher arguments', (
+                    New-StandInTask -Execute $powershell -Arguments $launcherArguments)),
+                @('another program', (New-StandInTask -Execute (Join-Path $fixtureRoot 'other.exe') -Arguments $launcherArguments)),
+                @('another working folder', (
+                    New-StandInTask -Execute $launcher -Arguments $launcherArguments -WorkingDirectory $fixtureRoot)),
+                @('another task folder', (
+                    New-StandInTask -Execute $launcher -Arguments $launcherArguments -TaskPath '\Other\')),
+                @('two actions', $twoActions)
+            )) {
+                Assert-True (
+                    -not (Test-UninstallerOwns -Task $case[1] -RepositoryId $repositoryId)
+                ) "uninstaller owns a Google Drive task with $($case[0]) $when"
+            }
+        }
+        # Without the program folder any well-formed ID is accepted; with it, only the registered one.
+        Assert-True (
+            Test-UninstallerOwns -Task (New-StandInTask -Execute $launcher -Arguments (
+                '--google-drive-check --expected-repository-id ' + $otherId))
+        ) 'uninstaller does not recognize a leftover task for another repository'
+        Assert-True (
+            -not (Test-UninstallerOwns -Task (New-StandInTask -Execute $launcher -Arguments (
+                '--google-drive-check --expected-repository-id ' + $otherId)) -RepositoryId $id)
+        ) 'uninstaller owns a task for another repository with the program folder'
+        Assert-True (
+            -not (Test-UninstallerOwns -Task (New-StandInTask -Execute $launcher -Arguments (
+                '--google-drive-check --expected-repository-id ' + $id.ToUpperInvariant())))
+        ) 'uninstaller owns a leftover task whose ID is in capitals'
+    }
     Assert-True (
         $uninstallerText -match
             'Preserved cloud verification assets/evidence'

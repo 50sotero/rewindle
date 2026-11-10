@@ -124,7 +124,11 @@ My Drive streaming root; for example:
 G:\My Drive\ResticBackups\Personal
 ```
 
-Install a reviewed Windows x64 rclone build separately. Create a dedicated
+Install a reviewed Windows x64 rclone build, 1.65.0 or later, separately:
+the check compares Google Drive's SHA-256 checksums, which earlier versions do
+not report. Provisioning runs `rclone version` on the protected copy (without
+a window, and stops it after a minute), refuses an older build, and records
+the version in `assets-manifest.json` as `rclone_version`. Create a dedicated
 Google Drive remote named `ResticBackuperGoogleReadOnly` and authorize it with
 the `drive.readonly` scope from the beginning. The verifier forces the
 read-only backend option and My Drive root for every invocation, but it cannot
@@ -201,6 +205,18 @@ the default task name remains `ResticBackuperGoogleDriveSync`. Its installed
 action is now verification-only: daily at 03:00, `InteractiveToken`, Highest,
 `IgnoreNew`, and `StartWhenAvailable`. Installation does not start it and never
 copies, deletes, prunes, or modifies repository objects.
+
+The action starts the task launcher from the program folder:
+`ResticBackuperTaskLauncher.exe --google-drive-check --expected-repository-id
+<repository ID>`. The launcher runs the verifier in Windows PowerShell without
+a window, with Windows' own environment values only (Windows' module folder,
+and Windows' `Temp` folder for temporary files), in a job that ends the
+verifier and every program it started when the launcher ends. It takes the
+verifier and the configuration from its own program folder and the evidence
+folder from Windows, and accepts nothing but a repository ID of 64 lowercase
+hexadecimal digits. A task registered by an earlier version starts
+`powershell.exe` itself, which shows a console window for a moment at every
+run; registering the task again replaces it with the launcher.
 
 After the task completes, inspect Task Scheduler and the dashboard. A successful
 task is not enough by itself: the dashboard must show **Google Drive repository

@@ -45,9 +45,12 @@ $verifierName = 'verify_my_drive_cloud_repository.ps1'
 $inventoryHelperName = 'verify_cloud_repository_inventory.py'
 $passwordHelperName = 'reveal-rclone-config-password.ps1'
 $installerName = 'install_google_drive_sync_task.ps1'
+$launcherName = 'ResticBackuperTaskLauncher.exe'
 $runtimeManifestName = 'runtime-manifest.json'
 $primaryTaskEvidenceName = 'scheduled-task.xml'
 $taskEvidenceName = 'google-drive-verification-task.xml'
+# The check compares Google Drive's SHA-256 checksums, which rclone reports from this version on.
+$minimumRcloneVersion = [Version]'1.65.0'
 
 function Test-SamePath {
     param(
@@ -502,6 +505,74 @@ function Read-VerifiedAssetManifest {
     return $manifest
 }
 
+function ConvertFrom-RcloneVersionText {
+    # The version on the first line of `rclone version` ("rclone v1.74.4", or "rclone v1.66.0-beta.7731.6a8ddbcc4").
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string]$Text)
+
+    $firstLine = ([string](($Text -split "`n", 2)[0])).Trim()
+    if ($firstLine -cnotmatch (
+        '^rclone v(?<major>[0-9]{1,4})\.(?<minor>[0-9]{1,4})\.(?<patch>[0-9]{1,6})' +
+        '(?:-[0-9A-Za-z.+-]{1,120})?$'
+    )) {
+        throw 'The rclone version could not be read.'
+    }
+    return [Version]::new(
+        [int]$Matches['major'],
+        [int]$Matches['minor'],
+        [int]$Matches['patch']
+    )
+}
+
+function Get-RcloneVersion {
+    # Runs `rclone version` without a window, with Windows' own values as its whole environment and nothing to read
+    # on its standard input, and returns the version it reports. It is stopped (that process only) if it takes long.
+    param(
+        [Parameter(Mandatory)] [string]$Executable,
+        [ValidateRange(1, 600)] [int]$TimeoutSeconds = 60
+    )
+
+    $system = [Environment]::SystemDirectory
+    $windows = [System.IO.Directory]::GetParent($system).FullName
+    $info = [System.Diagnostics.ProcessStartInfo]::new($Executable)
+    $info.Arguments = 'version'
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardInput = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $info.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $info.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+    $info.WorkingDirectory = Split-Path -Parent $Executable
+    $info.EnvironmentVariables.Clear()
+    $info.EnvironmentVariables['SystemRoot'] = $windows
+    $info.EnvironmentVariables['windir'] = $windows
+    $info.EnvironmentVariables['SystemDrive'] = [System.IO.Path]::GetPathRoot($windows).TrimEnd('\')
+    $info.EnvironmentVariables['PATH'] = $system + ';' + $windows
+    $info.EnvironmentVariables['RCLONE_ASK_PASSWORD'] = 'false'
+    $process = [System.Diagnostics.Process]::Start($info)
+    try {
+        $process.StandardInput.Close()
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $process.Kill() } catch { }
+            throw "rclone did not report its version within $TimeoutSeconds seconds."
+        }
+        if (-not [System.Threading.Tasks.Task]::WaitAll(
+                [System.Threading.Tasks.Task[]]@($stdout, $stderr),
+                10000)) {
+            throw 'The output of rclone version could not be read.'
+        }
+        if ($process.ExitCode -ne 0) {
+            throw "rclone version failed with exit code $($process.ExitCode)."
+        }
+        return ConvertFrom-RcloneVersionText -Text $stdout.Result
+    }
+    finally {
+        $process.Dispose()
+    }
+}
+
 function Install-ProtectedCloudAssets {
     param(
         [Parameter(Mandatory)] [string]$Target,
@@ -588,6 +659,13 @@ function Install-ProtectedCloudAssets {
                 throw 'A staged cloud-verification asset changed during protected copy.'
             }
         }
+        # The protected copy that will run is asked for its version, which the manifest records. An rclone too old to
+        # report Google Drive's SHA-256 checksums could never pass the check.
+        $rcloneVersion = Get-RcloneVersion -Executable (Join-Path $stage 'rclone.exe')
+        if ($rcloneVersion -lt $minimumRcloneVersion) {
+            $tooOld = 'rclone {0} is older than {1}, the first version that reports Google Drive SHA-256 checksums.'
+            throw ($tooOld -f $rcloneVersion, $minimumRcloneVersion)
+        }
         Write-NewUtf8Json `
             -Path (Join-Path $stage 'assets-manifest.json') `
             -Value ([ordered]@{
@@ -595,6 +673,7 @@ function Install-ProtectedCloudAssets {
                 created_utc = [DateTime]::UtcNow.ToString('o')
                 task_user_sid = $CurrentUserSid
                 remote_name = $RemoteName
+                rclone_version = $rcloneVersion.ToString()
                 file_count = $records.Count
                 files = $records
             })
@@ -794,6 +873,7 @@ $verifierPath = Join-Path $protectedRootFull $verifierName
 $inventoryHelperPath = Join-Path $protectedRootFull $inventoryHelperName
 $passwordHelperPath = Join-Path $protectedRootFull $passwordHelperName
 $installerPath = Join-Path $protectedRootFull $installerName
+$launcherPath = Join-Path $protectedRootFull $launcherName
 $taskEvidencePath = Join-Path $protectedRootFull $taskEvidenceName
 if (-not (Test-SamePath -Left $PSScriptRoot -Right $protectedRootFull) -or
     -not (Test-SamePath -Left $PSCommandPath -Right $installerPath) -or
@@ -810,14 +890,16 @@ Assert-RuntimeManifest `
         $installerName,
         $verifierName,
         $inventoryHelperName,
-        $passwordHelperName
+        $passwordHelperName,
+        $launcherName
     )
 foreach ($path in @(
     $configPathFull,
     $installerPath,
     $verifierPath,
     $inventoryHelperPath,
-    $passwordHelperPath
+    $passwordHelperPath,
+    $launcherPath
 )) {
     Assert-NormalFile -Path $path | Out-Null
 }
@@ -925,6 +1007,17 @@ if (-not $ValidateOnly -and
         -Right $canonicalCloudVerificationRoot)) {
     throw 'Production cloud-verification assets are fixed to protected ProgramData storage.'
 }
+# The task launcher starts the check only from its own Program Files folder.
+$canonicalProtectedRoot = [System.IO.Path]::Combine(
+    [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles),
+    'ResticBackuper'
+)
+if (-not $ValidateOnly -and
+    -not (Test-SamePath `
+        -Left $protectedRootFull `
+        -Right $canonicalProtectedRoot)) {
+    throw 'The verification task runs only from the Program Files runtime.'
+}
 if ($ProvisionAssets -and $ValidateOnly) {
     $validationAssets = @(
         @($RcloneExecutableSource, $ExpectedRcloneExecutableSha256),
@@ -981,17 +1074,11 @@ if ($null -ne $assetManifest) {
         throw 'Protected rclone assets do not contain the packaged password helper.'
     }
 }
-$powershell = Join-Path (
-    [System.IO.Directory]::GetParent([Environment]::SystemDirectory).FullName
-) 'System32\WindowsPowerShell\v1.0\powershell.exe'
-Assert-NormalFile -Path $powershell | Out-Null
-$arguments = (
-    '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass ' +
-    '-WindowStyle Hidden -File "' + $verifierPath + '" ' +
-    '-ConfigPath "' + $configPathFull + '" ' +
-    '-CloudVerificationRoot "' + $cloudVerificationRootFull + '" ' +
-    '-ExpectedRepositoryId "' + $repositoryId + '"'
-)
+# The task starts the check through the task launcher, which runs the verifier in Windows PowerShell without a window
+# (Task Scheduler starting powershell.exe itself shows a console window for a moment, even with -WindowStyle Hidden) and
+# with Windows' own environment. The launcher takes the verifier, the configuration and the evidence folder from its own
+# program folder and from Windows; only the repository ID is passed.
+$arguments = '--google-drive-check --expected-repository-id ' + $repositoryId
 if ($arguments -match
     '(?i)(password|credential|secret|DestinationRoot|sync_repository_to_google_drive)') {
     throw 'The verification action would expose a secret or legacy mirror argument.'
@@ -1033,7 +1120,14 @@ $validation = [ordered]@{
             Join-Path $cloudVerificationRootFull 'assets-manifest.json'
         )
     }
-    action_execute = $powershell
+    # Recorded when the assets were provisioned; assets provisioned by an earlier version have none.
+    rclone_version = if ($null -ne $assetManifest -and
+        $assetManifest.PSObject.Properties.Name -contains 'rclone_version') {
+        [string]$assetManifest.rclone_version
+    } else {
+        $null
+    }
+    action_execute = $launcherPath
     action_arguments = $arguments
     action_working_directory = $protectedRootFull
     local_mirror_destination = $null
@@ -1078,7 +1172,7 @@ if (Test-Path -LiteralPath $taskEvidencePath -PathType Leaf) {
 }
 
 $action = ScheduledTasks\New-ScheduledTaskAction `
-    -Execute $powershell `
+    -Execute $launcherPath `
     -Argument $arguments `
     -WorkingDirectory $protectedRootFull
 $dailyTrigger = ScheduledTasks\New-ScheduledTaskTrigger `
@@ -1125,7 +1219,7 @@ try {
     $registeredXml = ScheduledTasks\Export-ScheduledTask -TaskName $TaskName
     Assert-RegisteredTaskDefinition `
         -Xml $registeredXml `
-        -ExpectedExecute $powershell `
+        -ExpectedExecute $launcherPath `
         -ExpectedArguments $arguments `
         -ExpectedWorkingDirectory $protectedRootFull `
         -ExpectedUserSid $userSid
