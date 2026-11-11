@@ -1098,6 +1098,7 @@ function Update-ProtectedPasswordHelper {
     $stagedManifest = Join-Path $copy 'assets-manifest.json.new'
     $lock = $null
     $swapStarted = $false
+    $helperSwapped = $false
     try {
         [System.IO.Directory]::CreateDirectory($copy) | Out-Null
         Write-NewFileBytes -Path (Join-Path $copy 'assets-manifest.json.previous') -Bytes $manifestBytes
@@ -1126,6 +1127,7 @@ function Update-ProtectedPasswordHelper {
         $swapStarted = $true
         if ($Plan -ceq 'refresh') {
             Move-FileReplacing -Source $stagedHelper -Target $helperPath
+            $helperSwapped = $true
         }
         Move-FileReplacing -Source $stagedManifest -Target $manifestPath
         if ((Get-Sha256Hex -Path $helperPath) -cne $newHelperSha256 -or
@@ -1134,7 +1136,9 @@ function Update-ProtectedPasswordHelper {
         }
     }
     finally {
-        if ($swapStarted -and $Plan -ceq 'refresh') {
+        # A rename that was refused left the earlier helper where it was, so only a helper that was swapped can need
+        # putting back. Stopped between the rename and the flag, the folder is left for registering again to finish.
+        if ($helperSwapped) {
             # The helper was swapped and the manifest was not: the earlier helper goes back, so the two agree again.
             try {
                 if ((Get-Sha256Hex -Path $helperPath) -ceq $newHelperSha256 -and

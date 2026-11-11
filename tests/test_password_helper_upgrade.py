@@ -908,6 +908,54 @@ ConvertTo-AsciiJson -Value ([ordered]@{
         self.assertEqual(2, kept.count("assets-manifest.json.previous"))
         verifier_accepts(self, self.fixture.root)
 
+    def test_a_helper_that_was_never_replaced_is_not_reported_as_not_put_back(self):
+        # Another program opens the helper, shares it with no one, and keeps it open: its rename is refused, so the
+        # earlier helper is still in place and nothing needs putting back.
+        report = self.probe(
+            r"""
+New-AssetsRoot -Root $root -HelperBytes $earlierBytes
+$plan = Get-RootPlan -Root $root -PackagedPath $packaged
+$realMove = ${function:Move-FileReplacing}
+$script:holder = $null
+function Move-FileReplacing {
+    param([string]$Source, [string]$Target)
+
+    if ($Target.EndsWith('reveal-rclone-config-password.ps1') -and $null -eq $script:holder) {
+        $script:holder = [IO.File]::Open($Target, 'Open', 'Read', 'None')
+    }
+    & $realMove -Source $Source -Target $Target
+}
+$message = ''
+$warnings = @()
+try {
+    [void](Invoke-Refresh -Root $root -Plan $plan -PackagedPath $packaged -LockPath $lockPath 3>&1 |
+        ForEach-Object { $warnings += [string]$_ })
+}
+catch {
+    $message = $_.Exception.Message
+}
+finally {
+    if ($null -ne $script:holder) {
+        $script:holder.Dispose()
+    }
+}
+ConvertTo-AsciiJson -Value ([ordered]@{
+    held = $null -ne $script:holder
+    message = $message
+    warnings = $warnings
+    plan_after = Get-RootPlan -Root $root -PackagedPath $packaged
+})
+"""
+        )
+        self.assertTrue(report["held"], "the helper was never held open")
+        self.assertRegex(
+            report["message"],
+            "^Could not replace " + re.escape(str(self.fixture.root / HELPER_NAME)) + " with .+ If another program",
+        )
+        self.assertEqual([], report["warnings"], "a helper that was never replaced was reported as not put back")
+        self.assertEqual(earlier_helper(2), (self.fixture.root / HELPER_NAME).read_bytes())
+        self.assertEqual("refresh", report["plan_after"])
+
     def test_assets_that_change_before_the_swap_are_left_alone(self):
         # Just after the run lock is taken, one file changes: the helper or the manifest in the assets root, or one of
         # the replacements written into the evidence folder. The refresh stops before it swaps anything.
