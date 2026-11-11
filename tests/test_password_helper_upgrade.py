@@ -1076,6 +1076,37 @@ ConvertTo-AsciiJson -Value $results
                 self.assertEqual("Cloud-verification asset size or hash mismatch: " + name, report[name])
         self.assertEqual("", report[HELPER_NAME])
 
+    def test_the_plan_refuses_assets_it_cannot_bring_up_to_date(self):
+        # The plan the installer makes from the assets refuses, with what to do: a helper no Rewindle shipped, assets
+        # set up by a newer Rewindle, and a packaged helper this Rewindle does not know.
+        stranger = self.temp / "stranger-helper.ps1"
+        stranger.write_bytes(earlier_helper(2) + b"# added\n")
+        report = self.probe(
+            "\n".join(["$stranger = " + ps_literal(stranger), "$earlierPath = " + ps_literal(self.fixture.earlier)])
+            + r"""
+$results = [ordered]@{}
+# The case, the helper in the assets, the packaged helper.
+foreach ($case in @(
+        @('unknown', $stranger, $packaged),
+        @('newer', $packaged, $earlierPath),
+        @('packaged_unknown', $earlierPath, $stranger))) {
+    $caseRoot = Join-Path (Split-Path -Parent $root) ('assets-' + $case[0])
+    New-AssetsRoot -Root $caseRoot -HelperBytes ([IO.File]::ReadAllBytes($case[1]))
+    try {
+        $results[$case[0]] = 'allowed: ' + (Get-RootPlan -Root $caseRoot -PackagedPath $case[2])
+    }
+    catch {
+        $results[$case[0]] = $_.Exception.Message
+    }
+}
+ConvertTo-AsciiJson -Value $results
+"""
+        )
+        self.assertIn("no version of Rewindle shipped", report["unknown"])
+        self.assertIn("Move " + str(self.temp / "assets-unknown") + " aside", report["unknown"])
+        self.assertIn("set up by a newer version of Rewindle", report["newer"])
+        self.assertIn("does not recognise its own rclone password helper", report["packaged_unknown"])
+
     def test_a_file_is_replaced_in_one_step_or_not_at_all(self):
         report = self.probe(
             r"""
