@@ -19,7 +19,7 @@ namespace Rewindle.Setup
         public string Repository;
         public string StorageMode = InstallerContract.StorageLocalNtfs;
         public string DriveFsMyDriveRoot;
-        // "password" or "no_password": the person's choice for backups that are being started. Only an install carries it.
+        // "password" or "no_password": the person's choice for backups that are being started. Only an install, and the plan made just before it, carry it.
         public string RepositoryAccess;
         public readonly List<string> Sources = new List<string>();
         public string Schedule;
@@ -267,8 +267,11 @@ namespace Rewindle.Setup
             return arguments;
         }
 
-        // withAccess is true only for the install: a plan describes the location alone, so it never carries the person's password choice
-        // (the installer would then warn about a mode the person never saw at a location that may already have backups).
+        // withAccess is true for the install and for the plan made just before it (PlanArguments' forInstall), and for nothing else. The
+        // plans the wizard asks for describe the location alone, so they never carry the person's password choice (the installer would
+        // then warn about a mode the person never saw at a location that may already have backups). The check before the install must
+        // judge the install as it will run, so it carries the choice when the install will: without it the installer takes a password
+        // for a new location, and refuses over a recovery key file that an install without a password never reads.
         private static void AddChoices(List<string> arguments, InstallerInputs inputs, bool withAccess)
         {
             if (inputs.Repository != null)
@@ -304,14 +307,16 @@ namespace Rewindle.Setup
             }
         }
 
-        // Plan mode: runs without elevation and changes nothing, and writes the plan to planOutput.
-        public static List<string> PlanArguments(string scriptPath, string planOutput, InstallerInputs inputs)
+        // Plan mode: runs without elevation and changes nothing, and writes the plan to planOutput. forInstall is true for the check
+        // made just before an install, which carries -RepositoryAccess exactly when InstallArguments does (when inputs has a choice);
+        // it is false for the plans the wizard asks for, which never carry it.
+        public static List<string> PlanArguments(string scriptPath, string planOutput, InstallerInputs inputs, bool forInstall)
         {
             List<string> arguments = ScriptArguments(scriptPath);
             arguments.Add("-PlanOnly");
             arguments.Add("-PlanOutput");
             arguments.Add(planOutput);
-            AddChoices(arguments, inputs, false);
+            AddChoices(arguments, inputs, forInstall);
             return arguments;
         }
 

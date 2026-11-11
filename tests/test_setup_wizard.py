@@ -781,6 +781,46 @@ out.changed = {
 out.another = Object.fromEntries(
   ['repository_access_mismatch', 'repository_password_unavailable', 'repository_access_unreadable', 'recovery_key_failed', 'repository_initialization_failed', '', null, undefined]
     .map(code => [String(code), contract.leadsToAnotherLocation(code)]));
+// The same findings as warnings (the first page leaves them out of those too), and the five fields an issue can name.
+const warned = warnings => contract.parsePlan({
+  schema: 'Rewindle.InstallPlan.v1', ok: true, errors: [], warnings, defaults: {},
+  resolved: { repository: R, existing_repository_access: null }, environment: { existing_install: { rewindle: null } } });
+out.welcome_warnings = contract.welcomeIssues(warned([finding('recovery_key_stale'), finding('recovery_key_path_unsafe'), finding('drive_is_slow')])).warnings.map(issue => issue.code);
+out.fields = contract.ISSUE_FIELDS;
+const named = ['repository', 'sources', 'schedule', 'storage_mode', 'environment', 'bogus'];
+out.parsed_fields = plan(R, null, named.map(field => finding('about_' + field, field))).errors.map(issue => [issue.code, issue.field]);
+const sourcesError = plan(R, null, [finding('source_not_found', 'sources')]);
+out.sources = {
+  welcome: codes(contract.welcomeIssues(sourcesError)), folders: codes(contract.issuesFor(sourcesError, 'sources')),
+  review: codes(contract.reviewIssues(sourcesError, R, 'password', false)),
+};
+// What Review lists after an install was refused: every error of that plan, whatever the pick; otherwise as installIssues says.
+const reviewed = (name, p, repository, pick, blocked) => { out['review_' + name] = codes(contract.reviewIssues(p, repository, pick, blocked)); };
+reviewed('refused_none', plan(R, null, keyErrors), R, 'no_password', true);
+reviewed('refused_password', plan(R, null, keyErrors), R, 'password', true);
+reviewed('refused_recorded_none', plan(R, 'no_password', keyErrors), R, 'password', true);
+reviewed('refused_no_plan', null, R, 'no_password', true);
+reviewed('not_refused_none', plan(R, null, keyErrors), R, 'no_password', false);
+reviewed('not_refused_password', plan(R, null, keyErrors), R, 'password', false);
+reviewed('not_said', plan(R, null, keyErrors), R, 'no_password', undefined);
+reviewed('not_said_null', plan(R, null, keyErrors), R, 'no_password', null);
+// A plan the installer made with the person's pick: only its resolved mode follows the pick, what is already at the location stays the
+// location's own, so nothing that reads that (what is sent, the Password page, the mode the page expects, which findings count) moves.
+const made = (existing, mode) => contract.parsePlan({
+  schema: 'Rewindle.InstallPlan.v1', ok: true, errors: [], warnings: [], defaults: {},
+  resolved: { repository: R, repository_access: mode, existing_repository_access: existing }, environment: { existing_install: { rewindle: null } } });
+out.made = {};
+for (const existing of [null, 'password', 'no_password', 'unknown']) {
+  for (const mode of [null, 'password', 'no_password']) {
+    for (const pick of ['password', 'no_password']) {
+      const p = made(existing, mode);
+      out.made[[existing, mode, pick].join('|')] = {
+        resolved: p.resolved.repositoryAccess, existing: p.resolved.existingRepositoryAccess, send: contract.accessToSend(p, R, pick) ?? null,
+        page: contract.passwordPageFor(p, R, false, false), planned: contract.plannedAccess(p, R, pick), applies: contract.passwordFindingsApply(p, R, pick),
+      };
+    }
+  }
+}
 console.log(JSON.stringify(out));
 """
 
@@ -901,6 +941,63 @@ console.log(JSON.stringify(out));
         self.assertEqual(["recovery_key_stale"], out["install_key_code_about_another_field"])
         self.assertEqual([], out["install_no_plan_yet"])
 
+    def test_the_first_page_leaves_a_leftover_recovery_key_out_of_its_warnings_too(self) -> None:
+        out = node_module(self.RULES, self.uri)
+        # Errors and warnings alike: only the finding that has nothing to do with the password is left for the first page.
+        self.assertEqual(["drive_is_slow"], out["welcome_warnings"])
+
+    def test_every_field_an_issue_can_name_is_one_the_parser_keeps(self) -> None:
+        out = node_module(self.RULES, self.uri)
+        fields = ["repository", "sources", "schedule", "storage_mode", "environment"]
+        self.assertEqual(fields, out["fields"])
+        # A field the wizard does not know is read as the environment's; each of the five is kept as it is.
+        self.assertEqual(
+            [[f"about_{field}", field] for field in fields] + [["about_bogus", "environment"]], out["parsed_fields"])
+        # So a finding about the folders is one for the Folders page and Review, and never one for the first page.
+        self.assertEqual({"welcome": [], "folders": ["source_not_found"], "review": ["source_not_found"]}, out["sources"])
+
+    def test_review_lists_every_error_of_a_plan_an_install_was_refused_with(self) -> None:
+        out = node_module(self.RULES, self.uri)
+        key, other = ["recovery_key_stale", "recovery_key_path_unsafe"], ["task_name_in_use"]
+        # The host refuses on errors alone: all of them are listed, a leftover recovery key included whatever the pick or the record says,
+        # so "nothing was installed" is never shown over an empty list.
+        for case in ("refused_none", "refused_password", "refused_recorded_none"):
+            with self.subTest(case=case):
+                self.assertEqual(key + other, out["review_" + case])
+        self.assertEqual([], out["review_refused_no_plan"])
+        # Any other plan is read as installIssues reads it: no password picked (or recorded), and the key findings do not count.
+        self.assertEqual(other, out["review_not_refused_none"])
+        self.assertEqual(key + other, out["review_not_refused_password"])
+        for case in ("not_said", "not_said_null"):
+            with self.subTest(case=case):
+                self.assertEqual(other, out["review_" + case])
+
+    def test_a_plan_made_with_the_pick_changes_nothing_that_reads_what_is_already_at_the_location(self) -> None:
+        out = node_module(self.RULES, self.uri)
+        key = lambda *parts: "|".join("" if part is None else part for part in parts)
+        for existing in (None, "password", "no_password", "unknown"):
+            for pick in ("password", "no_password"):
+                # What the installer reports when it was given no pick (a plan request never carries one), and with each pick: only the
+                # resolved mode moves; what is sent, the page, the mode the page expects and the findings that count are the same.
+                plain = out["made"][key(existing, None, pick)]
+                for mode in ("password", "no_password"):
+                    with self.subTest(existing=existing, mode=mode, pick=pick):
+                        carried = out["made"][key(existing, mode, pick)]
+                        self.assertEqual(mode, carried["resolved"])
+                        self.assertEqual(existing, carried["existing"])
+                        for name in ("send", "page", "planned", "applies"):
+                            self.assertEqual(plain[name], carried[name], name)
+        # And what that is, for a location with no backups: the pick is sent, the choice stays offered, the pick is what is expected.
+        for pick in ("password", "no_password"):
+            for mode in ("password", "no_password"):
+                carried = out["made"][key(None, mode, pick)]
+                self.assertEqual(pick, carried["send"])
+                self.assertEqual({"kind": "choice"}, carried["page"])
+                self.assertEqual(pick, carried["planned"])
+        # Backups that are already there keep their own kind, whatever mode the plan resolved.
+        self.assertEqual({"kind": "kept", "access": "password"}, out["made"][key("password", "no_password", "no_password")]["page"])
+        self.assertIsNone(out["made"][key("password", "no_password", "no_password")]["send"])
+
     def test_an_install_that_did_not_finish_is_what_makes_the_location_be_asked_about_again(self) -> None:
         out = node_module(self.RULES, self.uri)
         # An install that failed or was cancelled may have left the backups it made. One that finished, one still running, one that
@@ -1013,6 +1110,9 @@ STALE_KEY = (
 )
 UNSAFE_KEY = "Something other than a file is where Rewindle keeps the recovery key in your profile folder."
 TASK_IN_USE = "A scheduled task already has Rewindle’s name. Open Task Scheduler and remove it, then try again."
+SOURCE_MISSING = "“Documents” can’t be found. It may have been moved or deleted (C:\\Users\\you\\Documents)."
+# The host's message when its check before an install refused the choices (SetupOperation.cs); the page puts it under "Nothing was installed".
+REFUSED_NOTICE = "Setup found a problem with your choices before changing anything."
 
 
 def finding(code: str, message: str, field: str = "environment") -> dict:
@@ -1100,6 +1200,17 @@ def render_cases() -> dict:
     page("rv_key_none", "review", plan=plan_json(errors=both + [PC_PROBLEM]), pick="no_password")
     page("rv_key_kept_password", "review", plan=plan_json(existing="password", errors=both), pick="no_password")
     page("rv_key_kept_unknown", "review", plan=plan_json(existing="unknown", errors=[KEY_UNSAFE]), pick="no_password")
+    page("rv_sources_error", "review", plan=plan_json(errors=[finding("source_not_found", SOURCE_MISSING, "sources")]))
+    # The plan an install was refused with (the host stops on errors), back on Review with the notice: every error is listed, a leftover
+    # recovery key included whatever the pick says, so the notice never stands over an empty list. Once the plan is renewed it is read
+    # by the pick again (rv_key_none above is the same plan, not refused).
+    refused = {"blocked": True, "notice": REFUSED_NOTICE}
+    page("rv_refused_key_none", "review", plan=plan_json(errors=both), pick="no_password", **refused)
+    page("rv_refused_key_none_and_pc", "review", plan=plan_json(errors=both + [PC_PROBLEM]), pick="no_password", **refused)
+    page("rv_refused_key_password", "review", plan=plan_json(errors=both), pick="password", **refused)
+    page("rv_refused_key_kept_none", "review", plan=plan_json(existing="no_password", errors=[KEY_STALE]), pick="password", **refused)
+    page("rv_refused_pc", "review", plan=plan_json(errors=[PC_PROBLEM]), pick="no_password", **refused)
+    page("rv_renewed_key_none", "review", plan=plan_json(errors=both), pick="no_password", notice=REFUSED_NOTICE)
     # The installer's refusal of backups with a password this PC doesn't have, as a finding about the location.
     unavailable = [finding("repository_password_unavailable", PASSWORD_UNAVAILABLE, "repository")]
     page("loc_password_unavailable", "location", plan=plan_json(existing="password", errors=unavailable))
@@ -1164,6 +1275,10 @@ def render_cases() -> dict:
     uninstalled("un_none", {"state_root": "C:\\ProgramData\\Rewindle", "repository": FOLDER, "recovery_key": None, "recovery_tools": "E:\\Rewindle\\RecoveryTools", "repository_access": "no_password"})
     uninstalled("un_password", {"state_root": "C:\\ProgramData\\Rewindle", "repository": FOLDER, "recovery_key": RECOVERY_KEY, "recovery_tools": "E:\\Rewindle\\RecoveryTools", "repository_access": "password"})
     uninstalled("un_not_told", {"state_root": "C:\\ProgramData\\Rewindle", "repository": FOLDER, "recovery_key": RECOVERY_KEY, "recovery_tools": None})
+    # The kind unknown in the other ways: the record named none, a value that is no mode, and no record of what was kept at all.
+    uninstalled("un_null", {"state_root": "C:\\ProgramData\\Rewindle", "repository": FOLDER, "recovery_key": None, "recovery_tools": None, "repository_access": None})
+    uninstalled("un_bogus", {"state_root": "C:\\ProgramData\\Rewindle", "repository": FOLDER, "recovery_key": None, "recovery_tools": None, "repository_access": "bogus"})
+    uninstalled("un_no_record", None)
 
     # What a plan request carries, with each pick.
     page("inputs_password", "inputs", plan=plan_json(), pick="password")
@@ -1174,7 +1289,7 @@ def render_cases() -> dict:
 ENTRY = """
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { PLAN_SCHEMA, PROGRESS_SCHEMA, parsePlan, parseProgressLine, passwordPageFor, plannedAccess, recoveryNeededFor } from '__SETUP__/contract';
+import { PLAN_SCHEMA, PROGRESS_SCHEMA, parsePlan, parseProgressLine, passwordPageFor, plannedAccess, recoveryNeededFor, reviewIssues } from '__SETUP__/contract';
 import { accessOfOperation, inputsOf, stepsFor } from '__SETUP__/useWizard';
 import { Welcome } from '__SETUP__/screens/Welcome';
 import { Location } from '__SETUP__/screens/Location';
@@ -1209,9 +1324,11 @@ function wizardFor(spec: any): any {
   const access = operation && operation.operation === 'install' ? accessOfOperation(operation) : plannedAccess(plan, choices.repository, choices.repositoryAccess);
   const recoveryNeeded = recoveryNeededFor(access);
   return {
-    choices, base, host: { version: '1.2.3', locale: 'en-GB' }, theme: { reducedMotion: true }, sizes: {}, notice: null, refreshing: false, refreshNote: null, keptRepository: null,
-    validation: { plan, checking: !!spec.checking, error: spec.failed ? 'The installer could not be asked.' : null },
+    choices, base, host: { version: '1.2.3', locale: 'en-GB' }, theme: { reducedMotion: true }, sizes: {}, refreshing: false, refreshNote: null, keptRepository: null,
+    notice: spec.notice ? { screen: 'review', text: spec.notice } : null,
+    validation: { plan, checking: !!spec.checking, error: spec.failed ? 'The installer could not be asked.' : null, blocked: !!spec.blocked },
     passwordPage, access, recoveryNeeded, steps: stepsFor(recoveryNeeded), operation,
+    findings: reviewIssues(plan, choices.repository, choices.repositoryAccess, !!spec.blocked),
     actions: { setRepositoryAccess: noop, setStartBackup: noop, refreshDrives: noop, chooseDrive: noop, chooseDriveFs: noop, chooseKeptRepository: noop, browseRepository: noop }, goTo: noop, request: () => Promise.resolve(undefined), openLink: noop,
   };
 }
@@ -1538,6 +1655,32 @@ class RenderedPageTests(unittest.TestCase):
             self.assertNotIn(message, none)
         self.assertIn(TASK_IN_USE, none)
 
+    def test_review_after_a_refused_install_lists_every_error_of_the_plan_it_was_refused_with(self) -> None:
+        both = (STALE_KEY, UNSAFE_KEY)
+        # The notice is never over an empty list: the leftover recovery key's findings are listed as errors although the pick is no password
+        # (the list that left them out for that pick is what showed the notice over nothing).
+        for name, messages in (
+            ("rv_refused_key_none", both), ("rv_refused_key_none_and_pc", both + (TASK_IN_USE,)), ("rv_refused_key_password", both),
+            ("rv_refused_key_kept_none", (STALE_KEY,)), ("rv_refused_pc", (TASK_IN_USE,)),
+        ):
+            with self.subTest(page=name):
+                text = self.text(name)
+                self.assertIn("Nothing was installed", text)
+                self.assertIn(REFUSED_NOTICE, text)
+                self.assertEqual(len(messages), self.pages[name].count('<div class="callout is-error"><svg'), name)
+                for message in messages:
+                    self.assertIn(message, text)
+                    self.assertRegex(self.pages[name], r'<div class="callout is-error">(?:<[^>]+>)*<span>' + re.escape(message[:30]))
+        # Renewed (a newer plan, which is not the refused one): the same errors are read by the pick again, and the page says nothing is left.
+        renewed = self.text("rv_renewed_key_none")
+        for message in both:
+            self.assertNotIn(message, renewed)
+        self.assertNotIn('<div class="callout is-error"><svg', self.pages["rv_renewed_key_none"])
+
+    def test_review_lists_a_finding_about_the_folders(self) -> None:
+        self.assertIn(SOURCE_MISSING, self.text("rv_sources_error"))
+        self.assertRegex(self.pages["rv_sources_error"], r'<div class="callout is-error">(?:<[^>]+>)*<span>“Documents” can’t be found')
+
     def test_a_failed_uninstall_says_the_backups_were_not_touched(self) -> None:
         text = self.text("op_uninstall_failed")
         self.assertIn("A scheduled task is running.", text)
@@ -1570,11 +1713,21 @@ class RenderedPageTests(unittest.TestCase):
         self.assertIn("Your backups and recovery key were kept. Keep the recovery key: you need it to restore anything from those backups.", password)
         self.assertNotIn("no recovery key to keep", password)
         self.assertIn(RECOVERY_KEY, password)
-        # The uninstaller did not say which kind the backups are: no key is claimed in the first sentence.
-        not_told = self.text("un_not_told")
-        self.assertIn("Your backups were kept, and so was any recovery key.", not_told)
-        self.assertNotIn("Your backups and recovery key", not_told)
-        self.assertNotIn("no recovery key to keep", not_told)
+        # The uninstaller did not say which kind the backups are (no field, a null, a value that is no mode, or no record of what was
+        # kept at all): no key is claimed in the first sentence, and none is said to be missing. Whoever has one is asked to keep it.
+        for name in ("un_not_told", "un_null", "un_bogus", "un_no_record"):
+            with self.subTest(page=name):
+                not_told = self.text(name)
+                self.assertIn(
+                    "Your backups were kept, and so was any recovery key. If you have a recovery key, keep it: "
+                    "you need it to restore anything from backups that have a password.", not_told)
+                self.assertNotIn("Keep the recovery key", not_told)
+                self.assertNotIn("Your backups and recovery key", not_told)
+                self.assertNotIn("no recovery key to keep", not_told)
+                self.assertNotIn("from those backups", not_told)
+        # Each kind has its own advice and never another's.
+        self.assertNotIn("If you have a recovery key", none)
+        self.assertNotIn("If you have a recovery key", password)
 
     # ---- all of it
 
@@ -1663,37 +1816,45 @@ export function useEffect(effect, deps) {
 
 HOOK_ENTRY = """
 import { useWizard } from '__SETUP__/useWizard';
+import { ISSUE_FIELDS, accessToSend, installIssues } from '__SETUP__/contract';
 import { mount } from './runtime.js';
 
 const E = 'E:\\\\Rewindle\\\\Backups';
 const DOCS = 'C:\\\\Users\\\\you\\\\Documents';
 const settle = async () => { for (let i = 0; i < 30; i++) await new Promise(resolve => setImmediate(resolve)); };
+const KEY_STALE = { code: 'recovery_key_stale', field: 'environment', message: 'A recovery key from an earlier setup is still in your profile folder.', path: null, detail: null };
 
-// One run: the person picks "No password" for an empty location and chooses Install; the installer ends as `outcome` (having made the
-// backups first, unless it was cancelled before it began); the person goes back to Review, picks a password and chooses Install again.
-export async function run(outcome: string) {
+// The desktop program in a script: it answers what the wizard asks, and the clock is the script's. `onInstall` decides how an install ends
+// (n counts the installs asked for so far; `plan` writes a plan the way the installer does, `pick` being what a plan made with the
+// person's pick carries as its mode, which a plan request never has).
+function scripted(onInstall: (n: number, host: any, emit: (event: string, data: unknown) => void, plan: (repository: string, extra?: any) => any) => void) {
   const timers = new Map<number, { fn: () => void; ms: number }>();
   let timerId = 0;
   const requests: any[] = [];
   const installs: any[] = [];
-  const host = { backups: null as string | null };
+  // `backups`: the mode of the backups at the location (null: none there). `staleKey`: a recovery key is left in the profile folder, which
+  // the installer reports for a new location unless it was told the backups will have no password.
+  const host = { backups: null as string | null, staleKey: false };
   let listener: any = null;
   const emit = (event: string, data: unknown) => listener({ data: { type: 'event', event, data } });
-  const plan = (repository: string) => ({
-    schema: 'Rewindle.InstallPlan.v1', ok: true, errors: [], warnings: [],
-    resolved: {
-      repository, storage_mode: 'local_ntfs', repository_access: host.backups ?? 'password', existing_repository_access: host.backups,
-      sources: [DOCS], schedule: '02:00', vss: true,
-    },
-    defaults: { repository: E, storage_mode: 'local_ntfs', sources: [DOCS], schedule: '02:00' },
-    environment: {
-      version: '1.2.3', os: { caption: 'Windows', build: '1', x64: true, supported: true }, powershell: '5.1', dotnet_framework_48: true,
-      elevated: false, webview2: '1', existing_install: { rewindle: null },
-      volumes: [{ root: 'E:\\\\', label: 'Backup Drive', filesystem: 'NTFS', drive_type: 'removable', size_bytes: 1e12, free_bytes: 9e11, is_system: false,
-        same_physical_disk_as_system: false, eligible: true, recommended: true }],
-      drivefs: { detected: false }, known_folders: [{ key: 'Documents', path: DOCS, exists: true, default_selected: true }],
-    },
-  });
+  const plan = (repository: string, extra: { pick?: string; errors?: any[] } = {}) => {
+    const errors = extra.errors ?? (host.staleKey && host.backups === null && extra.pick !== 'no_password' ? [KEY_STALE] : []);
+    return {
+      schema: 'Rewindle.InstallPlan.v1', ok: errors.length === 0, errors, warnings: [],
+      resolved: {
+        repository, storage_mode: 'local_ntfs', repository_access: host.backups ?? extra.pick ?? 'password', existing_repository_access: host.backups,
+        sources: [DOCS], schedule: '02:00', vss: true,
+      },
+      defaults: { repository: E, storage_mode: 'local_ntfs', sources: [DOCS], schedule: '02:00' },
+      environment: {
+        version: '1.2.3', os: { caption: 'Windows', build: '1', x64: true, supported: true }, powershell: '5.1', dotnet_framework_48: true,
+        elevated: false, webview2: '1', existing_install: { rewindle: null },
+        volumes: [{ root: 'E:\\\\', label: 'Backup Drive', filesystem: 'NTFS', drive_type: 'removable', size_bytes: 1e12, free_bytes: 9e11, is_system: false,
+          same_physical_disk_as_system: false, eligible: true, recommended: true }],
+        drivefs: { detected: false }, known_folders: [{ key: 'Documents', path: DOCS, exists: true, default_selected: true }],
+      },
+    };
+  };
   const answer = async (message: any) => {
     switch (message.command) {
       case 'hello': return { protocol: 1, version: '1.2.3', dark: false, highContrast: false, reducedMotion: false, host: 'desktop' };
@@ -1706,10 +1867,7 @@ export async function run(outcome: string) {
       case 'cancelMeasure': return { cancelled: false };
       case 'install':
         installs.push(message.payload.choices);
-        queueMicrotask(() => {
-          if (outcome !== 'cancelled') host.backups = 'no_password';
-          emit('operationFinished', { operation: 'install', outcome, result: null, message: 'The installer stopped.', exitCode: outcome === 'succeeded' ? 0 : 1 });
-        });
+        queueMicrotask(() => onInstall(installs.length, host, emit, plan));
         return { started: true };
       default: throw new Error('the scripted host does not know ' + message.command);
     }
@@ -1735,9 +1893,17 @@ export async function run(outcome: string) {
     await settle();
   };
   const plansAskedForTheFolder = () => requests.filter(request => request.command === 'getPlan' && request.payload?.inputs?.repository).length;
-
   const app: any = mount(() => useWizard());
-  const wizard = () => app.result;
+  return { wizard: () => app.result, host, installs, letTheChecksRun, plansAskedForTheFolder };
+}
+
+// One run: the person picks "No password" for an empty location and chooses Install; the installer ends as `outcome` (having made the
+// backups first, unless it was cancelled before it began); the person goes back to Review, picks a password and chooses Install again.
+export async function run(outcome: string) {
+  const { wizard, installs, letTheChecksRun, plansAskedForTheFolder } = scripted((_n, host, emit) => {
+    if (outcome !== 'cancelled') host.backups = 'no_password';
+    emit('operationFinished', { operation: 'install', outcome, result: null, message: 'The installer stopped.', exitCode: outcome === 'succeeded' ? 0 : 1 });
+  });
   await settle();
   await letTheChecksRun();
   const facts: any = { screen: wizard().screen, pageBefore: wizard().passwordPage };
@@ -1760,6 +1926,75 @@ export async function run(outcome: string) {
   facts.secondSent = installs.length > 1 ? installs[1].repositoryAccess ?? null : 'no second install was requested';
   return facts;
 }
+
+// A location with no backups and a recovery key left in the profile folder. The person picks "No password" and chooses Install; the
+// installer's check before the install refuses (its plan carries the pick, and an error the pick should have spared: the worst case for
+// what Review lists). Then, as `change` says, the person does nothing, picks the same again, picks the other, or changes a choice; and
+// chooses Install once more, with "No password" picked.
+export async function runRefused(change: string) {
+  const { wizard, host, installs, letTheChecksRun, plansAskedForTheFolder } = scripted((n, host, emit, plan) => {
+    if (n === 1) {
+      emit('operationFinished', {
+        operation: 'install', outcome: 'blocked', result: null, message: 'Setup found a problem with your choices before changing anything.', exitCode: null,
+        plan: plan(E, { pick: 'no_password', errors: [KEY_STALE] }),
+      });
+    } else {
+      host.backups = 'no_password';
+      emit('operationFinished', { operation: 'install', outcome: 'succeeded', result: null, message: '', exitCode: 0 });
+    }
+  });
+  host.staleKey = true;
+  await settle();
+  await letTheChecksRun();
+  const codes = (found: { errors: { code: string }[] }) => found.errors.map(issue => issue.code);
+  // What Review and Install read now, and the facts the password choice rests on (they come from the location's own answer).
+  const state = () => {
+    const w = wizard();
+    return {
+      screen: w.screen, blocked: w.validation.blocked, checking: w.validation.checking, notice: w.notice?.text ?? null,
+      listed: codes(w.findings),
+      // The list as it was before a refused plan was told apart: a leftover key's findings left out for the pick (empty here).
+      listedByThePick: codes(installIssues(w.validation.plan, w.choices.repository, w.choices.repositoryAccess, ...ISSUE_FIELDS)),
+      planErrors: codes(w.validation.plan),
+      pick: w.choices.repositoryAccess, page: w.passwordPage, expected: w.access, send: accessToSend(w.validation.plan, w.choices.repository, w.choices.repositoryAccess) ?? null,
+      recoveryNeeded: w.recoveryNeeded, plans: plansAskedForTheFolder(),
+    };
+  };
+  const facts: any = { before: state() };
+  wizard().actions.setRepositoryAccess('no_password');
+  await settle();
+  wizard().install();
+  await settle();
+  facts.firstSent = installs.length > 0 ? installs[0].repositoryAccess ?? null : 'no install was requested';
+  facts.refused = state();
+  if (change === 'same') {
+    wizard().actions.setRepositoryAccess('no_password');
+    await settle(); await letTheChecksRun();
+    facts.after = state();
+  } else if (change === 'pick') {
+    wizard().actions.setRepositoryAccess('password');
+    await settle();
+    facts.asked = state();
+    await letTheChecksRun();
+    facts.renewed = state();
+    wizard().actions.setRepositoryAccess('no_password');
+    await settle(); await letTheChecksRun();
+    facts.after = state();
+  } else if (change === 'choice') {
+    wizard().actions.setSchedule('03:00');
+    await settle();
+    facts.asked = state();
+    await letTheChecksRun();
+    facts.after = state();
+  }
+  if (change !== 'none' && change !== 'same') {
+    wizard().install();
+    await settle();
+    facts.secondSent = installs.length > 1 ? installs[1].repositoryAccess ?? null : 'no second install was requested';
+    facts.installed = wizard().operation?.finished?.outcome ?? null;
+  }
+  return facts;
+}
 """
 
 HOOK_BUILD = """
@@ -1774,10 +2009,14 @@ await esbuild.build({
 
 HOOK_DRIVER = """
 (async () => {
-  const out = {};
+  const out = { refused: {} };
   for (const outcome of ['failed', 'cancelled', 'succeeded']) {
     delete require.cache[require.resolve(process.argv[2])];
     out[outcome] = await require(process.argv[2]).run(outcome);
+  }
+  for (const change of ['none', 'same', 'pick', 'choice']) {
+    delete require.cache[require.resolve(process.argv[2])];
+    out.refused[change] = await require(process.argv[2]).runRefused(change);
   }
   process.stdout.write(JSON.stringify(out));
 })().catch(error => { console.error(error); process.exit(1); });
@@ -1817,7 +2056,8 @@ class WizardStateRunTests(unittest.TestCase):
 
     def test_the_scripted_run_reaches_the_choice_before_anything_is_installed(self) -> None:
         # The harness itself: the wizard started, asked about the folder, and offered the choice; the pick went with the first install.
-        for outcome, run in self.runs.items():
+        for outcome in ("failed", "cancelled", "succeeded"):
+            run = self.runs[outcome]
             with self.subTest(outcome=outcome):
                 self.assertEqual("welcome", run["screen"])
                 self.assertEqual({"kind": "choice"}, run["pageBefore"])
@@ -1842,6 +2082,93 @@ class WizardStateRunTests(unittest.TestCase):
 
     def test_an_install_that_finished_does_not_ask_again(self) -> None:
         self.assertEqual(1, self.runs["succeeded"]["plansAfter"])
+
+    # ---- an install the installer's own check refused
+
+    STALE = ["recovery_key_stale"]
+
+    def test_the_scripted_refusal_starts_from_a_plan_that_carries_the_key_finding(self) -> None:
+        # The harness itself: the plan requests (which never carry the pick) report the leftover key for the new location, Review lists it
+        # while a password is picked (the default), and the first install is sent with the pick, for the host to check.
+        for change, run in self.runs["refused"].items():
+            with self.subTest(change=change):
+                self.assertEqual("welcome", run["before"]["screen"])
+                self.assertEqual(self.STALE, run["before"]["planErrors"])
+                self.assertEqual(self.STALE, run["before"]["listed"])
+                self.assertEqual({"kind": "choice"}, run["before"]["page"])
+                self.assertEqual("no_password", run["firstSent"])
+
+    def test_after_a_refused_install_review_lists_every_error_of_that_plan_and_install_waits(self) -> None:
+        for change, run in self.runs["refused"].items():
+            with self.subTest(change=change):
+                refused = run["refused"]
+                self.assertEqual("review", refused["screen"])
+                self.assertEqual("Setup found a problem with your choices before changing anything.", refused["notice"])
+                self.assertTrue(refused["blocked"])
+                # The plan's error is a leftover key's, with No password picked: the list that spared it for the pick was empty under the
+                # notice, with Install offered. What Review lists and what Install waits on (wizard.findings, read by both) is not.
+                self.assertEqual(self.STALE, refused["planErrors"])
+                self.assertEqual([], refused["listedByThePick"])
+                self.assertEqual(self.STALE, refused["listed"])
+
+    def test_a_refused_plan_made_with_the_pick_changes_nothing_that_reads_what_is_at_the_location(self) -> None:
+        refused = self.runs["refused"]["none"]["refused"]
+        # The plan's mode follows the pick, the location's own mode (none: no backups there) is as it was: the choice is still offered, the pick
+        # is still the one to send, the mode the page expects and the steps (no recovery key to save) are those of the pick.
+        self.assertEqual({"kind": "choice"}, refused["page"])
+        self.assertEqual("no_password", refused["pick"])
+        self.assertEqual("no_password", refused["send"])
+        self.assertEqual("no_password", refused["expected"])
+        self.assertFalse(refused["recoveryNeeded"])
+        # And it asked nothing more of the installer.
+        self.assertEqual(self.runs["refused"]["none"]["before"]["plans"], refused["plans"])
+
+    def test_nothing_renews_a_refused_plan_until_the_person_changes_something(self) -> None:
+        for change in ("none", "same"):
+            run = self.runs["refused"][change]
+            with self.subTest(change=change):
+                final = run.get("after", run["refused"])
+                self.assertTrue(final["blocked"])
+                self.assertEqual(self.STALE, final["listed"])
+                self.assertEqual(run["before"]["plans"], final["plans"])
+
+    def test_another_pick_renews_a_refused_plan_and_the_page_is_not_stuck(self) -> None:
+        run = self.runs["refused"]["pick"]
+        # The pick changes: the refused plan, made with the other one, is let go of at once and the installer is asked again; until it answers,
+        # Install waits (checking), and nothing is listed from the plan it was refused with.
+        self.assertFalse(run["asked"]["blocked"])
+        self.assertTrue(run["asked"]["checking"])
+        # The answer is the plain plan (no pick in a plan request): the leftover key's finding counts for a password, so it is listed.
+        self.assertEqual(run["refused"]["plans"] + 1, run["renewed"]["plans"])
+        self.assertFalse(run["renewed"]["blocked"])
+        self.assertFalse(run["renewed"]["checking"])
+        self.assertEqual("password", run["renewed"]["pick"])
+        self.assertEqual(self.STALE, run["renewed"]["listed"])
+        # Back to No password: the finding does not count for it, so nothing is listed, no new plan was needed, and Install goes through,
+        # sent with the pick.
+        self.assertEqual("no_password", run["after"]["pick"])
+        self.assertEqual([], run["after"]["listed"])
+        self.assertEqual(run["renewed"]["plans"], run["after"]["plans"])
+        self.assertEqual("no_password", run["secondSent"])
+        self.assertEqual("succeeded", run["installed"])
+
+    def test_picking_the_same_again_does_not_renew_a_refused_plan(self) -> None:
+        run = self.runs["refused"]["same"]
+        self.assertEqual(run["refused"]["plans"], run["after"]["plans"])
+        self.assertTrue(run["after"]["blocked"])
+
+    def test_changing_a_choice_renews_a_refused_plan_through_the_usual_check(self) -> None:
+        run = self.runs["refused"]["choice"]
+        # The check of the changed choices is on its way: Install waits, and the refused plan is still what is listed.
+        self.assertTrue(run["asked"]["checking"])
+        self.assertTrue(run["asked"]["blocked"])
+        # Its answer replaces the refused plan; the finding is read by the pick again (No password: it does not count), Install goes through.
+        self.assertEqual(run["refused"]["plans"] + 1, run["after"]["plans"])
+        self.assertFalse(run["after"]["blocked"])
+        self.assertFalse(run["after"]["checking"])
+        self.assertEqual([], run["after"]["listed"])
+        self.assertEqual("no_password", run["secondSent"])
+        self.assertEqual("succeeded", run["installed"])
 
 
 class PasswordWiringTests(unittest.TestCase):
@@ -1905,15 +2232,22 @@ class PasswordWiringTests(unittest.TestCase):
         # contract.ts decides which findings count (test_a_leftover_recovery_key_counts_only_for_backups_that_have_a_password); the shell
         # and the two pages only ask it, so no page keeps a rule of its own.
         self.assertIn("const blocked = welcomeIssues(plan).errors.length > 0;", self.app)
-        self.assertIn("const problems = installIssues(plan, choices!.repository, choices!.repositoryAccess, ...ISSUE_FIELDS).errors.length > 0", self.app)
+        # Install and Review read one answer, wizard.findings, which useWizard takes from reviewIssues (every field; every error of a plan
+        # an install was refused with): the footer's Install and the list on the page can't disagree.
+        self.assertIn("const problems = wizard.findings.errors.length > 0", self.app)
+        self.assertNotIn("installIssues(", self.app)
         self.assertNotIn("plan?.errors.length", self.app)
         self.assertNotIn("issuesFor(plan, 'environment')", self.app)
         welcome = read(WIZARD / "screens" / "Welcome.tsx")
         self.assertIn("const environment = welcomeIssues(wizard.validation.plan);", welcome)
         self.assertNotIn("issuesFor(", welcome)
         review = read(WIZARD / "screens" / "Review.tsx")
-        self.assertIn("const all = installIssues(plan, choices.repository, choices.repositoryAccess, ...ISSUE_FIELDS);", review)
+        self.assertIn("const all = wizard.findings;", review)
         self.assertNotIn("issuesFor(", review)
+        self.assertNotIn("installIssues(", review)
+        self.assertIn(
+            "const findings = useMemo(\n    () => reviewIssues(validation.plan, choices?.repository ?? '', choices?.repositoryAccess, validation.blocked),", self.wizard)
+        self.assertIn("\n    findings,\n", self.wizard)
         # The two codes are the installer's own, raised for the environment.
         installer = read(PROJECT / "installer" / "Install-ResticBackuper.ps1")
         for code in re.findall(r"'(\w+)'", re.search(r"PASSWORD_ONLY_CODES: readonly string\[\] = \[([^\]]*)\]", self.contract).group(1)):
@@ -1935,6 +2269,11 @@ class PasswordWiringTests(unittest.TestCase):
     def test_what_a_removal_keeps_is_named_by_the_kind_of_backups_in_the_dialogs_too(self) -> None:
         self.assertIn("const keptAccess = wizard.base?.environment.existingInstall.keptRepositoryAccess ?? null;", self.app)
         self.assertEqual(2, self.app.count("{keptWords(keptAccess)}"))
+        # What the dialogs say is two sentences, the words for the kind of backups first and whole: for backups of an unknown kind they read
+        # "Your backups are kept, and so is any recovery key", which a trailing ", so you can ..." would turn into a run-on.
+        self.assertIn("<p><strong>{keptWords(keptAccess)}.</strong> You can still restore files or install Rewindle again. Windows will ask for permission.</p>", self.app)
+        self.assertIn("<p><strong>{keptWords(keptAccess)}.</strong> Setup picks your existing backup location again", self.app)
+        self.assertNotIn("}</strong>, so you can", self.app)
         self.assertNotIn("Your backups and recovery key are kept", self.app)
         self.assertNotIn("and recovery key", self.app)
         self.assertIn("accessOfOperation(operation)", self.app)
@@ -1943,7 +2282,7 @@ class PasswordWiringTests(unittest.TestCase):
 
     def test_the_pick_is_a_choice_that_starts_as_a_password_and_survives_a_change_of_location(self) -> None:
         self.assertIn("startBackup: true, repositoryAccess: 'password' };", self.wizard)
-        self.assertIn("setRepositoryAccess: (repositoryAccess: RepositoryAccess) => update(current => ({ ...current, repositoryAccess })),", self.wizard)
+        self.assertIn("setRepositoryAccess: (repositoryAccess: RepositoryAccess) => {\n      update(current => ({ ...current, repositoryAccess }));", self.wizard)
         # Location changes spread the earlier choices, so the pick is kept; no other screen reads or writes it but the Password page.
         for path in (WIZARD / "screens" / "Location.tsx", WIZARD / "screens" / "Folders.tsx", WIZARD / "screens" / "Schedule.tsx"):
             with self.subTest(file=path.name):
@@ -2001,15 +2340,17 @@ class PasswordWiringTests(unittest.TestCase):
 
     # ---- the host
 
-    def test_the_host_puts_the_password_choice_after_the_drive_pair_and_before_the_folders_at_install_only(self) -> None:
+    def test_the_host_puts_the_password_choice_after_the_drive_pair_and_before_the_folders_at_install_and_the_check_before_it_only(self) -> None:
         start = self.contract_cs.index("private static void AddChoices(")
         body = self.contract_cs[start:self.contract_cs.index("\n        }\n", start)]
         self.assertLess(body.index('"-DriveFsMyDriveRoot"'), body.index('"-RepositoryAccess"'))
         self.assertLess(body.index('"-RepositoryAccess"'), body.index('"-SourceList"'))
         self.assertIn("if (withAccess && inputs.RepositoryAccess != null)", body)
-        self.assertRegex(self.contract_cs, r"AddChoices\(arguments, inputs, false\)")
-        self.assertRegex(self.contract_cs, r"AddChoices\(arguments, inputs, true\)")
+        # The install always carries the choice it was given; a plan only when it is the check made just before the install (forInstall),
+        # never one the wizard asks for (the host's own tests and the wizard's plan requests read the same flag).
         self.assertEqual(1, len(re.findall(r"AddChoices\(arguments, inputs, true\)", self.contract_cs)))
+        self.assertEqual(1, len(re.findall(r"AddChoices\(arguments, inputs, forInstall\)", self.contract_cs)))
+        self.assertNotRegex(self.contract_cs, r"AddChoices\(arguments, inputs, false\)")
 
     def test_the_host_accepts_only_the_two_modes_from_the_page(self) -> None:
         self.assertIn('public const string AccessPassword = "password";', self.contract_cs)

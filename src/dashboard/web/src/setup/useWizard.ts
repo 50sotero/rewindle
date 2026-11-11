@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ContractError, INSTALL_PHASES, NO_PASSWORD_PHASE_TITLES, UNINSTALL_PHASES, accessToSend, installAccess, isUnsupported, keptEntriesOf,
-  locationMayHaveChanged, parsePlan, parseProgressLine, passwordPageFor, plannedAccess, recoveryNeededFor,
+  locationMayHaveChanged, parsePlan, parseProgressLine, passwordPageFor, plannedAccess, recoveryNeededFor, reviewIssues,
   type InstallPlan, type InstallResult, type KnownFolderKey, type PasswordPage, type PlanInputs, type PlanVolume, type ProgressPhase,
   type RepositoryAccess, type StorageMode,
 } from './contract';
@@ -106,7 +106,15 @@ export interface OperationState {
   access: RepositoryAccess | null;
 }
 
-export interface Validation { plan: InstallPlan | null; checking: boolean; error: string | null }
+export interface Validation {
+  plan: InstallPlan | null; checking: boolean; error: string | null;
+  /**
+   * True while `plan` is the one an install was refused with (the host checks the choices once more before it starts, and stops on
+   * errors). That plan was made with the pick the install carried, so Review lists every error of it (reviewIssues). A newer plan, or
+   * another pick, ends it: it describes the choices as they were.
+   */
+  blocked: boolean;
+}
 
 /** A message shown on one page only. */
 export interface Notice { screen: Screen; text: string }
@@ -255,7 +263,7 @@ export function useWizard() {
   const [base, setBase] = useState<InstallPlan | null>(null);
   const [hostError, setHostError] = useState<string | null>(null);
   const [choices, setChoices] = useState<Choices | null>(null);
-  const [validation, setValidation] = useState<Validation>({ plan: null, checking: false, error: null });
+  const [validation, setValidation] = useState<Validation>({ plan: null, checking: false, error: null, blocked: false });
   const [sizes, setSizes] = useState<Record<string, FolderSize>>({});
   const [operation, setOperation] = useState<OperationState | null>(null);
   // A message for one page: what went wrong with something the person just did there (or why the install did not start).
@@ -339,7 +347,8 @@ export function useWizard() {
       });
       if (finished.outcome === 'blocked' && finished.plan) {
         try {
-          setValidation({ plan: parsePlan(finished.plan), checking: false, error: null });
+          // The plan the host refused with: Review lists all of its errors until the plan is renewed or the pick changes.
+          setValidation({ plan: parsePlan(finished.plan), checking: false, error: null, blocked: true });
         } catch { /* the review screen still shows the host's message */ }
         setNotice({ screen: 'review', text: finished.message || 'Setup found a problem with your choices. Nothing was changed.' });
         setScreen('review');
@@ -421,7 +430,7 @@ export function useWizard() {
       setSizes({});
       setChoices(initial);
       setKeptRepository(kept ?? null);
-      setValidation({ plan, checking: false, error: null });
+      setValidation({ plan, checking: false, error: null, blocked: false });
       setScreen(firstScreen(plan));
       setMaintenance(!!plan.environment.existingInstall.rewindle);
       measure(initial.folders.filter(folder => folder.exists).map(folder => folder.path));
@@ -443,7 +452,7 @@ export function useWizard() {
     const timer = window.setTimeout(() => {
       bridge.request('getPlan', { inputs: JSON.parse(inputsKey) }).then(raw => {
         if (id !== planSequence.current) return;
-        setValidation({ plan: parsePlan(raw), checking: false, error: null });
+        setValidation({ plan: parsePlan(raw), checking: false, error: null, blocked: false });
       }).catch(error => {
         if (id !== planSequence.current) return;
         setValidation(current => ({ ...current, checking: false, error: messageOf(error) }));
@@ -603,10 +612,20 @@ export function useWizard() {
     },
     setVss: (vss: boolean) => update(current => ({ ...current, vss })),
     setStartBackup: (startBackup: boolean) => update(current => ({ ...current, startBackup })),
-    /** The person's pick on the Password page. It changes no plan request: inputsOf does not carry it. */
-    setRepositoryAccess: (repositoryAccess: RepositoryAccess) => update(current => ({ ...current, repositoryAccess })),
+    /**
+     * The person's pick on the Password page. It changes no plan request: inputsOf does not carry it. Only a plan an install was refused
+     * with is asked for again: it was made with the other pick, so it says nothing about this one, and nothing else would renew it (the
+     * errors it lists would keep Install off for a pick they were never about).
+     */
+    setRepositoryAccess: (repositoryAccess: RepositoryAccess) => {
+      update(current => ({ ...current, repositoryAccess }));
+      if (validation.blocked && choices?.repositoryAccess !== repositoryAccess) {
+        setValidation(current => ({ ...current, blocked: false }));
+        setRevalidation(count => count + 1);
+      }
+    },
     dismissNotice: () => setNotice(null),
-  }), [base, choices, forgetMeasurement, keptRepository, measure, setScreen, start, update]);
+  }), [base, choices, forgetMeasurement, keptRepository, measure, setScreen, start, update, validation.blocked]);
 
   const runOperation = useCallback(async (kind: Operation, options: { reinstall?: boolean } = {}) => {
     if (!choices) return;
@@ -646,6 +665,10 @@ export function useWizard() {
     [choices?.repository, choices?.repositoryAccess, operation, validation.plan]);
   const recoveryNeeded = recoveryNeededFor(access);
   const steps = useMemo(() => stepsFor(recoveryNeeded), [recoveryNeeded]);
+  // What Review lists and what keeps Install from starting: one answer for both (see reviewIssues).
+  const findings = useMemo(
+    () => reviewIssues(validation.plan, choices?.repository ?? '', choices?.repositoryAccess, validation.blocked),
+    [choices?.repository, choices?.repositoryAccess, validation.blocked, validation.plan]);
 
   // Install starts only after one more scan of the chosen folders: the scan the person waited for may be minutes old, OneDrive
   // or Storage Sense can make files online-only meanwhile, and the installer's own last check doesn't look for them although
@@ -705,6 +728,8 @@ export function useWizard() {
     recoveryNeeded,
     /** The steps of this install, from stepsFor(recoveryNeeded). */
     steps,
+    /** The findings Review lists; Install waits while it has errors. */
+    findings,
     actions,
     goTo: setScreen,
     /** Scans the chosen folders once more, then installs unless online-only files turned up (then back to Review, saying so). */

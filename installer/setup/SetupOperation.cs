@@ -108,7 +108,8 @@ namespace Rewindle.Setup
     // operationLine, operationFinished: the names and shapes web/src/setup/bridge.ts documents), which the bridge hands to the page.
     //
     // The order for an install is the contract's: check the choices once more in plan mode, without elevation, so a problem is
-    // found before Windows is asked for anything; then ask Windows, once; then follow the installer's progress file until it ends.
+    // found before Windows is asked for anything (the check is made as the install will run, with the person's password choice,
+    // unlike the wizard's own plans); then ask Windows, once; then follow the installer's progress file until it ends.
     // The person can cancel only up to the moment Windows is asked. After that the installer is an elevated process this one
     // cannot stop, so the only honest controls are "wait" and, when it ends, "try again".
     internal sealed class SetupOperation
@@ -246,7 +247,8 @@ namespace Rewindle.Setup
             }
             if (kind == Install)
             {
-                IDictionary<string, object> plan = plans.GetPlan(inputs, beforePermission.Token);
+                // forInstall: this plan judges the install as it will run, so it carries the password choice the install carries.
+                IDictionary<string, object> plan = plans.GetPlan(inputs, true, beforePermission.Token);
                 if (!InstallerContract.PlanAllowsInstall(plan))
                 {
                     Finish(

@@ -333,7 +333,8 @@ namespace Rewindle.Setup
                     try
                     {
                         WaitForBundle(mine.Token);
-                        IDictionary<string, object> plan = environment.Plans.GetPlan(inputs, mine.Token);
+                        // Not for an install: the wizard's plans describe the location alone and never carry the password choice.
+                        IDictionary<string, object> plan = environment.Plans.GetPlan(inputs, false, mine.Token);
                         Respond(id, plan);
                     }
                     catch (OperationCanceledException)

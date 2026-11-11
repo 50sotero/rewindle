@@ -1,7 +1,6 @@
 import { CalendarClock, Cloud, CircleCheck, FolderCheck, HardDrive, LockKeyhole, LockKeyholeOpen, Pencil, PlayCircle } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Button } from '@/components/atoms/Button';
-import { ISSUE_FIELDS, installIssues } from '../contract';
 import { driveLetter, folderName, formatBytes, formatTime, nextRunDay, plural, samePath } from '../format';
 import { Callout, IssueList, Spinner, Switch } from '../ui';
 import { onlineOnlyPaths, selectedPaths, selectedTotal, type Screen, type Wizard } from '../useWizard';
@@ -52,8 +51,9 @@ export function Review({ wizard }: { wizard: Wizard }) {
   const volume = environment.volumes.find(item => samePath(item.root, choices.driveRoot));
   const go = (screen: Screen) => () => wizard.goTo(screen);
   const password = passwordRow(wizard);
-  // Every finding, the ones about a recovery key left behind only while the password choice makes them matter (installIssues).
-  const all = installIssues(plan, choices.repository, choices.repositoryAccess, ...ISSUE_FIELDS);
+  // Every finding, the ones about a recovery key left behind only while the password choice makes them matter, and all of them for a
+  // plan an install was refused with (reviewIssues, through the wizard: the footer's Install reads the same answer).
+  const all = wizard.findings;
   // "The backup folder already holds a backup" is good news on a reinstall, so it is said as such rather than drawn as a warning.
   const earlier = all.warnings.some(warning => warning.code === 'repository_exists');
   // A folder measured after Protected folders was left can turn out to hold online-only files; Install waits for them too.

@@ -32,7 +32,7 @@ namespace Rewindle.Setup.Smoke
             this.home = home;
         }
 
-        public IDictionary<string, object> GetPlan(InstallerInputs inputs, CancellationToken cancel)
+        public IDictionary<string, object> GetPlan(InstallerInputs inputs, bool forInstall, CancellationToken cancel)
         {
             Thread.Sleep(350);
             cancel.ThrowIfCancellationRequested();

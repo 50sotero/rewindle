@@ -219,7 +219,7 @@ below, and the console shows the text the installer has always shown for it.
 | `repository_low_space` | repository | The drive has less than `-MinimumFreeGiB` free. |
 | `repository_access_invalid` | repository | `-RepositoryAccess` is not exactly `password` or `no_password` in lower case (Windows PowerShell accepts other capitals for a parameter, but every part of Rewindle that reads the configuration refuses them). |
 | `repository_access_rotation_pending` | repository | The choice is `no_password`, but the state folder an earlier installation kept holds an unfinished change to the keys of earlier backups (`credential-rotation.journal.json`), which only a password can finish. `path` is the state folder. The message says to finish it with a password, or to move the folder aside to start new backups without one. |
-| `repository_password_unavailable` | repository | The choice is `password`, the backups already in the folder are recorded as having a password (the kept record that names the folder, or the recovery tools beside it: `resolved.existing_repository_access` is `password`), the folder holds backups (a Restic `config` file) and the stored password file (`C:\ProgramData\ResticBackuper\repository-password.dpapi.json`) is not there, so these backups can't be continued and a new password would not open them. `path` is the backup folder. The message is "The backups in this location have a password that Rewindle doesn't have on this PC, so Setup can't continue them. Choose another location for new backups. You can still restore files from these backups with their recovery key." It is reported before anything is changed, by a plan and by an install's preflight, and it carries no "Setup undid its changes" ending. Never raised for a choice of `no_password` (the install asks the backups themselves), for backups no record describes (`existing_repository_access` is `unknown`: the install asks them, and its initializer refuses with exit 7 if they need a password this PC lacks), or when the stored password exists. |
+| `repository_password_unavailable` | repository | The choice is `password`, the recovery tools beside the backup folder record its backups as having a password (their `backup-config.json` and `recovery-manifest.json` both name this folder and agree: `resolved.existing_repository_access` is `password`), the folder holds backups (a Restic `config` file) and the stored password file (`C:\ProgramData\ResticBackuper\repository-password.dpapi.json`) is not there, so these backups can't be continued and a new password would not open them. The kept record of an earlier installation never raises it on its own: a record that names the folder as having a password counts only while the stored password file exists (`Get-KeptRepository` drops it otherwise, as it does for `kept_repository`), and with the file there nothing is unavailable; once it is dropped, the recovery tools' record decides. `path` is the backup folder. The message is "The backups in this location have a password that Rewindle doesn't have on this PC, so Setup can't continue them. Choose another location for new backups. You can still restore files from these backups with their recovery key." It is reported before anything is changed, by a plan and by an install's preflight, and it carries no "Setup undid its changes" ending. Never raised for a choice of `no_password` (the install asks the backups themselves), for backups no record describes (`existing_repository_access` is `unknown`: the install asks them, and its initializer refuses with exit 7 if they need a password this PC lacks), or when the stored password exists. |
 | `sources_required` | sources | No source folder. |
 | `source_not_absolute` | sources | A source is not a full path. `path` is it. |
 | `source_path_invalid` | sources | A source is not a valid path. |
@@ -320,7 +320,8 @@ from one kind to the other, and a contradiction is refused, never "fixed".
 | absent | holds backups with no record | null in a plan; the install asks the backups themselves and keeps what it finds |
 
 `resolved.existing_repository_access` is read from, in this order: the state folder an earlier uninstall kept, when its record
-names this folder (the same record as `kept_repository`); the `backup-config.json` and `recovery-manifest.json` in the
+names this folder (the same record as `kept_repository`, which for backups with a password counts only while their stored
+password file is there); the `backup-config.json` and `recovery-manifest.json` in the
 `RecoveryTools` folder next to the backup folder, when both name this folder and agree; otherwise `unknown` when the folder
 holds a Restic `config` file, and null when it holds none. A record that doesn't say means `password`; a record that names anything
 else is ignored (in the kept state) or makes the answer `unknown` (in the recovery tools). A wizard should offer the choice only when `existing_repository_access` is null (and may send
@@ -628,7 +629,8 @@ saves and a printout are the supported ways to keep it.
 ## 6. Notes for the wizard
 
 * **Plan, then install with the same inputs.** Pass the plan's `resolved.repository`, `resolved.sources` and the options you
-  planned with. A plan with `ok: false` would fail the real install at the same place.
+  planned with (the password choice goes with the install alone, see below). A plan with `ok: false` would fail the real
+  install at the same place.
 * **A repository path.** Any new or empty folder on an eligible volume. `RecoveryTools` is created beside it, so prefer a
   folder with a parent that is not a drive root if the drive's top level should stay tidy.
 * **A reinstall.** When `environment.existing_install.kept_repository` is set, propose that folder (in Google Drive mode
@@ -641,8 +643,20 @@ saves and a printout are the supported ways to keep it.
 * **The password choice.** Offer it only when the plan's `resolved.existing_repository_access` is null (the backup folder
   holds no backups), with the sentences of section 2.8 before it and "You can't change this later for these backups.", and
   pass `-RepositoryAccess` only then; otherwise leave it out, and the installer uses the way the backups are recorded or
-  asks them. Do not make the pick part of what a plan is requested with. Recovery-key screens are skipped only when the
+  asks them. The plans a wizard asks for while the person chooses describe the location alone and never carry the pick: with
+  it, the installer would warn about a mode the person never saw at a location that may already have backups. The plan the
+  setup host makes just before an install, to find a problem before Windows is asked for anything, carries the choice exactly
+  when the install does, so it describes the install that follows. Recovery-key screens are skipped only when the
   result's `repository_access` is exactly `no_password` (or, while installing, when `credential` is `skipped`).
+* **Findings that depend on the password.** The plans a wizard asks for while the person chooses never carry the pick, so the
+  plan of a location with no backups assumes a password, and can raise `recovery_key_stale` and
+  `recovery_key_path_unsafe` before the person has chosen. The wizard never
+  stops its first page for them. It counts them, on Review and so for Install, only while the backups have, or may have, a
+  password: not when the person picked no password for a new location, and not when the backups there are known to have
+  none. Every other finding counts as it always did.
+* **Backups Setup can't carry on with.** `repository_access_mismatch` and `repository_password_unavailable` both end an
+  install with nothing changed, and trying the same location again would end the same way. The wizard's next step for both
+  is to go back and change the backup location, not to try again.
 * **Plan again after the user changes a choice.** A plan takes a few seconds (about three on a development machine); most of
   it is reading drives, checking signatures and hashing the payload.
 * **The progress folder.** Create `%TEMP%\RewindleSetup-<guid>\` as the unelevated user, pass

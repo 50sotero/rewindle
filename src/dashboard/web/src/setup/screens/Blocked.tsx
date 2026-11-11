@@ -61,8 +61,12 @@ export function Uninstalled({ wizard }: { wizard: Wizard }) {
   const kept = result?.kept;
   const keptEntries = keptEntriesOf(result);
   const stoppedReinstall = !!wizard.operation?.reinstall && keptEntries.length > 0;
-  // What was kept depends on the kind of backups the uninstaller reported: without a password there is no recovery key to keep.
-  const noPassword = kept?.repositoryAccess === 'no_password';
+  // What was kept depends on the kind of backups the uninstaller reported: without a password there is no recovery key to keep. When it
+  // reported none (no record, or one it couldn't read) nothing is claimed either way, and a key is asked to be kept only if there is one.
+  const kind = kept?.repositoryAccess;
+  const keyAdvice = kind === 'no_password' ? ' They have no password, so there is no recovery key to keep.'
+    : kind === 'password' ? ' Keep the recovery key: you need it to restore anything from those backups.'
+      : ' If you have a recovery key, keep it: you need it to restore anything from backups that have a password.';
   const places = kept ? [
     kept.repository ? { label: 'Your backups', path: kept.repository } : null,
     kept.recoveryKey ? { label: 'Your recovery key', path: kept.recoveryKey } : null,
@@ -75,8 +79,8 @@ export function Uninstalled({ wizard }: { wizard: Wizard }) {
         <li><span>{removedSentence(result?.removed)}</span></li>
         <li>
           <span>
-            <strong>{keptWords(kept?.repositoryAccess, 'were')}.</strong>
-            {noPassword ? ' They have no password, so there is no recovery key to keep.' : ' Keep the recovery key: you need it to restore anything from those backups.'}
+            <strong>{keptWords(kind, 'were')}.</strong>
+            {keyAdvice}
           </span>
         </li>
         {places.length > 0 && (

@@ -7,7 +7,7 @@ import { ArrowLeft, ArrowRight, Check, LayoutDashboard, RotateCcw, X } from 'luc
 import { Button } from '@/components/atoms/Button';
 import { bridge } from './bridge';
 import LoadingState from '@/components/primitives/LoadingState';
-import { ISSUE_FIELDS, installIssues, issuesFor, keptWords, SCHEDULE_PATTERN, welcomeIssues } from './contract';
+import { issuesFor, keptWords, SCHEDULE_PATTERN, welcomeIssues } from './contract';
 import { formatBytes, formatCount, plural } from './format';
 import { ConfirmDialog, ShieldIcon, Spinner } from './ui';
 import {
@@ -132,7 +132,7 @@ export default function SetupApp() {
       case 'maintenance': return { next: closeAction() };
       case 'welcome': {
         // A problem with the PC itself (not with a choice) is told on this page, and there is no point going on until it is fixed. The
-        // findings about a recovery key left behind depend on the password choice, which comes later: Review counts them (installIssues).
+        // findings about a recovery key left behind depend on the password choice, which comes later: Review counts them (wizard.findings).
         const blocked = welcomeIssues(plan).errors.length > 0;
         return {
           back: wizard.maintenance ? back('maintenance') : { ...back('welcome'), disabled: true }, next: next('folders', blocked),
@@ -181,7 +181,7 @@ export default function SetupApp() {
         // Install itself scans them once more before the installer starts (wizard.checkingBeforeInstall meanwhile).
         const scan = selectedTotal(choices!, wizard.sizes);
         const scanning = scan.measuring;
-        const problems = installIssues(plan, choices!.repository, choices!.repositoryAccess, ...ISSUE_FIELDS).errors.length > 0
+        const problems = wizard.findings.errors.length > 0
           || selectedPaths(choices!).length === 0 || onlineOnlyPaths(choices!, wizard.sizes).length > 0;
         // The installer's answer for the location chosen last is what the password choice (and every other finding) rests on, so
         // Install waits for it, like Next on the Backup location page.
@@ -415,7 +415,7 @@ export default function SetupApp() {
         <ConfirmDialog open={confirmUninstall} title="Uninstall Rewindle?" confirm="Uninstall" cancel="Keep Rewindle" danger confirmIcon={<ShieldIcon size={15} />}
           onCancel={() => setConfirmUninstall(false)} onConfirm={() => { setConfirmUninstall(false); void wizard.uninstall(); }}>
           <p>This removes the Rewindle app, its scheduled backups, the Start menu shortcut and its entry in Installed apps. A backup that is running is stopped.</p>
-          <p><strong>{keptWords(keptAccess)}</strong>, so you can still restore files or install Rewindle again. Windows will ask for permission.</p>
+          <p><strong>{keptWords(keptAccess)}.</strong> You can still restore files or install Rewindle again. Windows will ask for permission.</p>
         </ConfirmDialog>
         <ConfirmDialog open={confirmReinstall} title="Set up Rewindle again?" confirm="Remove and set up again" cancel="Keep Rewindle" confirmIcon={<ShieldIcon size={15} />}
           onCancel={() => setConfirmReinstall(false)} onConfirm={() => { setConfirmReinstall(false); void wizard.reinstall(); }}>

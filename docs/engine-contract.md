@@ -587,10 +587,18 @@ prompt. `stale_lock_repair.py` runs its four Restic calls with the option and no
 `--password-command` (not even when an older DPAPI file is still there), never reads a recovery key, never prompts (standard
 input is closed), and refuses `--recovery-key-file` with "This backup opens without a key, so there is no key file to use."
 `--find-json` works the same way; the file-search refusal for backups with a password is "File search needs Rewindle's saved
-key or your recovery key." When Restic answers exit 12 to a restore of backups without a password (they now ask for a
-password), `restore.py` says "These backups now ask for a password that Rewindle doesn't have, usually because they were
-changed outside Rewindle, so Rewindle can't open them. If you know that password, Restic can still restore your files with it,
-as RECOVERY.md in the recovery tools folder next to your backups explains." The restore drill runs with no key and reports
+key or your recovery key." When Restic answers exit 12 (the backups now ask for a password) to any way `restore.py` reads
+backups without a password (a listing, a folder, a search, a restore, the drill), `restore.py` says "These backups now ask
+for a password that Rewindle doesn't have, usually because they were changed outside Rewindle, so Rewindle can't open them.
+If you know that password, Restic can still restore your files with it, as RECOVERY.md in the recovery tools folder next to
+your backups explains." It says it as the whole of its last stderr line after `RESTORE FAILED: ` when a query ends the run, and
+as the `error` of the report when Restic itself ends a restore or the drill's restore with exit 12 (the last line is then
+`RESTORE INCOMPLETE: ...`). `Manage-Restore.ps1` has its own copy of that text and passes it on, for every request kind
+(listing, folder, search, restore, drill), when it is the whole of `restore.py`'s last stderr line after `RESTORE FAILED: ` for
+backups without a password and the run failed without timing out; it then reads no report, and it reads no other stderr, so no
+other word of the backend's output reaches the dashboard. A restore that Restic itself ended with exit 12 prints another line
+last, so the manager keeps its report and history entry, and that report's `error` is the same text. The restore drill runs
+with no key and reports
 `credential_source` `none` (with a password: `recovery_key`); `drill_kind` stays `recovery_key_representative` and the history
 entry kind stays `recovery_key_representative_drill`. `Manage-Restore.ps1` then neither requires the recovery key file nor
 checks its ACL nor passes `--recovery-key-file`, and accepts only the `credential_source` that matches the mode;

@@ -803,6 +803,28 @@ try {
     Assert-True (-not (Test-AskedForAPassword 'no_password' ('RESTORE FAILED: Restic repository query failed with exit code 12'))) 'another failure is not turned into the sentence'
     Assert-True (-not (Test-AskedForAPassword 'no_password' ($backupsNowAskForAPasswordMessage))) 'the sentence alone, without the failure line it is printed on, is not passed on'
     Assert-True (-not (Test-AskedForAPassword 'No_Password' ($backendSentence))) 'the access is compared exactly'
+    # A backend that was stopped for running out of time may still have printed the sentence as its last line before it was stopped:
+    # what a stopped backend leaves behind is never read as its answer (the manager gives it exit code -1 and no output, but the
+    # check does not rely on that).
+    Assert-True (-not (Test-AskedForAPassword 'no_password' ($backendSentence + "`r`n") 1 $true)) 'a backend that ran out of time is not read for the sentence, whatever its last line says'
+    Assert-True (-not (Test-AskedForAPassword 'no_password' ($backendSentence + "`r`n") (-1) $true)) 'a backend stopped with exit code -1 is not read for the sentence either'
+    Assert-True (Test-AskedForAPassword 'no_password' ($backendSentence + "`r`n") 1 $false) 'the same last line from a backend that was not stopped is the sentence'
+    # A backend that failed without a word has no last line to read: the answer is no, and nothing is thrown. The manager runs under
+    # $ErrorActionPreference = 'Stop' (and StrictMode), where reading the last line of nothing ("Index was outside the bounds of the
+    # array.", or "You cannot call a method on a null-valued expression." without StrictMode) would end the request with that error
+    # instead of the backend's own failure.
+    $preferenceBeforeSilentBackends = $ErrorActionPreference
+    $ErrorActionPreference = 'Stop'
+    try {
+        foreach ($silentStderr in @('', "`r`n", "  `r`n`t`r`n")) {
+            $silentAnswer = $null
+            $silentFailure = ''
+            try { $silentAnswer = Test-AskedForAPassword 'no_password' $silentStderr 1 $false }
+            catch { $silentFailure = [string]$_.Exception.Message }
+            Assert-True ($silentFailure -ceq '' -and $silentAnswer -is [bool] -and -not $silentAnswer) ('a backend that failed without a word is not read for the sentence and throws nothing: ' + $silentFailure)
+        }
+    }
+    finally { $ErrorActionPreference = $preferenceBeforeSilentBackends }
 
     $partialDrillFixture = New-Fixture
     $env:FAKE_RESTORE_PARTIAL = '1'

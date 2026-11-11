@@ -25,6 +25,7 @@ CONTRACT_TEST = PROJECT / "tests" / "Test-InstallerContract.ps1"
 REGION = re.compile(r"# region progress-feed.*?# endregion progress-feed", re.S)
 OWNED_PROCESSES = re.compile(r"# region owned-processes.*?# endregion owned-processes", re.S)
 MAINTENANCE = PROJECT / "src" / "dashboard" / "web" / "src" / "setup" / "screens" / "Maintenance.tsx"
+WIZARD_CONTRACT = PROJECT / "src" / "dashboard" / "web" / "src" / "setup" / "contract.ts"
 
 
 def read(path: Path) -> str:
@@ -944,6 +945,19 @@ class OptionalPasswordInstallerTests(unittest.TestCase):
         self.assertLess(unavailable, other)
         self.assertIn("-Code 'repository_access_mismatch' -Field 'repository'", block[mismatch:unreadable])
         self.assertIn("-Code 'repository_access_unreadable' -Field 'repository'", block[unreadable:unavailable])
+        # What the console says for each (an unattended install's log, and the line a person at the console reads).
+        self.assertIn(
+            '-Console "The backups in $repositoryPath do not open the way this installation expects (exit code $initializerExit)."',
+            block[mismatch:unreadable],
+        )
+        self.assertIn(
+            '-Console "The backups in $repositoryPath could not be opened (exit code $initializerExit)."',
+            block[unreadable:unavailable],
+        )
+        self.assertIn(
+            '-Console "The backups in $repositoryPath have a password that is not stored on this PC (exit code $initializerExit)."',
+            block[unavailable:other],
+        )
         # Backups with a password that this PC has no saved password for: its own code and words, as a refusal (which no
         # catch-block inference about the phase can turn into something else).
         refusal = block[unavailable:other]
@@ -1111,6 +1125,100 @@ class OptionalPasswordInstallerTests(unittest.TestCase):
         self.assertIn("recovery_key = @('recovery_key_failed', 'Setup could not write your recovery key.')", self.installer)
         write_error = self.catch.split('Write-Error "INSTALLATION FAILED: ', 1)[0]
         self.assertIn("if ($script:repositoryAccessMode -ceq 'password') { 'Repository, recovery key, recovery tools, and ProgramData state' }", write_error)
+
+
+def wizard_note(contract: str, title: str) -> str:
+    """One bullet of the contract's "Notes for the wizard" (section 6), whitespace collapsed: from its bold title (which ends in a full stop) to the next bullet."""
+    notes = contract.split("## 6. Notes for the wizard", 1)[1].split("\n## 7.", 1)[0]
+    start = notes.index(f"* **{title}.**")
+    return " ".join(notes[start:].split("\n* ", 1)[0].split())
+
+
+def typescript_codes(text: str, name: str) -> list[str]:
+    """The strings in `const NAME: readonly string[] = [...]` of the wizard's contract module."""
+    match = re.search(r"const %s: readonly string\[\] = \[([^\]]*)\]" % re.escape(name), text)
+    if match is None:
+        raise AssertionError(f"{WIZARD_CONTRACT.name} has no list {name}")
+    return re.findall(r"'([a-z0-9_]+)'", match.group(1))
+
+
+class WizardNotesMatchTheCodeTests(unittest.TestCase):
+    """What the contract tells a wizard about the password choice, held against the wizard and the installer it describes."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.contract = read(CONTRACT)
+        cls.wizard = read(WIZARD_CONTRACT)
+        cls.installer = read(INSTALLER)
+        cls.defined = functions(cls.installer)
+
+    def test_the_wizard_never_stops_its_first_page_for_the_recovery_key_findings_and_counts_them_on_review_by_the_choice(self) -> None:
+        codes = typescript_codes(self.wizard, "PASSWORD_ONLY_CODES")
+        self.assertEqual(["recovery_key_stale", "recovery_key_path_unsafe"], codes)
+        # The first page leaves them out; Review and Install count them only while the backups have, or may have, a password.
+        welcome = self.wizard.split("export function welcomeIssues", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("!dependsOnPassword(issue)", welcome)
+        install = self.wizard.split("export function installIssues", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("!dependsOnPassword(issue) || passwordFindingsApply(plan, repository, pick)", install)
+        applies = self.wizard.split("export function passwordFindingsApply", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("accessToSend(plan, repository, pick) === 'no_password'", applies)
+        self.assertIn("existingRepositoryAccess !== 'no_password'", applies)
+        note = wizard_note(self.contract, "Findings that depend on the password")
+        for code in codes:
+            self.assertIn(f"`{code}`", note)
+        self.assertIn("The wizard never stops its first page for them.", note)
+        self.assertIn("counts them, on Review and so for Install, only while the backups have, or may have, a password", note)
+        self.assertIn("not when the person picked no password for a new location", note)
+        self.assertIn("not when the backups there are known to have none", note)
+        # The installer raises them only where the backups have, or may have, a password (the contract's table says so too).
+        table = {m.group(1): m.group(2) for m in re.finditer(r"^\| `(recovery_key_[a-z_]+)` \| environment \| (.*) \|$", self.contract, re.M)}
+        self.assertEqual({"recovery_key_stale", "recovery_key_path_unsafe"}, set(table))
+        self.assertIn("backups without a password", table["recovery_key_stale"])
+        self.assertIn("backups without a password", table["recovery_key_path_unsafe"])
+
+    def test_the_plans_asked_for_while_choosing_carry_no_pick_and_the_one_before_an_install_carries_what_the_install_does(self) -> None:
+        note = wizard_note(self.contract, "The password choice")
+        self.assertIn("The plans a wizard asks for while the person chooses describe the location alone and never carry the pick", note)
+        self.assertIn(
+            "The plan the setup host makes just before an install, to find a problem before Windows is asked for anything, "
+            "carries the choice exactly when the install does",
+            note,
+        )
+        self.assertNotIn("Do not make the pick part of what a plan is requested with", note)
+        # The same note says what to pass on: the pick goes with the install alone.
+        self.assertIn("the password choice goes with the install alone", wizard_note(self.contract, "Plan, then install with the same inputs"))
+
+    def test_the_wizard_sends_the_person_to_another_location_for_both_refusals_that_would_end_the_same_way(self) -> None:
+        self.assertEqual(
+            ["repository_access_mismatch", "repository_password_unavailable"], typescript_codes(self.wizard, "ANOTHER_LOCATION_CODES")
+        )
+        note = wizard_note(self.contract, "Backups Setup can't carry on with")
+        self.assertIn("`repository_access_mismatch` and `repository_password_unavailable`", note)
+        self.assertIn("trying the same location again would end the same way", note)
+        self.assertIn("go back and change the backup location, not to try again", note)
+
+    def test_only_the_recovery_tools_record_can_raise_the_early_password_check(self) -> None:
+        # Get-KeptRepository drops a record of backups with a password when their saved password file is missing, so the kept
+        # record can only ever name such backups while the file is there, and Assert-PasswordAvailable then has nothing to refuse.
+        kept = self.defined["Get-KeptRepository"]
+        self.assertIn(
+            "if ($null -ne $kept -and $kept.repository_access -ceq 'password' -and -not (Test-Path -LiteralPath $secretFile -PathType Leaf)) {\n"
+            "            return $null\n        }",
+            kept,
+        )
+        existing = self.defined["Get-ExistingRepositoryAccess"]
+        self.assertLess(existing.index("Get-KeptRepository"), existing.index("Get-RecoveryToolsRepositoryAccess"))
+        check = self.defined["Assert-PasswordAvailable"]
+        self.assertLess(check.index("existingRepositoryAccess -cne 'password'"), check.index("Test-Path -LiteralPath $secretFile"))
+        self.assertIn("if (Test-Path -LiteralPath $secretFile -PathType Leaf) { return }", check)
+        row = next(line for line in self.contract.splitlines() if line.startswith("| `repository_password_unavailable` | repository |"))
+        row = " ".join(row.split())
+        self.assertIn("the recovery tools beside the backup folder record its backups as having a password", row)
+        self.assertNotIn("the kept record that names the folder, or the recovery tools", row)
+        self.assertIn("The kept record of an earlier installation never raises it on its own", row)
+        self.assertIn("counts only while the stored password file exists (`Get-KeptRepository` drops it otherwise", row)
+        # Section 2.8 says the same of the kept record it reads first.
+        self.assertIn("which for backups with a password counts only while their stored password file is there", " ".join(self.contract.split()))
 
 
 class OptionalPasswordUninstallerTests(unittest.TestCase):

@@ -23,11 +23,13 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "src"))
 
 import recovery_health  # noqa: E402
+import restore  # noqa: E402
 
 DASHBOARD = PROJECT / "src" / "dashboard"
 WEB = DASHBOARD / "web"
 ACCESS_TS = WEB / "src" / "repositoryAccess.ts"
 HARNESS = PROJECT / "tests" / "fixtures" / "RepositoryAccessHarness.cs"
+RESTORE_SEARCH = DASHBOARD / "DashboardWindow.RestoreSearch.cs"
 
 # The owner's sentence, word for word, and the words the page and the windows use for a backup without a password.
 NO_PASSWORD_NOTE = "You chose to back up without a password, so anyone who can open the backup folder can restore these files."
@@ -60,6 +62,14 @@ NOW_OPEN_WITHOUT_PASSWORD = (
     "To keep using them, see Switching an existing backup in SECURITY.md on Rewindle's GitHub page, "
     "or start new backups in another place."
 )
+# What restore.py says, character for character, when backups that Rewindle opens without a password now ask for one (the exit code 12 of
+# a restore, a listing, a folder, a search or the drill), and what follows it when items stayed in the restore folder.
+RESTORE_NOW_ASKS = (
+    "These backups now ask for a password that Rewindle doesn't have, usually because they were changed outside Rewindle, so Rewindle "
+    "can't open them. If you know that password, Restic can still restore your files with it, as RECOVERY.md in the recovery tools folder "
+    "next to your backups explains."
+)
+RESTORE_FOLDER_NAME = ".rewindle-restore-0123456789abcdef"
 SOURCE_UNREADABLE_DETAILS = "Open the affected paths listed below and check that you can read them. This run isn't counted as a finished backup."
 SOURCE_UNREADABLE_STATUS = (
     "Some files couldn't be read (a program may have had them open), so this backup is incomplete. The next backup tries again."
@@ -103,6 +113,24 @@ console.log(JSON.stringify({
 
 def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def restore_search_failure_copy() -> str:
+    """DescribeRestoreFlowSearchFailure, word for word from the window's source, in a class the console harness can compile."""
+    source = read(RESTORE_SEARCH)
+    start = source.index("private static string DescribeRestoreFlowSearchFailure(")
+    closing = "\n        }\n"
+    end = source.index(closing, start) + len(closing)
+    messages = (
+        ("RestoreFlowSearchRunLockMessage", "(run lock)"),
+        ("RestoreFlowSearchListChangedMessage", "(list changed)"),
+        ("RestoreFlowSearchTooLongMessage", "(too long)"),
+        ("RestoreFlowSearchGenericFailureMessage", "(generic failure)"),
+    )
+    lines = ["namespace ResticBackuper.Dashboard", "{", "    internal static class RestoreSearchFailureCopy", "    {"]
+    lines += [f'        private const string {name} = "{text}";' for name, text in messages]
+    lines += ["", "        " + source[start:end].replace("private static", "internal static", 1) + "    }", "}", ""]
+    return "\n".join(lines)
 
 
 class RepositoryAccessPageTests(unittest.TestCase):
@@ -216,6 +244,10 @@ class RepositoryAccessHostTests(unittest.TestCase):
             framework / "WPF" / "PresentationFramework.dll",
             Path(os.environ["WINDIR"]) / "Microsoft.NET" / "assembly" / "GAC_MSIL" / "System.Xaml" / "v4.0_4.0.0.0__b77a5c561934e089" / "System.Xaml.dll",
         ]
+        # The window that words a file search's failure cannot be compiled here (it is the whole dashboard window), so the method that does
+        # is cut out of its source, as it is, into a class of its own beside the four messages it chooses between.
+        search_copy = Path(cls.build_directory.name) / "RestoreSearchFailureCopy.cs"
+        search_copy.write_text(restore_search_failure_copy(), encoding="utf-8")
         sources = [
             DASHBOARD / name
             for name in (
@@ -223,7 +255,7 @@ class RepositoryAccessHostTests(unittest.TestCase):
                 "ProcessLiveness.cs", "Telemetry.cs", "TaskSchedule.cs", "DashboardTheme.cs", "DashboardVisualStyle.cs",
                 "RecoveryHealthManager.cs", "RecoveryReadinessWindow.cs", "RestoreManager.cs", "RestoreFileSearch.cs", "RunDetailsWindow.cs",
             )
-        ] + [HARNESS]
+        ] + [HARNESS, search_copy]
         compiled = subprocess.run(
             [str(compiler), "/nologo", "/target:exe", "/platform:x64", f"/out:{executable}", "/codepage:65001",
              *[f"/reference:{path}" for path in references], *[str(path) for path in sources]],
@@ -237,6 +269,19 @@ class RepositoryAccessHostTests(unittest.TestCase):
         # the mode of the configuration whose report carries each (see ReadinessDetails in the harness).
         (work / "readiness-details.json").write_text(
             json.dumps({"no_password": recovery_health.NO_PASSWORD_NOW_ASKS_DETAIL, "password": recovery_health.PASSWORD_NOW_OPENS_FREELY_DETAIL}),
+            encoding="utf-8",
+        )
+        # The engine's sentence for backups that now ask for a password, alone and followed by where items stayed in the restore folder.
+        (work / "restore-words.json").write_text(
+            json.dumps(
+                {
+                    "asks": restore.NOW_ASKS_FOR_A_PASSWORD_MESSAGE,
+                    "asks_and_left": restore.NOW_ASKS_FOR_A_PASSWORD_MESSAGE + " " + restore._LEFT_IN_RESTORE_FOLDER.format(name=RESTORE_FOLDER_NAME),
+                    "asks_and_left_in_use": restore.NOW_ASKS_FOR_A_PASSWORD_MESSAGE
+                    + " "
+                    + restore._LEFT_IN_RESTORE_FOLDER_IN_USE.format(name=RESTORE_FOLDER_NAME),
+                }
+            ),
             encoding="utf-8",
         )
         # A window is built and read, never shown, and no process is started: the harness works on files in this folder only.
@@ -307,6 +352,48 @@ class RepositoryAccessHostTests(unittest.TestCase):
         for key, text in self.report["failure_words"].items():
             with self.subTest(key=key):
                 self.assertIsNone(TECHNICAL.search(text))
+
+    # ---- backups that now ask for a password, on their way from restore.py to the screen -------------------------------------------
+
+    def test_the_sentence_for_backups_that_now_ask_for_a_password_is_shown_whole_for_every_kind_of_request(self) -> None:
+        # The engine's constant is the sentence the owner approved, and the dashboard never rewrites, shortens or drops it.
+        self.assertEqual(RESTORE_NOW_ASKS, restore.NOW_ASKS_FOR_A_PASSWORD_MESSAGE)
+        words = self.report["restore_words"]
+        followed_by = {
+            "asks": RESTORE_NOW_ASKS,
+            "asks_and_left": RESTORE_NOW_ASKS + " " + restore._LEFT_IN_RESTORE_FOLDER.format(name=RESTORE_FOLDER_NAME),
+            "asks_and_left_in_use": RESTORE_NOW_ASKS + " " + restore._LEFT_IN_RESTORE_FOLDER_IN_USE.format(name=RESTORE_FOLDER_NAME),
+        }
+        for key, sentence in followed_by.items():
+            for action in ("none", "list_snapshots", "list_tree", "find_files", "restore", "restore_drill", "plain"):
+                with self.subTest(sentence=key, action=action):
+                    self.assertEqual(sentence, words[f"sanitize:{key}|{action}"])
+
+    def test_the_sanitizer_the_sentence_passes_through_still_rewords_the_dashboards_own_refusals(self) -> None:
+        # Without this, "unchanged" could only mean that nothing is checked at all.
+        self.assertEqual(
+            "That folder is part of what Rewindle backs up or where its backups are kept. Choose a different folder, for example a new folder on another drive.",
+            self.report["restore_words"]["sanitize:control"],
+        )
+
+    def test_a_file_search_that_fails_with_the_sentence_shows_it_whole_and_keeps_the_list(self) -> None:
+        words = self.report["restore_words"]
+        for key, sentence in (
+            ("asks", RESTORE_NOW_ASKS),
+            ("asks_and_left", RESTORE_NOW_ASKS + " " + restore._LEFT_IN_RESTORE_FOLDER.format(name=RESTORE_FOLDER_NAME)),
+        ):
+            with self.subTest(sentence=key):
+                self.assertEqual({"text": sentence, "list_changed": False}, words["search:" + sentence])
+        # The copy of the window's method is the real one: it still chooses its own words for what it knows.
+        for text, outcome in (
+            ("The backup service already holds the run lock.", {"text": "(run lock)", "list_changed": False}),
+            ("That file is no longer in the list.", {"text": "(list changed)", "list_changed": True}),
+            ("The search took too long.", {"text": "(too long)", "list_changed": False}),
+            ("", {"text": "(generic failure)", "list_changed": False}),
+            ("The file search failed.", {"text": "(generic failure)", "list_changed": False}),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(outcome, words["search:" + text])
 
     # ---- the readiness report -------------------------------------------------------------------------------------------------
 

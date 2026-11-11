@@ -410,6 +410,52 @@ namespace ResticBackuper.Dashboard
             return result;
         }
 
+        // ---- what restore.py says when backups now ask for a password, on its way to the screen ----------------------------------------
+        // The test writes restore-words.json: "asks" is the engine's sentence for backups without a password that Restic now refuses (exit
+        // code 12) and "asks_and_left" the same sentence followed by where items stayed in the restore folder. Every answer the dashboard
+        // reads from the restore step passes SanitizeAnswer (a listing, a folder, a search, a restore, the drill, or no request at all), and
+        // a file search's failure then passes DescribeRestoreFlowSearchFailure (copied out of the window's source by the test, which cannot
+        // compile the window itself). Neither may drop, shorten or reword the sentence.
+
+        private static Dictionary<string, object> RestoreWords()
+        {
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            string path = Path.Combine(root, "restore-words.json");
+            if (!File.Exists(path)) return result;
+            IDictionary<string, object> given = (IDictionary<string, object>)Json.DeserializeObject(File.ReadAllText(path, Encoding.UTF8));
+            string[] actions = { null, "list_snapshots", "list_tree", "find_files", "restore", "restore_drill" };
+            foreach (string key in new[] { "asks", "asks_and_left", "asks_and_left_in_use" })
+            {
+                string sentence = (string)given[key];
+                foreach (string action in actions)
+                {
+                    result["sanitize:" + key + "|" + (action ?? "none")] = RestoreManagerLauncher.SanitizeAnswer(sentence, action);
+                }
+                result["sanitize:" + key + "|plain"] = RestoreManagerLauncher.Sanitize(sentence);
+            }
+            // A controlled difference: a message that is one of the dashboard's own refusals is still worded for the person, so the
+            // sanitizer is really in the way here and not a pass-through.
+            result["sanitize:control"] = RestoreManagerLauncher.SanitizeAnswer("restore target must not overlap anything", "restore");
+            Type copy = Type.GetType("ResticBackuper.Dashboard.RestoreSearchFailureCopy");
+            if (copy != null)
+            {
+                MethodInfo describe = copy.GetMethod("DescribeRestoreFlowSearchFailure", Flags);
+                string[] inputs = {
+                    (string)given["asks"], (string)given["asks_and_left"], "The backup service already holds the run lock.",
+                    "That file is no longer in the list.", "The search took too long.", "", "The file search failed."
+                };
+                foreach (string input in inputs)
+                {
+                    object[] arguments = new object[] { input, false };
+                    Dictionary<string, object> outcome = new Dictionary<string, object>();
+                    outcome["text"] = (string)describe.Invoke(null, arguments);
+                    outcome["list_changed"] = (bool)arguments[1];
+                    result["search:" + input] = outcome;
+                }
+            }
+            return result;
+        }
+
         // ---- the restore drill's evidence ------------------------------------------------------------------------------------------
 
         private static string DrillVerdict(string access, string credentialSource)
@@ -470,6 +516,7 @@ namespace ResticBackuper.Dashboard
             result["launchers"] = Launchers();
             result["readiness"] = Readiness();
             result["readiness_details"] = ReadinessDetails();
+            result["restore_words"] = RestoreWords();
             result["drill"] = DrillCases();
             Console.WriteLine(Json.Serialize(result));
             return 0;

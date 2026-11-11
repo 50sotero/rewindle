@@ -127,6 +127,14 @@ if "ls" in args:
 if "restore" in args:
     target = Path(args[args.index("--target") + 1])
     target.mkdir(parents=True, exist_ok=True)
+    if control.get("restore_ends_with"):
+        # A restore that Restic starts and then ends with this exit code: it brought one item back first and, when asked to
+        # (name_taken), the same name appeared in the folder the person chose while it ran.
+        (target / "partial.txt").write_text("partly restored", encoding="utf-8")
+        if control.get("name_taken"):
+            (target.parent / "partial.txt").write_text("made by the user meanwhile", encoding="utf-8")
+        sys.stderr.write("Fatal: restore ended early\n")
+        raise SystemExit(int(control["restore_ends_with"]))
     includes = [args[index + 1] for index, value in enumerate(args[:-1]) if value == "--include"]
     if includes:
         for pattern in includes:
@@ -393,6 +401,14 @@ class FixtureCase(unittest.TestCase):
         control = json.loads(control_path.read_text(encoding="utf-8"))
         control["backups"] = backups
         control["answer_12_for"] = command
+        control_path.write_text(json.dumps(control), encoding="utf-8")
+
+    def restore_ends_with(self, code: int, name_taken: bool = False) -> None:
+        """From now on the stand-in opens the backups and ends every restore, after one item, with this exit code."""
+        control_path = self.fake.with_suffix(".control.json")
+        control = json.loads(control_path.read_text(encoding="utf-8"))
+        control["restore_ends_with"] = code
+        control["name_taken"] = name_taken
         control_path.write_text(json.dumps(control), encoding="utf-8")
 
     def arguments(self, *extra: str) -> list[str]:
@@ -671,6 +687,83 @@ class BackupsThatNowNeedAPasswordTests(FixtureCase):
         self.assertEqual(1, completed.returncode, completed.stderr)
         self.assertEqual(["RESTORE FAILED: " + NOW_ASKS_FOR_A_PASSWORD], completed.stderr.strip().splitlines())
         self.assertEqual("", completed.stdout)
+
+
+class NoPasswordRestoresThatResticEndsTests(FixtureCase):
+    """Backups without a password, a restore that Restic itself ends: only exit code 12 says that they now ask for a password.
+
+    The stand-in opens the backups for every query and then ends the restore (the drill's own restore too) after one item, with a
+    code of the test's choosing. Any other code keeps the exit-code words that every restore has had, and no word about a password.
+    """
+
+    config_access = "no_password"
+    backups = "no_password"
+    ENDED = "Restic restore failed with exit code {code}; the alternate target was retained for inspection"
+    # What restore.py adds when an item stays in its restore folder because the same name appeared in the chosen folder meanwhile.
+    NAME_TAKEN = (
+        "Some restored files could not be moved into the folder you chose, because files with the same names appeared there while "
+        "the restore ran. They are in the folder named {name} inside it."
+    )
+
+    def restored(self, name: str) -> tuple[int, dict, str]:
+        report = self.state / f"{name}.json"
+        result, _, stderr, _ = self.run_restore(
+            "--snapshot", "latest", "--target", str(self.root / name), "--report", str(report)
+        )
+        return result, json.loads(report.read_text(encoding="utf-8")), stderr
+
+    def test_a_restore_ended_with_another_code_keeps_the_exit_code_words(self) -> None:
+        for code in (1, 11, 130):
+            with self.subTest(code=code):
+                self.restore_ends_with(code)
+                result, report, stderr = self.restored(f"restored-{code}")
+                self.assertEqual(code, result)
+                self.assertEqual(
+                    ("partial", True, code, self.ENDED.format(code=code)),
+                    (report["result"], report["partial_target_retained"], report["restic_exit_code"], report["error"]),
+                )
+                self.assertNotIn("password", report["error"].casefold())
+                self.assertIn(f"RESTORE INCOMPLETE: Restic exited with {code}", stderr)
+                self.assertNotIn("ask for a password", stderr)
+                self.assertEqual(["partial.txt"], sorted(item.name for item in (self.root / f"restored-{code}").iterdir()))
+
+    def test_a_drills_restore_ended_with_another_code_keeps_the_exit_code_words(self) -> None:
+        for code in (1, 11, 130):
+            with self.subTest(code=code):
+                self.restore_ends_with(code)
+                name = f"drill-report-{code}.json"
+                result, _, stderr, _ = self.run_restore(*self.drill_arguments(target=f"drill-target-{code}", report=name))
+                self.assertEqual(code, result)
+                report = json.loads((self.state / name).read_text(encoding="utf-8"))
+                self.assertEqual(
+                    ("partial", False, code, self.ENDED.format(code=code)),
+                    (report["result"], report["verified"], report["restic_exit_code"], report["error"]),
+                )
+                self.assertNotIn("password", report["error"].casefold())
+                self.assertNotIn("ask for a password", stderr)
+
+    def test_items_left_in_the_restore_folder_follow_the_sentence_for_exit_code_12(self) -> None:
+        self.restore_ends_with(12, name_taken=True)
+        result, report, _ = self.restored("restored-12")
+        target = self.root / "restored-12"
+        self.assertEqual(12, result)
+        folders = [item for item in target.iterdir() if item.is_dir()]
+        self.assertEqual(1, len(folders), sorted(item.name for item in target.iterdir()))
+        self.assertTrue(folders[0].name.startswith(restore.RESTORE_FOLDER_PREFIX), folders[0].name)
+        self.assertEqual("made by the user meanwhile", (target / "partial.txt").read_text(encoding="utf-8"))
+        self.assertEqual("partly restored", (folders[0] / "partial.txt").read_text(encoding="utf-8"))
+        self.assertEqual(("partial", True, 12), (report["result"], report["partial_target_retained"], report["restic_exit_code"]))
+        # The sentence, one space, and where the items are: neither is left out.
+        self.assertEqual(NOW_ASKS_FOR_A_PASSWORD + " " + self.NAME_TAKEN.format(name=folders[0].name), report["error"])
+
+    def test_items_left_in_the_restore_folder_follow_the_exit_code_words_for_another_code(self) -> None:
+        self.restore_ends_with(1, name_taken=True)
+        result, report, _ = self.restored("restored-1")
+        target = self.root / "restored-1"
+        self.assertEqual(1, result)
+        folders = [item for item in target.iterdir() if item.is_dir()]
+        self.assertEqual(1, len(folders), sorted(item.name for item in target.iterdir()))
+        self.assertEqual(self.ENDED.format(code=1) + "; " + self.NAME_TAKEN.format(name=folders[0].name), report["error"])
 
 
 class ResticReadErrorWordsTests(unittest.TestCase):

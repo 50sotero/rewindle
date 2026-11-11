@@ -835,8 +835,7 @@ engine profile have no clean-up. The requests, records and checks are in
   credentials or command lines to explain a run.
 - Backups made without a password that now ask for one, usually because they
   were changed outside Rewindle, end a run as `repository_access_mismatch`. The
-  run says so and points to
-  [Switching an existing backup](../SECURITY.md#switching-an-existing-backup)
+  run says so and tells the person to start new backups in another place,
   instead of advising a check of the backup drive. Nothing is retried or
   switched.
 - Schedule-aware freshness is computed from the last verified run and installed

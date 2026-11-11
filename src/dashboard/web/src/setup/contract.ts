@@ -527,6 +527,18 @@ export function installIssues(plan: InstallPlan | null, repository: string, pick
   return { errors: errors.filter(counts), warnings: warnings.filter(counts) };
 }
 
+/**
+ * What Review lists, and what keeps Install from starting: installIssues over every field, except for a plan the installer's own check
+ * before an install refused (`blocked`). The host refuses on errors alone, and makes that plan with the pick the install carried, so
+ * every one of its errors is real and none is left out for the pick: leaving one out would show "nothing was installed" over an empty
+ * list with Install still offered, and every Install would end the same way. useWizard ends `blocked` as soon as the plan is renewed or
+ * the pick changes.
+ */
+export function reviewIssues(plan: InstallPlan | null, repository: string, pick: RepositoryAccess | null | undefined, blocked: boolean | null | undefined) {
+  const counted = installIssues(plan, repository, pick, ...ISSUE_FIELDS);
+  return blocked ? { errors: plan?.errors ?? [], warnings: counted.warnings } : counted;
+}
+
 // ---- after an install that did not finish -----------------------------------------------------------------------------------------
 
 /**
