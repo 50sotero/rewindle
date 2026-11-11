@@ -1126,8 +1126,16 @@ function Update-ProtectedPasswordHelper {
         }
         $swapStarted = $true
         if ($Plan -ceq 'refresh') {
-            Move-FileReplacing -Source $stagedHelper -Target $helperPath
+            # Set before the rename: a stop (Ctrl+C) that arrives while the rename runs is noticed only once it has
+            # returned, and then the earlier helper has to go back. A rename that is refused throws and changed nothing.
             $helperSwapped = $true
+            try {
+                Move-FileReplacing -Source $stagedHelper -Target $helperPath
+            }
+            catch {
+                $helperSwapped = $false
+                throw
+            }
         }
         Move-FileReplacing -Source $stagedManifest -Target $manifestPath
         if ((Get-Sha256Hex -Path $helperPath) -cne $newHelperSha256 -or
@@ -1136,8 +1144,8 @@ function Update-ProtectedPasswordHelper {
         }
     }
     finally {
-        # A rename that was refused left the earlier helper where it was, so only a helper that was swapped can need
-        # putting back. Stopped between the rename and the flag, the folder is left for registering again to finish.
+        # Only a helper that may have been swapped can need putting back: a refused rename left the earlier helper where
+        # it was. A stop runs this block but no catch block, so it leaves the flag set.
         if ($helperSwapped) {
             # The helper was swapped and the manifest was not: the earlier helper goes back, so the two agree again.
             try {
