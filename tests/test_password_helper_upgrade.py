@@ -955,6 +955,8 @@ ConvertTo-AsciiJson -Value ([ordered]@{
         self.assertEqual([], report["warnings"], "a helper that was never replaced was reported as not put back")
         self.assertEqual(earlier_helper(2), (self.fixture.root / HELPER_NAME).read_bytes())
         self.assertEqual("refresh", report["plan_after"])
+        # Nothing was replaced, so the copies made for the attempt are not left behind.
+        self.assertEqual([], self.evidence_folders(), "a refused rename left its copies behind")
 
     def test_a_stop_during_the_helpers_rename_puts_the_earlier_helper_back(self):
         # A stop (Ctrl+C) runs finally blocks but no catch block, and PowerShell notices it only once a .NET call has

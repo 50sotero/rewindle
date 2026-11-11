@@ -1133,7 +1133,9 @@ function Update-ProtectedPasswordHelper {
                 Move-FileReplacing -Source $stagedHelper -Target $helperPath
             }
             catch {
+                # Refused: nothing was replaced, so the folder holds only copies made here and is removed below.
                 $helperSwapped = $false
+                $swapStarted = $false
                 throw
             }
         }
