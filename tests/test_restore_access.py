@@ -147,6 +147,21 @@ raise SystemExit(97)
 '''
 
 
+def stored_copy(path: Path) -> bytes:
+    """The file as git stores it (its staged copy, the same as HEAD on a clean checkout).
+
+    A checkout with core.autocrlf=true, like the CI runner's, writes CR LF to the working copy, so the line endings a file is
+    committed with can only be read from git.
+    """
+    relative = path.relative_to(PROJECT_ROOT).as_posix()
+    completed = subprocess.run(
+        ["git", "cat-file", "blob", f":{relative}"], cwd=PROJECT_ROOT, capture_output=True, timeout=30, check=False
+    )
+    if completed.returncode != 0:
+        raise AssertionError(f"git has no stored copy of {relative}: " + completed.stderr.decode("utf-8", "replace").strip())
+    return completed.stdout
+
+
 def one_snapshot(source: Path) -> dict:
     return {
         "id": NEW_ID,
@@ -982,7 +997,8 @@ class FilesThatSpeakForThemselvesTests(unittest.TestCase):
             TESTS / "Test-ManageRetention.ps1",
             SOURCE_ROOT / "restore.py",
         ):
-            data = path.read_bytes()
+            data = stored_copy(path)
+            self.assertIn(b"\n", data, path.name)
             self.assertNotIn(b"\r", data, path.name)
             if path.suffix == ".ps1":
                 self.assertEqual(b"", bytes(byte for byte in data if byte > 127), path.name)

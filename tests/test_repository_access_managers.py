@@ -50,6 +50,19 @@ def powershell_function(text: str, name: str) -> str:
     return text[start : text.index("\n}\n", start) + 3]
 
 
+def stored_copy(path: Path) -> bytes:
+    """The file as git stores it (its staged copy, the same as HEAD on a clean checkout).
+
+    A checkout with core.autocrlf=true, like the CI runner's, writes CR LF to the working copy, so the line endings a file is
+    committed with can only be read from git.
+    """
+    relative = path.relative_to(PROJECT).as_posix()
+    completed = subprocess.run(["git", "cat-file", "blob", f":{relative}"], cwd=PROJECT, capture_output=True, timeout=30, check=False)
+    if completed.returncode != 0:
+        raise AssertionError(f"git has no stored copy of {relative}: " + completed.stderr.decode("utf-8", "replace").strip())
+    return completed.stdout
+
+
 def block_without(text: str, header: str) -> tuple[str, list[str]]:
     """`text` with every block that starts with the exact `header` line end removed, and those blocks."""
     removed: list[str] = []
@@ -318,8 +331,9 @@ class StaticManagerTests(unittest.TestCase):
             PROJECT / "tests" / "Test-ManageSourcesDriveFs.ps1",
         ):
             with self.subTest(file=path.name):
-                data = path.read_bytes()
+                data = stored_copy(path)
                 data.decode("ascii")
+                self.assertIn(b"\n", data)
                 self.assertNotIn(b"\r", data)
 
     def test_the_move_reads_the_mode_once_and_checks_the_secret_and_the_recovery_key_only_for_a_password(self) -> None:

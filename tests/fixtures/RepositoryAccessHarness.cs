@@ -518,8 +518,28 @@ namespace ResticBackuper.Dashboard
             result["readiness_details"] = ReadinessDetails();
             result["restore_words"] = RestoreWords();
             result["drill"] = DrillCases();
-            Console.WriteLine(Json.Serialize(result));
+            Console.WriteLine(AsciiJson(result));
             return 0;
+        }
+
+        // The report with every character outside ASCII written as a JSON escape, so it reads back the same whatever the console's
+        // code page: an OEM code page turns a typographic apostrophe (U+2019) into a straight one, and CI's keeps it as it is.
+        private static string AsciiJson(object value)
+        {
+            string json = Json.Serialize(value);
+            StringBuilder ascii = new StringBuilder(json.Length);
+            foreach (char character in json)
+            {
+                if (character > 126)
+                {
+                    ascii.Append("\\u").Append(((int)character).ToString("x4"));
+                }
+                else
+                {
+                    ascii.Append(character);
+                }
+            }
+            return ascii.ToString();
         }
 
         [STAThread]

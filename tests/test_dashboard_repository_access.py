@@ -34,25 +34,27 @@ RESTORE_SEARCH = DASHBOARD / "DashboardWindow.RestoreSearch.cs"
 # The owner's sentence, word for word, and the words the page and the windows use for a backup without a password.
 NO_PASSWORD_NOTE = "You chose to back up without a password, so anyone who can open the backup folder can restore these files."
 
-# Today's words for a backup with a password: they must not change.
+# Today's words for a backup with a password: they must not change. The run's details window (RunDetailsWindow.cs) writes straight
+# apostrophes and the status line under the backup (Telemetry.cs) typographic ones (U+2019), so each sentence is pinned as it shows.
 PASSWORD_AUTHENTICATION_DETAILS = (
     "Rewindle couldn't unlock your backups with its saved password. Open the Restore page and choose Check recovery readiness."
 )
 PASSWORD_AUTHENTICATION_STATUS = (
-    "Rewindle couldn't unlock the backup location, so the backup stopped before it began. Your earlier backups are not affected."
+    "Rewindle couldn\u2019t unlock the backup location, so the backup stopped before it began. Your earlier backups are not affected."
 )
 NO_PASSWORD_AUTHENTICATION_DETAILS = (
     "Rewindle couldn't open your backups. Check that the backup drive or Google Drive folder is connected, then choose Back up now. "
     "If it still fails, open the Restore page and choose Check recovery readiness."
 )
 NO_PASSWORD_AUTHENTICATION_STATUS = (
-    "Rewindle couldn't open your backups, so the backup stopped before it began. Check that the backup drive or Google Drive folder is "
+    "Rewindle couldn\u2019t open your backups, so the backup stopped before it began. Check that the backup drive or Google Drive folder is "
     "connected, then try again. Your earlier backups are not affected."
 )
 MISMATCH = (
     "These backups now ask for a password that Rewindle doesn't have, usually because they were changed outside Rewindle. Rewindle can't "
     "carry on with them. To keep backing up, start new backups in another place."
 )
+MISMATCH_STATUS = MISMATCH.replace("'", "\u2019")
 NOW_ASKS_FOR_PASSWORD = (
     "These backups now ask for a password, usually because one was added outside Rewindle. "
     "To keep backing up, start new backups in another place."
@@ -72,7 +74,7 @@ RESTORE_NOW_ASKS = (
 RESTORE_FOLDER_NAME = ".rewindle-restore-0123456789abcdef"
 SOURCE_UNREADABLE_DETAILS = "Open the affected paths listed below and check that you can read them. This run isn't counted as a finished backup."
 SOURCE_UNREADABLE_STATUS = (
-    "Some files couldn't be read (a program may have had them open), so this backup is incomplete. The next backup tries again."
+    "Some files couldn\u2019t be read (a program may have had them open), so this backup is incomplete. The next backup tries again."
 )
 
 PASSWORD_DESCRIPTION = (
@@ -345,8 +347,8 @@ class RepositoryAccessHostTests(unittest.TestCase):
         for mode in ("password", "no_password", "unknown"):
             with self.subTest(mode=mode):
                 self.assertEqual(words[f"details:repository_access_mismatch|{mode}"], MISMATCH)
-                self.assertEqual(words[f"status:repository_access_mismatch|{mode}"], MISMATCH)
-        self.assertEqual(words["status:repository_access_mismatch|absent"], MISMATCH)
+                self.assertEqual(words[f"status:repository_access_mismatch|{mode}"], MISMATCH_STATUS)
+        self.assertEqual(words["status:repository_access_mismatch|absent"], MISMATCH_STATUS)
 
     def test_no_failure_sentence_uses_a_word_a_person_should_not_need(self) -> None:
         for key, text in self.report["failure_words"].items():
