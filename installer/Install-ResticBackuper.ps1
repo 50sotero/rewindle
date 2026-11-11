@@ -3405,7 +3405,7 @@ function Read-RepositoryAccessChoice {
 }
 
 # Asked once the location and the folders are chosen, before the checks that depend on the answer (Resolve-ProtectedBindings
-# checks the recovery key's place in the profile folder only for backups with a password) and before the summary. A location
+# checks the recovery key's place in the profile folder unless the backups have no password) and before the summary. A location
 # that already holds backups is never asked: they keep the way they open, and the console says so.
 function Invoke-RepositoryAccessQuestion {
     if ($script:repositoryAccessSource -ceq 'default' -and -not $Unattended) {
@@ -3671,8 +3671,8 @@ function Invoke-InstallPreflight {
     Resolve-RepositorySelection
     Resolve-RepositoryAccess
     Resolve-SourceSelection
-    # Asked before the checks that depend on the answer: an old recovery key file in the profile folder matters only to backups
-    # with a password, so it must not stop someone who would choose none.
+    # Asked before the checks that depend on the answer: an old recovery key file in the profile folder isn't checked for backups
+    # without a password, so it must not stop someone who would choose none.
     Invoke-RepositoryAccessQuestion
     Resolve-ProtectedBindings
     Assert-RepositoryTarget
