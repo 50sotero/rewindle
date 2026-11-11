@@ -291,8 +291,11 @@ $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powersh
 
 Add `-ValidateOnly` to check everything first and change nothing. In its
 output, `password_helper_refresh` says whether registering will replace the
-protected password helper (`needed`, with the replaced helper's SHA-256 in
-`password_helper_previous_sha256`) or not (`not_needed`).
+protected password helper (`needed`, with the SHA-256 the manifest records for
+the helper it replaces in `password_helper_previous_sha256`) or not
+(`not_needed`). Once registering has replaced it, the output says `performed`,
+and `password_helper_previous_copy` names the folder that keeps the replaced
+files.
 
 The protected assets keep the copy of the password helper they were set up
 with. When an update ships a changed helper, registering the task again
@@ -308,14 +311,17 @@ release builds with CRLF):
   a new `evidence\password-helper-<UTC time>-<id>` folder under the assets
   root;
 - a helper no Rewindle shipped, or assets set up by a newer Rewindle, are
-  refused, and nothing changes.
+  refused, and nothing changes. For a helper no Rewindle shipped, rename the
+  assets folder that the message names, from an elevated window, then provision
+  the check again as described above.
 
 The two files are replaced while the task installer holds the run lock, so no
 backup or check runs meanwhile, and each in a single rename. If a backup or the
 check is running, it stops without changing anything and asks you to register
-the task again once that has finished. If the manifest cannot be replaced after
-the helper was, the earlier helper is put back; if even that fails, registering
-the task again finishes the change.
+the task again once that has finished. If another program has one of the files
+open, it asks you to close that program and register the task again. If the
+manifest cannot be replaced after the helper was, the earlier helper is put
+back; if even that fails, registering the task again finishes the change.
 
 For compatibility with installations that used the earlier mirror experiment,
 the default task name remains `ResticBackuperGoogleDriveSync`. Its installed

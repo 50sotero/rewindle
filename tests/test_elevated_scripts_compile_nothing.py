@@ -88,7 +88,8 @@ class NoElevatedScriptCompilesCodeTests(unittest.TestCase):
                     emitting.add(path.name)
                     self.assertIn("[Reflection.Emit.AssemblyBuilderAccess]::Run)", line, f"{path.name} may only run what it emits")
                 self.assertNotRegex(line, r"AssemblyBuilderAccess\]::(?:RunAndSave|Save)\b")
-        for name in ("Install-ResticBackuper.ps1", "Uninstall-ResticBackuper.ps1", "Manage-Repository.ps1", "Manage-Restore.ps1"):
+        for name in ("Install-ResticBackuper.ps1", "Uninstall-ResticBackuper.ps1", "Manage-Repository.ps1", "Manage-Restore.ps1",
+                     "install_google_drive_sync_task.ps1"):
             self.assertIn(name, emitting)
 
     def test_emitted_types_are_used_through_the_returned_type_never_by_name(self) -> None:

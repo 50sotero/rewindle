@@ -145,9 +145,11 @@ REFRESH_FUNCTIONS = (
     "New-RefreshedAssetManifest",
     "Enter-ProtectedRunLock",
     "Exit-ProtectedRunLock",
-    "Get-InstallerNativeMethods",
+    "Get-MoveFileNativeMethods",
     "Move-FileReplacing",
     "Update-ProtectedPasswordHelper",
+    "Get-AssetPasswordHelperPlan",
+    "Invoke-PasswordHelperRefresh",
 )
 PERMISSION_FUNCTIONS = (
     "Assert-ProtectedRootAclDescriptor",
@@ -206,18 +208,20 @@ function New-AssetsRoot {
     Write-NewUtf8Json -Path (Join-Path $Root 'assets-manifest.json') -Value $manifest
 }
 
+# The plan as the installer makes it when the check is registered: the manifest read as it reads it, then its own
+# Get-AssetPasswordHelperPlan.
 function Get-RootPlan {
     param([string]$Root, [string]$PackagedPath)
 
     $manifest = Read-VerifiedAssetManifest -Root $Root -AllowPasswordHelperMismatch
-    $record = @($manifest.files | Where-Object { [string]$_.name -ceq 'reveal-rclone-config-password.ps1' })[0]
-    return Get-PasswordHelperRefreshPlan `
-        -RecordedSha256 ([string]$record.sha256) `
-        -PresentSha256 (Get-Sha256Hex -Path (Join-Path $Root 'reveal-rclone-config-password.ps1')) `
-        -PackagedSha256 (Get-Sha256Hex -Path $PackagedPath) `
-        -Generations (Get-KnownPasswordHelperGenerations)
+    return (Get-AssetPasswordHelperPlan `
+        -Manifest $manifest `
+        -Root $Root `
+        -HelperName 'reveal-rclone-config-password.ps1' `
+        -PackagedHelperSha256 (Get-Sha256Hex -Path $PackagedPath)).Plan
 }
 
+# Update-ProtectedPasswordHelper alone.
 function Invoke-Refresh {
     param([string]$Root, [string]$Plan, [string]$PackagedPath, [string]$LockPath)
 
@@ -228,6 +232,20 @@ function Invoke-Refresh {
         -PackagedHelperPath $PackagedPath `
         -PackagedHelperSha256 (Get-Sha256Hex -Path $PackagedPath) `
         -Generations (Get-KnownPasswordHelperGenerations) `
+        -RunLockPath $LockPath `
+        -CurrentUserSid ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+}
+
+# The whole step that registering the check runs (Invoke-PasswordHelperRefresh).
+function Invoke-RefreshStep {
+    param([string]$Root, [string]$Plan, [string]$PackagedPath, [string]$LockPath)
+
+    return Invoke-PasswordHelperRefresh `
+        -Root $Root `
+        -Plan $Plan `
+        -HelperName 'reveal-rclone-config-password.ps1' `
+        -PackagedHelperPath $PackagedPath `
+        -PackagedHelperSha256 (Get-Sha256Hex -Path $PackagedPath) `
         -RunLockPath $LockPath `
         -CurrentUserSid ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
 }
@@ -339,8 +357,9 @@ class PasswordHelperOutputTests(unittest.TestCase):
                         "$env:PSModulePath = [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell', "
                         "'v1.0', 'Modules')",
                         "$ErrorActionPreference = 'Stop'",
-                        "$text = [string]::new([char[]]@(" + utf16_units(password) + "))",
-                        "$secure = ConvertTo-SecureString -String $text -AsPlainText -Force",
+                        # One code unit at a time, so that an empty password can be saved too.
+                        "$secure = [Security.SecureString]::new()",
+                        "foreach ($unit in [char[]]@(" + utf16_units(password) + ")) { $secure.AppendChar($unit) }",
                         "[PSCredential]::new('rclone-config', $secure) | Export-Clixml -LiteralPath $args[0]",
                     ]
                 ),
@@ -383,24 +402,25 @@ class PasswordHelperOutputTests(unittest.TestCase):
         completed = self.run_helper(earlier_helper(2), PASSWORD)
         self.assertNotEqual(PASSWORD.encode("utf-8") + b"\r\n", completed.stdout)
 
-    def test_a_password_that_is_not_valid_text_is_refused_without_output(self):
-        # A lone half of a surrogate pair cannot be written as UTF-8. The helper stops, prints nothing on standard
-        # output and does not repeat the password in its error.
-        completed = self.run_helper(HELPER.read_bytes(), "Kx7Qw\ud800Zp9")
-        self.assertNotEqual(0, completed.returncode)
-        self.assertEqual(b"", completed.stdout)
-        errors = completed.stderr.decode("utf-8", errors="replace")
-        self.assertIn("The protected rclone configuration password is invalid.", errors)
-        self.assertNotIn("Kx7Qw", errors)
-        self.assertNotIn("Zp9", errors)
-
-    def test_a_password_with_a_line_break_is_refused_without_output(self):
-        completed = self.run_helper(HELPER.read_bytes(), "Kx7Qw\nZp9")
-        self.assertNotEqual(0, completed.returncode)
-        self.assertEqual(b"", completed.stdout)
-        errors = completed.stderr.decode("utf-8", errors="replace")
-        self.assertIn("The protected rclone configuration password is invalid.", errors)
-        self.assertNotIn("Kx7Qw", errors)
+    def test_a_password_rclone_could_not_take_is_refused_without_output(self):
+        # A lone half of a surrogate pair cannot be written as UTF-8, rclone would cut the password at a line break of
+        # either kind, and an empty one is no password. The helper stops, prints nothing on standard output and does
+        # not repeat the password in its error.
+        for label, password in (
+            ("not valid text", "Kx7Qw\ud800Zp9"),
+            ("line feed", "Kx7Qw\nZp9"),
+            ("carriage return", "Kx7Qw\rZp9"),
+            ("both", "Kx7Qw\r\nZp9"),
+            ("empty", ""),
+        ):
+            with self.subTest(label):
+                completed = self.run_helper(HELPER.read_bytes(), password)
+                self.assertNotEqual(0, completed.returncode)
+                self.assertEqual(b"", completed.stdout)
+                errors = completed.stderr.decode("utf-8", errors="replace")
+                self.assertIn("The protected rclone configuration password is invalid.", errors)
+                self.assertNotIn("Kx7Qw", errors)
+                self.assertNotIn("Zp9", errors)
 
 
 @unittest.skipUnless(sys.platform == "win32", "Windows PowerShell 5.1 is Windows-only")
@@ -456,7 +476,7 @@ class PasswordHelperPlanTests(unittest.TestCase):
             ]
         )
         report = run_probe_json(self, body)
-        self.assertIn("Dictionary", report["type"], "the list of helpers was handed back one entry at a time")
+        self.assertIn("Dictionary", report["type"], "Get-KnownPasswordHelperGenerations did not return a dictionary")
         for (recorded, present, packaged, expected), plan in zip(cases, report["plans"], strict=True):
             with self.subTest(recorded=recorded[:8], present=present[:8], packaged=packaged[:8]):
                 self.assertEqual(expected, plan)
@@ -511,11 +531,12 @@ class PasswordHelperRefreshTests(unittest.TestCase):
         return sorted(path for path in (self.fixture.root / "evidence").iterdir())
 
     def test_an_earlier_helper_is_replaced_and_kept(self):
+        # The whole step that registering the check runs.
         report = self.probe(
             r"""
 New-AssetsRoot -Root $root -HelperBytes $earlierBytes -WithRcloneVersion
 $plan = Get-RootPlan -Root $root -PackagedPath $packaged
-$result = Invoke-Refresh -Root $root -Plan $plan -PackagedPath $packaged -LockPath $lockPath
+$fields = Invoke-RefreshStep -Root $root -Plan $plan -PackagedPath $packaged -LockPath $lockPath
 [void](Read-VerifiedAssetManifest -Root $root)
 $after = Get-RootPlan -Root $root -PackagedPath $packaged
 $lock = Enter-ProtectedRunLock -Path $lockPath
@@ -524,8 +545,7 @@ Exit-ProtectedRunLock -Stream $lock
 ConvertTo-AsciiJson -Value ([ordered]@{
     plan = $plan
     after = $after
-    recorded = $result.RecordedHelperSha256
-    previous_copy = $result.PreviousCopy
+    fields = $fields
     tree_checks = $script:treeChecks
     lock_free = $lockFree
 })
@@ -536,13 +556,21 @@ ConvertTo-AsciiJson -Value ([ordered]@{
         self.assertTrue(report["lock_free"], "the run lock was still held afterwards")
         earlier = earlier_helper(2)
         packaged = self.fixture.packaged.read_bytes()
-        self.assertEqual(hashlib.sha256(earlier).hexdigest(), report["recorded"])
         self.assertEqual(packaged, (self.fixture.root / HELPER_NAME).read_bytes())
 
         # The replaced files are kept, byte for byte, and nothing staged is left over.
         folders = self.evidence_folders()
         self.assertEqual(1, len(folders))
-        self.assertEqual(str(folders[0]), report["previous_copy"])
+        # What the installer reports: the manifest as it now is, and what was replaced and where it is kept.
+        self.assertEqual(
+            {
+                "asset_manifest_sha256": hashlib.sha256((self.fixture.root / "assets-manifest.json").read_bytes()).hexdigest(),
+                "password_helper_refresh": "performed",
+                "password_helper_previous_sha256": hashlib.sha256(earlier).hexdigest(),
+                "password_helper_previous_copy": str(folders[0]),
+            },
+            report["fields"],
+        )
         self.assertRegex(folders[0].name, r"^password-helper-\d{8}T\d{9}Z-[0-9a-f]{8}$")
         self.assertEqual(
             sorted([HELPER_NAME + ".previous", "assets-manifest.json.previous"]),
@@ -571,12 +599,12 @@ ConvertTo-AsciiJson -Value ([ordered]@{
         self.assertEqual(2, len(changed), changed)
         self.assertFalse((self.fixture.root / "assets-manifest.json").read_bytes().startswith(b"\xef\xbb\xbf"))
 
-        # The permission check ran once, on the whole folder, after the replacements were written and before the
-        # helper was swapped.
-        self.assertEqual(1, len(report["tree_checks"]))
-        check = report["tree_checks"][0]
-        self.assertEqual(str(self.fixture.root), check["path"])
-        self.assertEqual(hashlib.sha256(earlier).hexdigest(), check["helper_sha256"])
+        # The permission check ran on the whole folder after the replacements were written and before the helper was
+        # swapped, and again once the swap was done.
+        self.assertEqual(2, len(report["tree_checks"]))
+        before_swap, after_swap = report["tree_checks"]
+        self.assertEqual(str(self.fixture.root), before_swap["path"])
+        self.assertEqual(hashlib.sha256(earlier).hexdigest(), before_swap["helper_sha256"])
         self.assertEqual(
             sorted(
                 [
@@ -586,9 +614,63 @@ ConvertTo-AsciiJson -Value ([ordered]@{
                     "assets-manifest.json.previous",
                 ]
             ),
-            check["evidence"],
+            before_swap["evidence"],
         )
+        self.assertEqual(str(self.fixture.root), after_swap["path"])
+        self.assertEqual(hashlib.sha256(packaged).hexdigest(), after_swap["helper_sha256"])
+        self.assertEqual(sorted([HELPER_NAME + ".previous", "assets-manifest.json.previous"]), after_swap["evidence"])
         verifier_accepts(self, self.fixture.root)
+
+    def test_registering_refuses_assets_the_refresh_left_disagreeing(self):
+        # A refresh that reports success but swapped only the helper: the strict read afterwards refuses the folder.
+        report = self.probe(
+            r"""
+New-AssetsRoot -Root $root -HelperBytes $earlierBytes
+$plan = Get-RootPlan -Root $root -PackagedPath $packaged
+function Update-ProtectedPasswordHelper {
+    param($Root, $Plan, $HelperName, $PackagedHelperPath, $PackagedHelperSha256, $Generations, $RunLockPath, $CurrentUserSid)
+
+    [IO.File]::WriteAllBytes((Join-Path $Root $HelperName), [IO.File]::ReadAllBytes($PackagedHelperPath))
+    return [pscustomobject]@{ RecordedHelperSha256 = 'stand-in'; PreviousCopy = 'stand-in' }
+}
+$message = ''
+try {
+    [void](Invoke-RefreshStep -Root $root -Plan $plan -PackagedPath $packaged -LockPath $lockPath)
+}
+catch {
+    $message = $_.Exception.Message
+}
+ConvertTo-AsciiJson -Value ([ordered]@{ plan = $plan; message = $message })
+"""
+        )
+        self.assertEqual("refresh", report["plan"])
+        self.assertEqual("Cloud-verification asset size or hash mismatch: " + HELPER_NAME, report["message"])
+
+    def test_registering_refuses_assets_the_refresh_left_with_an_earlier_helper(self):
+        # A refresh that reports success but changed nothing: the folder reads well, and still holds generation 2.
+        report = self.probe(
+            r"""
+New-AssetsRoot -Root $root -HelperBytes $earlierBytes
+$plan = Get-RootPlan -Root $root -PackagedPath $packaged
+function Update-ProtectedPasswordHelper {
+    param($Root, $Plan, $HelperName, $PackagedHelperPath, $PackagedHelperSha256, $Generations, $RunLockPath, $CurrentUserSid)
+
+    return [pscustomobject]@{ RecordedHelperSha256 = 'stand-in'; PreviousCopy = 'stand-in' }
+}
+$message = ''
+try {
+    [void](Invoke-RefreshStep -Root $root -Plan $plan -PackagedPath $packaged -LockPath $lockPath)
+}
+catch {
+    $message = $_.Exception.Message
+}
+ConvertTo-AsciiJson -Value ([ordered]@{ plan = $plan; message = $message })
+"""
+        )
+        self.assertEqual("refresh", report["plan"])
+        self.assertEqual(
+            "The refreshed rclone password helper could not be confirmed. Register the check again.", report["message"]
+        )
 
     def test_a_refresh_cut_short_after_the_helper_is_finished(self):
         report = self.probe(
@@ -622,6 +704,37 @@ ConvertTo-AsciiJson -Value ([ordered]@{
         self.assertEqual(["assets-manifest.json.previous"], [path.name for path in folders[0].iterdir()])
         manifest = json.loads((self.fixture.root / "assets-manifest.json").read_text("utf-8"))
         self.assertNotIn("rclone_version", manifest)
+        verifier_accepts(self, self.fixture.root)
+
+    def test_a_refresh_cut_short_by_a_build_with_the_other_line_endings_is_finished(self):
+        # The helper in the assets is the packaged one's generation with the other line endings: a refresh cut short by
+        # a local build, finished by a release build. Finishing records the file that is there and leaves it as it is.
+        packaged = self.fixture.packaged.read_bytes()
+        lf = packaged.replace(b"\r\n", b"\n")
+        other = lf.replace(b"\n", b"\r\n") if packaged == lf else lf
+        other_path = self.temp / "other-line-endings.ps1"
+        other_path.write_bytes(other)
+        report = self.probe(
+            "$otherPath = "
+            + ps_literal(other_path)
+            + r"""
+New-AssetsRoot -Root $root -HelperBytes $earlierBytes
+[IO.File]::WriteAllBytes((Join-Path $root 'reveal-rclone-config-password.ps1'), [IO.File]::ReadAllBytes($otherPath))
+$plan = Get-RootPlan -Root $root -PackagedPath $packaged
+[void](Invoke-Refresh -Root $root -Plan $plan -PackagedPath $packaged -LockPath $lockPath)
+[void](Read-VerifiedAssetManifest -Root $root)
+ConvertTo-AsciiJson -Value ([ordered]@{
+    plan = $plan
+    after = Get-RootPlan -Root $root -PackagedPath $packaged
+})
+"""
+        )
+        self.assertEqual("finish", report["plan"])
+        self.assertEqual("current", report["after"])
+        self.assertEqual(other, (self.fixture.root / HELPER_NAME).read_bytes())
+        manifest = json.loads((self.fixture.root / "assets-manifest.json").read_text("utf-8"))
+        record = next(record for record in manifest["files"] if record["name"] == HELPER_NAME)
+        self.assertEqual({"name": HELPER_NAME, "bytes": len(other), "sha256": hashlib.sha256(other).hexdigest()}, record)
         verifier_accepts(self, self.fixture.root)
 
     def test_nothing_changes_while_a_backup_or_the_check_holds_the_run_lock(self):
@@ -703,6 +816,45 @@ ConvertTo-AsciiJson -Value ([ordered]@{
             sorted(path.name for path in folders[0].iterdir()),
         )
 
+    def test_a_swap_that_silently_does_nothing_is_caught_and_undone(self):
+        report = self.probe(
+            r"""
+New-AssetsRoot -Root $root -HelperBytes $earlierBytes
+$manifestBefore = Get-Sha256Hex -Path (Join-Path $root 'assets-manifest.json')
+$plan = Get-RootPlan -Root $root -PackagedPath $packaged
+$realMove = ${function:Move-FileReplacing}
+function Move-FileReplacing {
+    param([string]$Source, [string]$Target)
+
+    # Reports success for the manifest and moves nothing.
+    if ($Target.EndsWith('assets-manifest.json')) {
+        return
+    }
+    & $realMove -Source $Source -Target $Target
+}
+$message = ''
+try {
+    [void](Invoke-Refresh -Root $root -Plan $plan -PackagedPath $packaged -LockPath $lockPath)
+}
+catch {
+    $message = $_.Exception.Message
+}
+[void](Read-VerifiedAssetManifest -Root $root)
+ConvertTo-AsciiJson -Value ([ordered]@{
+    message = $message
+    manifest_unchanged = ((Get-Sha256Hex -Path (Join-Path $root 'assets-manifest.json')) -ceq $manifestBefore)
+    plan_after = Get-RootPlan -Root $root -PackagedPath $packaged
+})
+"""
+        )
+        self.assertEqual(
+            "The refreshed rclone password helper could not be confirmed. Register the check again.", report["message"]
+        )
+        self.assertTrue(report["manifest_unchanged"])
+        # The helper was swapped, and put back once the manifest turned out not to be.
+        self.assertEqual(earlier_helper(2), (self.fixture.root / HELPER_NAME).read_bytes())
+        self.assertEqual("refresh", report["plan_after"])
+
     def test_registering_again_finishes_when_even_the_way_back_fails(self):
         report = self.probe(
             r"""
@@ -750,45 +902,179 @@ ConvertTo-AsciiJson -Value ([ordered]@{
         self.assertEqual(2, kept.count("assets-manifest.json.previous"))
         verifier_accepts(self, self.fixture.root)
 
-    def test_assets_that_change_meanwhile_are_left_alone(self):
+    def test_assets_that_change_before_the_swap_are_left_alone(self):
+        # Just after the run lock is taken, one file changes: the helper or the manifest in the assets root, or one of
+        # the replacements written into the evidence folder. The refresh stops before it swaps anything.
+        report = self.probe(
+            r"""
+$realEnter = ${function:Enter-ProtectedRunLock}
+function Enter-ProtectedRunLock {
+    param([string]$Path)
+
+    $taken = & $realEnter -Path $Path
+    if ($script:changeName.EndsWith('.new')) {
+        $file = @(Get-ChildItem -LiteralPath (Join-Path $script:changeRoot 'evidence') -Recurse -File -Force |
+            Where-Object { $_.Name -ceq $script:changeName })[0].FullName
+    }
+    else {
+        $file = Join-Path $script:changeRoot $script:changeName
+    }
+    [IO.File]::AppendAllText($file, ' ')
+    return $taken
+}
+$results = [ordered]@{}
+foreach ($name in @('assets-manifest.json', 'reveal-rclone-config-password.ps1', 'assets-manifest.json.new',
+        'reveal-rclone-config-password.ps1.new')) {
+    $script:changeName = $name
+    $script:changeRoot = Join-Path (Split-Path -Parent $root) ('assets-' + $name)
+    New-AssetsRoot -Root $script:changeRoot -HelperBytes $earlierBytes
+    $manifestBefore = [IO.File]::ReadAllText((Join-Path $script:changeRoot 'assets-manifest.json'))
+    $plan = Get-RootPlan -Root $script:changeRoot -PackagedPath $packaged
+    $message = ''
+    try {
+        [void](Invoke-Refresh -Root $script:changeRoot -Plan $plan -PackagedPath $packaged -LockPath $lockPath)
+    }
+    catch {
+        $message = $_.Exception.Message
+    }
+    $lock = & $realEnter -Path $lockPath
+    $lockFree = $null -ne $lock
+    Exit-ProtectedRunLock -Stream $lock
+    $results[$name] = [ordered]@{
+        plan = $plan
+        message = $message
+        manifest_before = $manifestBefore
+        manifest = [IO.File]::ReadAllText((Join-Path $script:changeRoot 'assets-manifest.json'))
+        evidence = @(Get-ChildItem -LiteralPath (Join-Path $script:changeRoot 'evidence') -Force | ForEach-Object { $_.Name })
+        lock_free = $lockFree
+    }
+}
+ConvertTo-AsciiJson -Value $results
+"""
+        )
+        changed = "The protected rclone assets changed while this setup ran, so they were left as they are. Run it again."
+        earlier = earlier_helper(2)
+        for name, result in report.items():
+            with self.subTest(name):
+                self.assertEqual("refresh", result["plan"])
+                self.assertEqual(changed, result["message"])
+                # Nothing was swapped: the two files are as they were, but for the change made under the lock.
+                helper = (self.temp / ("assets-" + name) / HELPER_NAME).read_bytes()
+                self.assertEqual(earlier + b" " if name == HELPER_NAME else earlier, helper)
+                expected_manifest = result["manifest_before"] + " " if name == "assets-manifest.json" else result["manifest_before"]
+                self.assertEqual(expected_manifest, result["manifest"])
+                self.assertEqual([], result["evidence"], "the replacements were left behind")
+                self.assertTrue(result["lock_free"], "the run lock was still held afterwards")
+        self.assertEqual(4, len(report))
+
+    def test_a_plan_that_does_not_fit_the_folder_is_refused_before_anything_is_written(self):
+        # The refresh makes its own plan from the files it reads and refuses one handed to it that differs. Otherwise
+        # 'finish' would record a helper no Rewindle shipped, and 'refresh' would replace a current helper.
+        report = self.probe(
+            r"""
+$results = [ordered]@{}
+foreach ($case in @('stranger', 'current')) {
+    $caseRoot = Join-Path (Split-Path -Parent $root) ('assets-' + $case)
+    if ($case -ceq 'stranger') {
+        # Generation 2 with a line added, while the manifest still records generation 2.
+        New-AssetsRoot -Root $caseRoot -HelperBytes $earlierBytes
+        [IO.File]::AppendAllText((Join-Path $caseRoot 'reveal-rclone-config-password.ps1'), "# added`n")
+        $wrong = 'finish'
+    }
+    else {
+        New-AssetsRoot -Root $caseRoot -HelperBytes ([IO.File]::ReadAllBytes($packaged))
+        $wrong = 'refresh'
+    }
+    $before = Get-FolderSnapshot -Root $caseRoot
+    $script:treeChecks = @()
+    $message = ''
+    try {
+        [void](Invoke-Refresh -Root $caseRoot -Plan $wrong -PackagedPath $packaged -LockPath $lockPath)
+    }
+    catch {
+        $message = $_.Exception.Message
+    }
+    $results[$case] = [ordered]@{
+        message = $message
+        unchanged = ((ConvertTo-Json $before) -ceq (ConvertTo-Json (Get-FolderSnapshot -Root $caseRoot)))
+        tree_checks = @($script:treeChecks).Count
+    }
+}
+ConvertTo-AsciiJson -Value $results
+"""
+        )
+        for case in ("stranger", "current"):
+            with self.subTest(case):
+                self.assertIn("The protected rclone assets changed while this setup ran", report[case]["message"])
+                self.assertTrue(report[case]["unchanged"], "the assets folder changed")
+                self.assertEqual(0, report[case]["tree_checks"], "the refresh wrote its copies before refusing")
+
+    def test_a_packaged_helper_that_changes_meanwhile_is_not_put_in(self):
+        # The installer hashes the packaged helper when it starts and reads it again for the refresh. Bytes that differ
+        # from that hash are refused, so only the helper the runtime's manifest vouched for can go in.
         report = self.probe(
             r"""
 New-AssetsRoot -Root $root -HelperBytes $earlierBytes
+$before = Get-FolderSnapshot -Root $root
 $plan = Get-RootPlan -Root $root -PackagedPath $packaged
-# The permission check is the last step before the run lock is taken; the helper changes while it runs.
-function Assert-ProtectedTreeAcl {
-    param([string]$Path, [string]$CurrentUserSid)
-
-    [IO.File]::AppendAllText((Join-Path $Path 'reveal-rclone-config-password.ps1'), '# changed')
-}
-$changedBefore = ''
-$wrongPlan = ''
+$packagedSha256 = Get-Sha256Hex -Path $packaged
+[IO.File]::AppendAllText($packaged, "# changed`n")
+$message = ''
 try {
-    [void](Invoke-Refresh -Root $root -Plan $plan -PackagedPath $packaged -LockPath $lockPath)
+    [void](Update-ProtectedPasswordHelper `
+        -Root $root `
+        -Plan $plan `
+        -HelperName 'reveal-rclone-config-password.ps1' `
+        -PackagedHelperPath $packaged `
+        -PackagedHelperSha256 $packagedSha256 `
+        -Generations (Get-KnownPasswordHelperGenerations) `
+        -RunLockPath $lockPath `
+        -CurrentUserSid ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value))
 }
 catch {
-    $changedBefore = $_.Exception.Message
-}
-$manifestText = [IO.File]::ReadAllText((Join-Path $root 'assets-manifest.json'))
-try {
-    # A plan that does not fit the folder is refused before anything is written.
-    [void](Invoke-Refresh -Root $root -Plan 'finish' -PackagedPath $packaged -LockPath $lockPath)
-}
-catch {
-    $wrongPlan = $_.Exception.Message
+    $message = $_.Exception.Message
 }
 ConvertTo-AsciiJson -Value ([ordered]@{
-    changed_before = $changedBefore
-    wrong_plan = $wrongPlan
-    manifest_unchanged = ($manifestText -ceq [IO.File]::ReadAllText((Join-Path $root 'assets-manifest.json')))
+    plan = $plan
+    message = $message
+    unchanged = ((ConvertTo-Json $before) -ceq (ConvertTo-Json (Get-FolderSnapshot -Root $root)))
 })
 """
         )
-        expected = "The protected rclone assets changed while this setup ran, so they were left as they are."
-        self.assertIn(expected, report["changed_before"])
-        self.assertIn(expected, report["wrong_plan"])
-        self.assertTrue(report["manifest_unchanged"])
-        self.assertEqual([], self.evidence_folders())
+        self.assertEqual("refresh", report["plan"])
+        self.assertEqual("The packaged rclone password helper changed while this setup ran. Run it again.", report["message"])
+        self.assertTrue(report["unchanged"], "the assets folder changed")
+
+    def test_only_the_password_helper_may_differ_from_its_record(self):
+        # Reading the assets for the plan lets the helper's file differ from its record, which a refresh cut short
+        # leaves. Every other asset must still match it.
+        report = self.probe(
+            r"""
+$results = [ordered]@{}
+foreach ($name in @('rclone.exe', 'rclone-readonly.conf', 'rclone-config-password.clixml',
+        'reveal-rclone-config-password.ps1')) {
+    $caseRoot = Join-Path (Split-Path -Parent $root) ('assets-' + $name)
+    New-AssetsRoot -Root $caseRoot -HelperBytes $earlierBytes
+    # One byte changes; the size stays.
+    $path = Join-Path $caseRoot $name
+    $bytes = [IO.File]::ReadAllBytes($path)
+    $bytes[0] = $bytes[0] -bxor 1
+    [IO.File]::WriteAllBytes($path, $bytes)
+    try {
+        [void](Read-VerifiedAssetManifest -Root $caseRoot -AllowPasswordHelperMismatch)
+        $results[$name] = ''
+    }
+    catch {
+        $results[$name] = $_.Exception.Message
+    }
+}
+ConvertTo-AsciiJson -Value $results
+"""
+        )
+        for name in ("rclone.exe", "rclone-readonly.conf", "rclone-config-password.clixml"):
+            with self.subTest(name):
+                self.assertEqual("Cloud-verification asset size or hash mismatch: " + name, report[name])
+        self.assertEqual("", report[HELPER_NAME])
 
     def test_a_file_is_replaced_in_one_step_or_not_at_all(self):
         report = self.probe(
@@ -816,6 +1102,21 @@ finally {
     $reader.Dispose()
 }
 $seconds = $watch.Elapsed.TotalSeconds
+# Another program has the source open and does not let it be deleted (Windows says it is in use, not that access is
+# denied): also tried again, then refused.
+$sourceReader = [IO.File]::Open($source, 'Open', 'Read', 'Read')
+$sourceRefusal = ''
+$sourceWatch = [Diagnostics.Stopwatch]::StartNew()
+try {
+    Move-FileReplacing -Source $source -Target $target
+}
+catch {
+    $sourceRefusal = $_.Exception.Message
+}
+finally {
+    $sourceReader.Dispose()
+}
+$sourceSeconds = $sourceWatch.Elapsed.TotalSeconds
 $held = [IO.File]::Open($lockPath, 'Open', 'Read', 'ReadWrite')
 $held.Lock(0, 1)
 $whileLocked = Enter-ProtectedRunLock -Path $lockPath
@@ -843,6 +1144,8 @@ ConvertTo-AsciiJson -Value ([ordered]@{
     source_gone = $sourceGone
     refusal = $refusal
     seconds = $seconds
+    source_refusal = $sourceRefusal
+    source_seconds = $sourceSeconds
     target_after = [IO.File]::ReadAllText($target)
     source_kept = [IO.File]::ReadAllText($source)
     while_locked = $null -eq $whileLocked
@@ -854,8 +1157,16 @@ ConvertTo-AsciiJson -Value ([ordered]@{
         )
         self.assertEqual("new", report["replaced"])
         self.assertTrue(report["source_gone"])
-        self.assertIn("Could not replace", report["refusal"])
-        self.assertGreater(report["seconds"], 0.5, "a file in use was not tried again")
+        # Windows' reason, in its own language, then what to do.
+        refused = re.compile(
+            "^Could not replace "
+            + re.escape(str(self.fixture.state / "target.txt"))
+            + r" \(.+\)\. Close any program that has it open, then register the check again\.$"
+        )
+        self.assertRegex(report["refusal"], refused)
+        self.assertGreater(report["seconds"], 0.5, "a target in use was not tried again")
+        self.assertRegex(report["source_refusal"], refused)
+        self.assertGreater(report["source_seconds"], 0.5, "a source in use was not tried again")
         self.assertEqual("new", report["target_after"])
         self.assertEqual("newer", report["source_kept"])
         self.assertTrue(report["while_locked"], "the run lock was taken while another handle held it")
@@ -925,7 +1236,8 @@ ConvertTo-AsciiJson -Value ([ordered]@{ plan = $plan; after = Get-RootPlan -Root
 
 
 class InstallerOrderTests(unittest.TestCase):
-    """Where the refresh sits in the installer. Single-line anchors, so a CRLF checkout reads the same."""
+    """Where the refresh sits in the installer's main flow, which only an elevated registration runs. Python reads the
+    script with universal newlines, so a CRLF checkout reads the same."""
 
     TEXT = INSTALLER.read_text("utf-8")
 
@@ -934,36 +1246,111 @@ class InstallerOrderTests(unittest.TestCase):
         self.assertGreaterEqual(at, 0, f"not found in the installer: {anchor}")
         return at
 
+    def function_span(self, name: str) -> tuple[int, int]:
+        start = self.position(f"\nfunction {name} {{") + 1
+        end = self.TEXT.find("\n}\n", start)
+        self.assertGreater(end, start, f"the end of {name} was not found")
+        return start, end + 2
+
+    def calls(self, name: str) -> list[int]:
+        """Where each line that uses the name starts, leaving out comments and the function's own definition."""
+        found = []
+        offset = 0
+        for line in self.TEXT.splitlines(keepends=True):
+            code = line.lstrip()
+            if (
+                not code.startswith("#")
+                and not code.startswith(f"function {name} ")
+                and re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", line)
+            ):
+                found.append(offset)
+            offset += len(line)
+        return found
+
     def test_validate_only_reports_the_plan_and_changes_nothing(self):
-        plan = self.position("$passwordHelperPlan = Get-PasswordHelperRefreshPlan `")
-        allowed = self.position("Assert-PasswordHelperPlanAllowed -Plan $passwordHelperPlan", plan)
-        validate_only = self.position("if ($ValidateOnly) {", allowed)
-        self.position("    return", validate_only)
-        refresh = self.position("$passwordHelperRefresh = Update-ProtectedPasswordHelper `")
-        self.assertLess(validate_only, refresh)
+        plan = self.position("\n    $passwordHelperState = Get-AssetPasswordHelperPlan `\n") + 1
+        validate_only = self.position("\nif ($ValidateOnly) {\n", plan)
+        returned = self.position("\n    return\n}\n", validate_only)
+        self.assertEqual([plan], self.calls("Get-AssetPasswordHelperPlan"))
+        # The refresh step runs once, from the main flow, after -ValidateOnly has returned; the refresh itself runs only
+        # from that step.
+        step = self.calls("Invoke-PasswordHelperRefresh")
+        self.assertEqual(1, len(step), "Invoke-PasswordHelperRefresh is called more than once")
+        self.assertGreater(step[0], returned)
+        step_start, step_end = self.function_span("Invoke-PasswordHelperRefresh")
+        update = self.calls("Update-ProtectedPasswordHelper")
+        self.assertEqual(1, len(update), "Update-ProtectedPasswordHelper is called more than once")
+        self.assertTrue(step_start < update[0] < step_end, "Update-ProtectedPasswordHelper runs outside the refresh step")
 
     def test_the_refresh_runs_after_every_check_and_before_the_task_is_registered(self):
-        elevated = self.position("\nAssert-Elevated")
+        elevated = self.position("\nAssert-Elevated\n")
         running = self.position("if ([string]$existingTask.State -eq 'Running') {", elevated)
         other_account = self.position("Refusing to replace a Google Drive task owned by another account.", running)
-        refresh = self.position("$passwordHelperRefresh = Update-ProtectedPasswordHelper `", other_account)
-        strict = self.position("$assetManifest = Read-VerifiedAssetManifest -Root $cloudVerificationRootFull", refresh)
-        tree = self.position("Assert-ProtectedTreeAcl `", strict)
-        performed = self.position("$validation.password_helper_refresh = 'performed'", tree)
-        self.position("ScheduledTasks\\Register-ScheduledTask `", performed)
+        refresh = self.position("    $passwordHelperRefresh = Invoke-PasswordHelperRefresh `", other_account)
+        merged = self.position("        $validation[$field] = $passwordHelperRefresh[$field]", refresh)
+        # The first registration after the checks is the real one; the one in the catch block puts the earlier task
+        # back.
+        registered = self.position("ScheduledTasks\\Register-ScheduledTask `", other_account)
+        self.assertLess(merged, registered, "the refresh runs after the task is registered")
+
+    def test_the_refresh_is_wired_to_the_assets_the_runtime_and_the_account(self):
+        # The main flow's two calls as they must read: the plan from the manifest just read, the assets root and the
+        # runtime's helper; the refresh only when the plan is not 'current', with the run lock and this account, and
+        # its fields put into the report.
+        for block in (
+            [
+                "if ($null -ne $assetManifest) {",
+                "    $passwordHelperState = Get-AssetPasswordHelperPlan `",
+                "        -Manifest $assetManifest `",
+                "        -Root $cloudVerificationRootFull `",
+                "        -HelperName $passwordHelperName `",
+                "        -PackagedHelperSha256 $packagedPasswordHelperSha256",
+                "    $passwordHelperPlan = $passwordHelperState.Plan",
+                "    $recordedPasswordHelperSha256 = $passwordHelperState.RecordedSha256",
+                "}",
+            ],
+            [
+                "if ($null -ne $passwordHelperPlan -and $passwordHelperPlan -cne 'current') {",
+                "    $passwordHelperRefresh = Invoke-PasswordHelperRefresh `",
+                "        -Root $cloudVerificationRootFull `",
+                "        -Plan $passwordHelperPlan `",
+                "        -HelperName $passwordHelperName `",
+                "        -PackagedHelperPath $passwordHelperPath `",
+                "        -PackagedHelperSha256 $packagedPasswordHelperSha256 `",
+                "        -RunLockPath $runLockPath `",
+                "        -CurrentUserSid $userSid",
+                "    foreach ($field in @($passwordHelperRefresh.Keys)) {",
+                "        $validation[$field] = $passwordHelperRefresh[$field]",
+                "    }",
+                "}",
+            ],
+        ):
+            with self.subTest(block[1].strip()):
+                self.assertIn("\n" + "\n".join(block) + "\n", self.TEXT)
+        # What those names hold: the runtime's helper and its hash, the run lock, and this account.
+        for definition in (
+            "$passwordHelperName = 'reveal-rclone-config-password.ps1'",
+            "$passwordHelperPath = Join-Path $protectedRootFull $passwordHelperName",
+            "$packagedPasswordHelperSha256 = Get-Sha256Hex -Path $passwordHelperPath",
+            "$runLockPath = Join-Path $stateDirectoryFull 'run.lock'",
+            "$userSid = $identity.User.Value",
+        ):
+            with self.subTest(definition):
+                self.assertIn("\n" + definition + "\n", self.TEXT)
 
     def test_the_swap_happens_under_the_run_lock_after_the_permission_check(self):
-        start = self.position("function Update-ProtectedPasswordHelper {")
-        end = re.search(r"\r?\n}\r?\n", self.TEXT[start:])
-        self.assertIsNotNone(end, "the end of Update-ProtectedPasswordHelper was not found")
-        body = self.TEXT[start : start + end.start()]
+        start, end = self.function_span("Update-ProtectedPasswordHelper")
+        body = self.TEXT[start:end]
         order = [
             "Assert-ProtectedTreeAcl -Path $Root -CurrentUserSid $CurrentUserSid",
             "$lock = Enter-ProtectedRunLock -Path $RunLockPath",
+            "(Get-Sha256Hex -Path $stagedHelper) -cne $newHelperSha256",
             "$swapStarted = $true",
             "Move-FileReplacing -Source $stagedHelper -Target $helperPath",
             "Move-FileReplacing -Source $stagedManifest -Target $manifestPath",
             "finally {",
+            # The way back runs while the lock is still held.
+            "Move-FileReplacing -Source $rollback -Target $helperPath",
             "Exit-ProtectedRunLock -Stream $lock",
         ]
         positions = [body.find(anchor) for anchor in order]

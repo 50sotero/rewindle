@@ -459,9 +459,17 @@ class MyDriveCloudVerifierScriptTests(unittest.TestCase):
         self.assertIn("[Runtime.InteropServices.Marshal]::Copy($pointer, $passwordChars", PASSWORD_HELPER)
         self.assertIn("[System.Text.UTF8Encoding]::new($false, $true).GetBytes($passwordChars)", PASSWORD_HELPER)
         self.assertIn("[Console]::OpenStandardOutput()", PASSWORD_HELPER)
-        self.assertIn("[Array]::Clear($passwordBytes, 0, $passwordBytes.Length)", PASSWORD_HELPER)
-        self.assertIn("[Array]::Clear($passwordChars, 0, $passwordChars.Length)", PASSWORD_HELPER)
-        self.assertIn("$secret.Dispose()", PASSWORD_HELPER)
+        # The arrays and the native copy are cleared in the finally block, so also when the helper stops with an error.
+        cleanup = PASSWORD_HELPER.rindex("\nfinally {")
+        for clear in (
+            "[Array]::Clear($passwordBytes, 0, $passwordBytes.Length)",
+            "[Array]::Clear($passwordChars, 0, $passwordChars.Length)",
+            "[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)",
+            "$secret.Dispose()",
+        ):
+            with self.subTest(clear):
+                self.assertEqual(1, PASSWORD_HELPER.count(clear))
+                self.assertGreater(PASSWORD_HELPER.index(clear), cleanup)
         for unsafe in ("PtrToStringBSTR", "[Console]::Out", "Write-Output", "Write-Host", "$plainText"):
             self.assertNotIn(unsafe, PASSWORD_HELPER)
         # Windows PowerShell 5.1 reads a script without a byte order mark in the ANSI code page.
@@ -1266,7 +1274,8 @@ class PackagedPasswordHelperTests(unittest.TestCase):
                     generations.get(hashlib.sha256(data).hexdigest()),
                     "src/reveal-rclone-config-password.ps1 changed. Add the SHA-256 of the new file with LF and with "
                     f"CRLF line endings to Get-KnownPasswordHelperGenerations as generation {newest + 1}, so that "
-                    "registering the check again moves PCs that run the earlier helper to it.",
+                    "registering the check again moves PCs that run the earlier helper to it, and add that earlier "
+                    f"helper (generation {newest}, as git stores it, with LF) to tests/fixtures/earlier-password-helpers.json.",
                 )
 
     def test_every_generation_has_its_lf_and_crlf_form(self):
@@ -1282,7 +1291,12 @@ class PackagedPasswordHelperTests(unittest.TestCase):
         # generation, or PCs that run them could no longer be brought up to date.
         generations = known_password_helper_generations()
         fixture = json.loads((PROJECT / "tests" / "fixtures" / "earlier-password-helpers.json").read_text("ascii"))
-        self.assertEqual([1, 2, 3], [entry["generation"] for entry in fixture["helpers"]])
+        # Every generation but the packaged one, which test_the_packaged_helper_is_the_newest_known_generation checks.
+        self.assertEqual(
+            list(range(1, max(generations.values()))),
+            [entry["generation"] for entry in fixture["helpers"]],
+            "tests/fixtures/earlier-password-helpers.json must hold every earlier helper, oldest first",
+        )
         for entry in fixture["helpers"]:
             with self.subTest(generation=entry["generation"]):
                 lf = base64.b64decode(entry["base64_lf"])
