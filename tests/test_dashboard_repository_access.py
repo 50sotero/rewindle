@@ -14,11 +14,16 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
 PROJECT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT / "src"))
+
+import recovery_health  # noqa: E402
+
 DASHBOARD = PROJECT / "src" / "dashboard"
 WEB = DASHBOARD / "web"
 ACCESS_TS = WEB / "src" / "repositoryAccess.ts"
@@ -44,7 +49,16 @@ NO_PASSWORD_AUTHENTICATION_STATUS = (
 )
 MISMATCH = (
     "These backups now ask for a password that Rewindle doesn't have, usually because they were changed outside Rewindle. Rewindle can't "
-    "carry on with them. See Switching an existing backup in Rewindle's guide, or start new backups in another place."
+    "carry on with them. To keep backing up, start new backups in another place."
+)
+NOW_ASKS_FOR_PASSWORD = (
+    "These backups now ask for a password, usually because one was added outside Rewindle. "
+    "To keep backing up, start new backups in another place."
+)
+NOW_OPEN_WITHOUT_PASSWORD = (
+    "These backups now open without a password, usually because it was removed outside Rewindle. "
+    "To keep using them, see Switching an existing backup in SECURITY.md on Rewindle's GitHub page, "
+    "or start new backups in another place."
 )
 SOURCE_UNREADABLE_DETAILS = "Open the affected paths listed below and check that you can read them. This run isn't counted as a finished backup."
 SOURCE_UNREADABLE_STATUS = (
@@ -219,6 +233,12 @@ class RepositoryAccessHostTests(unittest.TestCase):
             raise AssertionError("repository access harness failed to compile:\n" + compiled.stdout + compiled.stderr)
         work = Path(cls.build_directory.name) / "work"
         work.mkdir()
+        # The sentences the readiness check gives when backups no longer open the way they were made, as the engine words them, keyed by
+        # the mode of the configuration whose report carries each (see ReadinessDetails in the harness).
+        (work / "readiness-details.json").write_text(
+            json.dumps({"no_password": recovery_health.NO_PASSWORD_NOW_ASKS_DETAIL, "password": recovery_health.PASSWORD_NOW_OPENS_FREELY_DETAIL}),
+            encoding="utf-8",
+        )
         # A window is built and read, never shown, and no process is started: the harness works on files in this folder only.
         completed = subprocess.run([str(executable), str(work)], cwd=PROJECT, text=True, capture_output=True, timeout=120, check=False)
         if completed.returncode != 0:
@@ -305,6 +325,22 @@ class RepositoryAccessHostTests(unittest.TestCase):
                 self.assertIsNone(parsed[key]["access"])
                 self.assertEqual(parsed[key]["error"], "Recovery-readiness data did not match how these backups are opened, so it was not used.")
                 self.assertIsNone(TECHNICAL.search(parsed[key]["error"]))
+
+    def test_what_the_checks_say_when_backups_no_longer_open_the_way_they_were_made_is_shown_whole(self) -> None:
+        shown = self.report["readiness_details"]
+        self.assertEqual({"no_password", "password"}, set(shown))
+        # No word filter on the way (the launcher's, the window's) may hide a sentence that says "password" or names SECURITY.md, and none
+        # may change it: the sentences are the engine's own and reach the grid as written.
+        for mode, expected, engine in (
+            ("no_password", NOW_ASKS_FOR_PASSWORD, recovery_health.NO_PASSWORD_NOW_ASKS_DETAIL),
+            ("password", NOW_OPEN_WITHOUT_PASSWORD, recovery_health.PASSWORD_NOW_OPENS_FREELY_DETAIL),
+        ):
+            with self.subTest(mode=mode):
+                self.assertEqual(expected, engine)
+                self.assertEqual({"loaded": True, "parsed": expected, "listed": expected}, shown[mode])
+                self.assertIsNone(TECHNICAL.search(expected))
+        # Where to read about switching is named, so a person can find it from the app; "guide" alone is a place nobody can open.
+        self.assertIn("SECURITY.md on Rewindle's GitHub page", shown["password"]["listed"])
 
     def test_a_backup_without_a_password_has_no_key_to_repair_or_rotate(self) -> None:
         launched = self.report["launchers"]

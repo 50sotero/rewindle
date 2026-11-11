@@ -219,6 +219,7 @@ below, and the console shows the text the installer has always shown for it.
 | `repository_low_space` | repository | The drive has less than `-MinimumFreeGiB` free. |
 | `repository_access_invalid` | repository | `-RepositoryAccess` is not exactly `password` or `no_password` in lower case (Windows PowerShell accepts other capitals for a parameter, but every part of Rewindle that reads the configuration refuses them). |
 | `repository_access_rotation_pending` | repository | The choice is `no_password`, but the state folder an earlier installation kept holds an unfinished change to the keys of earlier backups (`credential-rotation.journal.json`), which only a password can finish. `path` is the state folder. The message says to finish it with a password, or to move the folder aside to start new backups without one. |
+| `repository_password_unavailable` | repository | The choice is `password`, the backups already in the folder are recorded as having a password (the kept record that names the folder, or the recovery tools beside it: `resolved.existing_repository_access` is `password`), the folder holds backups (a Restic `config` file) and the stored password file (`C:\ProgramData\ResticBackuper\repository-password.dpapi.json`) is not there, so these backups can't be continued and a new password would not open them. `path` is the backup folder. The message is "The backups in this location have a password that Rewindle doesn't have on this PC, so Setup can't continue them. Choose another location for new backups. You can still restore files from these backups with their recovery key." It is reported before anything is changed, by a plan and by an install's preflight, and it carries no "Setup undid its changes" ending. Never raised for a choice of `no_password` (the install asks the backups themselves), for backups no record describes (`existing_repository_access` is `unknown`: the install asks them, and its initializer refuses with exit 7 if they need a password this PC lacks), or when the stored password exists. |
 | `sources_required` | sources | No source folder. |
 | `source_not_absolute` | sources | A source is not a full path. `path` is it. |
 | `source_path_invalid` | sources | A source is not a valid path. |
@@ -500,10 +501,19 @@ is left; reparse points are never followed or removed. Whether the folder is gon
 written. Only when the folder is gone does `error.message` end with "Setup undid
 its changes. Backups and the recovery key it had already created were kept." (for backups without a password, or when it is
 not known which kind they are, there is no recovery key to mention: "Setup undid its changes. Backups it had already created
-were kept."). The failures that say how the backups open, `repository_access_mismatch` and `repository_access_unreadable`
-below, end by themselves with "Setup undid its changes, and your backups were not touched." and take no other tail. Otherwise it says that some program files
-could not be removed yet and tells the user to restart the PC, then run Setup again and choose **Reinstall or repair**
-(which runs the uninstaller first); the next plan reports `already_installed` until then.
+were kept."). The failures that say how the backups open, `repository_access_mismatch`, `repository_access_unreadable` and
+`repository_password_unavailable` below (the last as the initializer's refusal; its plan and preflight form carries no
+ending), end by themselves with "Setup undid its changes, and your backups were not touched." and take no other tail.
+Otherwise it says that some program files could not be removed yet and tells the user to restart the PC, then run Setup again
+and choose **Reinstall or repair** (which runs the uninstaller first); the next plan reports `already_installed` until then.
+
+The installer reads the exit code of the engine's repository initializer (`docs/engine-contract.md`) like this: 4 or 5 is
+`repository_access_mismatch`, 6 is `repository_access_unreadable` and 7 is `repository_password_unavailable`. Each is a
+refusal that changes nothing and fails the phase that is running at that moment (`credential` for backups with a password,
+`repository` for backups without one). Any other exit code that is not 0 is a failure of the phase named from what is on disk
+(`credential`, `repository` or, once the backup folder holds backups, `recovery_key`), with that phase's own words. Only
+`repository_password_unavailable` also has a plan and preflight form (section 2.4); the other refusals are found by asking the
+backups, which only an install does.
 
 In addition to the validation codes of section 2.4, `result.error.code` can be:
 
@@ -517,9 +527,10 @@ In addition to the validation codes of section 2.4, `result.error.code` can be:
 | `canary_failed` | canary | The restore test file could not be prepared. |
 | `credential_failed` | credential | The repository password could not be created or stored. |
 | `repository_initialization_failed` | repository | Restic could not create or open the repository. For backups without a password, or when it is not known which kind they are, the message is "Setup could not create the backup location." |
-| `repository_access_mismatch` | credential or repository | The backups in the folder are opened the other way from the one chosen or recorded (the initializer refused: "The backups in this location are protected by a password, but you chose no password...", or the reverse; when the choice came from a record or from asking the backups, "These backups no longer match what Setup recorded for them..."). `credential` for backups with a password, `repository` for backups without one. Nothing was changed. |
-| `repository_access_unreadable` | payload, credential or repository | Setup could not open the backups in the folder to find out how (the detection in `payload`), or to continue them: "Setup couldn't open the backups in this location to continue them. Check that the backup drive or Google Drive folder is connected and available, then try again." Nothing was changed. |
-| `recovery_key_failed` | recovery_key | The recovery key or recovery tools could not be written (for backups without a password: the recovery tools). |
+| `repository_access_mismatch` | credential or repository | The backups in the folder are opened the other way from the one chosen or recorded (the initializer refused with exit 4 or 5: "The backups in this location are protected by a password, but you chose no password...", or the reverse; when the choice came from a record or from asking the backups, "These backups no longer match what Setup recorded for them, usually because they were changed outside Rewindle. Setup can't carry on with them here. Choose another location, or see Switching an existing backup in SECURITY.md on Rewindle's GitHub page."). Each is followed by "Setup undid its changes, and your backups were not touched." `credential` for backups with a password, `repository` for backups without one. Nothing was changed. |
+| `repository_access_unreadable` | payload, credential or repository | Setup could not open the backups in the folder to find out how (the detection in `payload`), or to continue them (the initializer's exit 6; for backups with a password also when the backups hold no key at all): "Setup couldn't open the backups in this location to continue them. Check that the backup drive or Google Drive folder is connected and available, then try again. If they still can't be opened, they may be damaged: choose another location for new backups, and keep this folder until you've checked it." followed by "Setup undid its changes, and your backups were not touched." Nothing was changed. |
+| `repository_password_unavailable` | credential | The backups in the folder have a password and this PC has no saved password that opens them (the initializer's exit 7), found after the preflight (backups no record describes, or a saved password that does not open them): "The backups in this location have a password that Rewindle doesn't have on this PC, so Setup can't continue them. Choose another location for new backups. You can still restore files from these backups with their recovery key." followed by "Setup undid its changes, and your backups were not touched." Nothing was changed, and no new password was made. A plan and the preflight raise the same code earlier for backups recorded as having a password (section 2.4), with the text alone. |
+| `recovery_key_failed` | recovery_key | The recovery key or recovery tools could not be written (for backups without a password, or when it is not known which kind they are, the message is "Setup could not save the recovery tools." instead of "Setup could not write your recovery key.", because there is no key; the phase and the code stay). |
 | `permissions_failed` | permissions | Folders could not be locked down. |
 | `task_registration_failed` | tasks | The backup task or the Installed apps entry could not be created. |
 | `dashboard_setup_failed` | dashboard | The dashboard task or shortcut could not be created. |

@@ -523,18 +523,27 @@ child of the engine, the managers and the Google Drive check has its standard in
 | 2 | A command line the parser refuses; the installer reads it as "can't tell" |
 | 4 | The configuration says `no_password`, but the backups in that location need a password |
 | 5 | The configuration says `password`, but the backups in that location have none |
-| 6 | The configuration says `no_password` and the existing backups could not be opened to tell (also `--detect-access` when it can't tell) |
+| 6 | The existing backups could not be opened to tell how they open: with `no_password`, `cat config` failed with anything but exit 12; with `password` and no saved password, the read-only look could not tell, or Restic said they need a password but their `keys` folder holds no file (a missing, empty or not yet downloaded folder: no password opens backups that hold no key); the same empty `keys` folder when the saved password did not open them (also `--detect-access` when it can't tell) |
+| 7 | The configuration says `password` and the backups need one, but this PC has no saved password that opens them: no saved password and the read-only look says they need a password, or the saved password did not open them (Restic exit 12) and they do not open without one either; in both the `keys` folder holds at least one file. No new password is ever made for them |
 | 20, 21, 22 | `--detect-access` only: the backups open without a password (20), need one (21), or are not there (22) |
 
-Exit 4, 5 and 6 print one plain line on stderr ("The backups in this location don't match the choice made in Setup." or
-"Setup couldn't open the backups in this location.") with none of Restic's text, and write nothing; the installer undoes
-its own changes and leaves the backups as they were. In `no_password` mode an existing backup (a `config` file) is opened
-with `cat config` through `restic_base`: exit 0 goes on, Restic exit 12 returns 4, anything else returns 6. A new one is
-created with `init --repository-version 2` and checked with `cat config`; Restic's `init` text, which always warns about
-"knowledge of your password", is never shown, and `init` is never used as a probe. In `password` mode the old flow runs
-first, and only where it refuses an existing backup (no saved password, or the saved password does not open it) does a
-read-only look run: if the backups open without a password the answer is 5, otherwise the old error (exit 1). The look is
-never run when the saved password opens the backups, so a backup that opens both ways keeps working with its password.
+Exit 4, 5, 6 and 7 print one plain line on stderr ("The backups in this location don't match the choice made in Setup." for 4
+and 5, "Setup couldn't open the backups in this location." for 6, "This PC has nothing saved that opens the backups in this
+location." for 7) with none of Restic's text, and write nothing (the secret, the key, the recovery tools and `repository.json`
+are not created or changed); the installer undoes its own changes and leaves the backups as they were. It words them for the
+person itself (`docs/setup-contract.md`): 4 and 5 are `repository_access_mismatch`, 6 is `repository_access_unreadable`, 7 is
+`repository_password_unavailable`. In `no_password` mode an existing backup (a `config` file) is opened with `cat config`
+through `restic_base`: exit 0 goes on, Restic exit 12 returns 4, anything else returns 6. A new one is created with
+`init --repository-version 2` and checked with `cat config`; Restic's `init` text, which always warns about "knowledge of your
+password", is never shown, and `init` is never used as a probe. In `password` mode the old flow runs first, and only where it
+refuses an existing backup (no saved password, or the saved password does not open it) does a read-only look run: if the
+backups open without a password the answer is 5. Otherwise, with no saved password, the look's answer decides: "needs a
+password" is 7, and anything else (it could not tell, or there is no backup after all) is 6; with a saved password that Restic
+answered with exit 12, the answer is 7. Either 7 becomes 6 when the backups' `keys` folder holds no file, because Restic
+answers exit 12 for backups that hold no key at all just as it does for a password that was not given, so only the folder
+tells a password this PC lacks from backups that can't be opened. Any other failure of `cat config` with a saved password
+stays the old error (exit 1). The look is never run when the saved password opens the backups, so a backup that opens both
+ways keeps working with its password.
 
 `--detect-access --repository <path> --restic <restic.exe>` is exclusive with `--config` and `--commit-recovery-key`
 (otherwise exit 2), loads no configuration and writes nothing. It runs one read-only
@@ -550,37 +559,42 @@ and Restic exits 12, the run fails with `failure_code` `repository_access_mismat
 `repository_authentication` and the message "these backups now ask for a key that Rewindle doesn't have": the backups were
 changed outside Rewindle or replaced by others. Every other failure of that step, and every failure in `password` mode, stays
 `repository_authentication_failed`. The message holds none of the words the dashboard's filters hide. The dashboard words the
-code the same in every mode (run details and the Protection status line) and points to "Switching an existing backup" in
-`SECURITY.md`; for `repository_authentication_failed` it words the next step by mode (read from `status.json`). The installer
-has findings of the same name for its own refusals (`docs/setup-contract.md`).
+code the same in every mode (run details and the Protection status line): "These backups now ask for a password that Rewindle
+doesn't have, usually because they were changed outside Rewindle. Rewindle can't carry on with them. To keep backing up, start
+new backups in another place." For `repository_authentication_failed` it words the next step by mode (read from
+`status.json`). The installer has findings of the same name for its own refusals (`docs/setup-contract.md`).
 
 **Recovery readiness.** `recovery_health.py` reads the mode first. For `no_password` it opens the backups with the option and
 no password source, and its report has no `recovery_key` and no `rotation_rollback_key` check; the other checks stay.
 `active_credential` passes with "Rewindle can open your backups."; when it fails it says "Rewindle couldn't open your backups.
 Check that the backup drive or Google Drive folder is connected, then run the checks again.", and, on Restic exit 12, "These
-backups now ask for a password, usually because one was added outside Rewindle. See Switching an existing backup in Rewindle's
-guide." In `password` mode nothing changes unless `active_credential` fails with exit 12: one read-only look (the option,
-`cat config`, `--no-lock --no-cache`, 20 seconds) then says "These backups now open without a password, usually because it was
-removed outside Rewindle. See Switching an existing backup in Rewindle's guide." when it succeeds; it never runs when the saved
-password works. `restore_drill` counts a history entry only when its `credential_source` matches the mode. The recovery copy's
+backups now ask for a password, usually because one was added outside Rewindle. To keep backing up, start new backups in
+another place." In `password` mode nothing changes unless `active_credential` fails with exit 12: one read-only look (the
+option, `cat config`, `--no-lock --no-cache`, 20 seconds) then says "These backups now open without a password, usually
+because it was removed outside Rewindle. To keep using them, see Switching an existing backup in SECURITY.md on Rewindle's
+GitHub page, or start new backups in another place." when it succeeds; it never runs when the saved password works.
+`restore_drill` counts a history entry only when its `credential_source` matches the mode. The recovery copy's
 `repository_access` is compared with the live configuration's (normalised), and a difference fails `recovery_bundle` with
-`Recovery configuration drift: repository_access`. The dashboard uses a report only when its `repository_access` (absent
-means `password`) equals the configuration's, shows no recovery-key row for `no_password`, hides credential repair and key
-rotation, and gates **Run restore drill** on `active_credential`, `recovery_bundle`, `last_verification`,
-`pending_transaction` and no locks. `credential_repair.py` and `key_rotation.py` refuse a `no_password` backup at once, before
-they read a key, secret or journal, with exit 2 and a `failed` document: "This backup opens without a key, so there is nothing
-to repair." and "This backup opens without a key, so there are no keys to rotate."; the dashboard's launchers refuse in the same
-words before any prompt. `stale_lock_repair.py` runs its four Restic calls with the option and no password source.
+`Recovery configuration drift: repository_access`. The dashboard uses a report only when its `repository_access` (absent means
+`password`) equals the configuration's, shows no recovery-key row for `no_password`, hides credential repair and key rotation,
+and gates **Run restore drill** on `active_credential`, `recovery_bundle`, `last_verification`, `pending_transaction` and no
+locks. `credential_repair.py` and `key_rotation.py` refuse a `no_password` backup at once, before they read a key, secret or
+journal, with exit 2 and a `failed` document: "This backup opens without a key, so there is nothing to repair." and "This
+backup opens without a key, so there are no keys to rotate."; the dashboard's launchers refuse in the same words before any
+prompt. `stale_lock_repair.py` runs its four Restic calls with the option and no password source.
 
 **Restore and the restore drill.** `restore.py` in `no_password` mode adds the option to every Restic call, never passes
 `--password-command` (not even when an older DPAPI file is still there), never reads a recovery key, never prompts (standard
 input is closed), and refuses `--recovery-key-file` with "This backup opens without a key, so there is no key file to use."
-`--find-json` works the same way; the file-search refusal for backups with a password is "File search needs Rewindle's saved key
-or your recovery key." The restore drill runs with no key and reports `credential_source` `none` (with a password:
-`recovery_key`); `drill_kind` stays `recovery_key_representative` and the history entry kind stays
-`recovery_key_representative_drill`. `Manage-Restore.ps1` then neither requires the recovery key file nor checks its ACL nor
-passes `--recovery-key-file`, and accepts only the `credential_source` that matches the mode; `RestoreManager.cs` does the same
-(`none` only for a `no_password` configuration, `recovery_key` only for `password`).
+`--find-json` works the same way; the file-search refusal for backups with a password is "File search needs Rewindle's saved
+key or your recovery key." When Restic answers exit 12 to a restore of backups without a password (they now ask for a
+password), `restore.py` says "These backups now ask for a password that Rewindle doesn't have, usually because they were
+changed outside Rewindle, so Rewindle can't open them. If you know that password, Restic can still restore your files with it,
+as RECOVERY.md in the recovery tools folder next to your backups explains." The restore drill runs with no key and reports
+`credential_source` `none` (with a password: `recovery_key`); `drill_kind` stays `recovery_key_representative` and the history
+entry kind stays `recovery_key_representative_drill`. `Manage-Restore.ps1` then neither requires the recovery key file nor
+checks its ACL nor passes `--recovery-key-file`, and accepts only the `credential_source` that matches the mode;
+`RestoreManager.cs` does the same (`none` only for a `no_password` configuration, `recovery_key` only for `password`).
 
 **Managers and the Google Drive check.** `Manage-Repository.ps1` (a move of the backup location) and `Manage-Sources.ps1`
 read the field with `Get-RepositoryAccess` and refuse "Recovery repository_access is not synchronized with the protected

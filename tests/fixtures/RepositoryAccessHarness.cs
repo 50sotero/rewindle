@@ -363,6 +363,53 @@ namespace ResticBackuper.Dashboard
             return result;
         }
 
+        // What the readiness check says when backups no longer open the way they were made. The test writes the sentences it takes from the
+        // engine (recovery_health.py) to readiness-details.json, keyed by the configuration's mode, and this takes each one through the steps
+        // a real report goes through: read from the engine's JSON by the launcher, then listed in the window. Neither may hide or change it.
+        private static Dictionary<string, object> ReadinessDetails()
+        {
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            string path = Path.Combine(root, "readiness-details.json");
+            if (!File.Exists(path)) return result;
+            IDictionary<string, object> given = (IDictionary<string, object>)Json.DeserializeObject(File.ReadAllText(path, Encoding.UTF8));
+            MethodInfo parse = typeof(RecoveryHealthLauncher).GetMethod("ParseBoundReport", Flags);
+            MethodInfo apply = typeof(RecoveryReadinessWindow).GetMethod("ApplyReport", Flags);
+            DashboardThemePalette palette = DashboardThemeManager.Resolve(DashboardThemePreference.Midnight).Palette;
+            foreach (KeyValuePair<string, object> item in given)
+            {
+                SourceConfiguration configuration = Configuration(item.Key, Path.Combine(root, "runtime"));
+                Dictionary<string, object> bound = new Dictionary<string, object>();
+                bound["repository"] = configuration.RepositoryPath;
+                Dictionary<string, object> document = ReportDocument(bound, item.Key, true);
+                document["overall_status"] = "blocked";
+                document["failed_check_count"] = 1;
+                List<object> checks = new List<object>();
+                Dictionary<string, object> check = new Dictionary<string, object>();
+                check["id"] = "active_credential";
+                check["status"] = "fail";
+                check["summary"] = "Rewindle couldn't open your backups.";
+                check["detail"] = (string)item.Value;
+                checks.Add(check);
+                document["checks"] = checks;
+                IDictionary<string, object> read = (IDictionary<string, object>)Json.DeserializeObject(Json.Serialize(document));
+                RecoveryHealthReport report = (RecoveryHealthReport)parse.Invoke(null, new object[] { read, configuration });
+                Dictionary<string, object> outcome = new Dictionary<string, object>();
+                outcome["loaded"] = report.Loaded;
+                outcome["parsed"] = report.Loaded ? report.Checks[0].Detail : report.ErrorMessage;
+                RecoveryReadinessWindow window = new RecoveryReadinessWindow(configuration, palette);
+                apply.Invoke(window, new object[] { report });
+                DataGrid grid = Get<DataGrid>(window, "checksGrid");
+                string listed = null;
+                if (grid.ItemsSource != null)
+                {
+                    foreach (object row in grid.ItemsSource) listed = ((RecoveryHealthCheck)row).Detail;
+                }
+                outcome["listed"] = listed;
+                result[item.Key] = outcome;
+            }
+            return result;
+        }
+
         // ---- the restore drill's evidence ------------------------------------------------------------------------------------------
 
         private static string DrillVerdict(string access, string credentialSource)
@@ -422,6 +469,7 @@ namespace ResticBackuper.Dashboard
             result["parse"] = ParseCases();
             result["launchers"] = Launchers();
             result["readiness"] = Readiness();
+            result["readiness_details"] = ReadinessDetails();
             result["drill"] = DrillCases();
             Console.WriteLine(Json.Serialize(result));
             return 0;

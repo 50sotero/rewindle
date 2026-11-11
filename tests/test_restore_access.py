@@ -27,6 +27,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 import warnings
@@ -47,6 +48,13 @@ NEW_ID = "b" * 64
 REPOSITORY_ID = "0123456789abcdef0123456789abcdef"
 PLAN_ID = "12345678-1234-4abc-8def-1234567890ab"
 NO_KEY_FILE_MESSAGE = "This backup opens without a key, so there is no key file to use."
+# What a person is told when backups that Rewindle opens without a password now ask for one: never "Restic ... failed with exit
+# code 12". Written out here, character for character, so that a change of it is seen.
+NOW_ASKS_FOR_A_PASSWORD = (
+    "These backups now ask for a password that Rewindle doesn't have, usually because they were changed outside Rewindle, "
+    "so Rewindle can't open them. If you know that password, Restic can still restore your files with it, as RECOVERY.md "
+    "in the recovery tools folder next to your backups explains."
+)
 DRILL_KEY_FILE_MESSAGE = "--recovery-drill requires a target, report, and recovery-key file"
 CANARY = b"canary\n"
 DRILL_FILES = {"canary.txt": CANARY, "live.txt": b"live source sentinel\n", "notes.txt": b"fixture notes\n"}
@@ -92,6 +100,10 @@ if control["backups"] == "password":
     # Backups with a password open only for the password command or the recovery key's password.
     if "--password-command" not in args and os.environ.get("RESTIC_PASSWORD") != control["password"]:
         raise SystemExit(12)
+if control.get("answer_12_for") in args:
+    # Backups that open, but this one command is answered "wrong password or no key found" (a password added in between).
+    sys.stderr.write("Fatal: wrong password or no key found\n")
+    raise SystemExit(12)
 
 if "find" in args:
     ids = [args[index + 1] for index, value in enumerate(args[:-1]) if value == "--snapshot"]
@@ -282,6 +294,17 @@ class SpawnGuardTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 restore.run_restic_capture(["restic", self.FLAG, "--password-command", "x"], ["snapshots"], {}, False, "snapshot query")
 
+    def test_a_search_never_waits_for_a_password(self) -> None:
+        # A search reads with its standard input closed, so a read that would need to ask for a password is refused in
+        # its own words before anything starts. The search itself never asks for one (it checks first), so this is
+        # the reader's own guard.
+        capture = restore.bounded_restic_capture(time.monotonic() + 60)
+        with mock.patch.object(restore.subprocess, "Popen", side_effect=AssertionError("started")):
+            with self.assertRaises(ValueError) as caught:
+                capture(["restic", "--repo", "repository"], ["snapshots", "--json"], {}, True, "snapshot query")
+        self.assertEqual("File search needs Rewindle's saved key or your recovery key.", str(caught.exception))
+        self.assertEqual(restore.FILE_SEARCH_KEY_MESSAGE, str(caught.exception))
+
 
 class FixtureCase(unittest.TestCase):
     """A disposable backup location, configuration and stand-in Restic. Subclasses choose what the two say."""
@@ -351,6 +374,7 @@ class FixtureCase(unittest.TestCase):
                 {
                     "log": str(self.log),
                     "backups": self.backups,
+                    "answer_12_for": None,
                     "password": self.password,
                     "repository_id": REPOSITORY_ID,
                     "snapshots": [one_snapshot(self.source)],
@@ -363,6 +387,14 @@ class FixtureCase(unittest.TestCase):
         )
 
     # --- helpers ---------------------------------------------------------------------------------------------------
+    def answer_12_for(self, command: str, backups: str = "no_password") -> None:
+        """From now on the stand-in opens the backups (they are `backups`) and answers this one Restic command with 12."""
+        control_path = self.fake.with_suffix(".control.json")
+        control = json.loads(control_path.read_text(encoding="utf-8"))
+        control["backups"] = backups
+        control["answer_12_for"] = command
+        control_path.write_text(json.dumps(control), encoding="utf-8")
+
     def arguments(self, *extra: str) -> list[str]:
         return ["--config", str(self.config_path), "--repository", str(self.repository), "--restic", str(self.fake), *extra]
 
@@ -505,23 +537,165 @@ class NoPasswordRestoreTests(FixtureCase):
                     self.assertNotIn(word, message.casefold())
 
 
+class NoStartWithAPasswordSourceTests(FixtureCase):
+    """main() makes one check, before any Restic starts, that the command and environment every start is given have no
+    password source next to the empty-password flag. The listing, the bare list and the restore start Restic with
+    subprocess.call, which has no guard of its own, so this check is theirs; nothing in restore.py puts a password
+    variable into that environment, so a test has to (restic_child_environment is where one would come from)."""
+
+    config_access = "no_password"
+    backups = "no_password"
+
+    def test_a_password_variable_in_the_environment_starts_no_restic_at_all(self) -> None:
+        plain = restore.restic_child_environment
+        for name in restore.PASSWORD_SOURCE_VARIABLES:
+            for label, arguments in (
+                ("the human list", ("--list",)),
+                ("no action", ()),
+                ("the list of backups", ("--list-snapshots-json",)),
+                ("a folder", ("--list-tree-json", "--snapshot", "latest")),
+                ("a search", ("--cache-dir", str(self.cache), "--no-restic-lock", "--find-json", "--find-text=notes")),
+                ("a restore", ("--snapshot", "latest", "--target", str(self.root / "restored"))),
+                ("the drill", tuple(self.drill_arguments())),
+            ):
+                with self.subTest(name=name, start=label):
+                    self.log.unlink(missing_ok=True)
+                    with mock.patch.object(restore, "restic_child_environment", lambda: {**plain(), name: "value"}):
+                        with self.assertRaises(ValueError) as caught:
+                            self.run_restore(*arguments)
+                    self.assertEqual(restore.NO_KEY_SOURCE_MESSAGE, str(caught.exception))
+                    self.assertEqual([], self.calls())
+
+    def test_the_same_environment_without_a_password_variable_starts_restic(self) -> None:
+        for arguments in (("--list",), ()):
+            with self.subTest(arguments=arguments):
+                result, _, _, _ = self.run_restore(*arguments)
+                self.assertEqual(0, result)
+        self.assertEqual(2, len(self.calls()))
+        self.assert_opened_without_a_key(self.calls())
+
+
 class BackupsThatNowNeedAPasswordTests(FixtureCase):
-    """Someone added a password outside Rewindle: the configuration still says no_password."""
+    """Someone added a password outside Rewindle: the configuration still says no_password.
+
+    Every way restore.py reads the backups says so in NOW_ASKS_FOR_A_PASSWORD, never as "Restic ... failed with exit code 12".
+    The stand-in's backups ask for a password (it answers every command with 12), or open and answer one command with 12.
+    """
 
     config_access = "no_password"
     backups = "password"
 
-    def test_they_fail_at_once_and_say_so_plainly(self) -> None:
+    def refused_plainly(self, operation: str, *arguments: str) -> restore.ResticReadError:
         # Restic answers 12 and has stdin closed, so nothing waits for a password.
         with self.assertRaises(restore.ResticReadError) as caught:
-            self.run_restore("--list-snapshots-json")
-        self.assertEqual(12, caught.exception.returncode)
-        self.assertEqual("Restic repository query failed with exit code 12", restore.safe_report_error(caught.exception))
+            self.run_restore(*arguments)
+        error = caught.exception
+        self.assertEqual((operation, 12), (error.operation, error.returncode))
+        self.assertEqual(NOW_ASKS_FOR_A_PASSWORD, str(error))
+        self.assertEqual(NOW_ASKS_FOR_A_PASSWORD, restore.safe_report_error(error))
+        self.assertNotIn("exit code", str(error))
         # No key was tried: the flag was the only credential on the command.
+        self.assertTrue(self.calls())
         for call in self.calls():
             self.assertIn("--insecure-no-password", call["args"])
             self.assertNotIn("--password-command", call["args"])
             self.assertFalse([name for name in call["environment"] if name.startswith("RESTIC_PASSWORD")])
+        return error
+
+    def report(self, name: str) -> dict:
+        return json.loads((self.state / name).read_text(encoding="utf-8"))
+
+    def test_listing_the_backups_says_so_plainly(self) -> None:
+        self.refused_plainly("repository query", "--list-snapshots-json")
+
+    def test_the_list_of_backups_itself_says_so_plainly(self) -> None:
+        self.answer_12_for("snapshots")
+        self.refused_plainly("snapshot query", "--list-snapshots-json")
+        # The repository query went through, so this is the list of backups itself.
+        self.assertEqual(["cat", "snapshots"], [next(word for word in ("cat", "snapshots") if word in call["args"]) for call in self.calls()])
+
+    def test_opening_a_folder_says_so_plainly(self) -> None:
+        self.refused_plainly("repository query", "--list-tree-json", "--snapshot", "latest", "--tree-path", "/")
+        self.answer_12_for("ls")
+        self.refused_plainly("tree query", "--list-tree-json", "--snapshot", "latest", "--tree-path", "/")
+
+    def test_finding_a_file_says_so_plainly(self) -> None:
+        find = ("--cache-dir", str(self.cache), "--no-restic-lock", "--find-json", "--find-text=notes")
+        # The list of backups it searches (read with the search's own time limit) ...
+        self.refused_plainly("snapshot query", *find)
+        # ... and the search itself.
+        self.answer_12_for("find")
+        self.refused_plainly("file search", *find)
+
+    def test_restoring_says_so_plainly_in_the_report_too(self) -> None:
+        target = self.root / "restored"
+        arguments = ("--snapshot", "latest", "--target", str(target), "--report", str(self.state / "restore-report.json"))
+        self.refused_plainly("snapshot query", *arguments)
+        report = self.report("restore-report.json")
+        self.assertEqual(("error", False, NOW_ASKS_FOR_A_PASSWORD), (report["result"], report["verified"], report["error"]))
+        self.assertFalse(target.exists())
+
+    def test_the_drill_says_so_plainly_in_the_report_too(self) -> None:
+        self.refused_plainly("snapshot query", *self.drill_arguments())
+        self.assertEqual(NOW_ASKS_FOR_A_PASSWORD, self.report("drill-report.json")["error"])
+        # The drill reads the backup's folders one by one, through its own bounded reader.
+        self.answer_12_for("ls")
+        self.refused_plainly("bounded representative sample query", *self.drill_arguments(report="drill-report-2.json"))
+        self.assertEqual(NOW_ASKS_FOR_A_PASSWORD, self.report("drill-report-2.json")["error"])
+
+    def test_a_restore_that_restic_itself_refuses_says_so_plainly(self) -> None:
+        # The backups opened for every query, and then Restic answered the restore itself with 12: nothing was restored.
+        self.answer_12_for("restore")
+        target = self.root / "restored"
+        arguments = ("--snapshot", "latest", "--target", str(target), "--report", str(self.state / "restore-report.json"))
+        result, _, stderr, _ = self.run_restore(*arguments)
+        self.assertEqual(12, result)
+        report = self.report("restore-report.json")
+        self.assertEqual(("partial", 12, NOW_ASKS_FOR_A_PASSWORD), (report["result"], report["restic_exit_code"], report["error"]))
+        self.assertNotIn("exit code", report["error"])
+        self.assertIn("RESTORE INCOMPLETE", stderr)
+        # The same for the drill's own restore.
+        result, _, _, _ = self.run_restore(*self.drill_arguments())
+        self.assertEqual(12, result)
+        self.assertEqual(NOW_ASKS_FOR_A_PASSWORD, self.report("drill-report.json")["error"])
+
+    def test_run_as_a_program_its_last_line_is_the_sentence_alone(self) -> None:
+        # The protected manager passes the sentence on only when it is the whole of this last line (Manage-Restore.ps1).
+        completed = subprocess.run(
+            [sys.executable, "-I", str(SOURCE_ROOT / "restore.py"), *self.arguments("--list-snapshots-json")],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertEqual(["RESTORE FAILED: " + NOW_ASKS_FOR_A_PASSWORD], completed.stderr.strip().splitlines())
+        self.assertEqual("", completed.stdout)
+
+
+class ResticReadErrorWordsTests(unittest.TestCase):
+    """Only a start without a password that Restic answered with 12 gets the sentence; every other failure keeps its words."""
+
+    FLAG = restore.NO_PASSWORD_FLAG
+
+    def test_the_sentence_is_for_exit_code_12_of_a_command_without_a_password(self) -> None:
+        self.assertEqual(NOW_ASKS_FOR_A_PASSWORD, restore.NOW_ASKS_FOR_A_PASSWORD_MESSAGE)
+        self.assertEqual(12, restore.RESTIC_WRONG_PASSWORD_EXIT)
+        self.assertEqual(NOW_ASKS_FOR_A_PASSWORD, str(restore.ResticReadError("snapshot query", 12, ["restic", self.FLAG])))
+
+    def test_everything_else_keeps_the_exit_code_in_its_words(self) -> None:
+        for returncode, command in (
+            (12, ["restic", "--password-command", "x"]),  # backups with a password
+            (12, ["restic"]),
+            (12, None),
+            (12, []),
+            (1, ["restic", self.FLAG]),
+            (130, ["restic", self.FLAG]),
+        ):
+            with self.subTest(returncode=returncode, command=command):
+                error = restore.ResticReadError("tree query", returncode, command)
+                self.assertEqual(f"Restic tree query failed with exit code {returncode}", str(error))
+                self.assertEqual(("tree query", returncode), (error.operation, error.returncode))
 
 
 class PasswordBackupsAreUnchangedTests(FixtureCase):
@@ -568,6 +742,31 @@ class PasswordBackupsAreUnchangedTests(FixtureCase):
         self.assertEqual(1, completed.returncode)
         self.assertEqual(f"RESTORE FAILED: {DRILL_KEY_FILE_MESSAGE}", completed.stderr.strip())
         self.assertFalse((self.state / "drill-report.json").exists())
+
+    def test_a_wrong_key_or_a_refused_command_still_says_the_exit_code(self) -> None:
+        # Only backups opened without a password say that they now ask for one; these keep the words they always had.
+        wrong = self.root / "wrong-key.txt"
+        wrong.write_text(f"Password: {'w' * 48}\n", encoding="utf-8")
+        with self.assertRaises(restore.ResticReadError) as caught:
+            self.run_restore("--recovery-key-file", str(wrong), "--list-snapshots-json")
+        self.assertEqual("Restic repository query failed with exit code 12", str(caught.exception))
+        self.assertEqual("Restic repository query failed with exit code 12", restore.safe_report_error(caught.exception))
+        self.answer_12_for("snapshots", backups="password")
+        with self.assertRaises(restore.ResticReadError) as caught:
+            self.run_restore("--list-snapshots-json")
+        self.assertEqual("Restic snapshot query failed with exit code 12", str(caught.exception))
+        self.answer_12_for("find", backups="password")
+        with self.assertRaises(restore.ResticReadError) as caught:
+            self.run_restore("--cache-dir", str(self.cache), "--no-restic-lock", "--find-json", "--find-text=notes")
+        self.assertEqual("Restic file search failed with exit code 12", str(caught.exception))
+        self.answer_12_for("restore", backups="password")
+        report_path = self.state / "restore-report.json"
+        result, _, _, _ = self.run_restore("--snapshot", "latest", "--target", str(self.root / "restored"), "--report", str(report_path))
+        self.assertEqual(12, result)
+        self.assertEqual(
+            "Restic restore failed with exit code 12; the alternate target was retained for inspection",
+            json.loads(report_path.read_text(encoding="utf-8"))["error"],
+        )
 
     def test_a_password_configuration_that_names_its_mode_behaves_the_same(self) -> None:
         explicit = dict(self.config, repository_access="password")
@@ -622,6 +821,35 @@ class FilesThatSpeakForThemselvesTests(unittest.TestCase):
         # Password backups keep their texts.
         self.assertIn("'Restoring the canary and a bounded representative sample with the recovery key.'", self.MANAGER)
         self.assertIn("'Recovery-key restore drill completed, verified, and was recorded.'", self.MANAGER)
+
+    def test_the_manager_has_the_same_sentence(self) -> None:
+        match = re.search(r"^\$backupsNowAskForAPasswordMessage = '(.*)'$", self.MANAGER, re.MULTILINE)
+        self.assertIsNotNone(match)
+        self.assertEqual(NOW_ASKS_FOR_A_PASSWORD, match.group(1).replace("''", "'"))
+
+    def test_no_filter_between_restore_and_the_dashboard_hides_or_rewrites_the_sentence(self) -> None:
+        # restore.py's report: the sentence as it is, short enough, nothing but printable characters.
+        error = restore.ResticReadError("snapshot query", 12, [restore.NO_PASSWORD_FLAG])
+        self.assertEqual(NOW_ASKS_FOR_A_PASSWORD, restore.safe_report_error(error))
+        self.assertLess(len(NOW_ASKS_FOR_A_PASSWORD), restore.MAX_REPORT_STRING)
+        self.assertTrue(all(character.isprintable() for character in NOW_ASKS_FOR_A_PASSWORD))
+        # The manager's Get-SanitizedError hides a message that names the password command, the variable or DPAPI.
+        sanitizer = re.search(r"\$result -match '([^']+)'", self.function_text(self.MANAGER, "Get-SanitizedError"))
+        self.assertIsNotNone(sanitizer)
+        self.assertIsNone(re.search(sanitizer.group(1), NOW_ASKS_FOR_A_PASSWORD))
+        # The dashboard's two places that choose its own words for a backend message (the rest is shown as it came): every phrase
+        # they look for is absent from the sentence, so neither one rewrites it.
+        lowered = NOW_ASKS_FOR_A_PASSWORD.casefold()
+        for path, method in (
+            (SOURCE_ROOT / "dashboard" / "RestoreManager.cs", "private static string PlainBackendMessage("),
+            (SOURCE_ROOT / "dashboard" / "DashboardWindow.RestoreSearch.cs", "private static string DescribeRestoreFlowSearchFailure("),
+        ):
+            text = path.read_text(encoding="utf-8")
+            start = text.index(method)
+            phrases = re.findall(r'Contains\("([^"]+)"\)', text[start : text.index("\n        }\n", start)])
+            self.assertGreater(len(phrases), 3, method)
+            for phrase in phrases:
+                self.assertNotIn(phrase.casefold(), lowered, f"{method} would rewrite the sentence at {phrase!r}")
 
     def test_both_suites_stand_in_for_restic_with_the_same_three_rules(self) -> None:
         restore_rules = self.RULES.findall(self.RESTORE_SUITE)

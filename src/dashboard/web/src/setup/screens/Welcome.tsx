@@ -2,12 +2,13 @@ import { CalendarClock, FlaskConical, HardDrive, History, Info, ShieldCheck } fr
 import { Button } from '@/components/atoms/Button';
 import { Callout, IssueList, Spinner } from '../ui';
 import type { Wizard } from '../useWizard';
-import { issuesFor } from '../contract';
+import { welcomeIssues } from '../contract';
 
 /** The first screen: what Rewindle is, in three lines, and the honest notice that this is an early release. */
 export function Welcome({ wizard }: { wizard: Wizard }) {
   const legacy = wizard.base?.environment.existingInstall.legacyPersonalEdition;
-  const environment = issuesFor(wizard.validation.plan, 'environment');
+  // The findings about a recovery key left behind are not told here: they depend on the password choice, so Review lists them when they count.
+  const environment = welcomeIssues(wizard.validation.plan);
   return (
     <div className="screen-stack">
       <ul className="welcome-points" aria-label="What Rewindle does">

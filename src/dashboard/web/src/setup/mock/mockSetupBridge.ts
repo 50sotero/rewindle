@@ -254,7 +254,7 @@ export function installSetupSampleBridge(): void {
     const keptDetail = 'Your existing backups in this location were kept and reused.'
       + (there === 'unknown' ? ` They have ${noPassword ? 'no password' : 'a password'}, so Setup kept that.` : noPassword ? ' They have no password.' : '');
     const failureText = mismatch
-      ? 'These backups no longer match what Setup recorded for them, usually because they were changed outside Rewindle. Setup can’t carry on with them here. Choose another location, or see Switching an existing backup in Rewindle’s guide. Setup undid its changes, and your backups were not touched.'
+      ? 'These backups no longer match what Setup recorded for them, usually because they were changed outside Rewindle. Setup can’t carry on with them here. Choose another location, or see Switching an existing backup in SECURITY.md on Rewindle’s GitHub page. Setup undid its changes, and your backups were not touched.'
       : `The drive E: stopped responding while the backup location was being prepared. Setup removed what it had installed and kept your backups${noPassword ? '' : ' and recovery key'}.`;
 
     // The installer's own phases and titles, as docs/setup-contract.md lists them (the wizard shows its own plainer words for them).

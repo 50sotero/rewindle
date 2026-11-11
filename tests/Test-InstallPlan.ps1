@@ -1722,7 +1722,8 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
     . ([scriptblock]::Create((Get-InstallerFunctionText -Name @(
         'Get-NormalizedPath', 'Get-RecordedRepositoryAccess', 'Test-SameFolderPath', 'Get-RecoveryToolsRepositoryAccess',
         'Get-ExistingRepositoryAccess', 'Get-RepositoryAccessDecision', 'Get-RepositoryAccessDifferenceMessage',
-        'Assert-RepositoryAccessValue', 'Assert-NoPendingKeyChange', 'Resolve-RepositoryAccess', 'Get-NoPasswordWarning',
+        'Assert-RepositoryAccessValue', 'Assert-NoPendingKeyChange', 'Assert-PasswordAvailable', 'Get-PasswordUnavailableMessage',
+        'Resolve-RepositoryAccess', 'Get-NoPasswordWarning',
         'ConvertTo-RepositoryAccessChoice', 'Read-RepositoryAccessChoice', 'Invoke-RepositoryAccessQuestion',
         'Get-RepositoryAccessRefusalMessage', 'Get-RepositoryAccessFromDetectionExit', 'Get-RepositoryPhaseDetail',
         'Invoke-RepositoryAccessDetection', 'Get-InstallPhaseTitle', 'Start-InstallPhase', 'Complete-InstallPhase',
@@ -1924,6 +1925,55 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
     $resolved = Resolve-Access -Given 'No_Password' -Initialized $false
     Assert-Equal 'repository_access_invalid' $resolved.Code 'a choice in the wrong case stops the resolution'
 
+    # Backups recorded as having a password, in a folder that holds backups, with no stored password on this PC: they can't be
+    # continued, and the plan and the preflight (which both run this) say so before anything is changed.
+    $unavailableText = "The backups in this location have a password that Rewindle doesn't have on this PC, so Setup can't continue them. Choose another location for new backups. You can still restore files from these backups with their recovery key."
+    Assert-Equal $unavailableText (Get-PasswordUnavailableMessage) 'the words for backups whose password is not on this PC'
+    function Resolve-AccessFinding {
+        param($Given, [bool]$Initialized)
+        $invocationParameters = if ($null -ne $Given) { @{ RepositoryAccess = $Given } } else { @{} }
+        $RepositoryAccess = $Given
+        $script:repositoryPreviouslyInitialized = $Initialized
+        return $(try { Use-KeptStateOwner { Resolve-RepositoryAccess } } catch { Get-InstallFinding -ErrorRecord $_ })
+    }
+    Reset-KeptState -NoSecret
+    Set-ToolsFixture -Config $ownWith -Manifest $ownWith
+    $finding = Resolve-AccessFinding -Given $null -Initialized $true
+    Assert-True ($null -ne $finding -and $finding.code -ceq 'repository_password_unavailable') 'backups recorded with a password and no stored password: the choice is refused'
+    Assert-Equal @('repository', $repositoryPath, $unavailableText) @($finding.field, $finding.path, $finding.message) 'the refusal belongs to the repository field, names the folder and says it as it is, with no ending'
+    Assert-True (-not $finding.message.Contains('Setup undid its changes')) 'nothing was started, so nothing is said to be undone'
+    Assert-Equal @('password', 'recorded', 'password') @($script:repositoryAccessMode, $script:repositoryAccessSource, $script:existingRepositoryAccess) 'and what was resolved is still there for the plan to report'
+    Assert-Equal 'repository_password_unavailable' (Resolve-Access -Given 'password' -Initialized $true).Code 'asking for a password over them changes nothing about it'
+    $resolved = Resolve-Access -Given $null -Initialized $true
+    Assert-Equal @('repository_password_unavailable', 'password', 'recorded', 'password') @($resolved.Code, $resolved.Access, $resolved.Source, $resolved.Existing) 'the resolution reports the refusal with its answers'
+    # The same backups with the stored password there, or a location that holds no backups, or another kind of backups, are nobody's refusal.
+    Reset-KeptState
+    Assert-Equal 'no-finding' (Resolve-Access -Given $null -Initialized $true).Code 'backups recorded with a password and the stored password present are not refused'
+    Reset-KeptState -NoSecret
+    Assert-Equal 'no-finding' (Resolve-Access -Given $null -Initialized $false).Code 'a location that holds no backups is not refused, whatever the recovery tools say'
+    Assert-Equal 'no-finding' (Resolve-Access -Given 'no_password' -Initialized $true).Code 'no password asked for is checked against the backups themselves by the install, not refused here'
+    Set-ToolsFixture -Config $ownWithout -Manifest $ownWithout
+    Assert-Equal 'no-finding' (Resolve-Access -Given $null -Initialized $true).Code 'backups recorded without a password need no stored password'
+    Assert-Equal 'no-finding' (Resolve-Access -Given 'password' -Initialized $true).Code 'a password asked for over backups recorded without one is left to the install to refuse'
+    foreach ($tools in @(
+        @('backups no record describes', $null, $null),
+        @('records that disagree', $ownWithout, $ownWith),
+        @('a record of one file only', $ownWith, $null)
+    )) {
+        Set-ToolsFixture -Config $tools[1] -Manifest $tools[2]
+        if ($null -eq $tools[1]) { Remove-Item -LiteralPath $recoveryTools -Recurse -Force }
+        Assert-Equal 'no-finding' (Resolve-Access -Given $null -Initialized $true).Code "$($tools[0]): not refused (the install asks the backups)"
+        Assert-Equal 'no-finding' (Resolve-Access -Given 'password' -Initialized $true).Code "$($tools[0]) with a password asked for: not refused either"
+    }
+    # A kept record of backups with a password does not count without its stored password (it is not used), so the recovery tools decide.
+    Reset-KeptState -Records @{ 'repository.json' = (Copy-Record $keptHere) } -NoSecret
+    Set-ToolsFixture -Config $ownWith -Manifest $ownWith
+    Assert-Equal 'repository_password_unavailable' (Resolve-Access -Given $null -Initialized $true).Code 'a kept record and recovery tools that say a password, and no stored password: refused'
+    Remove-Item -LiteralPath $recoveryTools -Recurse -Force
+    Assert-Equal 'no-finding' (Resolve-Access -Given $null -Initialized $true).Code 'a kept record of a password and nothing else, and no stored password: the install asks the backups'
+    Reset-KeptState
+    Remove-Item -LiteralPath $recoveryTools -Recurse -Force -ErrorAction SilentlyContinue
+
     # An unfinished change to the keys of earlier backups can only be finished with a password.
     Reset-KeptState
     Write-Text -Path (Join-Path $stateRoot 'credential-rotation.journal.json') -Text '{}'
@@ -2031,8 +2081,9 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
     $ending = ' Setup undid its changes, and your backups were not touched.'
     $chosenWithPassword = 'The backups in this location are protected by a password, but you chose no password. To continue these backups, choose a password. To start without one, choose another location.' + $ending
     $chosenWithoutPassword = 'The backups in this location were made without a password, but you chose a password. To continue these backups, choose no password. To start with a password, choose another location.' + $ending
-    $changedOutside = 'These backups no longer match what Setup recorded for them, usually because they were changed outside Rewindle. Setup can''t carry on with them here. Choose another location, or see Switching an existing backup in Rewindle''s guide.' + $ending
-    $unreadable = 'Setup couldn''t open the backups in this location to continue them. Check that the backup drive or Google Drive folder is connected and available, then try again.' + $ending
+    $changedOutside = 'These backups no longer match what Setup recorded for them, usually because they were changed outside Rewindle. Setup can''t carry on with them here. Choose another location, or see Switching an existing backup in SECURITY.md on Rewindle''s GitHub page.' + $ending
+    $unreadable = 'Setup couldn''t open the backups in this location to continue them. Check that the backup drive or Google Drive folder is connected and available, then try again. If they still can''t be opened, they may be damaged: choose another location for new backups, and keep this folder until you''ve checked it.' + $ending
+    $passwordNotHere = $unavailableText + $ending
     foreach ($source in @('parameter', 'prompt', 'default')) {
         Assert-Equal $chosenWithPassword (Get-RepositoryAccessRefusalMessage -ExitCode 4 -Source $source) "exit 4, choice from '$source'"
         Assert-Equal $chosenWithoutPassword (Get-RepositoryAccessRefusalMessage -ExitCode 5 -Source $source) "exit 5, choice from '$source'"
@@ -2044,10 +2095,41 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
     }
     foreach ($source in @('parameter', 'prompt', 'recorded', 'detected', 'default')) {
         Assert-Equal $unreadable (Get-RepositoryAccessRefusalMessage -ExitCode 6 -Source $source) "exit 6, choice from '$source'"
+        Assert-Equal $passwordNotHere (Get-RepositoryAccessRefusalMessage -ExitCode 7 -Source $source) "exit 7, choice from '$source'"
     }
-    foreach ($message in @($chosenWithPassword, $chosenWithoutPassword, $changedOutside, $unreadable)) {
+    Assert-True ($unreadable.Contains('they may be damaged') -and $unreadable.Contains('choose another location for new backups')) 'the words for backups that can''t be opened say what to do when trying again does not help'
+    Assert-True (-not $changedOutside.Contains('guide')) 'the words for backups that were changed outside Rewindle name a document and a place, not a guide that does not exist'
+    foreach ($message in @($chosenWithPassword, $chosenWithoutPassword, $changedOutside, $unreadable, $passwordNotHere)) {
         Assert-True (-not $message.ToLowerInvariant().Contains('restic') -and -not $message.ToLowerInvariant().Contains('snapshot') -and -not $message.ToLowerInvariant().Contains('repository')) 'a refusal uses plain words'
     }
+
+    # --- what the install makes of the initializer's exit code (the lines of the install itself, run with a stand-in) ---
+    $exitMapping = [regex]::Match($installerText, '(?s)    if \(\$initializerExit -eq 4 -or \$initializerExit -eq 5\) \{.*?throw "Repository initialization failed with exit code \$initializerExit\."\r?\n    \}\r?\n')
+    Assert-True $exitMapping.Success 'the install''s reading of the initializer''s exit code is found'
+    $mapExit = [scriptblock]::Create('param($initializerExit) ' + $exitMapping.Value)
+    $repositoryPath = Join-Path $workspace 'exit-mapping\Backups'
+    foreach ($case in @(
+        @(4, 'repository_access_mismatch', 'parameter'), @(5, 'repository_access_mismatch', 'parameter'),
+        @(4, 'repository_access_mismatch', 'recorded'), @(5, 'repository_access_mismatch', 'detected'),
+        @(6, 'repository_access_unreadable', 'recorded'), @(7, 'repository_password_unavailable', 'recorded'),
+        @(7, 'repository_password_unavailable', 'detected'), @(7, 'repository_password_unavailable', 'default')
+    )) {
+        $script:repositoryAccessSource = $case[2]
+        $finding = $(try { & $mapExit $case[0] } catch { Get-InstallFinding -ErrorRecord $_ })
+        Assert-True ($null -ne $finding -and $finding.code -ceq $case[1]) "initializer exit $($case[0]) (choice from '$($case[2])') is $($case[1])"
+        Assert-Equal @('repository', $repositoryPath) @($finding.field, $finding.path) "initializer exit $($case[0]) names the repository field and the folder"
+        Assert-Equal (Get-RepositoryAccessRefusalMessage -ExitCode $case[0] -Source $case[2]) $finding.message "initializer exit $($case[0]) says the refusal's own words, with their ending"
+        Assert-True ($finding.message.EndsWith($ending)) "initializer exit $($case[0]) says Setup undid its changes and the backups were not touched"
+    }
+    $script:repositoryAccessSource = $null
+    $finding = $(try { & $mapExit 7 } catch { Get-InstallFinding -ErrorRecord $_ })
+    Assert-Equal @($passwordNotHere, $false) @($finding.message, $finding.console.Contains('Restic')) 'exit 7 says the words for backups whose password is not on this PC, and the console line has none of the program''s'
+    Assert-Equal $true ($null -eq (& $mapExit 0)) 'initializer exit 0 is no refusal'
+    foreach ($exit in @(1, 2, 3, 8, 20, 21, 22, 255)) {
+        $failure = $(try { & $mapExit $exit } catch { $_ })
+        Assert-True ($null -eq (Get-InstallFinding -ErrorRecord $failure) -and $failure.Exception.Message -ceq "Repository initialization failed with exit code $exit.") "initializer exit $exit is an unclassified failure of the phase that was running"
+    }
+    Remove-Variable -Name mapExit
 
     # --- the installed program is asked which way unknown backups open, and only that ---
     $script:detectionCalls = [Collections.Generic.List[object]]::new()
@@ -2260,11 +2342,16 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
     Assert-True ($bogus.Error.Contains('RepositoryAccess')) 'and the message names the parameter'
 
     # Backups that already exist keep their way, and a choice that contradicts it is warned about.
+    # Backups recorded with a password are continued only with the stored password this PC keeps for them, so these plans run
+    # where that password is (a plan for them without it is the case after this block).
+    $secretRoots = New-RootsSet -Name 'access-with-secret'
+    Write-Text -Path (Join-Path $secretRoots.ProgramData 'ResticBackuper\repository-password.dpapi.json') -Text '{}'
     $oldShape = New-ExistingBackups -Name 'old-shape' -Config '<absent>' -Manifest '<absent>'
-    $shown = Show-Plan (Get-AccessPlan -Repository $oldShape)
+    $shown = Show-Plan (Get-AccessPlan -Repository $oldShape -RootsSet $secretRoots)
     Assert-Equal @('password', 'password') @($shown.Access, $shown.Existing) 'backups recorded without the new key behave as they always did: a password'
     Assert-True ($shown.Warnings -contains 'repository_exists' -and $shown.Warnings -cnotcontains 'repository_access_differs') 'and nothing is said about them beyond what was always said'
-    $shown = Show-Plan (Get-AccessPlan -Repository $oldShape -Extra @('-RepositoryAccess', 'password'))
+    Assert-True ($shown.Errors -cnotcontains 'repository_password_unavailable') 'and they are not refused while the stored password is there'
+    $shown = Show-Plan (Get-AccessPlan -Repository $oldShape -RootsSet $secretRoots -Extra @('-RepositoryAccess', 'password'))
     Assert-True ($shown.Warnings -cnotcontains 'repository_access_differs') 'asking for a password over backups recorded without the key is no contradiction'
     $withoutBackups = New-ExistingBackups -Name 'without-password' -Config 'no_password' -Manifest 'no_password'
     $run = Get-AccessPlan -Repository $withoutBackups
@@ -2281,13 +2368,15 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
     $shown = Show-Plan (Get-AccessPlan -Repository $withoutBackups -Extra @('-RepositoryAccess', 'no_password'))
     Assert-True ($shown.Warnings -cnotcontains 'repository_access_differs') 'asking for no password over backups without one is no contradiction'
     $withBackups = New-ExistingBackups -Name 'with-password' -Config 'password' -Manifest 'password'
-    $run = Get-AccessPlan -Repository $withBackups -Extra @('-RepositoryAccess', 'no_password')
+    $run = Get-AccessPlan -Repository $withBackups -RootsSet $secretRoots -Extra @('-RepositoryAccess', 'no_password')
     $shown = Show-Plan $run
     Assert-Equal @('no_password', 'password') @($shown.Access, $shown.Existing) 'no password asked for over backups with one is resolved as asked, beside what is recorded'
     $differs = @(@($run.Plan.warnings) | Where-Object { $_.code -ceq 'repository_access_differs' })
     Assert-Equal @(1, $passwordDiffers) @($differs.Count, $differs[0].message) 'and warned about with the words for backups with a password'
-    $shown = Show-Plan (Get-AccessPlan -Repository $withBackups)
+    $shown = Show-Plan (Get-AccessPlan -Repository $withBackups -RootsSet $secretRoots)
     Assert-Equal @('password', 'password') @($shown.Access, $shown.Existing) 'backups recorded with a password keep it'
+    Assert-True ($shown.Errors -cnotcontains 'repository_password_unavailable') 'and with the stored password there the plan has nothing against them'
+
 
     # Backups that no record describes: the install asks them, so the plan resolves nothing.
     $undescribed = New-ExistingBackups -Name 'no-records' -NoTools
@@ -2303,6 +2392,33 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
         $repository = New-ExistingBackups -Name "records-$($case[0])" -Config $case[1] -Manifest $case[2]
         $shown = Show-Plan (Get-AccessPlan -Repository $repository)
         Assert-Equal @('<null>', 'unknown') @($shown.Access, $shown.Existing) "recovery tools that $($case[0]) say nothing the plan can use"
+    }
+
+    # The stored password is not on this PC (a new PC, or the state folder moved aside): a plan says so, before anything changes,
+    # when the choice is a password and the backups already in the folder are recorded with one. Nothing else is refused.
+    $unavailableMessage = "The backups in this location have a password that Rewindle doesn't have on this PC, so Setup can't continue them. Choose another location for new backups. You can still restore files from these backups with their recovery key."
+    foreach ($case in @(
+        @('recorded with a password, nothing asked', $withBackups, @()),
+        @('recorded with a password, a password asked for', $withBackups, @('-RepositoryAccess', 'password')),
+        @('recorded without the new key (an older installation)', $oldShape, @())
+    )) {
+        $run = Get-AccessPlan -Repository $case[1] -Extra $case[2]
+        Assert-PlanError $run 'repository_password_unavailable' 'repository' "backups $($case[0]) and no stored password"
+        $found = @(@($run.Plan.errors) | Where-Object { $_.code -ceq 'repository_password_unavailable' })
+        Assert-Equal 1 $found.Count "backups $($case[0]): the refusal is reported once"
+        Assert-Equal @($case[1], $unavailableMessage) @($found[0].path, $found[0].message) "backups $($case[0]): it names the folder and says it as it is, with no ending"
+        Assert-Equal @('password', 'password') @((Show-Value $run.Plan.resolved.repository_access), (Show-Value $run.Plan.resolved.existing_repository_access)) "backups $($case[0]): the plan still reports what was resolved"
+    }
+    foreach ($case in @(
+        @('recorded without a password', $withoutBackups, @()),
+        @('recorded with a password, no password asked for', $withBackups, @('-RepositoryAccess', 'no_password')),
+        @('recorded without a password, a password asked for', $withoutBackups, @('-RepositoryAccess', 'password')),
+        @('that no record describes', $undescribed, @()),
+        @('that no record describes, a password asked for', $undescribed, @('-RepositoryAccess', 'password')),
+        @('(none: a new location)', $freshAccess, @('-RepositoryAccess', 'password'))
+    )) {
+        $run = Get-AccessPlan -Repository $case[1] -Extra $case[2]
+        Assert-True ((Show-Plan $run).Errors -cnotcontains 'repository_password_unavailable') "backups $($case[0]) with no stored password: not refused by the plan"
     }
 
     # A recovery key left behind is held against the install only for backups known to have a password.
@@ -2577,7 +2693,8 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
     $refusalCases = @(
         @('mismatch', 'repository_access_mismatch', (Get-RepositoryAccessRefusalMessage -ExitCode 4 -Source 'parameter')),
         @('mismatch-recorded', 'repository_access_mismatch', (Get-RepositoryAccessRefusalMessage -ExitCode 5 -Source 'recorded')),
-        @('unreadable', 'repository_access_unreadable', (Get-RepositoryAccessRefusalMessage -ExitCode 6 -Source 'detected'))
+        @('unreadable', 'repository_access_unreadable', (Get-RepositoryAccessRefusalMessage -ExitCode 6 -Source 'detected')),
+        @('unavailable', 'repository_password_unavailable', (Get-RepositoryAccessRefusalMessage -ExitCode 7 -Source 'recorded'))
     )
     foreach ($case in $refusalCases) {
         $refusal = $(try { Stop-InstallValidation -Code $case[1] -Field 'repository' -Message $case[2] } catch { $_ })
@@ -2608,6 +2725,51 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
         $script:repositoryAccessMode = $mode
         $lines = Get-FailureLines -Name "initializer-$(if ($null -eq $mode) { 'unknown' } else { $mode })" -ErrorRecord $plainFailure -Gone $true -StartedPhase 'repository'
         Assert-Equal @('repository_initialization_failed', 'Setup could not create the backup location. Setup undid its changes. Backups it had already created were kept.') @($lines[2].error.code, $lines[2].error.message) "the repository phase fails without a word about an encrypted place when the mode is $(Show-Value $mode)"
+    }
+    $script:repositoryAccessMode = $null
+
+    # A failure in the recovery key phase: backups with a password name the key; backups without one, or of a kind not known,
+    # have no key, so the phase says what is saved there, the recovery tools (the phase and the code stay).
+    foreach ($case in @(
+        @('password', 'Setup could not write your recovery key. Setup undid its changes. Backups and the recovery key it had already created were kept.', 'Writing your recovery key'),
+        @('no_password', 'Setup could not save the recovery tools. Setup undid its changes. Backups it had already created were kept.', 'Saving the recovery tools'),
+        @($null, 'Setup could not save the recovery tools. Setup undid its changes. Backups it had already created were kept.', 'Writing your recovery key')
+    )) {
+        $script:repositoryAccessMode = $case[0]
+        $label = if ($null -eq $case[0]) { 'unknown' } else { $case[0] }
+        $lines = Get-FailureLines -Name "recovery-key-$label" -ErrorRecord $plainFailure -Gone $true -StartedPhase 'recovery_key'
+        Assert-Equal @('recovery_key_failed', $case[1]) @($lines[2].error.code, $lines[2].error.message) "the recovery key phase fails in the words for $label"
+        Assert-Equal @('recovery_key', 'failed', $case[2], $case[1]) @($lines[1].phase, $lines[1].state, $lines[1].title, $lines[1].detail) "$label : the failed phase carries the same words and its own title"
+        if ($label -cne 'password') {
+            Assert-True (-not ([string]$lines[2].error.message).ToLowerInvariant().Contains('recovery key')) "$label : the message says nothing about a recovery key that does not exist"
+        }
+        if ($label -ceq 'no_password') {
+            Assert-True (-not ([string]$lines[1].title).ToLowerInvariant().Contains('recovery key')) "$label : and neither does the title"
+        }
+        $lines = Get-FailureLines -Name "recovery-key-$label-left" -ErrorRecord $plainFailure -Gone $false -StartedPhase 'recovery_key'
+        $expectedStart = $case[1].Substring(0, $case[1].IndexOf(' Setup undid'))
+        Assert-True (([string]$lines[2].error.message).StartsWith($expectedStart)) "$label : with program files left the words of the phase come first"
+    }
+    # The whole path of the case that was found: a backup folder that exists, an initializer that failed for a reason nothing
+    # classified (the program files copy, the Google Drive check, free space), and backups without a password.
+    $failedRepository = Join-Path $workspace 'failed-initializer\Backups'
+    Write-Text -Path (Join-Path $failedRepository 'config') -Text 'a restic repository config'
+    $repositoryPath = $failedRepository
+    foreach ($mode in @('no_password')) {
+        $script:repositoryAccessMode = $mode
+        $script:FeedResultWritten = $false
+        $path = Join-Path $feedDirectory 'failed-initializer-existing-backups.jsonl'
+        Open-ProgressFeed -Path $path -ExpectedSid $currentSid
+        Start-InstallPhase 'repository'
+        Set-InitializationFailurePhase
+        Write-InstallFailure -ErrorRecord $plainFailure -RolledBack $true -Leftover $null
+        Close-ProgressFeed
+        $lines = @([IO.File]::ReadAllLines($path) | ForEach-Object { $_ | ConvertFrom-Json })
+        $failedPhase = @($lines | Where-Object { $_.type -eq 'phase' -and $_.state -eq 'failed' })
+        Assert-Equal 1 $failedPhase.Count 'one phase failed'
+        Assert-Equal @('recovery_key', 'Saving the recovery tools', 'recovery_key_failed') @($failedPhase[0].phase, $failedPhase[0].title, $lines[-1].error.code) 'with backups already in the folder and no password, the phase that failed is saving the recovery tools'
+        Assert-Equal 'Setup could not save the recovery tools. Setup undid its changes. Backups it had already created were kept.' $lines[-1].error.message 'and its message says so, without a recovery key'
+        Assert-Equal $lines[-1].error.message $failedPhase[0].detail 'the failed phase and the result agree'
     }
     $script:repositoryAccessMode = $null
 

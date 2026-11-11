@@ -937,11 +937,21 @@ class OptionalPasswordInstallerTests(unittest.TestCase):
         block = self.initialization
         mismatch = block.index("if ($initializerExit -eq 4 -or $initializerExit -eq 5) {")
         unreadable = block.index("if ($initializerExit -eq 6) {")
+        unavailable = block.index("if ($initializerExit -eq 7) {")
         other = block.index("if ($initializerExit -ne 0) {")
         self.assertLess(mismatch, unreadable)
-        self.assertLess(unreadable, other)
+        self.assertLess(unreadable, unavailable)
+        self.assertLess(unavailable, other)
         self.assertIn("-Code 'repository_access_mismatch' -Field 'repository'", block[mismatch:unreadable])
-        self.assertIn("-Code 'repository_access_unreadable' -Field 'repository'", block[unreadable:other])
+        self.assertIn("-Code 'repository_access_unreadable' -Field 'repository'", block[unreadable:unavailable])
+        # Backups with a password that this PC has no saved password for: its own code and words, as a refusal (which no
+        # catch-block inference about the phase can turn into something else).
+        refusal = block[unavailable:other]
+        self.assertIn("-Code 'repository_password_unavailable' -Field 'repository' -Path $repositoryPath", refusal)
+        self.assertIn(
+            "-Message (Get-RepositoryAccessRefusalMessage -ExitCode $initializerExit -Source $script:repositoryAccessSource)", refusal
+        )
+        self.assertNotIn("throw", refusal)
         self.assertIn('throw "Repository initialization failed with exit code $initializerExit."', block[other:])
 
     def test_the_refusal_messages_are_the_designed_ones_and_end_by_saying_nothing_was_touched(self) -> None:
@@ -953,12 +963,62 @@ class OptionalPasswordInstallerTests(unittest.TestCase):
             "The backups in this location were made without a password, but you chose a password. To continue these backups, "
             "choose no password. To start with a password, choose another location.$ending",
             "These backups no longer match what Setup recorded for them, usually because they were changed outside Rewindle. "
-            "Setup can't carry on with them here. Choose another location, or see Switching an existing backup in Rewindle's "
-            "guide.$ending",
+            "Setup can't carry on with them here. Choose another location, or see Switching an existing backup in SECURITY.md "
+            "on Rewindle's GitHub page.$ending",
             "Setup couldn't open the backups in this location to continue them. Check that the backup drive or Google Drive "
-            "folder is connected and available, then try again.$ending",
+            "folder is connected and available, then try again. If they still can't be opened, they may be damaged: choose "
+            "another location for new backups, and keep this folder until you've checked it.$ending",
+            '"$(Get-PasswordUnavailableMessage)$ending"',
         ):
             self.assertIn(text, body)
+        self.assertNotIn("Rewindle's guide", body)
+        self.assertIn("if ($ExitCode -eq 7) {", body)
+        # Backups with a password whose password this PC doesn't have: the one text of the plan, the preflight and the install.
+        self.assertIn(
+            "return \"The backups in this location have a password that Rewindle doesn't have on this PC, so Setup can't continue "
+            "them. Choose another location for new backups. You can still restore files from these backups with their recovery "
+            "key.\"",
+            self.defined["Get-PasswordUnavailableMessage"],
+        )
+
+    def test_the_contract_quotes_the_refusal_texts_of_the_script(self) -> None:
+        contract = read(CONTRACT)
+        for text in (
+            "These backups no longer match what Setup recorded for them, usually because they were changed outside Rewindle. "
+            "Setup can't carry on with them here. Choose another location, or see Switching an existing backup in SECURITY.md "
+            "on Rewindle's GitHub page.",
+            "Setup couldn't open the backups in this location to continue them. Check that the backup drive or Google Drive "
+            "folder is connected and available, then try again. If they still can't be opened, they may be damaged: choose "
+            "another location for new backups, and keep this folder until you've checked it.",
+            "The backups in this location have a password that Rewindle doesn't have on this PC, so Setup can't continue them. "
+            "Choose another location for new backups. You can still restore files from these backups with their recovery key.",
+            "Setup could not save the recovery tools.",
+        ):
+            self.assertIn(text, contract)
+        self.assertNotIn("Rewindle's guide", contract)
+
+    def test_backups_with_a_password_this_pc_does_not_have_are_refused_by_the_plan_and_the_preflight(self) -> None:
+        check = self.defined["Assert-PasswordAvailable"]
+        # A plan runs the check and says the words, so both are defined before plan mode exits (what is defined after it does
+        # not exist in a plan, which would end as an internal error).
+        for name in ("Assert-PasswordAvailable", "Get-PasswordUnavailableMessage"):
+            self.assertLess(self.installer.index(f"function {name} "), self.marker, name)
+        # Only a password chosen over backups recorded as having one, in a folder that holds backups, with no stored password.
+        self.assertIn(
+            "if ($script:repositoryAccessMode -cne 'password' -or $script:existingRepositoryAccess -cne 'password') { return }", check
+        )
+        self.assertIn("if (-not $repositoryPreviouslyInitialized) { return }", check)
+        self.assertIn("if (Test-Path -LiteralPath $secretFile -PathType Leaf) { return }", check)
+        self.assertIn("-Code 'repository_password_unavailable' -Field 'repository' -Path $repositoryPath", check)
+        self.assertIn("-Message (Get-PasswordUnavailableMessage)", check)
+        self.assertNotIn("Get-RepositoryAccessRefusalMessage", check)  # no "Setup undid its changes" before anything was started
+        # It runs wherever the choice is resolved: a plan's repository stage and the install's preflight, after the decision.
+        resolve = self.defined["Resolve-RepositoryAccess"]
+        self.assertLess(resolve.index("Assert-NoPendingKeyChange"), resolve.index("Assert-PasswordAvailable"))
+        self.assertIn("Invoke-PlanStage -Field 'repository' { Resolve-RepositoryAccess }", self.defined["Invoke-PlanMode"])
+        preflight = self.defined["Invoke-InstallPreflight"]
+        self.assertLess(preflight.index("Resolve-RepositoryAccess"), preflight.index("Resolve-ProtectedBindings"))
+        self.assertLess(preflight.index("Invoke-SelfElevation"), preflight.index("Resolve-RepositoryAccess"))
 
     def test_the_catch_block_blames_a_phase_only_for_a_failure_nothing_named(self) -> None:
         self.assertIn(
@@ -1037,9 +1097,18 @@ class OptionalPasswordInstallerTests(unittest.TestCase):
         self.assertIn("$message += ' Setup undid its changes. Backups it had already created were kept.'", failure)
         self.assertIn("elseif ($script:repositoryAccessMode -ceq 'password') { 'Backups and the recovery key", failure)
         # The refusals bring their own ending, and the repository phase's default is not about an encrypted place.
-        self.assertIn("$refusal = ($code -ceq 'repository_access_mismatch' -or $code -ceq 'repository_access_unreadable')", failure)
+        self.assertIn(
+            "$refusal = ($code -ceq 'repository_access_mismatch' -or $code -ceq 'repository_access_unreadable' "
+            "-or $code -ceq 'repository_password_unavailable')",
+            failure,
+        )
         self.assertIn("if ($phase -ceq 'repository' -and $script:repositoryAccessMode -cne 'password') {", failure)
         self.assertIn("$message = 'Setup could not create the backup location.'", failure)
+        # Nor does the recovery key phase name a key that backups without a password (or of an unknown kind) do not have; the
+        # table keeps the words for backups with a password.
+        self.assertIn("elseif ($phase -ceq 'recovery_key' -and $script:repositoryAccessMode -cne 'password') {", failure)
+        self.assertIn("$message = 'Setup could not save the recovery tools.'", failure)
+        self.assertIn("recovery_key = @('recovery_key_failed', 'Setup could not write your recovery key.')", self.installer)
         write_error = self.catch.split('Write-Error "INSTALLATION FAILED: ', 1)[0]
         self.assertIn("if ($script:repositoryAccessMode -ceq 'password') { 'Repository, recovery key, recovery tools, and ProgramData state' }", write_error)
 

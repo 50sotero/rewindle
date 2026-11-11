@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown, Circle, Copy, Minus, ShieldAlert, X } from 'lucide-react';
 import { motion } from 'motion/react';
 import { Button } from '@/components/atoms/Button';
+import { leadsToAnotherLocation } from '../contract';
 import { Callout, ShieldIcon, Spinner } from '../ui';
 import { listedPhases, operationProgress, type ListedPhase, type OperationState, type Wizard } from '../useWizard';
 
@@ -151,9 +152,9 @@ function FailureNotice({ wizard, operation, onCopy, copied }: { wizard: Wizard; 
   }
   const notes = uninstall ? [] : describeOutcome(operation);
   const message = operation.result?.error?.message || finished.message || 'The installer stopped without saying why.';
-  // Backups at the chosen location that don't match what Setup recorded, or the choice made: trying again would end the same way,
-  // so the next step is another location.
-  const mismatch = operation.result?.error?.code === 'repository_access_mismatch';
+  // Backups at the chosen location that don't match what Setup recorded, or the choice made, or that have a password this PC doesn't
+  // have: trying again would end the same way, so the next step is another location.
+  const mismatch = leadsToAnotherLocation(operation.result?.error?.code);
   return (
     <Callout tone="error" title="What went wrong">
       <p className="failure-message">{message}</p>

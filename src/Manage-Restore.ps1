@@ -178,6 +178,13 @@ $findKillSeconds = 35
 $findText = ''
 $findFromSnapshotId = ''
 
+# Backups that Rewindle opens without a password and that Restic now answers with "wrong password or no key found" (exit code
+# 12): a password was added outside Rewindle. restore.py says so in this sentence (its NOW_ASKS_FOR_A_PASSWORD_MESSAGE is the
+# same text) as the whole of its last line, after "RESTORE FAILED: ". The manager shows its own copy, and only when that
+# line is exactly it, so that no other word of the backend's output reaches the dashboard. It names no password source, so
+# Get-SanitizedError lets it through.
+$backupsNowAskForAPasswordMessage = 'These backups now ask for a password that Rewindle doesn''t have, usually because they were changed outside Rewindle, so Rewindle can''t open them. If you know that password, Restic can still restore your files with it, as RECOVERY.md in the recovery tools folder next to your backups explains.'
+
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -1046,6 +1053,17 @@ function Invoke-RestoreBackend {
     finally { $process.Dispose() }
 }
 
+function Test-BackendAskedForAPassword {
+    # True when restore.py failed and its last line of output is exactly "RESTORE FAILED: " and the sentence above, for backups
+    # that open without a password. That is true for every request that reads the backups (a listing, a folder, a search, a
+    # restore, the drill), whether or not restore.py wrote a report. A restore that Restic itself ended with exit code 12 prints
+    # another line last, so it keeps its report and its history entry.
+    param([object]$Backend, [string]$RepositoryAccess)
+    if ($RepositoryAccess -cne 'no_password' -or $Backend.TimedOut -or $Backend.ExitCode -eq 0) { return $false }
+    $lines = @(([string]$Backend.Stderr) -split '[\r\n]+' | Where-Object { $_.Trim().Length -gt 0 })
+    return ($lines.Count -gt 0 -and $lines[$lines.Count - 1].Trim() -ceq ('RESTORE FAILED: ' + $backupsNowAskForAPasswordMessage))
+}
+
 function ConvertFrom-BackendObject {
     param([string]$Text, [string]$Description)
     try { $value = $Text | ConvertFrom-Json }
@@ -1529,6 +1547,10 @@ function Invoke-RestoreOperation {
             }
         }
         $backend = Invoke-RestoreBackend -Arguments $arguments -KillAfterSeconds $(if ($requestAction -eq 'find_files') { $findKillSeconds } else { 0 })
+        if (Test-BackendAskedForAPassword -Backend $backend -RepositoryAccess $configuration.RepositoryAccess) {
+            # Nothing was restored. A report restore.py wrote is not read: it ended before it was bound to a backup.
+            throw $backupsNowAskForAPasswordMessage
+        }
         $payload = $null
         if ($requestAction -eq 'list_snapshots') {
             if ($backend.ExitCode -ne 0) { throw "Snapshot history query failed with exit code $($backend.ExitCode)." }

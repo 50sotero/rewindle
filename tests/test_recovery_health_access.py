@@ -39,11 +39,12 @@ HIDDEN_WORDS = ("password", "dpapi", "restic_")
 
 NOW_ASKS_FOR_PASSWORD = (
     "These backups now ask for a password, usually because one was added outside Rewindle. "
-    "See Switching an existing backup in Rewindle's guide."
+    "To keep backing up, start new backups in another place."
 )
 NOW_OPEN_WITHOUT_PASSWORD = (
     "These backups now open without a password, usually because it was removed outside Rewindle. "
-    "See Switching an existing backup in Rewindle's guide."
+    "To keep using them, see Switching an existing backup in SECURITY.md on Rewindle's GitHub page, "
+    "or start new backups in another place."
 )
 
 

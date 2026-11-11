@@ -267,12 +267,18 @@ Start new backups with a password in another place instead.
 **If a backup is switched outside Rewindle.** Rewindle does not follow. A
 backup made without a password that now asks for one ends as
 `repository_access_mismatch` ("These backups now ask for a password that
-Rewindle doesn't have..."), and the recovery-readiness check says so. A backup
-with a password whose password key was removed, so that it now opens without
-one, ends with "Rewindle couldn't unlock your backups with its saved
-password", and the readiness check then says "These backups now open without a
-password". Either way, follow the steps above for the backups as they now are,
-or start new backups in another place.
+Rewindle doesn't have, usually because they were changed outside Rewindle.
+Rewindle can't carry on with them. To keep backing up, start new backups in
+another place."), and the recovery-readiness check says "These backups now ask
+for a password, usually because one was added outside Rewindle. To keep backing
+up, start new backups in another place." A backup with a password whose
+password key was removed, so that it now opens without one, ends with
+"Rewindle couldn't unlock your backups with its saved password", and the
+readiness check then says "These backups now open without a password, usually
+because it was removed outside Rewindle. To keep using them, see Switching an
+existing backup in SECURITY.md on Rewindle's GitHub page, or start new backups
+in another place." Either way, follow the steps above for the backups as they
+now are, or start new backups in another place.
 
 No backup tool can protect against every threat. In a backup with a password,
 keep an offline recovery-key copy. Whatever you choose, test restores, and

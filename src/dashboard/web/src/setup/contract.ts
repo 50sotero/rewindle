@@ -206,7 +206,8 @@ export function ineligibleText(volume: PlanVolume): string {
   return volume.ineligibleMessage ?? (volume.ineligibleReason ? INELIGIBLE_TEXT[volume.ineligibleReason] : undefined) ?? 'Backups can’t be kept on this drive.';
 }
 
-const FIELDS: readonly IssueField[] = ['repository', 'sources', 'schedule', 'storage_mode', 'environment'];
+/** Every field an issue can name (an unknown one is read as `environment`), so a list of "all findings" is one of these. */
+export const ISSUE_FIELDS: readonly IssueField[] = ['repository', 'sources', 'schedule', 'storage_mode', 'environment'];
 const DRIVE_TYPES: readonly DriveType[] = ['fixed', 'removable', 'network', 'cdrom', 'ram', 'unknown'];
 const KNOWN_KEYS: readonly KnownFolderKey[] = ['Desktop', 'Documents', 'Pictures', 'Music', 'Videos', 'Downloads', 'Favorites'];
 const PHASE_STATES: readonly PhaseState[] = ['started', 'completed', 'skipped', 'failed'];
@@ -245,7 +246,7 @@ function issues(value: unknown): PlanIssue[] {
   return list(value).filter(isObject).map(item => ({
     code: text(item.code, 'unknown'),
     // An issue about a field the wizard does not know is shown with the environment's: on the first screen, never lost.
-    field: FIELDS.includes(item.field as IssueField) ? item.field as IssueField : 'environment',
+    field: ISSUE_FIELDS.includes(item.field as IssueField) ? item.field as IssueField : 'environment',
     message: text(item.message, 'The installer reported a problem without describing it.'),
     path: textOrNull(item.path),
     detail: textOrNull(item.detail),
@@ -477,6 +478,67 @@ export function installAccess(result: Pick<InstallResult, 'repositoryAccess'> | 
 /** The Recovery page is skipped only when the backups are known to have no password: for anything else (password, absent, unknown) it is shown. */
 export const recoveryNeededFor = (access: RepositoryAccess | null) => access !== 'no_password';
 
-/** What stays on this PC when Rewindle is removed, in words that fit the kind of backups; `tense` is "are" before the removal and "were" after. */
+/**
+ * What stays on this PC when Rewindle is removed, in words that fit the kind of backups; `tense` is "are" before the removal and "were"
+ * after. When nothing says which kind they are (null or undefined), no recovery key is claimed: any that exists is kept too.
+ */
 export const keptWords = (access: RepositoryAccess | null | undefined, tense: 'are' | 'were' = 'are') =>
-  access === 'no_password' ? `Your backups ${tense} kept` : `Your backups and recovery key ${tense} kept`;
+  access === 'no_password' ? `Your backups ${tense} kept`
+    : access === 'password' ? `Your backups and recovery key ${tense} kept`
+      : `Your backups ${tense} kept, and so ${tense === 'were' ? 'was' : 'is'} any recovery key`;
+
+// ---- findings that depend on the password choice ---------------------------------------------------------------------------------
+
+/**
+ * The findings about a recovery key left in the profile folder. The installer raises them only for backups with a password, but a plan
+ * never carries the pick, so the plan of a location with no backups assumes a password. Whether they count is decided here, from the
+ * choice the person has made by now.
+ */
+const PASSWORD_ONLY_CODES: readonly string[] = ['recovery_key_stale', 'recovery_key_path_unsafe'];
+
+export const dependsOnPassword = (issue: PlanIssue) => issue.field === 'environment' && PASSWORD_ONLY_CODES.includes(issue.code);
+
+/**
+ * Whether those findings count for the choices made now. They don't when the backups will have no password, whether the person picked
+ * that for a new location (what accessToSend would send) or the backups already there are known to have none. Anything else counts,
+ * the kind not being known yet included: the installer checks them then, and Install must not start only to be refused.
+ */
+export function passwordFindingsApply(plan: InstallPlan | null, repository: string, pick: RepositoryAccess | null | undefined): boolean {
+  if (accessToSend(plan, repository, pick) === 'no_password') return false;
+  return planFor(plan, repository)?.resolved.existingRepositoryAccess !== 'no_password';
+}
+
+/**
+ * The environment findings that keep the first page from going on: all but the ones that depend on the password, which is chosen
+ * later (they count where Install is, see installIssues). A problem with the PC itself stops the person at once.
+ */
+export function welcomeIssues(plan: InstallPlan | null) {
+  const { errors, warnings } = issuesFor(plan, 'environment');
+  return { errors: errors.filter(issue => !dependsOnPassword(issue)), warnings: warnings.filter(issue => !dependsOnPassword(issue)) };
+}
+
+/**
+ * The findings that stop Install, and that Review lists, for the choices made now: all of them, but the ones that depend on the
+ * password only while passwordFindingsApply says they do.
+ */
+export function installIssues(plan: InstallPlan | null, repository: string, pick: RepositoryAccess | null | undefined, ...fields: IssueField[]) {
+  const { errors, warnings } = issuesFor(plan, ...fields);
+  const counts = (issue: PlanIssue) => !dependsOnPassword(issue) || passwordFindingsApply(plan, repository, pick);
+  return { errors: errors.filter(counts), warnings: warnings.filter(counts) };
+}
+
+// ---- after an install that did not finish -----------------------------------------------------------------------------------------
+
+/**
+ * True when an install has ended failed or cancelled. It may have left backups it made at the chosen location (Setup keeps them), so
+ * what the installer said about that location is out of date: it is asked again, and the Password page and the pick sent with the next
+ * install follow what is there now.
+ */
+export const locationMayHaveChanged = (operation: { operation: string; finished: { outcome: string } | null } | null | undefined) =>
+  !!operation && operation.operation === 'install' && !!operation.finished && (operation.finished.outcome === 'failed' || operation.finished.outcome === 'cancelled');
+
+// The installer's refusals that would end the same way if the same location were tried again: the next step is another location.
+const ANOTHER_LOCATION_CODES: readonly string[] = ['repository_access_mismatch', 'repository_password_unavailable'];
+
+/** True for an install error whose next step is another backup location (the backups there are not what Setup can carry on with). */
+export const leadsToAnotherLocation = (code: string | null | undefined) => !!code && ANOTHER_LOCATION_CODES.includes(code);

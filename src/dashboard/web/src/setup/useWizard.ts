@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ContractError, INSTALL_PHASES, NO_PASSWORD_PHASE_TITLES, UNINSTALL_PHASES, accessToSend, installAccess, isUnsupported, keptEntriesOf,
-  parsePlan, parseProgressLine, passwordPageFor, plannedAccess, recoveryNeededFor,
+  locationMayHaveChanged, parsePlan, parseProgressLine, passwordPageFor, plannedAccess, recoveryNeededFor,
   type InstallPlan, type InstallResult, type KnownFolderKey, type PasswordPage, type PlanInputs, type PlanVolume, type ProgressPhase,
   type RepositoryAccess, type StorageMode,
 } from './contract';
@@ -269,6 +269,9 @@ export function useWizard() {
   const [refreshNote, setRefreshNote] = useState<string | null>(null);
   // Whether the time field on the Schedule page currently holds a valid time; choices.schedule keeps the last valid one.
   const [scheduleDraftValid, setScheduleDraftValid] = useState(true);
+  // Bumped to ask the installer about the same choices again: after the drives were looked at again (a chosen drive may be gone), and
+  // after an install that did not finish (it may have left backups at the location).
+  const [revalidation, setRevalidation] = useState(0);
   const measureSequence = useRef(0);
   const planSequence = useRef(0);
   const measured = useRef(new Set<string>());
@@ -433,8 +436,6 @@ export function useWizard() {
 
   // Every change to the choices is checked again by the installer, a moment after the last change.
   const inputsKey = useMemo(() => choices ? JSON.stringify(inputsOf(choices, base)) : '', [choices, base]);
-  // Bumped to check the same choices again, after the drives were looked at again (a chosen drive may be gone).
-  const [revalidation, setRevalidation] = useState(0);
   useEffect(() => {
     if (!choices || !base || !inputsKey) return;
     const id = ++planSequence.current;
@@ -452,6 +453,14 @@ export function useWizard() {
     // `choices` and `base` are read through inputsKey; the check runs when what is sent changes, not on every keystroke elsewhere.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inputsKey, revalidation]);
+
+  // An install that ended failed or cancelled may have left the backups it made at the location (Setup keeps them), and neither the
+  // choices nor the drives changed, so nothing else would ask again. Without this the Password page would still offer a choice for
+  // backups that now exist, and the pick would be sent for them (accessToSend reads the latest plan).
+  const locationChanged = locationMayHaveChanged(operation);
+  useEffect(() => {
+    if (locationChanged) setRevalidation(count => count + 1);
+  }, [locationChanged]);
 
   // Forgets what was measured for these folders, so the next measurement is a fresh one: a folder removed and added again, or
   // ticked again, may have changed meanwhile (OneDrive can make its files online-only).

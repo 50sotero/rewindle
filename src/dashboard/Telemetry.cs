@@ -2369,7 +2369,7 @@ namespace ResticBackuper.Dashboard
                         return "Rewindle couldn\u2019t open your backups, so the backup stopped before it began. Check that the backup drive or Google Drive folder is connected, then try again. Your earlier backups are not affected.";
                     return "Rewindle couldn\u2019t unlock the backup location, so the backup stopped before it began. Your earlier backups are not affected.";
                 case "repository_access_mismatch":
-                    return "These backups now ask for a password that Rewindle doesn\u2019t have, usually because they were changed outside Rewindle. Rewindle can\u2019t carry on with them. See Switching an existing backup in Rewindle\u2019s guide, or start new backups in another place.";
+                    return "These backups now ask for a password that Rewindle doesn\u2019t have, usually because they were changed outside Rewindle. Rewindle can\u2019t carry on with them. To keep backing up, start new backups in another place.";
                 case "restic_backup_failed":
                     return "The backup stopped before it finished. Your earlier backups are not affected.";
                 case "snapshot_verification_failed":

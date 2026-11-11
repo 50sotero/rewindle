@@ -56,8 +56,11 @@ RESTIC_NO_MATCHING_KEY_EXIT = 12
 # The whole readiness inspection has one minute, so the follow-up look at how the backups open gets a short limit.
 ACCESS_FOLLOW_UP_TIMEOUT_SECONDS = 20
 
-# What the checks say for backups without a password. Shown as written (never run through a filter that hides
-# the word "password"), but free of every word a filter would hide.
+# What the checks say when backups are opened without a password, or no longer open the way they were made. A check's
+# summary and detail reach the dashboard's window as written: the filter that hides a whole message holding the word
+# "password" (RecoveryHealthManager.Sanitize) applies to error text only. The summaries avoid the word anyway; the two
+# details below say it on purpose, because it is the news, and tests/test_dashboard_repository_access.py carries them
+# through the dashboard's own code to prove that nothing hides or changes them.
 NO_PASSWORD_OPENS_SUMMARY = "Rewindle can open your backups."
 NO_PASSWORD_FAILS_SUMMARY = (
     "Rewindle couldn't open your backups. Check that the backup drive or Google Drive folder is connected, "
@@ -65,11 +68,12 @@ NO_PASSWORD_FAILS_SUMMARY = (
 )
 NO_PASSWORD_NOW_ASKS_DETAIL = (
     "These backups now ask for a password, usually because one was added outside Rewindle. "
-    "See Switching an existing backup in Rewindle's guide."
+    "To keep backing up, start new backups in another place."
 )
 PASSWORD_NOW_OPENS_FREELY_DETAIL = (
     "These backups now open without a password, usually because it was removed outside Rewindle. "
-    "See Switching an existing backup in Rewindle's guide."
+    "To keep using them, see Switching an existing backup in SECURITY.md on Rewindle's GitHub page, "
+    "or start new backups in another place."
 )
 
 

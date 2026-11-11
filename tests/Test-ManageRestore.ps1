@@ -21,6 +21,9 @@ $generation = [long]7
 $snapshotId = 'b' * 64
 $legacySnapshotId = 'f' * 64
 $repositoryId = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+# What a person is told when backups that Rewindle opens without a password now ask for one (restore.py and the manager have the
+# same sentence). Written out here, character for character, so that a change of it is seen.
+$backupsNowAskForAPasswordMessage = 'These backups now ask for a password that Rewindle doesn''t have, usually because they were changed outside Rewindle, so Rewindle can''t open them. If you know that password, Restic can still restore your files with it, as RECOVERY.md in the recovery tools folder next to your backups explains.'
 $assertions = 0
 $roots = [Collections.Generic.List[string]]::new()
 
@@ -207,6 +210,9 @@ public static class FakeRestic {
       return 0;
     }
     if (args.Contains("restore")) {
+      // The manager's progress as it is while Restic restores (the file the dashboard reads), kept for the test to read.
+      string progressFile = Control("FAKE_PROGRESS_FILE"); string progressCopy = Control("FAKE_PROGRESS_COPY");
+      if (!String.IsNullOrEmpty(progressFile) && !String.IsNullOrEmpty(progressCopy) && File.Exists(progressFile)) File.Copy(progressFile, progressCopy, true);
       string target = After(args, "--target"); Directory.CreateDirectory(target);
       if (Control("FAKE_RESTORE_PARTIAL") == "1") {
         File.WriteAllText(Path.Combine(target, "partial.txt"), "retained partial data"); return 23;
@@ -240,7 +246,7 @@ Add-Type -TypeDefinition $fakeResticSource -OutputAssembly $fakeRestic -OutputTy
 
 function Write-FakeResticControl {
     # Restic gets an allow-listed environment, so this process's FAKE_* settings reach the fake through a file.
-    $lines = @(foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_RESTORE_NOTHING','FAKE_LEGACY_SNAPSHOT','FAKE_FIND_SLEEP_MS','FAKE_REPOSITORY_ACCESS')) {
+    $lines = @(foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_RESTORE_NOTHING','FAKE_LEGACY_SNAPSHOT','FAKE_FIND_SLEEP_MS','FAKE_REPOSITORY_ACCESS','FAKE_PROGRESS_FILE','FAKE_PROGRESS_COPY')) {
         $value = [Environment]::GetEnvironmentVariable($name, 'Process')
         if ($null -ne $value) { $name + '=' + $value }
     })
@@ -436,6 +442,10 @@ function Invoke-Manager {
     $env:FAKE_PLAN_ID = $planId
     $env:FAKE_SOURCE = $Fixture.Source
     $env:FAKE_REPOSITORY_ACCESS = $Fixture.FakeAccess
+    # The fake Restic copies the manager's progress as it is when a restore starts: what the dashboard shows meanwhile.
+    $restoringCopy = Join-Path $Fixture.Root ('restoring-progress-' + $nonce + '.json')
+    $env:FAKE_PROGRESS_FILE = $resultPath + '.progress.json'
+    $env:FAKE_PROGRESS_COPY = $restoringCopy
     if ($LegacyFixture) { $env:FAKE_LEGACY_SNAPSHOT = '1' }
     else { Remove-Item Env:FAKE_LEGACY_SNAPSHOT -ErrorAction SilentlyContinue }
     Write-FakeResticControl
@@ -448,12 +458,15 @@ function Invoke-Manager {
     finally {
         $ErrorActionPreference = $priorPreference
         Remove-Item Env:FAKE_LEGACY_SNAPSHOT -ErrorAction SilentlyContinue
+        Remove-Item Env:FAKE_PROGRESS_FILE -ErrorAction SilentlyContinue
+        Remove-Item Env:FAKE_PROGRESS_COPY -ErrorAction SilentlyContinue
     }
     $result = if (Test-Path -LiteralPath $resultPath) { Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json } else { $null }
     $progress = if (Test-Path -LiteralPath ($resultPath + '.progress.json')) {
         Get-Content -LiteralPath ($resultPath + '.progress.json') -Raw | ConvertFrom-Json
     } else { $null }
-    return [pscustomobject]@{ ExitCode=$exitCode; Result=$result; Progress=$progress; Output=$output; Nonce=$nonce; Digest=$digest; ConfigHash=$configHash }
+    $restoring = if (Test-Path -LiteralPath $restoringCopy) { Get-Content -LiteralPath $restoringCopy -Raw | ConvertFrom-Json } else { $null }
+    return [pscustomobject]@{ ExitCode=$exitCode; Result=$result; Progress=$progress; Restoring=$restoring; Output=$output; Nonce=$nonce; Digest=$digest; ConfigHash=$configHash }
 }
 
 $productionConfig = Join-Path $env:ProgramFiles 'ResticBackuper\backup-config.json'
@@ -627,6 +640,9 @@ try {
     Assert-True ($null -eq $ownerShapedConfiguration.PSObject.Properties['repository_access']) 'the fixtures so far are shaped like an older configuration, without repository_access'
     Assert-True ([string]$drillHistory.entries[0].credential_source -ceq 'recovery_key') 'a drill of backups with a password is recorded as made with the recovery key'
     Assert-True ([string]$drill.Progress.message -ceq 'Recovery-key restore drill completed, verified, and was recorded.') 'the drill of backups with a password keeps its completion text'
+    # What the dashboard shows while Restic restores the sample (the fake Restic copied the progress file as it was then).
+    Assert-True ($null -ne $drill.Restoring -and [string]$drill.Restoring.stage -ceq 'restoring' -and [int]$drill.Restoring.percent -eq 25 -and
+        [string]$drill.Restoring.message -ceq 'Restoring the canary and a bounded representative sample with the recovery key.') ('the drill of backups with a password says that it restores with the recovery key: ' + [string]$drill.Restoring.message)
     Assert-True (-not ((Get-Content -LiteralPath $drillFixture.Log -Raw) -match 'insecure-no-password')) 'backups with a password never get the empty-password flag'
 
     # ------------------------------------------------------------------------------------------------------------------
@@ -638,7 +654,7 @@ try {
     $accessParseErrors = $null
     $accessAst = [Management.Automation.Language.Parser]::ParseFile($managerSource, [ref]$accessTokens, [ref]$accessParseErrors)
     Assert-True ($accessParseErrors.Count -eq 0) 'the restore manager parses'
-    foreach ($accessFunctionName in @('Get-RepositoryAccess', 'Assert-RecoveryDrillReport')) {
+    foreach ($accessFunctionName in @('Get-RepositoryAccess', 'Assert-RecoveryDrillReport', 'Test-BackendAskedForAPassword')) {
         $accessDefinitions = @($accessAst.FindAll({
             param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $accessFunctionName
@@ -723,6 +739,9 @@ try {
         $noPasswordDrillHistory.entries[0].verified -eq $true) 'its history entry keeps the drill kind and records that no credential was used'
     Assert-True ([string]$noPasswordDrill.Progress.stage -ceq 'complete' -and
         [string]$noPasswordDrill.Progress.message -ceq 'Restore drill completed, verified, and was recorded.') 'the drill of backups without a password finishes in plain words'
+    # ... and restores in plain words too: they have no recovery key, so the progress never says the sample is restored with one.
+    Assert-True ($null -ne $noPasswordDrill.Restoring -and [string]$noPasswordDrill.Restoring.stage -ceq 'restoring' -and [int]$noPasswordDrill.Restoring.percent -eq 25 -and
+        [string]$noPasswordDrill.Restoring.message -ceq 'Restoring the restore test file and a small sample of your files.') ('the drill of backups without a password restores in plain words: ' + [string]$noPasswordDrill.Restoring.message)
     $noPasswordDrillCalls = @(Get-Content -LiteralPath $noPasswordDrillFixture.Log)
     Assert-True ($noPasswordDrillCalls.Count -ge 3 -and
         @($noPasswordDrillCalls | Where-Object { $_ -notmatch '(^|\t)--insecure-no-password(\t|$)' -or $_ -notmatch '(^|\t)--no-cache(\t|$)' }).Count -eq 0 -and
@@ -753,6 +772,37 @@ try {
     $nowPasswordFixture = New-Fixture -Access no_password -NoRecoveryKey -BackupsAre password
     $nowPassword = Invoke-Manager -Fixture $nowPasswordFixture -Action list_snapshots
     Assert-True ($nowPassword.ExitCode -ne 0 -and $nowPassword.Result.ok -eq $false -and [string]$nowPassword.Result.error -notmatch '(?i)(password-command|RESTIC_PASSWORD|dpapi)') 'backups that now ask for a password fail at once'
+    # Every request that reads them says so in the same plain words (never "... failed with exit code 1"), whether or not
+    # restore.py wrote a report, and the progress the dashboard shows ends in them too.
+    Assert-True ([string]$nowPassword.Result.error -ceq $backupsNowAskForAPasswordMessage -and [string]$nowPassword.Progress.stage -ceq 'failed' -and
+        [string]$nowPassword.Progress.message -ceq $backupsNowAskForAPasswordMessage) ('listing backups that now ask for a password says so in plain words: ' + [string]$nowPassword.Result.error)
+    $nowPasswordTree = Invoke-Manager -Fixture $nowPasswordFixture -Action list_tree -Snapshot $snapshotId -TreePath '/'
+    Assert-True ($nowPasswordTree.ExitCode -ne 0 -and $nowPasswordTree.Result.ok -eq $false -and [string]$nowPasswordTree.Result.error -ceq $backupsNowAskForAPasswordMessage) ('opening a folder of backups that now ask for a password says so in plain words: ' + [string]$nowPasswordTree.Result.error)
+    $nowPasswordTarget = Join-Path $nowPasswordFixture.Root 'Restored\NowAsks'
+    $nowPasswordRestore = Invoke-Manager -Fixture $nowPasswordFixture -Action restore -Snapshot $snapshotId -Target $nowPasswordTarget -Includes @('/notes.txt')
+    Assert-True ($nowPasswordRestore.ExitCode -ne 0 -and $nowPasswordRestore.Result.ok -eq $false -and [string]$nowPasswordRestore.Result.error -ceq $backupsNowAskForAPasswordMessage) ('restoring from backups that now ask for a password says so in plain words: ' + [string]$nowPasswordRestore.Result.error)
+    $nowPasswordDrill = Invoke-Manager -Fixture $nowPasswordFixture -Action restore_drill
+    Assert-True ($nowPasswordDrill.ExitCode -ne 0 -and $nowPasswordDrill.Result.ok -eq $false -and [string]$nowPasswordDrill.Result.error -ceq $backupsNowAskForAPasswordMessage) ('the drill of backups that now ask for a password says so in plain words: ' + [string]$nowPasswordDrill.Result.error)
+    Assert-True ([string]$nowPasswordDrill.Progress.stage -ceq 'failed' -and [string]$nowPasswordDrill.Progress.message -ceq $backupsNowAskForAPasswordMessage) 'the drill progress ends in the same words'
+    Assert-True (@(Get-ChildItem -LiteralPath (Join-Path $nowPasswordFixture.State 'RestoreManagerResults') -Filter '*.restore-report.json' -Force -ErrorAction SilentlyContinue).Count -eq 0) 'no report of the refused restore or drill is left behind'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $nowPasswordFixture.State 'restore-history.json'))) 'a drill or restore that could not open the backups records nothing'
+    Assert-True (-not (@(Get-Content -LiteralPath $nowPasswordFixture.Log) | Where-Object { ($_ -split "`t") -contains 'restore' })) 'Restic was never asked to restore backups that now ask for a password'
+    # The manager lets restore.py's words through only when they are the whole of its last line, and only for backups without a password.
+    $backendSentence = 'RESTORE FAILED: ' + $backupsNowAskForAPasswordMessage
+    function Test-AskedForAPassword([string]$Access, [string]$Stderr, [int]$ExitCode = 1, [bool]$TimedOut = $false) {
+        return [bool](Test-BackendAskedForAPassword -Backend ([pscustomobject]@{ ExitCode = $ExitCode; Stdout = ''; Stderr = $Stderr; TimedOut = $TimedOut }) -RepositoryAccess $Access)
+    }
+    Assert-True (Test-AskedForAPassword 'no_password' ($backendSentence + "`r`n")) 'the sentence as the last line is passed on'
+    Assert-True (Test-AskedForAPassword 'no_password' ("RESTORE INCOMPLETE: something`r`n`r`n" + $backendSentence + "`r`n`r`n")) 'the sentence after other lines, with blank lines around it, is passed on'
+    Assert-True (-not (Test-AskedForAPassword 'password' ($backendSentence + "`r`n"))) 'backups with a password never get the sentence'
+    Assert-True (-not (Test-AskedForAPassword 'no_password' ($backendSentence + "`r`n") 0)) 'a backend that ended well is not read for it'
+    Assert-True (-not (Test-AskedForAPassword 'no_password' '' (-1) $true)) 'a backend that ran out of time is not read for it'
+    Assert-True (-not (Test-AskedForAPassword 'no_password' ($backendSentence + "`r`nRESTORE INCOMPLETE: Restic exited with 12"))) 'a line after the sentence means it was not the last word'
+    Assert-True (-not (Test-AskedForAPassword 'no_password' ($backendSentence + ' More words.'))) 'the sentence with more words after it is not passed on'
+    Assert-True (-not (Test-AskedForAPassword 'no_password' ($backendSentence.ToLowerInvariant()))) 'the sentence is compared exactly'
+    Assert-True (-not (Test-AskedForAPassword 'no_password' ('RESTORE FAILED: Restic repository query failed with exit code 12'))) 'another failure is not turned into the sentence'
+    Assert-True (-not (Test-AskedForAPassword 'no_password' ($backupsNowAskForAPasswordMessage))) 'the sentence alone, without the failure line it is printed on, is not passed on'
+    Assert-True (-not (Test-AskedForAPassword 'No_Password' ($backendSentence))) 'the access is compared exactly'
 
     $partialDrillFixture = New-Fixture
     $env:FAKE_RESTORE_PARTIAL = '1'
@@ -1352,6 +1402,26 @@ try {
     [void](Read-SessionTestMessage $broker 30000)
     $ended = Wait-SessionBrokerEnd $broker
     Assert-True ($ended.EndedOnItsOwn -and [string]$ended.Record.close_reason -ceq 'client_closed') 'the session for backups without a password ends when the dashboard closes it'
+    # Backups that now ask for a password: the list, a folder and a search each answer in the same plain words, and the session
+    # goes on (the person can still close the dialog or choose another backup location).
+    $nowAsksFixture = New-Fixture -Access no_password -NoRecoveryKey -BackupsAre password
+    $broker = Start-SessionBroker -Fixture $nowAsksFixture
+    [void](Open-SessionBroker $broker)
+    Send-SessionTestRequest $broker 1 'list_snapshots'
+    $nowAsksList = Receive-SessionTestResult $broker 1
+    Send-SessionTestRequest $broker 2 'list_tree' $snapshotId '/'
+    $nowAsksTree = Receive-SessionTestResult $broker 2
+    Send-SessionTestFind $broker 3 'notes'
+    $nowAsksSearch = Receive-SessionTestResult $broker 3
+    foreach ($answer in @(@('listing', $nowAsksList), @('opening a folder', $nowAsksTree), @('searching', $nowAsksSearch))) {
+        Assert-True ($answer[1].ExitCode -ne 0 -and $answer[1].Result.ok -eq $false -and [string]$answer[1].Result.error -ceq $backupsNowAskForAPasswordMessage) ('a session says so in plain words when ' + $answer[0] + ' backups that now ask for a password: ' + [string]$answer[1].Result.error)
+        Assert-True ([string]$answer[1].Progress[-1].stage -ceq 'failed' -and [string]$answer[1].Progress[-1].message -ceq $backupsNowAskForAPasswordMessage) ('the progress of a session ends in the same words when ' + $answer[0])
+    }
+    Send-SessionTestMessage $broker ([ordered]@{ type = 'close' })
+    $nowAsksClosed = Read-SessionTestMessage $broker 30000
+    Assert-True ($null -ne $nowAsksClosed -and [string]$nowAsksClosed.type -ceq 'closed') 'a session whose backups now ask for a password goes on until it is closed'
+    $ended = Wait-SessionBrokerEnd $broker
+    Assert-True ($ended.EndedOnItsOwn -and $ended.ExitCode -eq 0 -and [string]$ended.Record.close_reason -ceq 'client_closed') 'that session ends when the dashboard closes it'
     # A single request can never ask for a search.
     $singleFind = Invoke-Manager -Fixture $findFixture -Action find_files
     Assert-True ($singleFind.ExitCode -ne 0 -and $null -eq $singleFind.Result) 'a single request asking for a search is refused'
@@ -1602,7 +1672,7 @@ namespace RestoreManagerTests {
     } | ConvertTo-Json -Depth 3
 }
 finally {
-    foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_RESTORE_NOTHING','FAKE_LEGACY_SNAPSHOT','FAKE_FIND_SLEEP_MS','FAKE_REPOSITORY_ACCESS')) {
+    foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_RESTORE_NOTHING','FAKE_LEGACY_SNAPSHOT','FAKE_FIND_SLEEP_MS','FAKE_REPOSITORY_ACCESS','FAKE_PROGRESS_FILE','FAKE_PROGRESS_COPY')) {
         Remove-Item "Env:$name" -ErrorAction SilentlyContinue
     }
     foreach ($name in $plantedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $null, 'Process') }

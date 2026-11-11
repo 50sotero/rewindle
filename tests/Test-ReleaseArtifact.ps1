@@ -60,6 +60,21 @@ function Assert-PayloadManifest {
     }
 }
 
+# The documents at the top of the ZIP. README.md links to SECURITY.md by a relative path, and a few of Rewindle's messages send people
+# to its section "Switching an existing backup", so the two must sit side by side in what a person extracts.
+function Assert-BundleDocuments {
+    foreach ($name in @('README.md', 'SECURITY.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $bundle $name) -PathType Leaf)) {
+            throw "The release ZIP lacks $name at its top level."
+        }
+    }
+    $readme = Get-Content -LiteralPath (Join-Path $bundle 'README.md') -Raw
+    $security = Get-Content -LiteralPath (Join-Path $bundle 'SECURITY.md') -Raw
+    if ($readme -notmatch '\]\(SECURITY\.md#switching-an-existing-backup\)' -or $security -notmatch '(?m)^## Switching an existing backup\s*$') {
+        throw 'The README.md in the release ZIP does not lead to the "Switching an existing backup" section of its SECURITY.md.'
+    }
+}
+
 # One full run of the packaged engine in its own folders: initialize, two verified backups, a representative drill, an
 # independent restore and a listing. -Access is the backup's repository_access: with a password (the default) or
 # without one (Restic's empty password, --insecure-no-password on every command).
@@ -238,6 +253,7 @@ function Invoke-ReleaseScenario {
 try {
     New-Item -ItemType Directory -Path $bundle, $runtime | Out-Null
     Expand-Archive -LiteralPath $artifactPath -DestinationPath $bundle
+    Assert-BundleDocuments
     Assert-PayloadManifest
     foreach ($item in Get-ChildItem -LiteralPath (Join-Path $bundle 'payload') -Force) {
         Copy-Item -LiteralPath $item.FullName -Destination $runtime -Recurse

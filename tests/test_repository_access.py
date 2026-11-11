@@ -226,6 +226,34 @@ class AccessProbeTests(unittest.TestCase):
             (repository / "config").write_bytes(b"x")
             self.assertEqual("unknown", self.probe(repository, FakeRun(10)))
 
+    def test_a_config_check_that_fails_after_exit_10_is_unknown_not_missing(self) -> None:
+        # Restic says "no repository", and then the config file can't be checked (access denied, say): that is not
+        # proof that there are no backups, so the answer is "unknown", never "missing".
+        with tempfile.TemporaryDirectory(prefix="resticbackuper-probe-") as root_text:
+            repository = Path(root_text) / "repository"
+            repository.mkdir()
+            real_exists = Path.exists
+            for error in (PermissionError(13, "Access is denied"), OSError(5, "Input/output error")):
+                with self.subTest(error=type(error).__name__):
+
+                    def exists(path, *arguments, **options):
+                        if path.name == "config":
+                            raise error
+                        return real_exists(path, *arguments, **options)
+
+                    with mock.patch.object(Path, "exists", exists):
+                        self.assertEqual("unknown", self.probe(repository, FakeRun(10)))
+            # Without the error the same answer is "missing", so the patch above is what made it "unknown".
+            self.assertEqual("missing", self.probe(repository, FakeRun(10)))
+
+    def test_a_default_call_is_given_the_long_time_limit(self) -> None:
+        # Google Drive may have to download the key files before Restic can answer, so the limit is generous.
+        self.assertGreaterEqual(restic_common.ACCESS_PROBE_TIMEOUT_SECONDS, 120)
+        with tempfile.TemporaryDirectory(prefix="resticbackuper-probe-") as root_text:
+            runner = FakeRun(0)
+            restic_common.probe_repository_access("C:/fake/restic.exe", Path(root_text), runner=runner)
+            self.assertEqual(restic_common.ACCESS_PROBE_TIMEOUT_SECONDS, runner.calls[0][1]["timeout"])
+
     def test_time_out_and_start_failure_are_unknown(self) -> None:
         with tempfile.TemporaryDirectory(prefix="resticbackuper-probe-") as root_text:
             repository = Path(root_text)
@@ -320,6 +348,89 @@ HANDLES_BACKUPS_WITHOUT_A_PASSWORD = (
     "Get-RepositoryAccess",
     "Get-RecordedRepositoryAccess",
 )
+
+# What counts as giving Restic a password, and where the sweep looks.
+PASSWORD_SOURCES = ("--password-command", "RESTIC_PASSWORD", "--password-file")
+SWEPT_ROOTS = ("src", "installer")
+SWEPT_SUFFIXES = (".py", ".ps1", ".cs", ".ts", ".tsx", ".cmd")
+SKIPPED_FOLDERS = ("node_modules", "dist", "obj", "__pycache__", "vendor")
+PRINT_COUNTS_OPTION = "--print-password-source-counts"
+
+# How many times each file under src\ or installer\ mentions a password source (every occurrence of
+# PASSWORD_SOURCES, comments included; allowed files too). A file that already knows the mode still passes the marker
+# check above when someone adds a call that builds its own password source, so the sweep also pins the number of
+# mentions per file. A new site, or a removed one, fails the sweep until the new site has been checked (it must follow
+# the mode: no password source next to --insecure-no-password) and the count here is updated. Print the current counts
+# with:  python tests\test_repository_access.py --print-password-source-counts
+PASSWORD_SOURCE_COUNTS = {
+    "src/credential_repair.py": 4,
+    "src/dashboard/RunDetailsWindow.cs": 1,
+    "src/key_rotation.py": 7,
+    "src/Manage-Repository.ps1": 1,
+    "src/Manage-Restore.ps1": 1,
+    "src/recovery_health.py": 6,
+    "src/restic_common.py": 10,
+    "src/restore.py": 12,
+    "src/secret_store.py": 1,
+    "src/sync_repository_to_google_drive.ps1": 6,
+    "src/verify_my_drive_cloud_repository.ps1": 3,
+}
+
+
+def swept_files(project: Path):
+    """Every source file under src\\ and installer\\ of `project` that the sweep reads, as a sorted list of paths."""
+    found = []
+    for root in SWEPT_ROOTS:
+        for path in sorted((project / root).rglob("*")):
+            if not path.is_file() or path.suffix.lower() not in SWEPT_SUFFIXES:
+                continue
+            if any(part in SKIPPED_FOLDERS for part in path.relative_to(project).parts):
+                continue
+            found.append(path)
+    return found
+
+
+def password_source_counts(project: Path) -> dict[str, int]:
+    """For each swept file of `project` that mentions a password source: how many times it does."""
+    counts = {}
+    for path in swept_files(project):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        count = sum(text.count(source) for source in PASSWORD_SOURCES)
+        if count:
+            counts[path.relative_to(project).as_posix()] = count
+    return counts
+
+
+def password_source_problems(project: Path) -> list[str]:
+    """What is wrong with the password sources of `project`'s tree; an empty list when the sweep passes."""
+    counts = password_source_counts(project)
+    if not counts:
+        return ["the sweep found no file that gives Restic a password, so it is looking in the wrong place"]
+    problems = []
+    for relative, count in counts.items():
+        if relative not in PASSWORD_SOURCE_ALLOWED:
+            text = (project / relative).read_text(encoding="utf-8", errors="replace")
+            if not any(marker in text for marker in HANDLES_BACKUPS_WITHOUT_A_PASSWORD):
+                problems.append(f"{relative} gives Restic a password but never mentions backups without one")
+        pinned = PASSWORD_SOURCE_COUNTS.get(relative)
+        if pinned is None:
+            problems.append(
+                f"{relative} mentions a password source {count} times and is not in PASSWORD_SOURCE_COUNTS. Check the "
+                f"site follows the mode (backups without a password get no password source), then add the count."
+            )
+        elif pinned != count:
+            problems.append(
+                f"{relative} mentions a password source {count} times; PASSWORD_SOURCE_COUNTS pins {pinned}. A site was "
+                f"added or removed: check it follows the mode (backups without a password get no password source), "
+                f"then update the count."
+            )
+    for relative, pinned in PASSWORD_SOURCE_COUNTS.items():
+        if relative not in counts:
+            problems.append(
+                f"{relative} no longer mentions a password source but PASSWORD_SOURCE_COUNTS pins {pinned}. Check that "
+                f"the site it had was removed on purpose, then update the count."
+            )
+    return problems
 
 
 def text_of(relative: str) -> str:
@@ -456,32 +567,119 @@ class CopiesOfTheRuleTests(unittest.TestCase):
 class PasswordSourceSweepTests(unittest.TestCase):
     """Search the tree, don't trust a list: a file that gives Restic a password must also know backups without one."""
 
-    def test_every_file_with_a_password_source_handles_backups_without_one(self) -> None:
-        found = []
-        for root in ("src", "installer"):
-            for path in sorted((PROJECT / root).rglob("*")):
-                if not path.is_file() or path.suffix.lower() not in (".py", ".ps1", ".cs", ".ts", ".tsx", ".cmd"):
-                    continue
-                if any(part in ("node_modules", "dist", "obj", "__pycache__", "vendor") for part in path.parts):
-                    continue
-                text = path.read_text(encoding="utf-8", errors="replace")
-                if "--password-command" in text or "RESTIC_PASSWORD" in text or "--password-file" in text:
-                    found.append(path.relative_to(PROJECT).as_posix())
-        self.assertTrue(found)
-        for relative in found:
-            with self.subTest(file=relative):
-                if relative in PASSWORD_SOURCE_ALLOWED:
-                    continue
-                text = text_of(relative)
-                self.assertTrue(
-                    any(marker in text for marker in HANDLES_BACKUPS_WITHOUT_A_PASSWORD),
-                    f"{relative} gives Restic a password but never mentions backups without one",
-                )
+    def test_every_file_with_a_password_source_handles_backups_without_one_and_keeps_its_count(self) -> None:
+        problems = password_source_problems(PROJECT)
+        self.assertEqual(
+            [],
+            problems,
+            "\n".join(problems) + f"\nThe current counts print with: python tests\\test_repository_access.py {PRINT_COUNTS_OPTION}",
+        )
         self.assertNotIn(
             "sync_repository_to_google_drive.ps1",
             (PROJECT / "build" / "Build-Release.ps1").read_text(encoding="utf-8"),
             "the retired script is allowed only because it is not shipped",
         )
+
+
+class PasswordSourceSweepOnACopyTests(unittest.TestCase):
+    """The sweep is a function over a folder, so these run it on a copy of the swept files with one change made."""
+
+    def setUp(self) -> None:
+        self.fresh_copy()
+
+    def fresh_copy(self) -> None:
+        holder = tempfile.TemporaryDirectory(prefix="resticbackuper-sweep-")
+        self.addCleanup(holder.cleanup)
+        self.copy = Path(holder.name)
+        for path in swept_files(PROJECT):
+            target = self.copy / path.relative_to(PROJECT)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(path.read_bytes())
+
+    def edit(self, relative: str, change) -> None:
+        path = self.copy / relative
+        path.write_text(change(path.read_text(encoding="utf-8")), encoding="utf-8", newline="")
+
+    def test_the_copy_passes_when_nothing_changed(self) -> None:
+        self.assertEqual([], password_source_problems(self.copy))
+        self.assertEqual(password_source_counts(PROJECT), password_source_counts(self.copy))
+
+    def test_one_extra_unguarded_password_command_in_a_file_that_knows_the_mode_fails(self) -> None:
+        relative = "src/restore.py"
+        text = (self.copy / relative).read_text(encoding="utf-8")
+        # The per-file marker check alone would let this file through: it already mentions the mode.
+        self.assertTrue(any(marker in text for marker in HANDLES_BACKUPS_WITHOUT_A_PASSWORD))
+        self.assertIn("no_password", text)
+        self.edit(relative, lambda text: text + '\n\ndef unguarded_site(restic):\n    return [restic, "--password-command", "reveal"]\n')
+        problems = password_source_problems(self.copy)
+        self.assertEqual(1, len(problems), problems)
+        self.assertIn(relative, problems[0])
+        self.assertIn(f"{PASSWORD_SOURCE_COUNTS[relative] + 1} times", problems[0])
+        self.assertIn(f"pins {PASSWORD_SOURCE_COUNTS[relative]}", problems[0])
+        # The message says what to do about it.
+        self.assertIn("check it follows the mode", problems[0])
+        self.assertIn("update the count", problems[0])
+
+    def test_an_extra_environment_password_or_password_file_fails_too(self) -> None:
+        for source in ('environment["RESTIC_PASSWORD"] = secret', '"--password-file", key_file'):
+            with self.subTest(source=source):
+                self.fresh_copy()
+                self.edit("src/key_rotation.py", lambda text: text + f"\nunguarded = {source}\n")
+                problems = password_source_problems(self.copy)
+                self.assertEqual(1, len(problems), problems)
+                self.assertIn("src/key_rotation.py", problems[0])
+                self.assertIn("update the count", problems[0])
+
+    def test_a_removed_password_source_fails(self) -> None:
+        relative = "src/restic_common.py"
+        self.edit(relative, lambda text: text.replace("--password-command", "--password-source", 1))
+        problems = password_source_problems(self.copy)
+        self.assertEqual(1, len(problems), problems)
+        self.assertIn(relative, problems[0])
+        self.assertIn(f"{PASSWORD_SOURCE_COUNTS[relative] - 1} times", problems[0])
+        self.assertIn("update the count", problems[0])
+
+    def test_a_pinned_file_that_loses_every_password_source_fails(self) -> None:
+        relative = "src/Manage-Restore.ps1"
+
+        def without_password_sources(text: str) -> str:
+            for source in PASSWORD_SOURCES:
+                text = text.replace(source, "no-source")
+            return text
+
+        self.edit(relative, without_password_sources)
+        problems = password_source_problems(self.copy)
+        self.assertEqual(1, len(problems), problems)
+        self.assertIn(relative, problems[0])
+        self.assertIn("no longer mentions a password source", problems[0])
+
+    def test_a_new_file_with_a_password_source_fails_even_when_it_knows_the_mode(self) -> None:
+        guarded = self.copy / "src" / "new_helper.py"
+        guarded.write_text('if access == "no_password":\n    pass\ncommand = ["--password-command", "reveal"]\n', encoding="utf-8")
+        problems = password_source_problems(self.copy)
+        self.assertEqual(1, len(problems), problems)
+        self.assertIn("src/new_helper.py", problems[0])
+        self.assertIn("not in PASSWORD_SOURCE_COUNTS", problems[0])
+        # And one that never mentions the mode fails the marker check as well as the count.
+        guarded.write_text('command = ["--password-command", "reveal"]\n', encoding="utf-8")
+        problems = password_source_problems(self.copy)
+        self.assertEqual(2, len(problems), problems)
+        self.assertTrue(any("never mentions backups without one" in problem for problem in problems))
+
+    def test_an_allowed_file_is_still_counted(self) -> None:
+        relative = "src/secret_store.py"
+        self.assertIn(relative, PASSWORD_SOURCE_ALLOWED)
+        self.edit(relative, lambda text: text + '\nextra = "--password-command"\n')
+        problems = password_source_problems(self.copy)
+        self.assertEqual(1, len(problems), problems)
+        self.assertIn(relative, problems[0])
+
+    def test_folders_that_hold_other_peoples_code_are_not_swept(self) -> None:
+        for folder in ("node_modules", "dist", "vendor"):
+            target = self.copy / "src" / "dashboard" / folder / "package.ts"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text('const x = "--password-command";\n', encoding="utf-8")
+        self.assertEqual([], password_source_problems(self.copy))
 
 
 class FakeContractTests(unittest.TestCase):
@@ -498,4 +696,10 @@ class FakeContractTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    if PRINT_COUNTS_OPTION in sys.argv[1:]:
+        print("PASSWORD_SOURCE_COUNTS = {")
+        for name, number in password_source_counts(PROJECT).items():
+            print(f'    "{name}": {number},')
+        print("}")
+    else:
+        unittest.main()

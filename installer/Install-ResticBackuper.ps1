@@ -2191,6 +2191,26 @@ function Assert-NoPendingKeyChange {
     }
 }
 
+# What Setup says about backups with a password whose password this PC doesn't have. The plan and the preflight say it as it is
+# (nothing has been started yet); the install's refusal (initializer exit 7) adds the ending of the others. It is defined here,
+# before the plan-only exit, because a plan says it too.
+function Get-PasswordUnavailableMessage {
+    return "The backups in this location have a password that Rewindle doesn't have on this PC, so Setup can't continue them. Choose another location for new backups. You can still restore files from these backups with their recovery key."
+}
+
+# Backups with a password can be carried on only with the password this PC stored for them. When the folder holds backups that
+# are recorded as having one and that password is not here (they were made on another PC, or the state folder was moved aside),
+# nothing in Setup could open them and a new password would not either, so the plan and the install's preflight say so now,
+# before anything is changed. Only backups recorded as having a password count: backups no record describes are asked about
+# later (the initializer refuses them with exit 7), and a choice of no password is checked against the backups themselves.
+function Assert-PasswordAvailable {
+    if ($script:repositoryAccessMode -cne 'password' -or $script:existingRepositoryAccess -cne 'password') { return }
+    if (-not $repositoryPreviouslyInitialized) { return }
+    if (Test-Path -LiteralPath $secretFile -PathType Leaf) { return }
+    Stop-InstallValidation -Code 'repository_password_unavailable' -Field 'repository' -Path $repositoryPath `
+        -Message (Get-PasswordUnavailableMessage)
+}
+
 # Decides how Restic opens this install's backups (see Get-RepositoryAccessDecision) and records what it found. A plan runs it as
 # a stage once the backup folder is understood; an install runs it in its preflight. The console question for a new backup
 # comes later, once everything else has passed.
@@ -2204,6 +2224,7 @@ function Resolve-RepositoryAccess {
     $script:repositoryAccessMode = $decision.access
     $script:repositoryAccessSource = $decision.source
     Assert-NoPendingKeyChange
+    Assert-PasswordAvailable
 }
 
 function Get-DriveFsInfo {
@@ -3408,17 +3429,20 @@ function Invoke-RepositoryAccessQuestion {
     }
 }
 
-# What Setup says when the backups don't open the way this install expects (initializer exit 4 or 5) or can't be opened at all
-# (exit 6). Every one of these ends the install with nothing changed; the sentence says so, and the failure helper leaves it as
-# it is instead of adding a generic tail.
+# What Setup says when the backups don't open the way this install expects (initializer exit 4 or 5), can't be opened at all
+# (exit 6) or need a password this PC doesn't have (exit 7). Every one of these ends the install with nothing changed; the
+# sentence says so, and the failure helper leaves it as it is instead of adding a generic tail.
 function Get-RepositoryAccessRefusalMessage {
     param([int]$ExitCode, [string]$Source)
     $ending = ' Setup undid its changes, and your backups were not touched.'
     if ($ExitCode -eq 6) {
-        return "Setup couldn't open the backups in this location to continue them. Check that the backup drive or Google Drive folder is connected and available, then try again.$ending"
+        return "Setup couldn't open the backups in this location to continue them. Check that the backup drive or Google Drive folder is connected and available, then try again. If they still can't be opened, they may be damaged: choose another location for new backups, and keep this folder until you've checked it.$ending"
+    }
+    if ($ExitCode -eq 7) {
+        return "$(Get-PasswordUnavailableMessage)$ending"
     }
     if ($Source -ceq 'recorded' -or $Source -ceq 'detected') {
-        return "These backups no longer match what Setup recorded for them, usually because they were changed outside Rewindle. Setup can't carry on with them here. Choose another location, or see Switching an existing backup in Rewindle's guide.$ending"
+        return "These backups no longer match what Setup recorded for them, usually because they were changed outside Rewindle. Setup can't carry on with them here. Choose another location, or see Switching an existing backup in SECURITY.md on Rewindle's GitHub page.$ending"
     }
     if ($ExitCode -eq 4) {
         return "The backups in this location are protected by a password, but you chose no password. To continue these backups, choose a password. To start without one, choose another location.$ending"
@@ -3522,6 +3546,11 @@ function Write-InstallFailure {
             # Not a password in sight: nothing about an encrypted location.
             $message = 'Setup could not create the backup location.'
         }
+        elseif ($phase -ceq 'recovery_key' -and $script:repositoryAccessMode -cne 'password') {
+            # Nor a recovery key: what is saved in this phase, for backups without a password (or of a kind not known), is the
+            # recovery tools beside the backups.
+            $message = 'Setup could not save the recovery tools.'
+        }
     }
     else {
         $code = 'setup_failed'
@@ -3531,7 +3560,7 @@ function Write-InstallFailure {
     # and left the backups alone, so they take no generic tail; with program files left behind that ending is swapped for the
     # leftover sentence. Everything else keeps the wording it always had for backups with a password; for backups without one,
     # or when it is not known, there is no recovery key to mention.
-    $refusal = ($code -ceq 'repository_access_mismatch' -or $code -ceq 'repository_access_unreadable')
+    $refusal = ($code -ceq 'repository_access_mismatch' -or $code -ceq 'repository_access_unreadable' -or $code -ceq 'repository_password_unavailable')
     $refusalEnding = ' Setup undid its changes, and your backups were not touched.'
     if ($RolledBack -and $Leftover) {
         # The program folder is still there, so a new install refuses until it is removed; say how, in Setup's own words.
@@ -4051,6 +4080,12 @@ try {
         Stop-InstallValidation -Code 'repository_access_unreadable' -Field 'repository' -Path $repositoryPath `
             -Message (Get-RepositoryAccessRefusalMessage -ExitCode $initializerExit -Source $script:repositoryAccessSource) `
             -Console "The backups in $repositoryPath could not be opened (exit code $initializerExit)."
+    }
+    if ($initializerExit -eq 7) {
+        # The backups have a password and this PC has none saved for them; nothing was changed, and no new password is made.
+        Stop-InstallValidation -Code 'repository_password_unavailable' -Field 'repository' -Path $repositoryPath `
+            -Message (Get-RepositoryAccessRefusalMessage -ExitCode $initializerExit -Source $script:repositoryAccessSource) `
+            -Console "The backups in $repositoryPath have a password that is not stored on this PC (exit code $initializerExit)."
     }
     if ($initializerExit -ne 0) {
         throw "Repository initialization failed with exit code $initializerExit."

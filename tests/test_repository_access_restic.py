@@ -27,7 +27,9 @@ INITIALIZER = SOURCE / "initialize_repository.py"
 REQUIRE_PINNED_RESTIC = os.environ.get("REWINDLE_REQUIRE_PINNED_RESTIC") == "1"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+import initialize_repository  # noqa: E402
 import restic_common  # noqa: E402
+import secret_store  # noqa: E402
 from restic_access import CONFLICT, EMPTY_NOT_ALLOWED, WRONG_PASSWORD  # noqa: E402
 
 
@@ -341,6 +343,58 @@ class PinnedResticNoPasswordTests(unittest.TestCase):
                 # No password file and no recovery key were made for backups that were not continued.
                 self.assertFalse(Path(config["secret_file"]).exists())
                 self.assertFalse(Path(config["recovery_key_file"]).exists())
+                self.assertNotIn("Fatal", result.stdout + result.stderr)
+
+    def test_backups_with_a_password_this_pc_does_not_have_are_refused_with_exit_7_and_changed_in_no_way(self) -> None:
+        unavailable = initialize_repository.UNAVAILABLE_MESSAGE
+        unreadable = initialize_repository.UNREADABLE_MESSAGE
+        mismatch = initialize_repository.MISMATCH_MESSAGE
+        cases = (
+            # (fixture, configured access, expected exit, the one plain line)
+            (self.password, "password", 7, unavailable),
+            (self.password, None, 7, unavailable),  # a configuration from before the choice existed means a password
+            (self.dual, "password", 5, mismatch),  # opens without a password too, so it is "no password" and the choice is wrong
+            (self.empty_keys, "password", 6, unreadable),  # holds no key at all: not a password this PC lacks
+            (self.damaged_key, "password", 6, unreadable),
+            (self.truncated_config, "password", 6, unreadable),
+        )
+        for fixture, access, code, line in cases:
+            with self.subTest(fixture=fixture.name, access=access):
+                repository = self.copy_of(fixture)
+                before = tree_fingerprint(repository)
+                config_path, config = self.write_initializer_config(repository, access)
+                result = self.initialize(config_path)
+                self.assertEqual(code, result.returncode, result.stderr)
+                self.assertEqual(line + "\n", result.stderr)
+                self.assertEqual("", result.stdout)
+                self.assertEqual(before, tree_fingerprint(repository))
+                # Nothing was created for them: no password, no recovery key, no recovery tools, no record.
+                self.assertFalse(Path(config["secret_file"]).exists())
+                self.assertFalse(Path(config["recovery_key_file"]).exists())
+                self.assertFalse(Path(config["recovery_tools_directory"]).exists())
+                self.assertFalse((Path(config["state_directory"]) / "repository.json").exists())
+
+    def test_a_saved_password_that_does_not_open_the_backups_is_exit_7_and_is_left_exactly_as_it_is(self) -> None:
+        for label, fixture, code, line in (
+            ("another password", self.password, 7, initialize_repository.UNAVAILABLE_MESSAGE),
+            ("a folder of keys with no key", self.empty_keys, 6, initialize_repository.UNREADABLE_MESSAGE),
+            ("backups without a password", self.no_password, 5, initialize_repository.MISMATCH_MESSAGE),
+        ):
+            with self.subTest(label):
+                repository = self.copy_of(fixture)
+                before = tree_fingerprint(repository)
+                config_path, config = self.write_initializer_config(repository, "password")
+                # A real stored password, made for some other backups.
+                secret_file = Path(config["secret_file"])
+                secret_store.create_secret(secret_file)
+                secret_before = secret_file.read_bytes()
+                result = self.initialize(config_path)
+                self.assertEqual(code, result.returncode, result.stderr)
+                self.assertEqual(line + "\n", result.stderr)
+                self.assertEqual(before, tree_fingerprint(repository))
+                self.assertEqual(secret_before, secret_file.read_bytes())
+                self.assertFalse(Path(config["recovery_key_file"]).exists())
+                self.assertFalse(Path(config["recovery_tools_directory"]).exists())
                 self.assertNotIn("Fatal", result.stdout + result.stderr)
 
 

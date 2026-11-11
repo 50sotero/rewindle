@@ -65,6 +65,12 @@ class FakeRestic:
     def write_repository_config(self) -> None:
         self.repository.mkdir(parents=True, exist_ok=True)
         (self.repository / "config").write_bytes(b"fixture config")
+        (self.repository / "keys").mkdir(exist_ok=True)
+        (self.repository / "keys" / ("b" * 64)).write_bytes(b"fixture key")
+
+    def empty_the_keys_folder(self) -> None:
+        for entry in (self.repository / "keys").iterdir():
+            entry.unlink()
 
     def run_capture(self, command, **_kwargs):
         self.commands.append(list(command))
@@ -221,24 +227,48 @@ class InitializerTestCase(unittest.TestCase):
 class ExitCodeConstantTests(unittest.TestCase):
     def test_the_codes_the_installer_reads(self) -> None:
         self.assertEqual(
-            (4, 5, 6, 20, 21, 22),
+            (4, 5, 6, 7, 20, 21, 22),
             (
                 initialize_repository.EXIT_NEEDS_PASSWORD,
                 initialize_repository.EXIT_HAS_NO_PASSWORD,
                 initialize_repository.EXIT_ACCESS_UNREADABLE,
+                initialize_repository.EXIT_PASSWORD_UNAVAILABLE,
                 initialize_repository.EXIT_DETECT_NO_PASSWORD,
                 initialize_repository.EXIT_DETECT_PASSWORD,
                 initialize_repository.EXIT_DETECT_NONE,
             ),
         )
 
-    def test_the_two_plain_lines_say_nothing_the_log_filters_hide(self) -> None:
-        for line in (initialize_repository.MISMATCH_MESSAGE, initialize_repository.UNREADABLE_MESSAGE):
+    def test_the_plain_lines_say_nothing_the_log_filters_hide(self) -> None:
+        for line in (
+            initialize_repository.MISMATCH_MESSAGE,
+            initialize_repository.UNREADABLE_MESSAGE,
+            initialize_repository.UNAVAILABLE_MESSAGE,
+        ):
             with self.subTest(line=line):
                 for word in SANITIZED_WORDS:
                     self.assertNotIn(word, line.lower())
                 self.assertNotIn(NO_PASSWORD_FLAG, line)
                 self.assertTrue(line.isascii())
+
+    def test_every_refusal_has_its_own_line(self) -> None:
+        lines = {
+            initialize_repository.MISMATCH_MESSAGE,
+            initialize_repository.UNREADABLE_MESSAGE,
+            initialize_repository.UNAVAILABLE_MESSAGE,
+        }
+        self.assertEqual(3, len(lines))
+        for code, line in (
+            (initialize_repository.EXIT_NEEDS_PASSWORD, initialize_repository.MISMATCH_MESSAGE),
+            (initialize_repository.EXIT_HAS_NO_PASSWORD, initialize_repository.MISMATCH_MESSAGE),
+            (initialize_repository.EXIT_ACCESS_UNREADABLE, initialize_repository.UNREADABLE_MESSAGE),
+            (initialize_repository.EXIT_PASSWORD_UNAVAILABLE, initialize_repository.UNAVAILABLE_MESSAGE),
+        ):
+            with self.subTest(code=code):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    self.assertEqual(code, initialize_repository.refuse(code))
+                self.assertEqual(line + "\n", err.getvalue())
 
 
 class NewBackupWithoutPasswordTests(InitializerTestCase):
@@ -335,6 +365,21 @@ class NewBackupWithoutPasswordTests(InitializerTestCase):
         self.assertEqual("restic init failed with exit 1", str(raised.exception))
         self.assert_nothing_written()
 
+    def test_a_failed_check_right_after_creation_shows_none_of_restics_text(self) -> None:
+        # `init` worked, and the `cat config` that proves the new backups open fails: the message is exactly this, with none of
+        # what Restic printed (which may name the password option), and nothing is recorded.
+        config = self.write_config(repository_access="no_password")
+        self.fake.cat_override = (12, "", "Fatal: wrong password or no key found")
+
+        with self.assertRaises(RuntimeError) as raised:
+            self.run_main(["--config", str(config)])
+
+        self.assertEqual("repository authentication failed after init", str(raised.exception))
+        self.assertEqual(["init", "--repository-version", "2"], self.fake.commands[0][-3:])
+        self.assertEqual(["cat", "config"], self.fake.commands[1][-2:])
+        self.assertEqual(2, len(self.fake.commands))
+        self.assert_nothing_written()
+
     def test_a_folder_that_holds_other_files_is_still_refused(self) -> None:
         config = self.write_config(repository_access="no_password")
         self.repository.mkdir()
@@ -364,8 +409,8 @@ class ExistingBackupWithoutPasswordTests(InitializerTestCase):
         self.assertFalse(self.secret.exists())
 
     def test_the_missing_password_file_refusal_belongs_to_backups_with_a_password(self) -> None:
-        # No DPAPI file anywhere: with a password this refuses ("refusing to create an unrelated key"); without one it
-        # must not, because there is no such file to have.
+        # No DPAPI file anywhere: with a password this refuses (5, 6 or 7, by what the backups are: none of them makes a
+        # key); without one it must not, because there is no such file to have.
         self.fake = FakeRestic(self.repository, "no_password")
         config = self.write_config(repository_access="no_password")
         self.assertFalse(self.secret.exists())
@@ -551,42 +596,127 @@ class PasswordBackupsTests(InitializerTestCase):
                 self.assertEqual([str(self.repository)], self.fake.probes)
                 self.assert_nothing_written()
 
-    def test_a_missing_saved_password_for_backups_that_need_one_is_the_error_it_always_was(self) -> None:
-        for answer in ("password", "unknown", "missing"):
+    def assert_refused(self, config: Path, code_expected: int, line: str) -> None:
+        """The refusal with its own exit code and one plain line; nothing was made, tried or changed."""
+        code, out, err = self.run_main(["--config", str(config)])
+        self.assertEqual(code_expected, code)
+        self.assertEqual("", out)
+        self.assertEqual(line + "\n", err)
+        self.assert_plain_line(err)
+        self.assert_nothing_written()
+        self.create_secret.assert_not_called()
+
+    def test_backups_with_a_password_that_is_not_saved_on_this_pc_stop_with_exit_7(self) -> None:
+        # No saved password at all, and Restic says the backups need one: a new password would not open them.
+        for extra in ({}, {"repository_access": "password"}):
+            with self.subTest(extra=extra):
+                shutil.rmtree(self.root, ignore_errors=True)
+                self.root.mkdir()
+                self.fake = FakeRestic(self.repository, "password")
+                config = self.write_config(**extra)
+                before = sorted(str(path.relative_to(self.repository)) for path in self.repository.rglob("*"))
+
+                self.assert_refused(config, initialize_repository.EXIT_PASSWORD_UNAVAILABLE, initialize_repository.UNAVAILABLE_MESSAGE)
+
+                self.assertEqual([str(self.repository)], self.fake.probes)
+                self.assertEqual([], self.fake.commands)  # no secret was made, so nothing was tried with one
+                self.assertFalse(self.secret.exists())
+                self.assertFalse(self.key.exists())
+                self.assertEqual(before, sorted(str(path.relative_to(self.repository)) for path in self.repository.rglob("*")))
+                self.assertEqual(["cat", "config"], self.fake.probe_runs[0][-2:])
+                self.assertIn(NO_PASSWORD_FLAG, self.fake.probe_runs[0])
+
+    def test_backups_that_could_not_be_opened_to_tell_stop_with_exit_6_when_there_is_no_saved_password(self) -> None:
+        # Restic could not answer (or the answer was not one of its three): not a password this PC lacks, but backups that can't be opened.
+        for answer in ("unknown", "missing", "something else"):
             with self.subTest(probe=answer):
                 self.fake = FakeRestic(self.repository, "password")
                 self.fake.probe_override = answer
                 config = self.write_config()
-                if self.secret.exists():
-                    self.secret.unlink()
+                self.assertFalse(self.secret.exists())
+
+                self.assert_refused(config, initialize_repository.EXIT_ACCESS_UNREADABLE, initialize_repository.UNREADABLE_MESSAGE)
+
+                self.assertEqual([], self.fake.commands)
+                self.assertFalse(self.secret.exists())
+
+    def test_a_folder_of_keys_with_no_key_in_it_can_not_be_opened_at_all_so_it_is_exit_6_not_7(self) -> None:
+        # Restic answers "needs a password" (12) for backups that hold no key at all, as it does for backups with a password.
+        for label in ("empty", "missing", "only a folder"):
+            with self.subTest(keys=label):
+                shutil.rmtree(self.root, ignore_errors=True)
+                self.root.mkdir()
+                self.fake = FakeRestic(self.repository, "password")
+                self.fake.empty_the_keys_folder()
+                if label == "missing":
+                    (self.repository / "keys").rmdir()
+                if label == "only a folder":
+                    (self.repository / "keys" / "not-a-key").mkdir()
+                config = self.write_config()
+
+                self.assert_refused(config, initialize_repository.EXIT_ACCESS_UNREADABLE, initialize_repository.UNREADABLE_MESSAGE)
+
+                self.assertEqual([str(self.repository)], self.fake.probes)
+                self.assertEqual([], self.fake.commands)
+
+    def test_a_saved_password_that_does_not_open_backups_that_need_one_stops_with_exit_7(self) -> None:
+        self.fake = FakeRestic(self.repository, "password")
+        self.fake.saved_password_opens = False
+        config = self.write_config()
+        self.fake_secret(self.secret)
+        before = self.secret.read_bytes()
+
+        self.assert_refused(config, initialize_repository.EXIT_PASSWORD_UNAVAILABLE, initialize_repository.UNAVAILABLE_MESSAGE)
+
+        self.assertEqual([str(self.repository)], self.fake.probes)
+        self.assertEqual(1, len(self.fake.commands))  # the one `cat config` with the saved password
+        self.assertIn("--password-command", self.fake.commands[0])
+        self.assertEqual(before, self.secret.read_bytes())
+        self.assertFalse(self.key.exists())
+
+    def test_a_probe_that_cannot_tell_does_not_change_that(self) -> None:
+        # Restic answered 12 to the saved password: the probe is only asked whether the backups have no password after all.
+        for answer in ("password", "unknown", "missing"):
+            with self.subTest(probe=answer):
+                self.fake = FakeRestic(self.repository, "password")
+                self.fake.saved_password_opens = False
+                self.fake.probe_override = answer
+                config = self.write_config()
+                self.fake_secret(self.secret)
+
+                self.assert_refused(config, initialize_repository.EXIT_PASSWORD_UNAVAILABLE, initialize_repository.UNAVAILABLE_MESSAGE)
+
+    def test_a_saved_password_does_not_open_backups_whose_folder_of_keys_is_empty_exit_6(self) -> None:
+        self.fake = FakeRestic(self.repository, "password")
+        self.fake.saved_password_opens = False
+        self.fake.empty_the_keys_folder()
+        config = self.write_config()
+        self.fake_secret(self.secret)
+
+        self.assert_refused(config, initialize_repository.EXIT_ACCESS_UNREADABLE, initialize_repository.UNREADABLE_MESSAGE)
+
+    def test_any_other_failure_with_a_saved_password_is_the_error_it_always_was(self) -> None:
+        for exit_code in (1, 2, 10, 130):
+            with self.subTest(exit=exit_code):
+                self.fake = FakeRestic(self.repository, "password")
+                self.fake.cat_override = (exit_code, "", "Fatal: some text from Restic")
+                self.fake.probe_override = "password"
+                config = self.write_config()
+                self.fake_secret(self.secret)
 
                 with self.assertRaisesRegex(
-                    RuntimeError, "repository exists but its DPAPI password file is missing; refusing to create an unrelated key"
+                    RuntimeError, f"^repository authentication failed with exit {exit_code}: Fatal: some text from Restic$"
                 ):
                     self.run_main(["--config", str(config)])
 
+                self.assert_nothing_written()
                 self.create_secret.assert_not_called()
 
-    def test_a_saved_password_that_does_not_open_backups_that_need_one_is_the_error_it_always_was(self) -> None:
-        self.fake = FakeRestic(self.repository, "password")
-        self.fake.saved_password_opens = False
+    def test_a_failed_check_right_after_creation_with_a_password_is_the_error_it_always_was(self) -> None:
         config = self.write_config()
-        self.fake_secret(self.secret)
+        self.fake.cat_override = (12, "", "Fatal: wrong password or no key found")
 
-        with self.assertRaisesRegex(RuntimeError, "^repository authentication failed with exit 12: Fatal: wrong password"):
-            self.run_main(["--config", str(config)])
-
-        self.assertEqual([str(self.repository)], self.fake.probes)
-        self.assert_nothing_written()
-
-    def test_a_probe_that_cannot_tell_leaves_the_error_alone(self) -> None:
-        self.fake = FakeRestic(self.repository, "password")
-        self.fake.saved_password_opens = False
-        self.fake.probe_override = "unknown"
-        config = self.write_config()
-        self.fake_secret(self.secret)
-
-        with self.assertRaisesRegex(RuntimeError, "repository authentication failed with exit 12"):
+        with self.assertRaisesRegex(RuntimeError, "^repository authentication failed after init: Fatal: wrong password"):
             self.run_main(["--config", str(config)])
 
 

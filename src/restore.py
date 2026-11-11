@@ -74,6 +74,16 @@ NO_KEY_FILE_MESSAGE = "This backup opens without a key, so there is no key file 
 NO_KEY_SOURCE_MESSAGE = "a restore command for backups without a key also names a key source"
 DRILL_ARGUMENTS_MESSAGE = "--recovery-drill requires a target, report, and recovery-key file"
 FILE_SEARCH_KEY_MESSAGE = "File search needs Rewindle's saved key or your recovery key."
+# Restic's answer "wrong password or no key found". For backups that Rewindle opens without a password it means one was
+# added outside Rewindle, and every way restore.py reads them says so in these words, not as an exit code. The protected
+# manager has the same sentence: it passes it on to the dashboard when it is the whole of restore.py's last line. It
+# names no password source, so the manager's report filter lets it through.
+RESTIC_WRONG_PASSWORD_EXIT = 12
+NOW_ASKS_FOR_A_PASSWORD_MESSAGE = (
+    "These backups now ask for a password that Rewindle doesn't have, usually because they were changed outside "
+    "Rewindle, so Rewindle can't open them. If you know that password, Restic can still restore your files with it, as "
+    "RECOVERY.md in the recovery tools folder next to your backups explains."
+)
 # What a recovery drill's report says it was opened with: the recovery key (backups with a password) or nothing.
 DRILL_CREDENTIAL_SOURCE_KEY = "recovery_key"
 DRILL_CREDENTIAL_SOURCE_NONE = "none"
@@ -100,12 +110,22 @@ RESTORE_FOLDER_PREFIX = ".rewindle-restore-"
 
 
 class ResticReadError(RuntimeError):
-    """A read-only Restic metadata operation failed without exposing argv."""
+    """A read-only Restic metadata operation failed without exposing argv.
 
-    def __init__(self, operation: str, returncode: int):
+    `command` is the Restic command that failed. One opened without a password (NO_PASSWORD_FLAG) that Restic answered
+    with exit code 12 says that its backups now ask for one, in NOW_ASKS_FOR_A_PASSWORD_MESSAGE; any other failure says
+    only which operation failed and with which exit code.
+    """
+
+    def __init__(self, operation: str, returncode: int, command: list[str] | None = None):
         self.operation = operation
         self.returncode = int(returncode)
-        super().__init__(f"Restic {operation} failed with exit code {returncode}")
+        asks_for_a_password = self.returncode == RESTIC_WRONG_PASSWORD_EXIT and NO_PASSWORD_FLAG in (command or ())
+        super().__init__(
+            NOW_ASKS_FOR_A_PASSWORD_MESSAGE
+            if asks_for_a_password
+            else f"Restic {operation} failed with exit code {returncode}"
+        )
 
 
 def _normalized_windows_path(path: Path | str) -> str:
@@ -1042,7 +1062,7 @@ def run_restic_json_lines_bounded(
         if diagnostic_overflow:
             raise RuntimeError("Restic drill diagnostics exceeded their bounded safety limit")
         if returncode != 0:
-            raise ResticReadError(operation, returncode)
+            raise ResticReadError(operation, returncode, base_command)
         return entries
     finally:
         try:
@@ -1151,7 +1171,7 @@ def run_restic_capture(
         check=False,
     )
     if completed.returncode != 0:
-        raise ResticReadError(operation, completed.returncode)
+        raise ResticReadError(operation, completed.returncode, base_command)
     return completed.stdout
 
 
@@ -2898,7 +2918,7 @@ def bounded_restic_capture(deadline: float) -> Any:
         if run.stopped == "overflow":
             raise RuntimeError(f"Restic returned more output than a file search accepts for the {operation}")
         if run.returncode != 0:
-            raise ResticReadError(operation, int(run.returncode or 1))
+            raise ResticReadError(operation, int(run.returncode or 1), base_command)
         return run.output.decode("utf-8", errors="replace")
 
     return capture
@@ -3140,7 +3160,7 @@ def run_file_search(
         if run.stopped == "overflow":
             return finish("too_broad", results)
         if run.returncode != 0:
-            raise ResticReadError("file search", int(run.returncode or 1))
+            raise ResticReadError("file search", int(run.returncode or 1), command)
         found = parse_find_output(run.output, set(batch_ids))
         if sum(len(nodes) for nodes in found.values()) > FIND_MAX_BATCH_NODES:
             return finish("too_broad", results)
@@ -3344,6 +3364,8 @@ def main(argv: list[str] | None = None) -> int:
             if dpapi_command:
                 command.extend(["--password-command", dpapi_command])
                 interactive_password = False
+        # The listing, the bare list and the restore below start Restic with subprocess.call, which has no guard of its
+        # own: this one, made once for the command and environment every start here is given, is theirs.
         assert_no_password_source_with_flag(command, environment)
 
         if args.find_json:
@@ -3669,12 +3691,18 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 report["result"] = "partial"
                 report["partial_target_retained"] = True
-                report["error"] = (
-                    f"Restic restore failed with exit code {returncode}; "
-                    "the alternate target was retained for inspection"
-                )
-                if left_in_restore_folder:
-                    report["error"] += "; " + restore_folder.left_message()
+                if access == "no_password" and returncode == RESTIC_WRONG_PASSWORD_EXIT:
+                    # Restic opened these backups a moment ago (the queries above) and no longer does.
+                    report["error"] = NOW_ASKS_FOR_A_PASSWORD_MESSAGE
+                    if left_in_restore_folder:
+                        report["error"] += " " + restore_folder.left_message()
+                else:
+                    report["error"] = (
+                        f"Restic restore failed with exit code {returncode}; "
+                        "the alternate target was retained for inspection"
+                    )
+                    if left_in_restore_folder:
+                        report["error"] += "; " + restore_folder.left_message()
         if returncode != 0:
             print(
                 f"RESTORE INCOMPLETE: Restic exited with {returncode}; "

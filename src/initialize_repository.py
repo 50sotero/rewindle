@@ -37,7 +37,12 @@ from secret_store import create_secret, load_secret, secure_directory, write_rec
 # installer why it must stop without touching the backups, so it can say so in plain words.
 EXIT_NEEDS_PASSWORD = 4  # no password was chosen, but the backups in this location need one
 EXIT_HAS_NO_PASSWORD = 5  # a password was chosen, but the backups in this location have none
-EXIT_ACCESS_UNREADABLE = 6  # no password was chosen and the backups in this location could not be opened to tell
+# Either choice: the backups in this location could not be opened to tell how they open, or, when a password was chosen and
+# none saved on this PC opens them, they could not be opened at all (Restic can't tell, or the folder of keys holds no key).
+EXIT_ACCESS_UNREADABLE = 6
+# A password was chosen and the backups need one, but this PC has no saved password that opens them (made on another PC, or
+# the saved password is gone). The password is never made again: it would not open these backups.
+EXIT_PASSWORD_UNAVAILABLE = 7
 # --detect-access answers with these (and EXIT_ACCESS_UNREADABLE for "can't tell"); it writes nothing.
 EXIT_DETECT_NO_PASSWORD = 20
 EXIT_DETECT_PASSWORD = 21
@@ -52,6 +57,8 @@ RESTIC_EXIT_WRONG_PASSWORD = 12
 # One plain line each on stderr, with none of Restic's text.
 MISMATCH_MESSAGE = "The backups in this location don't match the choice made in Setup."
 UNREADABLE_MESSAGE = "Setup couldn't open the backups in this location."
+UNAVAILABLE_MESSAGE = "This PC has nothing saved that opens the backups in this location."
+REFUSAL_MESSAGES = {EXIT_ACCESS_UNREADABLE: UNREADABLE_MESSAGE, EXIT_PASSWORD_UNAVAILABLE: UNAVAILABLE_MESSAGE}
 NO_PASSWORD_NOTE = (
     "These backups have no password: anyone who can read the backup folder can restore them."
 )
@@ -235,8 +242,27 @@ def detect_access(restic_executable: Path, repository: Path) -> int:
 
 def refuse(code: int) -> int:
     """Stop with one of the exit codes that mean "these backups are not what was chosen"; the message is one plain line."""
-    print(UNREADABLE_MESSAGE if code == EXIT_ACCESS_UNREADABLE else MISMATCH_MESSAGE, file=sys.stderr)
+    print(REFUSAL_MESSAGES.get(code, MISMATCH_MESSAGE), file=sys.stderr)
     return code
+
+
+def keys_folder_has_files(repository: Path) -> bool:
+    """Whether the backups' folder of keys holds at least one key file. A missing, empty or unreadable folder does not.
+
+    Restic answers "wrong password or no key found" (exit 12) for backups that hold no key at all, the same as for backups
+    with a password that was not given, so the answer alone does not tell a password from a folder that was damaged or has
+    not finished downloading from Google Drive.
+    """
+    try:
+        return any(entry.is_file() for entry in (repository / "keys").iterdir())
+    except OSError:
+        return False
+
+
+def refuse_unopened_password_backups(repository: Path) -> int:
+    """A password was chosen and the backups were not opened with the saved password (or there is none): 7 when they hold
+    keys, so a password exists that this PC does not have, and 6 when they hold none and so can't be opened at all."""
+    return refuse(EXIT_PASSWORD_UNAVAILABLE if keys_folder_has_files(repository) else EXIT_ACCESS_UNREADABLE)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -273,12 +299,14 @@ def main(argv: list[str] | None = None) -> int:
                 f"refusing to initialize nonempty non-Restic directory: {repository}"
             )
         if with_password and config_file.is_file() and not secret_file.is_file():
-            if probe_repository_access(config["restic_executable"], repository) == "no_password":
+            # No saved password, and a new one would not open these backups, so none is made. Only Restic can say which kind
+            # of backups these are: without a password (5), with one this PC doesn't have (7), or not to be opened at all (6).
+            answer = probe_repository_access(config["restic_executable"], repository)
+            if answer == "no_password":
                 return refuse(EXIT_HAS_NO_PASSWORD)
-            raise RuntimeError(
-                "repository exists but its DPAPI password file is missing; "
-                "refusing to create an unrelated key"
-            )
+            if answer == "password":
+                return refuse_unopened_password_backups(repository)
+            return refuse(EXIT_ACCESS_UNREADABLE)
 
         password: str | None = None
         secret_created = False
@@ -298,6 +326,9 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 if probe_repository_access(config["restic_executable"], repository) == "no_password":
                     return refuse(EXIT_HAS_NO_PASSWORD)
+                if cat_result.returncode == RESTIC_EXIT_WRONG_PASSWORD:
+                    # The saved password does not open them, and neither does an empty one: a password this PC doesn't have.
+                    return refuse_unopened_password_backups(repository)
                 raise RuntimeError(
                     f"repository authentication failed with exit {cat_result.returncode}: "
                     f"{cat_result.stderr.strip() or cat_result.stdout.strip()}"

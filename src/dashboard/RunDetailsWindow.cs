@@ -451,7 +451,7 @@ namespace ResticBackuper.Dashboard
                         return "Rewindle couldn't open your backups. Check that the backup drive or Google Drive folder is connected, then choose Back up now. If it still fails, open the Restore page and choose Check recovery readiness.";
                     return "Rewindle couldn't unlock your backups with its saved password. Open the Restore page and choose Check recovery readiness.";
                 case "repository_access_mismatch":
-                    return "These backups now ask for a password that Rewindle doesn't have, usually because they were changed outside Rewindle. Rewindle can't carry on with them. See Switching an existing backup in Rewindle's guide, or start new backups in another place.";
+                    return "These backups now ask for a password that Rewindle doesn't have, usually because they were changed outside Rewindle. Rewindle can't carry on with them. To keep backing up, start new backups in another place.";
                 case "source_data_unreadable":
                     return "Open the affected paths listed below and check that you can read them. This run isn't counted as a finished backup.";
                 case "repository_structure_check_failed":
