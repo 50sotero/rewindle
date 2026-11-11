@@ -295,7 +295,9 @@ protected password helper (`needed`, with the SHA-256 the manifest records for
 the helper it replaces in `password_helper_previous_sha256`) or not
 (`not_needed`). Once registering has replaced it, the output says `performed`,
 and `password_helper_previous_copy` names the folder that keeps the replaced
-files.
+files. If registering finished an update that was cut short, that folder keeps
+only the earlier manifest, and the earlier helper is in the folder that the
+cut-short update left.
 
 The protected assets keep the copy of the password helper they were set up
 with. When an update ships a changed helper, registering the task again

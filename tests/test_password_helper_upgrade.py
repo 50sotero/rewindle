@@ -530,6 +530,99 @@ class PasswordHelperRefreshTests(unittest.TestCase):
     def evidence_folders(self) -> list[Path]:
         return sorted(path for path in (self.fixture.root / "evidence").iterdir())
 
+    def stopped_refresh(self, plan: str, setup: str, renamed_file: str) -> dict:
+        """Runs the refresh in a pipeline of its own, and stops that pipeline once a file is renamed onto renamed_file.
+
+        A stop (Ctrl+C) runs finally blocks but no catch block, and PowerShell notices it only once a .NET call has
+        returned: a stop that arrives while a file is renamed takes effect after the rename. A pipeline stopped with
+        Stop() behaves the same way.
+        """
+        worker_extra = "\n".join(
+            [
+                "Set-StrictMode -Version Latest",
+                "$ErrorActionPreference = 'Stop'",
+                TREE_CHECK_STAND_IN,
+                "$renamedFile = " + ps_literal(renamed_file),
+                r"""
+$realMove = ${function:Move-FileReplacing}
+$script:renamed = $false
+function Move-FileReplacing {
+    param([string]$Source, [string]$Target)
+
+    & $realMove -Source $Source -Target $Target
+    if (-not $script:renamed -and $Target.EndsWith($renamedFile)) {
+        $script:renamed = $true
+        [IO.File]::WriteAllText($signalPath, 'renamed')
+        # As if the rename were still running: the stop is noticed only once this returns.
+        [System.Threading.Thread]::Sleep(3000)
+    }
+}
+""",
+            ]
+        )
+        return self.probe(
+            "\n".join(
+                [
+                    "$workerFunctions = @(" + ", ".join(ps_literal(name) for name in REFRESH_FUNCTIONS) + ")",
+                    "$workerExtra = " + ps_literal(base64.b64encode(worker_extra.encode("ascii")).decode("ascii")),
+                    "$workerPlan = " + ps_literal(plan),
+                    setup,
+                ]
+            )
+            + r"""
+$manifestBefore = Get-Sha256Hex -Path (Join-Path $root 'assets-manifest.json')
+$plan = Get-RootPlan -Root $root -PackagedPath $packaged
+$signal = Join-Path (Split-Path -Parent $lockPath) 'renamed.signal'
+function ConvertTo-Literal {
+    param([string]$Text)
+
+    return "'" + $Text.Replace("'", "''") + "'"
+}
+$workerScript = (
+    (@(Get-ScriptFunctionText -Path $installer -Names $workerFunctions) -join "`n`n") + "`n" +
+    [Text.Encoding]::ASCII.GetString([Convert]::FromBase64String($workerExtra)) + "`n" +
+    '$signalPath = ' + (ConvertTo-Literal $signal) + "`n" +
+    'Update-ProtectedPasswordHelper -Plan ' + (ConvertTo-Literal $workerPlan) +
+    ' -HelperName ''reveal-rclone-config-password.ps1''' +
+    ' -Root ' + (ConvertTo-Literal $root) +
+    ' -PackagedHelperPath ' + (ConvertTo-Literal $packaged) +
+    ' -PackagedHelperSha256 ' + (ConvertTo-Literal (Get-Sha256Hex -Path $packaged)) +
+    ' -Generations (Get-KnownPasswordHelperGenerations)' +
+    ' -RunLockPath ' + (ConvertTo-Literal $lockPath) +
+    ' -CurrentUserSid ' + (ConvertTo-Literal ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value))
+)
+$worker = [powershell]::Create()
+$renamed = $false
+$state = ''
+try {
+    [void]$worker.AddScript($workerScript)
+    $handle = $worker.BeginInvoke()
+    $deadline = [DateTime]::UtcNow.AddSeconds(60)
+    while (-not (Test-Path -LiteralPath $signal) -and -not $handle.IsCompleted -and [DateTime]::UtcNow -lt $deadline) {
+        Start-Sleep -Milliseconds 20
+    }
+    $renamed = Test-Path -LiteralPath $signal
+    $worker.Stop()
+    $state = [string]$worker.InvocationStateInfo.State
+}
+finally {
+    $worker.Dispose()
+}
+$lock = Enter-ProtectedRunLock -Path $lockPath
+$lockFree = $null -ne $lock
+Exit-ProtectedRunLock -Stream $lock
+ConvertTo-AsciiJson -Value ([ordered]@{
+    plan = $plan
+    renamed = $renamed
+    state = $state
+    manifest_before = $manifestBefore
+    manifest_after = Get-Sha256Hex -Path (Join-Path $root 'assets-manifest.json')
+    plan_after = Get-RootPlan -Root $root -PackagedPath $packaged
+    lock_free = $lockFree
+})
+"""
+        )
+
     def test_an_earlier_helper_is_replaced_and_kept(self):
         # The whole step that registering the check runs.
         report = self.probe(
@@ -1020,95 +1113,58 @@ ConvertTo-AsciiJson -Value ([ordered]@{
         self.assertEqual("finish", report["plan_after"])
         self.assertTrue(report["lock_free"], "the run lock was still held afterwards")
 
-    def test_a_stop_during_the_helpers_rename_puts_the_earlier_helper_back(self):
-        # A stop (Ctrl+C) runs finally blocks but no catch block, and PowerShell notices it only once a .NET call has
-        # returned: a stop that arrives while the helper is renamed takes effect after the rename. The earlier helper
-        # must still go back. A pipeline stopped with Stop() behaves the same way, so the refresh runs in one here.
-        worker_extra = "\n".join(
-            [
-                "Set-StrictMode -Version Latest",
-                "$ErrorActionPreference = 'Stop'",
-                TREE_CHECK_STAND_IN,
-                r"""
+    def test_finishing_keeps_the_earlier_manifest_when_the_new_one_cannot_be_confirmed(self):
+        # Finishing renamed the manifest, and then another program changed it before it was confirmed. The refresh
+        # refuses it, but the manifest was replaced, so the copy of the earlier one must stay.
+        report = self.probe(
+            r"""
+New-AssetsRoot -Root $root -HelperBytes $earlierBytes
+# As a refresh leaves the folder when it stops between the helper and the manifest.
+[IO.File]::WriteAllBytes((Join-Path $root 'reveal-rclone-config-password.ps1'), [IO.File]::ReadAllBytes($packaged))
+$manifestBefore = Get-Sha256Hex -Path (Join-Path $root 'assets-manifest.json')
+$plan = Get-RootPlan -Root $root -PackagedPath $packaged
 $realMove = ${function:Move-FileReplacing}
-$script:renamed = $false
 function Move-FileReplacing {
     param([string]$Source, [string]$Target)
 
     & $realMove -Source $Source -Target $Target
-    if (-not $script:renamed -and $Target.EndsWith('reveal-rclone-config-password.ps1')) {
-        $script:renamed = $true
-        [IO.File]::WriteAllText($signalPath, 'renamed')
-        # As if the rename were still running: the stop is noticed only once this returns.
-        [System.Threading.Thread]::Sleep(3000)
+    if ($Target.EndsWith('assets-manifest.json')) {
+        [IO.File]::WriteAllText($Target, '{}')
     }
 }
-""",
-            ]
-        )
-        report = self.probe(
-            "\n".join(
-                [
-                    "$workerFunctions = @(" + ", ".join(ps_literal(name) for name in REFRESH_FUNCTIONS) + ")",
-                    "$workerExtra = " + ps_literal(base64.b64encode(worker_extra.encode("ascii")).decode("ascii")),
-                ]
-            )
-            + r"""
-New-AssetsRoot -Root $root -HelperBytes $earlierBytes
-$manifestBefore = Get-Sha256Hex -Path (Join-Path $root 'assets-manifest.json')
-$plan = Get-RootPlan -Root $root -PackagedPath $packaged
-$signal = Join-Path (Split-Path -Parent $lockPath) 'helper-renamed.signal'
-function ConvertTo-Literal {
-    param([string]$Text)
-
-    return "'" + $Text.Replace("'", "''") + "'"
-}
-$workerScript = (
-    (@(Get-ScriptFunctionText -Path $installer -Names $workerFunctions) -join "`n`n") + "`n" +
-    [Text.Encoding]::ASCII.GetString([Convert]::FromBase64String($workerExtra)) + "`n" +
-    '$signalPath = ' + (ConvertTo-Literal $signal) + "`n" +
-    'Update-ProtectedPasswordHelper -Plan ''refresh'' -HelperName ''reveal-rclone-config-password.ps1''' +
-    ' -Root ' + (ConvertTo-Literal $root) +
-    ' -PackagedHelperPath ' + (ConvertTo-Literal $packaged) +
-    ' -PackagedHelperSha256 ' + (ConvertTo-Literal (Get-Sha256Hex -Path $packaged)) +
-    ' -Generations (Get-KnownPasswordHelperGenerations)' +
-    ' -RunLockPath ' + (ConvertTo-Literal $lockPath) +
-    ' -CurrentUserSid ' + (ConvertTo-Literal ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value))
-)
-$worker = [powershell]::Create()
-$renamed = $false
-$state = ''
+$message = ''
 try {
-    [void]$worker.AddScript($workerScript)
-    $handle = $worker.BeginInvoke()
-    $deadline = [DateTime]::UtcNow.AddSeconds(60)
-    while (-not (Test-Path -LiteralPath $signal) -and -not $handle.IsCompleted -and [DateTime]::UtcNow -lt $deadline) {
-        Start-Sleep -Milliseconds 20
-    }
-    $renamed = Test-Path -LiteralPath $signal
-    $worker.Stop()
-    $state = [string]$worker.InvocationStateInfo.State
+    [void](Invoke-Refresh -Root $root -Plan $plan -PackagedPath $packaged -LockPath $lockPath)
 }
-finally {
-    $worker.Dispose()
+catch {
+    $message = $_.Exception.Message
 }
-$lock = Enter-ProtectedRunLock -Path $lockPath
-$lockFree = $null -ne $lock
-Exit-ProtectedRunLock -Stream $lock
 ConvertTo-AsciiJson -Value ([ordered]@{
     plan = $plan
-    renamed = $renamed
-    state = $state
-    manifest_unchanged = ((Get-Sha256Hex -Path (Join-Path $root 'assets-manifest.json')) -ceq $manifestBefore)
-    plan_after = Get-RootPlan -Root $root -PackagedPath $packaged
-    lock_free = $lockFree
+    message = $message
+    manifest_before = $manifestBefore
 })
 """
         )
+        self.assertEqual("finish", report["plan"])
+        self.assertEqual(
+            "The refreshed rclone password helper could not be confirmed. Register the check again.", report["message"]
+        )
+        folders = self.evidence_folders()
+        self.assertEqual(1, len(folders), "the copy of the manifest that was replaced was removed")
+        self.assertEqual(["assets-manifest.json.previous"], [path.name for path in folders[0].iterdir()])
+        self.assertEqual(
+            report["manifest_before"],
+            hashlib.sha256((folders[0] / "assets-manifest.json.previous").read_bytes()).hexdigest(),
+        )
+
+    def test_a_stop_during_the_helpers_rename_puts_the_earlier_helper_back(self):
+        # The stop takes effect once the helper is renamed and before the manifest is: the earlier helper must go back.
+        report = self.stopped_refresh("refresh", "New-AssetsRoot -Root $root -HelperBytes $earlierBytes", HELPER_NAME)
         self.assertEqual("refresh", report["plan"])
         self.assertTrue(report["renamed"], "the helper was never renamed")
         self.assertEqual("Stopped", report["state"])
-        self.assertTrue(report["manifest_unchanged"])
+        self.assertEqual(report["manifest_before"], report["manifest_after"], "the manifest changed")
         self.assertEqual(
             earlier_helper(2),
             (self.fixture.root / HELPER_NAME).read_bytes(),
@@ -1124,6 +1180,32 @@ ConvertTo-AsciiJson -Value ([ordered]@{
             sorted(path.name for path in folders[0].iterdir()),
         )
         self.assertEqual(earlier_helper(2), (folders[0] / (HELPER_NAME + ".previous")).read_bytes())
+
+    def test_a_stop_while_finishing_keeps_the_earlier_manifest(self):
+        # Finishing renames only the manifest, and the stop takes effect once it is renamed: the refresh is then done,
+        # and the manifest it replaced exists only as the copy in the evidence folder, which must stay.
+        report = self.stopped_refresh(
+            "finish",
+            r"""
+New-AssetsRoot -Root $root -HelperBytes $earlierBytes
+# As a refresh leaves the folder when it stops between the helper and the manifest.
+[IO.File]::WriteAllBytes((Join-Path $root 'reveal-rclone-config-password.ps1'), [IO.File]::ReadAllBytes($packaged))
+""",
+            "assets-manifest.json",
+        )
+        self.assertEqual("finish", report["plan"])
+        self.assertTrue(report["renamed"], "the manifest was never renamed")
+        self.assertEqual("Stopped", report["state"])
+        self.assertNotEqual(report["manifest_before"], report["manifest_after"], "the manifest was not replaced")
+        self.assertEqual("current", report["plan_after"])
+        self.assertTrue(report["lock_free"], "the run lock was still held after the stop")
+        folders = self.evidence_folders()
+        self.assertEqual(1, len(folders), "a stop during the manifest's rename must keep its copies")
+        self.assertEqual(["assets-manifest.json.previous"], [path.name for path in folders[0].iterdir()])
+        self.assertEqual(
+            report["manifest_before"],
+            hashlib.sha256((folders[0] / "assets-manifest.json.previous").read_bytes()).hexdigest(),
+        )
 
     def test_assets_that_change_before_the_swap_are_left_alone(self):
         # Just after the run lock is taken, one file changes: the helper or the manifest in the assets root, or one of
