@@ -321,11 +321,12 @@ check is running, it stops without changing anything and asks you to register
 the task again once that has finished. If another program has one of the files
 open, it asks you to close that program and register the task again. If the
 manifest cannot be replaced after the helper was, the earlier helper is put
-back. If even that fails, or setup ends between the two, for example in a power
-cut, registering the task again finishes the change. The folder it names in
-`password_helper_previous_copy` then keeps only the earlier manifest, and the
-earlier helper is in the `evidence\password-helper-<UTC time>-<id>` folder of
-the attempt that replaced it.
+back. If that fails too, or setup is cut off after the helper was replaced and
+before the manifest was (the computer loses power, or setup is killed),
+registering the task again finishes the change. The folder named in
+`password_helper_previous_copy` then keeps only the earlier manifest. The
+earlier helper is in the older `evidence\password-helper-<UTC time>-<id>`
+folder, the one that holds `reveal-rclone-config-password.ps1.previous`.
 
 For compatibility with installations that used the earlier mirror experiment,
 the default task name remains `ResticBackuperGoogleDriveSync`. Its installed

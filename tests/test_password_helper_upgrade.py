@@ -555,7 +555,8 @@ function Move-FileReplacing {
         [IO.File]::WriteAllText($signalPath, 'renamed')
         # Waits for the stop right after the rename. PowerShell notices it between these calls, as it notices a stop
         # that arrives during a rename once the rename has returned.
-        for ($waited = 0; $waited -lt 60000; $waited += 25) {
+        $until = [DateTime]::UtcNow.AddSeconds(60)
+        while ([DateTime]::UtcNow -lt $until) {
             [System.Threading.Thread]::Sleep(25)
         }
     }
@@ -608,8 +609,9 @@ try {
     $renamed = Test-Path -LiteralPath $signal
     $worker.Stop()
     $state = [string]$worker.InvocationStateInfo.State
-    # How the worker ended, for the failure message when it ended some other way than by the stop.
+    # How the worker ended, for the failure messages: its state, its errors and the reason it gives.
     $ended = @(
+        @($state) +
         @($worker.Streams.Error | ForEach-Object { [string]$_ }) +
         @($worker.InvocationStateInfo.Reason | Where-Object { $null -ne $_ } | ForEach-Object { $_.Message })
     ) -join ' | '
