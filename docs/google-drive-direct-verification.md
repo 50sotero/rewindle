@@ -276,13 +276,67 @@ The task installer runs in a new Windows PowerShell process, without your
 profile or the modules this session loaded, and loads modules only from
 Windows' own folder.
 
-The password helper is always copied from the manifest-authorized Program Files
-runtime; an arbitrary helper is rejected. Independently compare the rclone
-executable hash with the checksum published for the build you reviewed before
-running the command. When a release ships a changed helper, registering the
-task again needs `-ProvisionAssets` and the three sources above; without them
-the task installer stops with "Protected rclone assets do not contain the
-packaged password helper".
+The password helper is `reveal-rclone-config-password.ps1`, which hands rclone
+its configuration password; the check needs it whether or not the backups have
+a password. The helper is always copied from the manifest-authorized Program
+Files runtime; an arbitrary helper is rejected. Independently compare the
+rclone executable hash with the checksum published for the build you reviewed
+before running the command.
+
+Updating Rewindle removes the verification task and keeps the protected assets.
+Afterwards, register the task again from a same-user elevated Windows
+PowerShell 5.1 session, without `-ProvisionAssets` or any of the sources:
+
+```powershell
+$runtime = 'C:\Program Files\ResticBackuper'
+$powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+& $powershell -NoProfile -ExecutionPolicy Bypass `
+  -File (Join-Path $runtime 'install_google_drive_sync_task.ps1')
+```
+
+Add `-ValidateOnly` to see what registering would do without changing
+anything. It checks the configuration and the protected assets, but not their
+permissions, whether this window is elevated, or whether a backup or the check
+is running: only registering checks those. In its output,
+`password_helper_refresh` says whether registering will replace the protected
+password helper (`needed`, with the SHA-256 the manifest records for the
+helper it replaces in `password_helper_previous_sha256`) or not
+(`not_needed`). Once registering has replaced it, the output says `performed`,
+and `password_helper_previous_copy` names the folder that keeps the replaced
+files.
+
+The protected assets keep the copy of the password helper they were set up
+with. When an update ships a changed helper, registering the task again
+replaces that copy with the packaged helper and updates its size and SHA-256
+in `assets-manifest.json`; nothing else in the assets changes. The task
+installer knows every helper Rewindle has shipped, in order, by the SHA-256 of
+the file with LF and with CRLF line endings (local builds check it out with LF,
+release builds with CRLF):
+
+- a copy of the packaged helper's generation, in either line ending, is left as
+  it is;
+- an earlier one is replaced, and the replaced helper and manifest are kept in
+  a new `evidence\password-helper-<UTC time>-<id>` folder under the assets
+  root;
+- a helper no Rewindle shipped, or assets set up by a newer Rewindle, are
+  refused, and nothing changes. For a helper no Rewindle shipped, rename the
+  assets folder that the message names, from an elevated window, then provision
+  the check again as described above. For assets set up by a newer Rewindle,
+  install that version or a later one, then register the task again.
+
+The two files are replaced while the task installer holds the run lock, so no
+backup or check runs meanwhile, and each in a single rename. If a backup or the
+check is running, it stops without changing anything and asks you to register
+the task again once that has finished. If another program has one of the files
+open, it asks you to close that program and register the task again. If the
+manifest cannot be replaced after the helper was, or you stop setup with Ctrl+C
+in between, the earlier helper is put back. If that fails too, or setup is cut
+off after the helper was replaced and before the manifest was (the computer
+loses power, or setup is killed), registering the task again finishes the
+change. The folder named in `password_helper_previous_copy` then keeps only the
+earlier manifest. The earlier helper is in the older
+`evidence\password-helper-<UTC time>-<id>` folder, the one that holds
+`reveal-rclone-config-password.ps1.previous`.
 
 For compatibility with installations that used the earlier mirror experiment,
 the default task name remains `ResticBackuperGoogleDriveSync`. Its installed
@@ -320,8 +374,9 @@ restore bound to the latest successful backup.
   it.
 - Updating rclone, changing its encrypted configuration, rotating the
   configuration password, changing accounts, or changing the remote requires a
-  reviewed reprovisioning procedure. Existing protected assets are never
-  silently overwritten.
+  reviewed reprovisioning procedure. Registering the task again replaces only
+  the password helper and its manifest record, as described above, and keeps
+  the replaced copies; nothing else in the protected assets is overwritten.
 - An exact API inventory and direct restore prove that the verified repository
   generation was readable from Google Drive at that time. They do
   not make the provider account immutable or offline.

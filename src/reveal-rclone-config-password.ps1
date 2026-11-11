@@ -54,22 +54,44 @@ $credential = Import-Clixml -LiteralPath $credentialPathFull
 if ($credential -isnot [System.Management.Automation.PSCredential]) {
     throw 'The protected rclone configuration credential has an invalid type.'
 }
+# rclone reads the password from standard output as UTF-8, up to the line break. The console's text writer would encode
+# it in the console's code page instead, and a letter outside English would reach rclone as the wrong bytes. So the
+# password goes out as UTF-8 bytes on the raw output stream. It is held only in arrays that are cleared afterwards,
+# never in a string, which could not be cleared.
+$secret = $credential.Password
 $pointer = [IntPtr]::Zero
-$plainText = $null
+$passwordChars = $null
+$passwordBytes = $null
 try {
-    $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR(
-        $credential.Password
-    )
-    $plainText = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
-    if ([string]::IsNullOrEmpty($plainText) -or
-        $plainText.IndexOfAny([char[]]@("`r", "`n")) -ge 0) {
+    $passwordChars = New-Object char[] $secret.Length
+    $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret)
+    [Runtime.InteropServices.Marshal]::Copy($pointer, $passwordChars, 0, $passwordChars.Length)
+    if ($passwordChars.Length -eq 0 -or
+        [Array]::IndexOf($passwordChars, [char]13) -ge 0 -or
+        [Array]::IndexOf($passwordChars, [char]10) -ge 0) {
         throw 'The protected rclone configuration password is invalid.'
     }
-    [Console]::Out.WriteLine($plainText)
+    try {
+        # Strict: a password that is not valid text stops here rather than reaching rclone changed.
+        $passwordBytes = [System.Text.UTF8Encoding]::new($false, $true).GetBytes($passwordChars)
+    }
+    catch {
+        throw 'The protected rclone configuration password is invalid.'
+    }
+    $standardOutput = [Console]::OpenStandardOutput()
+    $standardOutput.Write($passwordBytes, 0, $passwordBytes.Length)
+    $standardOutput.Write([byte[]]@(13, 10), 0, 2)
+    $standardOutput.Flush()
 }
 finally {
-    $plainText = $null
+    if ($null -ne $passwordBytes) {
+        [Array]::Clear($passwordBytes, 0, $passwordBytes.Length)
+    }
+    if ($null -ne $passwordChars) {
+        [Array]::Clear($passwordChars, 0, $passwordChars.Length)
+    }
     if ($pointer -ne [IntPtr]::Zero) {
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
     }
+    $secret.Dispose()
 }
