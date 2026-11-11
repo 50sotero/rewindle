@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import secrets
 import shutil
 import subprocess
 import sys
@@ -67,8 +68,9 @@ class PinnedResticNoPasswordTests(unittest.TestCase):
         cls.root = Path(cls._temporary.name).resolve()
         # Only what Restic needs: no inherited RESTIC_* setting can point it at any other backup.
         cls.environment = {name: os.environ[name] for name in ("SYSTEMROOT", "TEMP", "TMP") if name in os.environ}
+        # The throwaway backups with a password get a fresh random one each run: the source holds no password at all.
         cls.password_file = cls.root / "password.txt"
-        cls.password_file.write_text("no-password-restic-test-only\n", encoding="utf-8")
+        cls.password_file.write_text(secrets.token_hex(16) + "\n", encoding="utf-8")
         fixtures = cls.root / "fixtures"
         fixtures.mkdir()
         cls.no_password = fixtures / "no-password"
