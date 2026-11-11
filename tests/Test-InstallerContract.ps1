@@ -286,6 +286,11 @@ function Get-ExpectedSequence {
     return $sequence
 }
 
+# The templates start the script under test with $ErrorActionPreference = 'Continue'. A template that runs as a task
+# (Invoke-AsUserElevated) has its streams captured with 2>, so Windows PowerShell turns every line the script, or a program it
+# starts, writes to stderr into an error record. Under 'Stop' the first one ended the template, and with it the run, while the
+# script was still working: the initializer's one-line refusal on stderr cut an install off before it wrote its result. The
+# script's own exit code says how it went. (Invoke-AsUser redirects at the process level, which has no such effect.)
 $planTemplate = @'
 $ErrorActionPreference = 'Stop'
 $directory = Join-Path ([IO.Path]::GetTempPath()) ('RewindleSetup-' + [Guid]::NewGuid().ToString('N'))
@@ -293,6 +298,7 @@ New-Item -ItemType Directory -Path $directory | Out-Null
 $planPath = Join-Path $directory 'plan.json'
 [IO.File]::WriteAllText('{{HANDOFF}}', $planPath)
 $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '{{SCRIPT}}', '-PlanOnly', '-PlanOutput', $planPath) + @({{ARGUMENTS}})
+$ErrorActionPreference = 'Continue'
 & '{{POWERSHELL}}' @arguments
 exit $LASTEXITCODE
 '@
@@ -311,6 +317,7 @@ $security.SetOwner([Security.Principal.SecurityIdentifier]::new($sid))
 $progress = Join-Path $directory 'progress.jsonl'
 [IO.File]::WriteAllText('{{HANDOFF}}', $progress)
 $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '{{SCRIPT}}', '-Unattended', '-ExpectedUserSid', $sid, '-ProgressPath', $progress) + @({{ARGUMENTS}})
+$ErrorActionPreference = 'Continue'
 & '{{POWERSHELL}}' @arguments
 exit $LASTEXITCODE
 '@
@@ -862,6 +869,7 @@ try {
 $ErrorActionPreference = 'Stop'
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $outside = Join-Path $env:SystemRoot 'rewindle-contract-progress.jsonl'
+$ErrorActionPreference = 'Continue'
 & '{{POWERSHELL}}' -NoProfile -ExecutionPolicy Bypass -File '{{SCRIPT}}' -Unattended -ExpectedUserSid $sid -ProgressPath $outside {{ARGUMENTS}}
 exit $LASTEXITCODE
 '@ -Values @{ SCRIPT = $installerScript; POWERSHELL = $windowsPowerShell; ARGUMENTS = (($common | ForEach-Object { "'" + $_ + "'" }) -join ' ') }
