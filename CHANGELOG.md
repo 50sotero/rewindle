@@ -69,6 +69,11 @@ labels. Releases before 0.2.0 were published under the name ResticBackuper.
   have, with or without a password, keep the way they were made, and Rewindle
   never switches them. SECURITY.md has the details and a guide to switching an
   existing backup yourself with Restic.
+- Tests: one test (`tests/test_rclone_version_parity.py`) ties together the two
+  places that read `rclone version`, the nightly Google Drive check and the
+  installer that sets it up. It gives both the same outputs and fails if they
+  read any of them differently, or if either one's oldest allowed rclone is not
+  1.65.0, so the two can't drift apart unnoticed.
 
 ### Changed
 
