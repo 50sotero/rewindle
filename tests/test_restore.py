@@ -2434,7 +2434,7 @@ class FileSearchTests(unittest.TestCase):
         for arguments, message in refused:
             with self.subTest(arguments=arguments), self.assertRaisesRegex(ValueError, message):
                 self.invoke(arguments)
-        with self.assertRaisesRegex(ValueError, "needs the protected password helper or a recovery key"):
+        with self.assertRaisesRegex(ValueError, "^File search needs Rewindle's saved key or your recovery key\\.$"):
             restore.main([*self.base_arguments(recovery_key=False), "--find-json", "--find-text=Budget"])
         self.assertEqual([], self.read_log())
 

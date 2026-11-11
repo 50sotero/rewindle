@@ -292,7 +292,13 @@ export interface DashboardState {
   /** `error` is why the installed schedule could not be read (empty when it could); `summary` then reads "Schedule unavailable". `notice` is the short-lived outcome of a schedule change; null once it expires. */
   schedule: { summary: string; nextRun: string; /** The next run as an ISO 8601 timestamp, or empty/absent when there is none; the page formats it like every other time. */ nextRunAt?: string; detail: string; /** Set while Windows keeps the run at a fixed UTC time, so it moves an hour when the clocks change; says how to keep it fixed. Additive. */ clockChange?: string; error?: string; notice?: { text: string; tone: 'info' | 'success' | 'warning' | 'error' } | null };
   /** `volumeReady` is false only when the drive itself answered that it is not ready (unplugged, disconnected); true or absent means no such answer. */
-  repository: { path: string; volume: string; volumeReady?: boolean; space?: BackupSpaceState | null };
+  /**
+   * `repositoryAccess` is how the backups are opened: 'password' (also for a backup made before the choice existed), 'no_password' (made
+   * without a password, so anyone who can open the backup folder can restore it), or null when the host cannot say (no readable
+   * configuration, or one that names something else). The page claims nothing about protection for null (see repositoryAccess.ts, which
+   * reads this strictly). Additive: an older host does not send it, which reads as null.
+   */
+  repository: { path: string; volume: string; volumeReady?: boolean; space?: BackupSpaceState | null; repositoryAccess?: 'password' | 'no_password' | null };
   /** How far back the backups in the backup location go, or null when that is not known for the plan and location in use. Additive: an older host sends nothing. */
   backupRange?: BackupRangeState | null;
   /** `CatchingUp`: a backup was missed while the PC was off, asleep or signed out, and Windows starts it by itself shortly (not a problem; an older host never sends it). */

@@ -175,8 +175,8 @@ jobs:
       # against the release built above: what it leaves out with the shipped exclusion list and with the file each backup
       # generates for WSL links, also with --use-fs-snapshot (as installed backups run; this runner is elevated). With the
       # variable set, a missing restic.exe, a WSL special file Windows refuses to create or a VSS run that cannot happen
-      # fails the step instead of skipping. It and the step after it come last, so a failure here hides no other check, and
-      # both run whenever the release was built, so a failed check after the build does not hide them.
+      # fails the step instead of skipping. It and the steps after it come last, so a failure here hides no other check, and
+      # all of them run whenever the release was built, so a failed check after the build does not hide them.
       - name: Check what the pinned Restic leaves out
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: pwsh
@@ -194,3 +194,26 @@ jobs:
         env:
           REWINDLE_REQUIRE_PINNED_RESTIC: "1"
         run: python -m unittest -v tests.test_generation_parent
+
+      # Backups without a password are opened with Restic's --insecure-no-password flag, and only the pinned restic.exe can say
+      # what it does with them. These throwaway repositories show how every engine command opens such backups, how the
+      # initializer's --detect-access tells them from backups with a password, and that existing backups are never switched
+      # from one kind to the other. The unit-test step skips that module; with the variable set, a missing restic.exe fails the
+      # step instead. Like the steps above, it runs whenever the release was built.
+      - name: Check backups without a password with the pinned Restic
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        env:
+          REWINDLE_REQUIRE_PINNED_RESTIC: "1"
+        run: python -m unittest -v tests.test_repository_access_restic
+
+      # The unit-test step runs before the build, so it skips the Setup wizard's rendered pages and the checks that run its state:
+      # they bundle the wizard with esbuild from src/dashboard/web/node_modules, which the release build installs. Run them here;
+      # with the variable set, a missing Node.js or esbuild fails the step instead of skipping. Like the steps above, it runs
+      # whenever the release was built.
+      - name: Check the Setup wizard's pages and state
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        env:
+          REWINDLE_REQUIRE_WEB_BUNDLE: "1"
+        run: python -m unittest -v tests.test_setup_wizard

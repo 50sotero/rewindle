@@ -676,7 +676,8 @@ namespace ResticBackuper.Dashboard
                     treePath,
                     target,
                     includesHash,
-                    exitCode);
+                    exitCode,
+                    configuration.RepositoryAccess);
             }
             catch (Win32Exception error)
             {
@@ -753,6 +754,7 @@ namespace ResticBackuper.Dashboard
                     target,
                     includesHash,
                     exchange.ExitCode,
+                    configuration.RepositoryAccess,
                     findText,
                     findFromSnapshotId);
             }
@@ -816,7 +818,8 @@ namespace ResticBackuper.Dashboard
             string treePath,
             string target,
             string includesHash,
-            int exitCode)
+            int exitCode,
+            string repositoryAccess)
         {
             for (int attempt = 0; attempt < 20 && !File.Exists(resultPath); attempt++)
             {
@@ -881,7 +884,8 @@ namespace ResticBackuper.Dashboard
                             treePath,
                             target,
                             includesHash,
-                            exitCode);
+                            exitCode,
+                            repositoryAccess);
                     }
                 }
             }
@@ -919,6 +923,7 @@ namespace ResticBackuper.Dashboard
             string target,
             string includesHash,
             int exitCode,
+            string repositoryAccess,
             string findText = null,
             string findFromSnapshotId = null)
         {
@@ -987,7 +992,7 @@ namespace ResticBackuper.Dashboard
                 if (action == "restore_drill" && ok && exitCode == 0 &&
                     backendExitCode == 0 && report.Verified && report.Result == "verified")
                 {
-                    ValidateRecoveryDrillReport(payload, report, generation);
+                    ValidateRecoveryDrillReport(payload, report, generation, repositoryAccess);
                 }
                 if (ok && exitCode == 0 && backendExitCode == 0 && report.Verified &&
                     report.Result == "verified")
@@ -1203,18 +1208,37 @@ namespace ResticBackuper.Dashboard
                 expectedBinding);
         }
 
+        // The credential a restore drill used, by how the bound configuration opens its backups: a backup with a password is drilled with
+        // its recovery key ("recovery_key"), a backup without one with no key at all ("none"). A report that names the other source, or a
+        // configuration whose mode is not known (null), is not used.
+        internal static string ExpectedDrillCredentialSource(string repositoryAccess)
+        {
+            if (string.Equals(repositoryAccess, "password", StringComparison.Ordinal))
+            {
+                return "recovery_key";
+            }
+            if (string.Equals(repositoryAccess, "no_password", StringComparison.Ordinal))
+            {
+                return "none";
+            }
+            return null;
+        }
+
         private static void ValidateRecoveryDrillReport(
             IDictionary<string, object> payload,
             ProtectedRestoreReport report,
-            long generation)
+            long generation,
+            string repositoryAccess)
         {
+            string expectedSource = ExpectedDrillCredentialSource(repositoryAccess);
             long? sampleCount = ReadOptionalLong(payload, "sample_file_count");
             long? sampleBytes = ReadOptionalLong(payload, "sample_bytes");
             long? canaryBytes = ReadOptionalLong(payload, "canary_bytes");
             string canaryHash = ReadOptionalString(payload, "canary_sha256");
             string sampleHash = ReadOptionalString(payload, "sample_paths_sha256");
             if (ReadString(payload, "drill_kind") != "recovery_key_representative" ||
-                ReadString(payload, "credential_source") != "recovery_key" ||
+                expectedSource == null ||
+                ReadString(payload, "credential_source") != expectedSource ||
                 ReadLong(payload, "snapshot_generation") != generation ||
                 !ReadBoolean(payload, "canary_verified") ||
                 canaryBytes == null || canaryBytes.Value < 0 ||

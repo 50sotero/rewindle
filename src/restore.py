@@ -58,6 +58,35 @@ DRIVE_REMOVABLE = 2
 LOCAL_NTFS_MODE = "local_ntfs"
 GOOGLE_DRIVEFS_MODE = "google_drivefs_stream"
 REPOSITORY_STORAGE_MODES = frozenset({LOCAL_NTFS_MODE, GOOGLE_DRIVEFS_MODE})
+# How Restic opens these backups (backup-config.json "repository_access"): the same values, default and message as
+# restic_common, which this recovery entrypoint cannot import because it also runs from the standalone recovery folder.
+# "password": the saved DPAPI password or the recovery key (a configuration written before the choice existed has no such
+# key and means this). "no_password": --insecure-no-password and nothing else, so no password command, no recovery key and
+# no prompt: Restic refuses the flag next to any password source, but only after it has run a password command.
+REPOSITORY_ACCESS_VALUES = ("password", "no_password")
+DEFAULT_REPOSITORY_ACCESS = "password"
+NO_PASSWORD_FLAG = "--insecure-no-password"
+PASSWORD_SOURCE_OPTIONS = ("--password-command", "--password-file", "--new-password-file")
+PASSWORD_SOURCE_VARIABLES = ("RESTIC_PASSWORD", "RESTIC_PASSWORD_FILE", "RESTIC_PASSWORD_COMMAND")
+# These reach the person through the manager's own filter, which hides a message that names the password command, the
+# variable or DPAPI: they name none of them.
+NO_KEY_FILE_MESSAGE = "This backup opens without a key, so there is no key file to use."
+NO_KEY_SOURCE_MESSAGE = "a restore command for backups without a key also names a key source"
+DRILL_ARGUMENTS_MESSAGE = "--recovery-drill requires a target, report, and recovery-key file"
+FILE_SEARCH_KEY_MESSAGE = "File search needs Rewindle's saved key or your recovery key."
+# Restic's answer "wrong password or no key found". For backups that Rewindle opens without a password it means one was
+# added outside Rewindle, and every way restore.py reads them says so in these words, not as an exit code. The protected
+# manager has the same sentence: it passes it on to the dashboard when it is the whole of restore.py's last line. It
+# names no password source, so the manager's report filter lets it through.
+RESTIC_WRONG_PASSWORD_EXIT = 12
+NOW_ASKS_FOR_A_PASSWORD_MESSAGE = (
+    "These backups now ask for a password that Rewindle doesn't have, usually because they were changed outside "
+    "Rewindle, so Rewindle can't open them. If you know that password, Restic can still restore your files with it, as "
+    "RECOVERY.md in the recovery tools folder next to your backups explains."
+)
+# What a recovery drill's report says it was opened with: the recovery key (backups with a password) or nothing.
+DRILL_CREDENTIAL_SOURCE_KEY = "recovery_key"
+DRILL_CREDENTIAL_SOURCE_NONE = "none"
 EXPECTED_DRIVEFS_MY_DRIVE_ROOT = r"G:\My Drive"
 PLAN_TAG_PREFIX = "restic-backuper-plan:"
 GENERATION_TAG_PREFIX = "restic-backuper-generation:"
@@ -81,12 +110,22 @@ RESTORE_FOLDER_PREFIX = ".rewindle-restore-"
 
 
 class ResticReadError(RuntimeError):
-    """A read-only Restic metadata operation failed without exposing argv."""
+    """A read-only Restic metadata operation failed without exposing argv.
 
-    def __init__(self, operation: str, returncode: int):
+    `command` is the Restic command that failed. One opened without a password (NO_PASSWORD_FLAG) that Restic answered
+    with exit code 12 says that its backups now ask for one, in NOW_ASKS_FOR_A_PASSWORD_MESSAGE; any other failure says
+    only which operation failed and with which exit code.
+    """
+
+    def __init__(self, operation: str, returncode: int, command: list[str] | None = None):
         self.operation = operation
         self.returncode = int(returncode)
-        super().__init__(f"Restic {operation} failed with exit code {returncode}")
+        asks_for_a_password = self.returncode == RESTIC_WRONG_PASSWORD_EXIT and NO_PASSWORD_FLAG in (command or ())
+        super().__init__(
+            NOW_ASKS_FOR_A_PASSWORD_MESSAGE
+            if asks_for_a_password
+            else f"Restic {operation} failed with exit code {returncode}"
+        )
 
 
 def _normalized_windows_path(path: Path | str) -> str:
@@ -384,6 +423,7 @@ def load_restore_config(path: Path) -> dict[str, Any]:
             for item in topology_paths.values()
         ):
             raise ValueError("restore configuration topology_paths must contain paths")
+    repository_access(value)
     validate_repository_storage_config(value)
     return value
 
@@ -486,7 +526,43 @@ def recovery_password(path: Path) -> str:
     return matches[0]
 
 
+def repository_access(config: dict[str, Any]) -> str:
+    """How Restic opens these backups: "password" (also when the key is absent) or "no_password".
+
+    Any other value is refused, never read as a default: these backups would then be opened the wrong way. The message
+    names only the key, because the manager's report filter hides a whole message that names a password source.
+    """
+    value = config.get("repository_access", DEFAULT_REPOSITORY_ACCESS)
+    if not isinstance(value, str) or value not in REPOSITORY_ACCESS_VALUES:
+        raise ValueError("unsupported repository_access")
+    return value
+
+
+def assert_no_password_source_with_flag(
+    command: list[str], environment: dict[str, str] | None = None
+) -> None:
+    """Refuse a Restic command that opens backups without a password (NO_PASSWORD_FLAG) and also has a password source.
+
+    Restic refuses that pair, but only after it has run a password command, so nothing is started for it: not a
+    password option on the command line, and not a non-empty password variable (an empty one is tolerated) in the
+    environment it would be given.
+    """
+    if NO_PASSWORD_FLAG not in command:
+        return
+    for argument in command:
+        for option in PASSWORD_SOURCE_OPTIONS:
+            if argument == option or argument.startswith(option + "="):
+                raise ValueError(NO_KEY_SOURCE_MESSAGE)
+    for name, value in (environment or {}).items():
+        if name.upper() in PASSWORD_SOURCE_VARIABLES and value:
+            raise ValueError(NO_KEY_SOURCE_MESSAGE)
+
+
 def password_command(config: dict[str, Any]) -> str | None:
+    if repository_access(config) == "no_password":
+        # These backups open without a key. An older install's DPAPI file at secret_file is left alone and never used:
+        # Restic would run its password command before refusing it next to the flag.
+        return None
     python = Path(config.get("python_executable", ""))
     secret = Path(config.get("secret_file", ""))
     helper = (
@@ -927,6 +1003,7 @@ def run_restic_json_lines_bounded(
     interactive_password: bool,
     operation: str,
 ) -> list[dict[str, Any]]:
+    assert_no_password_source_with_flag([*base_command, *arguments], environment)
     process = subprocess.Popen(
         [*base_command, *arguments],
         cwd=SCRIPT_DIRECTORY,
@@ -985,7 +1062,7 @@ def run_restic_json_lines_bounded(
         if diagnostic_overflow:
             raise RuntimeError("Restic drill diagnostics exceeded their bounded safety limit")
         if returncode != 0:
-            raise ResticReadError(operation, returncode)
+            raise ResticReadError(operation, returncode, base_command)
         return entries
     finally:
         try:
@@ -1078,6 +1155,7 @@ def run_restic_capture(
     interactive_password: bool,
     operation: str,
 ) -> str:
+    assert_no_password_source_with_flag([*base_command, *arguments], environment)
     completed = subprocess.run(
         [*base_command, *arguments],
         cwd=SCRIPT_DIRECTORY,
@@ -1093,7 +1171,7 @@ def run_restic_capture(
         check=False,
     )
     if completed.returncode != 0:
-        raise ResticReadError(operation, completed.returncode)
+        raise ResticReadError(operation, completed.returncode, base_command)
     return completed.stdout
 
 
@@ -2540,7 +2618,9 @@ def base_report(args: argparse.Namespace) -> dict[str, Any]:
         "schema_version": 1,
         "operation": "restore",
         "drill_kind": "recovery_key_representative" if args.recovery_drill else None,
-        "credential_source": "recovery_key" if args.recovery_drill else None,
+        # The drill with a recovery key (backups with a password); main() says "none" once the configuration shows that
+        # these backups have no password and so no key.
+        "credential_source": DRILL_CREDENTIAL_SOURCE_KEY if args.recovery_drill else None,
         "repository": None,
         "repository_id": None,
         "plan_id": None,
@@ -2749,6 +2829,7 @@ def run_restic_bounded(
     maximum_bytes: int,
 ) -> _BoundedRun:
     """One Restic read, stopped at `deadline` (time.monotonic) or once it has printed more than `maximum_bytes`."""
+    assert_no_password_source_with_flag([*base_command, *arguments], environment)
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         return _BoundedRun(None, b"", "deadline")
@@ -2829,14 +2910,15 @@ def bounded_restic_capture(deadline: float) -> Any:
         operation: str,
     ) -> str:
         if interactive_password:
-            raise ValueError("a file search needs the protected password helper or a recovery key")
+            # Only backups with a password get here: for backups without one nothing is ever interactive.
+            raise ValueError(FILE_SEARCH_KEY_MESSAGE)
         run = run_restic_bounded(base_command, arguments, environment, deadline, FIND_MAX_LIST_BYTES)
         if run.stopped == "deadline":
             raise _FindOutOfTime()
         if run.stopped == "overflow":
             raise RuntimeError(f"Restic returned more output than a file search accepts for the {operation}")
         if run.returncode != 0:
-            raise ResticReadError(operation, int(run.returncode or 1))
+            raise ResticReadError(operation, int(run.returncode or 1), base_command)
         return run.output.decode("utf-8", errors="replace")
 
     return capture
@@ -3078,7 +3160,7 @@ def run_file_search(
         if run.stopped == "overflow":
             return finish("too_broad", results)
         if run.returncode != 0:
-            raise ResticReadError("file search", int(run.returncode or 1))
+            raise ResticReadError("file search", int(run.returncode or 1), command)
         found = parse_find_output(run.output, set(batch_ids))
         if sum(len(nodes) for nodes in found.values()) > FIND_MAX_BATCH_NODES:
             return finish("too_broad", results)
@@ -3164,8 +3246,10 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--source cannot be combined with --recovery-drill")
     drill_proof_fields = (args.drill_canary_sha256, args.drill_canary_bytes)
     if args.recovery_drill:
-        if args.target is None or args.report is None or args.recovery_key_file is None:
-            raise ValueError("--recovery-drill requires a target, report, and recovery-key file")
+        # Whether a recovery-key file is needed depends on the backups (none for a backup without a password), which the
+        # configuration says: that check is made below, once it is loaded.
+        if args.target is None or args.report is None:
+            raise ValueError(DRILL_ARGUMENTS_MESSAGE)
         if args.allow_legacy_unbound or args.include:
             raise ValueError("a recovery drill does not accept legacy snapshots or caller include patterns")
         if (
@@ -3213,6 +3297,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config_path = args.config.resolve(strict=True)
         config = load_restore_config(config_path)
+        access = repository_access(config)
+        if access == "no_password":
+            # No key exists for these backups, so none is read: a key file given for them is a mistake, and is refused.
+            if args.recovery_key_file is not None:
+                raise ValueError(NO_KEY_FILE_MESSAGE)
+            if report is not None and args.recovery_drill:
+                report["credential_source"] = DRILL_CREDENTIAL_SOURCE_NONE
+        elif args.recovery_drill and args.recovery_key_file is None:
+            raise ValueError(DRILL_ARGUMENTS_MESSAGE)
         configured_repository = Path(config["repository"])
         repository = (args.repository or configured_repository).resolve(strict=True)
         if not (repository / "config").is_file():
@@ -3258,7 +3351,12 @@ def main(argv: list[str] | None = None) -> int:
                 # restore.py holds no run lock and keeps Restic's lock.
                 command.append("--no-lock")
         interactive_password = True
-        if args.recovery_key_file:
+        if access == "no_password":
+            # The flag is the whole credential: never a password command (not even when an older install's DPAPI file is
+            # still there), never a key, and never a prompt, so every Restic below gets stdin closed.
+            command.append(NO_PASSWORD_FLAG)
+            interactive_password = False
+        elif args.recovery_key_file:
             environment["RESTIC_PASSWORD"] = recovery_password(args.recovery_key_file)
             interactive_password = False
         else:
@@ -3266,10 +3364,14 @@ def main(argv: list[str] | None = None) -> int:
             if dpapi_command:
                 command.extend(["--password-command", dpapi_command])
                 interactive_password = False
+        # The listing, the bare list and the restore below start Restic with subprocess.call, which has no guard of its
+        # own: this one, made once for the command and environment every start here is given, is theirs.
+        assert_no_password_source_with_flag(command, environment)
 
         if args.find_json:
-            if interactive_password:
-                raise ValueError("a file search needs the protected password helper or a recovery key")
+            # Backups without a password are never interactive, so only backups with one can lack both a key and the helper.
+            if access == "password" and interactive_password:
+                raise ValueError(FILE_SEARCH_KEY_MESSAGE)
             return run_file_search(args, command, environment, config, repository, started)
 
         if args.list and not args.list_snapshots_json:
@@ -3589,12 +3691,18 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 report["result"] = "partial"
                 report["partial_target_retained"] = True
-                report["error"] = (
-                    f"Restic restore failed with exit code {returncode}; "
-                    "the alternate target was retained for inspection"
-                )
-                if left_in_restore_folder:
-                    report["error"] += "; " + restore_folder.left_message()
+                if access == "no_password" and returncode == RESTIC_WRONG_PASSWORD_EXIT:
+                    # Restic opened these backups a moment ago (the queries above) and no longer does.
+                    report["error"] = NOW_ASKS_FOR_A_PASSWORD_MESSAGE
+                    if left_in_restore_folder:
+                        report["error"] += " " + restore_folder.left_message()
+                else:
+                    report["error"] = (
+                        f"Restic restore failed with exit code {returncode}; "
+                        "the alternate target was retained for inspection"
+                    )
+                    if left_in_restore_folder:
+                        report["error"] += "; " + restore_folder.left_message()
         if returncode != 0:
             print(
                 f"RESTORE INCOMPLETE: Restic exited with {returncode}; "

@@ -2,18 +2,19 @@ import { CalendarClock, FlaskConical, HardDrive, History, Info, ShieldCheck } fr
 import { Button } from '@/components/atoms/Button';
 import { Callout, IssueList, Spinner } from '../ui';
 import type { Wizard } from '../useWizard';
-import { issuesFor } from '../contract';
+import { welcomeIssues } from '../contract';
 
 /** The first screen: what Rewindle is, in three lines, and the honest notice that this is an early release. */
 export function Welcome({ wizard }: { wizard: Wizard }) {
   const legacy = wizard.base?.environment.existingInstall.legacyPersonalEdition;
-  const environment = issuesFor(wizard.validation.plan, 'environment');
+  // The findings about a recovery key left behind are not told here: they depend on the password choice, so Review lists them when they count.
+  const environment = welcomeIssues(wizard.validation.plan);
   return (
     <div className="screen-stack">
       <ul className="welcome-points" aria-label="What Rewindle does">
         <li>
           <span className="point-icon"><CalendarClock size={18} aria-hidden="true" /></span>
-          <span><strong>Backs up the folders you choose, every day.</strong> Encrypted, to a drive you pick, and only what changed.</span>
+          <span><strong>Backs up the folders you choose, every day.</strong> To a drive you pick, only what changed, and protected by a password unless you choose otherwise.</span>
         </li>
         <li>
           <span className="point-icon"><ShieldCheck size={18} aria-hidden="true" /></span>
@@ -31,7 +32,7 @@ export function Welcome({ wizard }: { wizard: Wizard }) {
 
       {legacy && (
         <Callout tone="info" icon={<Info size={18} aria-hidden="true" />} title="You also have the earlier personal edition">
-          <p>Rewindle installs alongside it and doesn’t change it. It can’t take over the personal edition’s backups, so it starts its own in a new, empty backup location, with its own schedule and recovery key. This PC will run both.</p>
+          <p>Rewindle installs alongside it and doesn’t change it. It can’t take over the personal edition’s backups, so it starts its own in a new, empty backup location, with its own schedule and settings. This PC will run both.</p>
           <p>Keep the personal edition’s backups and recovery key for as long as you need their history.</p>
         </Callout>
       )}

@@ -1306,6 +1306,30 @@ function Assert-SourceListsEqual {
     }
 }
 
+function Get-RepositoryAccess {
+    # How Restic opens these backups (backup-config.json "repository_access"): 'password' (also when the key is absent,
+    # as in every configuration written before the choice existed) or 'no_password'. Anything else is refused.
+    param([Parameter(Mandatory = $true)] [object]$Configuration)
+    $property = $Configuration.PSObject.Properties['repository_access']
+    if ($null -eq $property) { return 'password' }
+    $value = $property.Value
+    if ($value -isnot [string] -or $value -cnotin @('password', 'no_password')) {
+        throw 'unsupported repository_access'
+    }
+    return [string]$value
+}
+
+function Assert-RecoveryRepositoryAccess {
+    # Whether these backups have a password is the same in the protected configuration, the recovery copy of it and the
+    # recovery manifest (a missing key counts as 'password' in each). A difference is refused, never copied over.
+    param([object]$Configuration, [object]$Manifest, [pscustomobject]$Validated)
+    $expected = Get-RepositoryAccess -Configuration $Validated.Json
+    if ((Get-RepositoryAccess -Configuration $Configuration) -cne $expected -or
+        (Get-RepositoryAccess -Configuration $Manifest) -cne $expected) {
+        throw 'Recovery repository_access is not synchronized with the protected configuration.'
+    }
+}
+
 function Assert-RecoveryStorageBinding {
     param([object]$Configuration, [pscustomobject]$Validated)
     $modeProperty = $Configuration.PSObject.Properties['repository_storage_mode']
@@ -1642,6 +1666,7 @@ function Get-ValidatedRecoveryBundle {
         throw 'Recovery configuration does not match the protected repository.'
     }
     Assert-RecoveryStorageBinding -Configuration $recoveryConfig -Validated $Validated
+    Assert-RecoveryRepositoryAccess -Configuration $recoveryConfig -Manifest $manifest -Validated $Validated
     Assert-SourceListsEqual -Expected $Validated.Sources -Actual @($recoveryConfig.sources) -Message 'Recovery source list is not synchronized with the protected configuration.'
     if ($recoveryConfig.plan_id -isnot [string] -or
         -not [string]::Equals([string]$recoveryConfig.plan_id, $Validated.PlanId, [StringComparison]::Ordinal) -or

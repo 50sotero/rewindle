@@ -21,8 +21,10 @@ from unittest import mock
 PROJECT = Path(__file__).resolve().parents[1]
 SOURCE = PROJECT / "src"
 sys.path.insert(0, str(SOURCE))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import retention  # noqa: E402
+from restic_access import NO_PASSWORD_FLAG, PASSWORD_SOURCE_OPTIONS, restic_access_result  # noqa: E402
 
 
 PLAN = "12345678-1234-4abc-8def-1234567890ab"
@@ -76,6 +78,8 @@ class FakeRestic:
         self.repository_id = REPO
         self.dry_run_code = 0
         self.lose_on_forget: str | None = None
+        # How the backups open (tests/restic_access.py): a command that does not suit them is refused as Restic would.
+        self.access = "password"
 
     def groups(self) -> list[dict]:
         keep = [item for item in self.store if item["id"] in self.keep]
@@ -90,6 +94,9 @@ class FakeRestic:
 
     def run(self, command: list[str], **_kwargs) -> subprocess.CompletedProcess:
         self.calls.append(list(command))
+        refused = restic_access_result(command, {}, self.access)
+        if refused is not None:
+            return subprocess.CompletedProcess(command, refused[0], "", refused[1])
         if "cat" in command:
             return subprocess.CompletedProcess(command, 0, json.dumps({"id": self.repository_id, "version": 2}), "")
         if "forget" in command:
@@ -104,6 +111,9 @@ class FakeRestic:
 
     def stream(self, command: list[str], log_handle, *_args, **_kwargs) -> int:
         self.streamed.append(list(command))
+        refused = restic_access_result(command, {}, self.access)
+        if refused is not None:
+            return refused[0]
         if "forget" in command:
             self.batches += 1
             if self.fail_batch == self.batches:
@@ -986,6 +996,81 @@ class SpaceAndRecordTests(RetentionTestCase):
         entries, _readable = retention.read_history(h.ctx)
         self.assertEqual(len(entries), 50)
         self.assertEqual(entries[-1]["request_nonce"], f"{54:064x}")
+
+
+class BackupsWithoutAPasswordTests(RetentionTestCase):
+    """Clean-up reaches Restic only through restic_base, so backups without a password get the flag and no password option."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.h.config["repository_access"] = "no_password"
+        self.h.fake.access = "no_password"
+
+    def every_command(self) -> list[list[str]]:
+        return self.h.fake.calls + self.h.fake.streamed
+
+    def assert_credentials(self, command: list[str], access: str) -> None:
+        if access == "no_password":
+            self.assertEqual(1, command.count(NO_PASSWORD_FLAG), command)
+            self.assertFalse(any(word.startswith(PASSWORD_SOURCE_OPTIONS) for word in command), command)
+        else:
+            self.assertNotIn(NO_PASSWORD_FLAG, command)
+            self.assertEqual(1, command.count("--password-command"), command)
+
+    def run_everything(self) -> None:
+        h = self.h
+        standard_history(h)
+        h.policy()
+        retention.compute_preview(h.ctx)
+        self.assertEqual("removed", h.apply()["state"])
+        self.assertTrue(retention.apply_prune(h.ctx)["prune_completed"])
+        self.assertTrue(retention.apply_check(h.ctx)["check_completed"])
+
+    def test_the_preview_forget_prune_and_check_all_carry_the_flag_and_no_password_option(self) -> None:
+        self.run_everything()
+
+        verbs = {word for command in self.every_command() for word in command if word in ("cat", "snapshots", "forget", "prune", "check")}
+        self.assertEqual({"cat", "snapshots", "forget", "prune", "check"}, verbs)
+        self.assertTrue(any("--dry-run" in command for command in self.h.fake.calls))
+        self.assertTrue(any("forget" in command and "--dry-run" not in command for command in self.h.fake.streamed))
+        for command in self.every_command():
+            self.assert_credentials(command, "no_password")
+
+    def test_an_older_configuration_still_gets_the_password_command_and_never_the_flag(self) -> None:
+        h = self.h
+        del h.config["repository_access"]
+        h.fake.access = "password"
+
+        self.run_everything()
+
+        for command in self.every_command():
+            self.assert_credentials(command, "password")
+
+    def test_a_listing_of_backups_that_now_ask_for_a_password_is_unavailable_and_says_no_more(self) -> None:
+        # Restic answers exit 12; the clean-up reports only its fixed code, so nothing of Restic's text can reach a reader.
+        h = self.h
+        h.fake.access = "password"
+        standard_history(h)
+        h.policy()
+
+        document, _sha = retention.compute_preview(h.ctx)
+
+        self.assertEqual("blocked", document["state"])
+        self.assertEqual("backup_location_unavailable", document["blocked_reason"])
+        self.assertNotIn("password", json.dumps(document).lower())
+        for command in self.every_command():
+            self.assert_credentials(command, "no_password")
+
+    def test_the_log_of_a_clean_up_names_no_password_command(self) -> None:
+        self.run_everything()
+        log = (self.h.state / "logs" / "retention-test.jsonl.log").read_text(encoding="utf-8")
+        events = [json.loads(line) for line in log.splitlines() if line.startswith("{")]
+        commands = [event["command"] for event in events if "command" in event]
+        self.assertTrue(commands)
+        for command in commands:
+            self.assertEqual(1, command.count(NO_PASSWORD_FLAG))
+            self.assertNotIn("--password-command", command)
+            self.assertNotIn("<DPAPI password command>", command)
 
 
 class CommandLineTests(RetentionTestCase):

@@ -6,15 +6,19 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 PROJECT = Path(__file__).resolve().parents[1]
 SOURCE = PROJECT / "src"
 sys.path.insert(0, str(SOURCE))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import recovery_health  # noqa: E402
 from credential_repair import sha256_file  # noqa: E402
 from refresh_recovery_tools import json_bytes  # noqa: E402
-from restic_common import RunLock  # noqa: E402
+from restic_access import restic_access_result  # noqa: E402
+from restic_common import NO_PASSWORD_FLAG, PASSWORD_SOURCE_OPTIONS, RunLock  # noqa: E402
 from stale_lock_repair import repair  # noqa: E402
 
 
@@ -23,7 +27,10 @@ REPOSITORY_ID = "d" * 64
 SID = "S-1-5-21-111-222-333-1001"
 
 
-def build_fixture(root: Path) -> tuple[Path, dict[str, object]]:
+def build_fixture(root: Path, *, access: str | None = None) -> tuple[Path, dict[str, object]]:
+    """`access` None leaves out "repository_access" (every configuration written before the choice existed; it
+    means a password); "password" and "no_password" write it. The DPAPI file stays on disk in every case: backups
+    without a password may sit next to one an older install left."""
     install = root / "Install"
     state = root / "State"
     repository = root / "Repository"
@@ -55,6 +62,8 @@ def build_fixture(root: Path) -> tuple[Path, dict[str, object]]:
         "sources": [source],
         "source_identities": {source: {"expected_volume_serial": "11223344"}},
     }
+    if access is not None:
+        config["repository_access"] = access
     for path in (
         Path(config["restic_executable"]),
         Path(config["python_executable"]),
@@ -72,13 +81,22 @@ def build_fixture(root: Path) -> tuple[Path, dict[str, object]]:
 
 
 class StatefulRunner:
-    def __init__(self, locks_before: int, locks_after: int = 0) -> None:
+    """Restic as the backups open: `access` says whether they were made with a password or without."""
+
+    def __init__(self, locks_before: int, locks_after: int = 0, access: str = "password") -> None:
         self.locks = locks_before
         self.locks_after = locks_after
+        self.access = access
         self.commands: list[list[str]] = []
+        self.environments: list[dict[str, str]] = []
 
     def __call__(self, command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         self.commands.append(list(command))
+        environment = kwargs.get("env")
+        self.environments.append(dict(environment) if isinstance(environment, dict) else {})
+        refusal = restic_access_result(command, environment, self.access)
+        if refusal is not None:
+            return subprocess.CompletedProcess(command, refusal[0], "", refusal[1])
         if command[-2:] == ["cat", "config"]:
             return subprocess.CompletedProcess(command, 0, json.dumps({"id": REPOSITORY_ID, "version": 2}), "")
         if command[-2:] == ["list", "locks"]:
@@ -153,6 +171,60 @@ class StaleLockRepairTests(unittest.TestCase):
             with RunLock(Path(config["state_directory"]) / "run.lock"):
                 with self.assertRaisesRegex(RuntimeError, "another backup process"):
                     self.invoke(config_path, StatefulRunner(1))
+
+    def test_a_backup_without_a_password_is_unlocked_with_the_flag_and_never_a_password_command(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="stale-lock-no-password-") as root_text:
+            config_path, config = build_fixture(Path(root_text), access="no_password")
+            secret = Path(config["secret_file"])
+            secret_before = secret.read_bytes()
+            runner = StatefulRunner(locks_before=2, locks_after=0, access="no_password")
+
+            with mock.patch.object(
+                recovery_health, "password_command", side_effect=AssertionError("a key command was built")
+            ):
+                result = self.invoke(config_path, runner)
+
+            self.assertEqual("repaired", result["state"])
+            self.assertEqual(2, result["removed_count"])
+            # Opening the backups, counting the locks, unlocking, counting again: every command opens them the
+            # same way, through the flag alone.
+            self.assertEqual(
+                [["cat", "config"], ["list", "locks"], ["unlock"], ["list", "locks"]],
+                [command[-2:] if command[-1] != "unlock" else ["unlock"] for command in runner.commands],
+            )
+            for command, environment in zip(runner.commands, runner.environments):
+                self.assertIn(NO_PASSWORD_FLAG, command)
+                for option in PASSWORD_SOURCE_OPTIONS:
+                    self.assertNotIn(option, command)
+                self.assertEqual([], [name for name in environment if name.startswith("RESTIC_PASSWORD")])
+            unlock = next(command for command in runner.commands if command[-1:] == ["unlock"])
+            self.assertNotIn("--remove-all", unlock)
+            self.assertEqual(secret_before, secret.read_bytes())
+
+    def test_backups_that_now_ask_for_a_password_are_not_unlocked(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="stale-lock-asks-") as root_text:
+            config_path, _ = build_fixture(Path(root_text), access="no_password")
+            # A key with a password was added outside Rewindle: Restic refuses the flag with exit 12.
+            runner = StatefulRunner(locks_before=2, access="password")
+
+            with self.assertRaisesRegex(RuntimeError, "exit code 12"):
+                self.invoke(config_path, runner)
+
+            self.assertEqual([["cat", "config"]], [command[-2:] for command in runner.commands])
+
+    def test_a_backup_with_a_password_is_opened_with_the_password_command_as_before(self) -> None:
+        for access in (None, "password"):
+            with self.subTest(access=access), tempfile.TemporaryDirectory(prefix="stale-lock-password-") as root_text:
+                config_path, _ = build_fixture(Path(root_text), access=access)
+                runner = StatefulRunner(locks_before=1)
+
+                result = self.invoke(config_path, runner)
+
+                self.assertEqual("repaired", result["state"])
+                self.assertEqual(4, len(runner.commands))
+                for command in runner.commands:
+                    self.assertIn("--password-command", command)
+                    self.assertNotIn(NO_PASSWORD_FLAG, command)
 
 
 if __name__ == "__main__":

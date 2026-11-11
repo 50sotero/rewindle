@@ -124,9 +124,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Test-SetupWindow.p
 Notes:
 
 - `test_key_rotation`, and the pinned-Restic tests in `test_exclusions`,
-  `test_generation_parent` and `test_unarchivable_links`, run the real
-  `restic.exe` from the release build output and are skipped until you have
-  run `Build-Release.ps1`.
+  `test_generation_parent`, `test_unarchivable_links` and
+  `test_repository_access_restic`, run the real `restic.exe` from the release
+  build output and are skipped until you have run `Build-Release.ps1`.
+- The Setup wizard's rendered pages and state checks in `test_setup_wizard`
+  bundle the wizard with esbuild, so they need Node.js and are skipped until
+  `npm ci` has run in `src\dashboard\web` (the dashboard build runs it).
 - The PowerShell suites live in `tests\*.ps1`. They build disposable fixtures
   in your temporary folder and do not change an installed copy.
 - `-SkipInstalledChecks` keeps the dashboard regressions from reading an
@@ -136,10 +139,11 @@ Notes:
   `Test-ManageSources.ps1`, the release build, `Test-SetupHost.ps1`, the
   dashboard regressions, the restore and clean-up manager suites
   (`Test-ManageRestore.ps1`, `Test-ManageRetention.ps1`, as a standard user),
-  `Test-ReleaseArtifact.ps1` and `Test-InstallPlan.ps1`. Its last step runs the
+  `Test-ReleaseArtifact.ps1` and `Test-InstallPlan.ps1`. Its last steps run the
   pinned-Restic tests against the release just built, elevated, so the
-  `--use-fs-snapshot` case runs too; `REWINDLE_REQUIRE_PINNED_RESTIC=1` makes
-  them fail instead of skipping.
+  `--use-fs-snapshot` case runs too, and then the Setup wizard's page and state
+  checks; `REWINDLE_REQUIRE_PINNED_RESTIC=1` and `REWINDLE_REQUIRE_WEB_BUNDLE=1`
+  make them fail instead of skipping.
 - `tests\Test-InstallerContract.ps1` really installs and uninstalls Rewindle. It
   refuses to run anywhere but a GitHub-hosted runner (it checks
   `GITHUB_ACTIONS` and `RUNNER_ENVIRONMENT` and needs `-AllowSystemInstall`),

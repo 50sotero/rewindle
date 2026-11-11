@@ -1,4 +1,7 @@
-"""Guarded removal of Restic locks that Restic itself classifies as stale."""
+"""Guarded removal of Restic locks that Restic itself classifies as stale.
+
+Backups set up without a password are opened with --insecure-no-password and no password command at all.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +19,7 @@ from credential_repair import (
     sha256_file,
     validate_runtime_manifest,
 )
-from recovery_health import authenticate, command_result, lock_count, password_command, utc_now
+from recovery_health import authenticate, command_result, credential_arguments, lock_count, utc_now
 from restic_common import load_config_under_lock, windows_directory
 from secret_store import _current_user_sid
 
@@ -106,10 +109,8 @@ def repair(
             )
         restic = Path(config["restic_executable"])
         repository = Path(config["repository"])
-        authentication = [
-            "--password-command",
-            password_command(config, config_path.parent),
-        ]
+        # The DPAPI password command, or for backups without a password the flag alone.
+        authentication = credential_arguments(config, config_path.parent)
         repository_id, repository_format = authenticate(
             restic,
             repository,

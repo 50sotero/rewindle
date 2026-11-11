@@ -52,6 +52,11 @@ namespace ResticBackuper.Dashboard
         public int FailedCheckCount { get; private set; }
         public int WarningCheckCount { get; private set; }
         public IList<RecoveryHealthCheck> Checks { get; private set; }
+        // How the backups this report describes are opened: "password" (also when the report names no repository_access, as every
+        // report from before the choice existed) or "no_password". ParseBoundReport sets it from the report and has already checked
+        // it against the configuration; null on a report that did not load. A backup without a password has no recovery key, so
+        // its report has no recovery_key check and the window shows no key row and offers no key repair or rotation.
+        public string RepositoryAccess { get; internal set; }
 
         internal static RecoveryHealthReport Success(
             string overallStatus,
@@ -75,7 +80,8 @@ namespace ResticBackuper.Dashboard
                 ActiveLockCount = activeLockCount,
                 FailedCheckCount = failedCheckCount,
                 WarningCheckCount = warningCheckCount,
-                Checks = checks ?? new List<RecoveryHealthCheck>()
+                Checks = checks ?? new List<RecoveryHealthCheck>(),
+                RepositoryAccess = "password"
             };
         }
 
@@ -225,6 +231,15 @@ namespace ResticBackuper.Dashboard
                 return RecoveryHealthReport.Failure(
                     "Recovery-readiness data did not bind to the current protected plan.");
             }
+            // The report says how it opened the backups (absent means with a password). It must be the way the configuration it
+            // was bound to says, or the checks and the actions built on them would be about something else.
+            string reportedAccess = SourceConfiguration.ReadRepositoryAccess(document);
+            if (reportedAccess == null ||
+                !string.Equals(reportedAccess, configuration.RepositoryAccess, StringComparison.Ordinal))
+            {
+                return RecoveryHealthReport.Failure(
+                    "Recovery-readiness data did not match how these backups are opened, so it was not used.");
+            }
             string overall = ReadString(document, "overall_status");
             if (overall != "healthy" && overall != "warning" && overall != "blocked")
             {
@@ -264,7 +279,7 @@ namespace ResticBackuper.Dashboard
             {
                 throw new InvalidDataException("Recovery-health check counts are invalid.");
             }
-            return RecoveryHealthReport.Success(
+            RecoveryHealthReport report = RecoveryHealthReport.Success(
                 overall,
                 ReadOptionalString(document, "repository_id") ?? string.Empty,
                 ReadOptionalLong(document, "repository_format") ?? 0,
@@ -274,6 +289,8 @@ namespace ResticBackuper.Dashboard
                 checked((int)failed),
                 checked((int)warnings),
                 checks);
+            report.RepositoryAccess = reportedAccess;
+            return report;
         }
 
         private static bool IsChildPath(string candidate, string parent)
@@ -455,6 +472,11 @@ namespace ResticBackuper.Dashboard
         {
             if (configuration == null)
                 return CredentialRepairResult.Failure("Protected configuration is unavailable.", null);
+            // A backup without a password has no recovery key and no saved password, so there is nothing to repair and the
+            // recovery_key check below does not exist for it. Refused before anything is read or started.
+            if (string.Equals(configuration.RepositoryAccess, "no_password", StringComparison.Ordinal))
+                return CredentialRepairResult.Failure(
+                    "This backup opens without a key, so there is nothing to repair.", null);
             try
             {
                 string installRoot = SourceConfiguration.NormalizePath(configuration.InstallRoot);
@@ -999,6 +1021,11 @@ namespace ResticBackuper.Dashboard
         {
             if (configuration == null)
                 return KeyRotationResult.Failure("Protected configuration is unavailable.", null);
+            // No key, no rotation (see CredentialRepairLauncher.Repair); the recovery_key and rotation_rollback_key checks below
+            // exist only for a backup with a password.
+            if (string.Equals(configuration.RepositoryAccess, "no_password", StringComparison.Ordinal))
+                return KeyRotationResult.Failure(
+                    "This backup opens without a key, so there are no keys to rotate.", null);
             try
             {
                 string installRoot = SourceConfiguration.NormalizePath(configuration.InstallRoot);

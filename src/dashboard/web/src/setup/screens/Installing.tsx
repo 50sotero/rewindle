@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown, Circle, Copy, Minus, ShieldAlert, X } from 'lucide-react';
 import { motion } from 'motion/react';
 import { Button } from '@/components/atoms/Button';
+import { leadsToAnotherLocation } from '../contract';
 import { Callout, ShieldIcon, Spinner } from '../ui';
 import { listedPhases, operationProgress, type ListedPhase, type OperationState, type Wizard } from '../useWizard';
 
@@ -113,8 +114,8 @@ export function OperationView({ wizard, operation }: { wizard: Wizard; operation
               <PhaseIcon state={phase.state} />
               <span className="phase-text">
                 <span className="phase-title">{phase.title}</span>
-                {phase.detail && (phase.state === 'failed' || phase.state === 'completed') && phase.detail !== operation.result?.error?.message && <span className="phase-detail">{phase.detail}</span>}
-                {phase.state === 'skipped' && <span className="phase-detail" aria-hidden="true">Not needed</span>}
+                {phase.detail && (phase.state === 'failed' || phase.state === 'completed' || phase.state === 'skipped') && phase.detail !== operation.result?.error?.message && <span className="phase-detail">{phase.detail}</span>}
+                {phase.state === 'skipped' && !phase.detail && <span className="phase-detail" aria-hidden="true">Not needed</span>}
               </span>
               <span className="sr-only">, {STATE_WORDS[phase.state]}</span>
             </li>
@@ -151,13 +152,18 @@ function FailureNotice({ wizard, operation, onCopy, copied }: { wizard: Wizard; 
   }
   const notes = uninstall ? [] : describeOutcome(operation);
   const message = operation.result?.error?.message || finished.message || 'The installer stopped without saying why.';
+  // Backups at the chosen location that don't match what Setup recorded, or the choice made, or that have a password this PC doesn't
+  // have: trying again would end the same way, so the next step is another location.
+  const mismatch = leadsToAnotherLocation(operation.result?.error?.code);
   return (
     <Callout tone="error" title="What went wrong">
       <p className="failure-message">{message}</p>
       {notes.map(note => <p key={note}>{note}</p>)}
       {uninstall
-        ? <p>Your backups and recovery key were not touched. Try again, or remove Rewindle from Settings › Apps › Installed apps.</p>
-        : <p>Choose <strong>Try again</strong>, or <strong>Back to review</strong> to change your choices.</p>}
+        ? <p>Your backups were not touched. Try again, or remove Rewindle from Settings › Apps › Installed apps.</p>
+        : mismatch
+          ? <p>Choose <strong>Back to review</strong>, then change the backup location.</p>
+          : <p>Choose <strong>Try again</strong>, or <strong>Back to review</strong> to change your choices.</p>}
       <div className="callout-actions">
         <Button size="sm" onClick={onCopy}><Copy size={13} aria-hidden="true" />{copied ? 'Copied' : 'Copy details'}</Button>
         <button type="button" className="text-link" onClick={() => wizard.openLink('issues')}>Report the problem (opens GitHub)</button>

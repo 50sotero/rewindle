@@ -108,6 +108,40 @@ public static class FakeRestic {
       "\",\"hostname\":\"FIXTURE\",\"tags\":[\"scheduled\",\"restic-backuper-plan:" + plan +
       "\",\"restic-backuper-generation:7\"],\"paths\":[\"" + Escape(source) + "\"],\"summary\":{\"total_files_processed\":2}}";
   }
+  // ---- Restic 0.19.1's rules for --insecure-no-password (the same text in Test-ManageRestore.ps1 and Test-ManageRetention.ps1) ----
+  // FAKE_REPOSITORY_ACCESS (control file) says what backups this stand-in is: password (the default) or no_password. The
+  // first rule that applies refuses the command, as Restic does: 1. the flag next to a password source (an option, or a
+  // variable with a value): exit 1; 2. backups without a password opened without the flag: exit 1 (with stdin closed, as
+  // every caller has it; with an open stdin the real Restic waits for a password instead); 3. backups with a password
+  // opened with the flag: exit 12. -1 means the command may go on.
+  static int Access(string[] args) {
+    bool flag = Array.IndexOf(args, "--insecure-no-password") >= 0;
+    bool source = false;
+    foreach (string argument in args) {
+      foreach (string option in new[] { "--password-command", "--password-file", "--new-password-file" }) {
+        if (argument == option || argument.StartsWith(option + "=", StringComparison.Ordinal)) source = true;
+      }
+    }
+    foreach (string variable in new[] { "RESTIC_PASSWORD", "RESTIC_PASSWORD_FILE", "RESTIC_PASSWORD_COMMAND" }) {
+      if (!String.IsNullOrEmpty(Environment.GetEnvironmentVariable(variable))) source = true;
+    }
+    string access = Control("FAKE_REPOSITORY_ACCESS");
+    if (String.IsNullOrEmpty(access)) access = "password";
+    if (flag && source) {
+      Console.Error.WriteLine("Fatal: --insecure-no-password must not be specified together with providing a password via a cli option or environment variable");
+      return 1;
+    }
+    if (access == "no_password" && !flag) {
+      Console.Error.WriteLine("Fatal: an empty password is not allowed by default. Pass the flag `--insecure-no-password` to restic to disable this check");
+      return 1;
+    }
+    if (access == "password" && flag) {
+      Console.Error.WriteLine("Fatal: wrong password or no key found");
+      return 12;
+    }
+    return -1;
+  }
+  // ---- end of the access rules ----
   public static int Main(string[] args) {
     foreach (System.Collections.DictionaryEntry item in Environment.GetEnvironmentVariables()) {
       string name = ((string)item.Key).ToUpperInvariant();
@@ -117,6 +151,8 @@ public static class FakeRestic {
     }
     string log = Control("FAKE_RESTIC_LOG");
     if (!String.IsNullOrEmpty(log)) File.AppendAllText(log, String.Join("\t", args) + Environment.NewLine);
+    int refused = Access(args);
+    if (refused >= 0) return refused;
     string plan = Control("FAKE_PLAN_ID");
     string source = Control("FAKE_SOURCE");
     string storePath = Control("FAKE_STORE");

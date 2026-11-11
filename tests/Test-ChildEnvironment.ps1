@@ -6,6 +6,8 @@
 # really receives. Covered here: the 03:00 Google Drive check (verify_my_drive_cloud_repository.ps1), including the
 # real rclone password helper under that environment and the read-only rclone connection string, and the installer's
 # repository set-up (Install-ResticBackuper.ps1). Manage-Restore.ps1 is covered end to end by Test-ManageRestore.ps1.
+# The check runs Restic for backups with a password and for backups without one (--insecure-no-password): both get an
+# allow-listed environment, and only the first gets a Restic password command.
 # Nothing here is installed or elevated: the functions are extracted from the sources and run against a fake child.
 
 [CmdletBinding()]
@@ -85,6 +87,11 @@ function Get-SourceFunctions {
 . ([scriptblock]::Create((Get-SourceFunctions -Path $verifierSource -Names @(
     'ConvertTo-NativeArgument',
     'New-NativeChildEnvironment',
+    # How the check opens a backup: the mode, the Restic command line and the settings that go with it.
+    'Get-RepositoryAccess',
+    'Get-ResticCommonArguments',
+    'New-ResticPasswordCommand',
+    'Get-CloudEnvironmentSettings',
     'Get-ReadOnlyRemoteSpec',
     'Invoke-NativeToFiles',
     # What Invoke-NativeToFiles uses to keep to its deadline.
@@ -248,13 +255,24 @@ try {
     $runFolder = Join-Path $fixtureRoot 'runs\run-1'
     $temporary = Join-Path $runFolder 'temp'
     [void][IO.Directory]::CreateDirectory($temporary)
-    $settings = [ordered]@{
-        RCLONE_CONFIG = (Join-Path $runFolder 'rclone-readonly.conf')
-        RCLONE_PASSWORD_COMMAND = '"C:\fixture\powershell.exe" -NoProfile -File "C:\fixture\reveal.ps1"'
-        RCLONE_ASK_PASSWORD = 'false'
-        RCLONE_CACHE_DIR = (Join-Path $runFolder 'rclone-cache')
-        RESTIC_PASSWORD_COMMAND = '"C:\fixture\python.exe" -I -S -B "C:\fixture\secret_store.py" reveal'
-    }
+    # The settings are the verifier's own, for a backup made with a password (a configuration without the choice, like
+    # every one written before it existed, is one) and for one made without.
+    $oldConfiguration = [pscustomobject]@{ repository = 'C:\fixture\repository' }
+    $access = Get-RepositoryAccess -Configuration $oldConfiguration
+    Assert-True ($access -ceq 'password') 'a configuration without repository_access is a backup with a password'
+    $rclonePasswordCommand = '"C:\fixture\powershell.exe" -NoProfile -File "C:\fixture\reveal.ps1"'
+    $resticPasswordCommand = New-ResticPasswordCommand -Access $access `
+        -PythonExecutable 'C:\fixture\python.exe' -SecretStore 'C:\fixture\secret_store.py' `
+        -SecretFile 'C:\fixture\repository-password.dpapi.json'
+    $settings = Get-CloudEnvironmentSettings -Access $access `
+        -RcloneConfig (Join-Path $runFolder 'rclone-readonly.conf') `
+        -RclonePasswordCommand $rclonePasswordCommand `
+        -RcloneCacheDirectory (Join-Path $runFolder 'rclone-cache') `
+        -ResticPasswordCommand $resticPasswordCommand
+    $noPasswordSettings = Get-CloudEnvironmentSettings -Access 'no_password' `
+        -RcloneConfig (Join-Path $runFolder 'rclone-readonly.conf') `
+        -RclonePasswordCommand $rclonePasswordCommand `
+        -RcloneCacheDirectory (Join-Path $runFolder 'rclone-cache')
     $cloudExpected = [ordered]@{}
     foreach ($name in $windowsValues.Keys) { $cloudExpected[$name] = $windowsValues[$name] }
     $cloudExpected['PSModulePath'] = Join-Path $system 'WindowsPowerShell\v1.0\Modules'
@@ -297,8 +315,72 @@ try {
             ('lsjson|ResticBackuperGoogleReadOnly,scope=drive.readonly,root_folder_id=root:' + $cloudPath + '|--recursive')
     ) 'rclone gets the read-only scope and the My Drive root in its connection string'
     Assert-True ($record.WorkingDirectory.TrimEnd('\') -ceq $fixtureRoot.TrimEnd('\')) 'the child runs in its own folder'
+    Assert-True ([string]$record.Environment['RESTIC_PASSWORD_COMMAND'] -ceq $resticPasswordCommand) (
+        'a backup with a password gives its Restic children the command that reads its saved password')
 
-    $helperExit = Invoke-WithPlantedEnvironment {
+    # A Restic run of the check, once for a backup with a password and once for one without. The planted environment
+    # holds a Restic password command and a password file; neither may reach the child. A backup without a password
+    # gets the flag exactly once and no RESTIC_PASSWORD* setting at all (Restic refuses the two together).
+    $repositoryPath = 'C:\fixture\Google Drive\My Drive\Backups\repo'
+    foreach ($mode in @('password', 'no_password')) {
+        $modeSettings = if ($mode -ceq 'password') { $settings } else { $noPasswordSettings }
+        $modeExpected = [ordered]@{}
+        foreach ($name in $helperExpected.Keys) { $modeExpected[$name] = $helperExpected[$name] }
+        foreach ($name in $modeSettings.Keys) { $modeExpected[$name] = $modeSettings[$name] }
+        $resticArguments = @(Get-ResticCommonArguments -Access $mode -Repository $repositoryPath) + @('cat', 'config')
+        $resticExit = Invoke-WithPlantedEnvironment {
+            $environment = New-NativeChildEnvironment -TemporaryDirectory $temporary -Settings $modeSettings
+            Invoke-NativeToFiles `
+                -Executable $fakeNative `
+                -Arguments $resticArguments `
+                -StdoutPath (Join-Path $runFolder "restic-$mode.stdout.json") `
+                -StderrPath (Join-Path $runFolder "restic-$mode.stderr.log") `
+                -Environment $environment `
+                -TimeoutSeconds 60
+        }
+        Assert-True ($resticExit -eq 0) "the fake Restic ran for a backup in mode $mode"
+        $record = Read-FakeRecord
+        Assert-ExactEnvironment -Actual $record.Environment -Expected $modeExpected -Label "Restic ($mode)"
+        $flags = @($record.Arguments | Where-Object { $_ -ceq '--insecure-no-password' })
+        $passwordNames = @($record.Environment.Keys | Where-Object { $_ -clike 'RESTIC_PASSWORD*' })
+        if ($mode -ceq 'password') {
+            Assert-True ($flags.Count -eq 0) 'a backup with a password is opened without the flag'
+            Assert-True (($passwordNames -join ',') -ceq 'RESTIC_PASSWORD_COMMAND') (
+                'a backup with a password gets RESTIC_PASSWORD_COMMAND and no other password setting')
+            Assert-True (
+                ($record.Arguments -join '|') -ceq "--repo|$repositoryPath|--no-lock|--no-cache|cat|config"
+            ) 'a backup with a password keeps its Restic command line'
+        }
+        else {
+            Assert-True ($flags.Count -eq 1) 'a backup without a password is opened with the flag, exactly once'
+            Assert-True ($passwordNames.Count -eq 0) 'a backup without a password gets no RESTIC_PASSWORD* setting'
+            Assert-True (
+                ($record.Arguments -join '|') -ceq "--repo|$repositoryPath|--insecure-no-password|--no-lock|--no-cache|cat|config"
+            ) 'a backup without a password has the flag right after its repository'
+        }
+    }
+    Assert-FailsClosed { Get-RepositoryAccess -Configuration ([pscustomobject]@{ repository_access = 'NO_PASSWORD' }) } (
+        'a repository_access that is not exactly password or no_password is refused')
+    Assert-True (
+        (Get-RepositoryAccess -Configuration ([pscustomobject]@{ repository_access = 'no_password' })) -ceq 'no_password'
+    ) 'a configuration that says no_password is read as such'
+    Assert-FailsClosed { Get-ResticCommonArguments -Access 'No_Password' -Repository $repositoryPath } (
+        'an unsupported mode gets no Restic command line')
+    Assert-FailsClosed {
+        New-ResticPasswordCommand -Access 'no_password' -PythonExecutable 'C:\fixture\python.exe' `
+            -SecretStore 'C:\fixture\secret_store.py' -SecretFile 'C:\fixture\repository-password.dpapi.json'
+    } 'a backup without a password gets no command that reads a saved password'
+    Assert-FailsClosed {
+        Get-CloudEnvironmentSettings -Access 'no_password' -RcloneConfig 'C:\fixture\rclone.conf' `
+            -RclonePasswordCommand $rclonePasswordCommand -RcloneCacheDirectory 'C:\fixture\cache' `
+            -ResticPasswordCommand $resticPasswordCommand
+    } 'a password command is refused for a backup without a password'
+    Assert-FailsClosed {
+        Get-CloudEnvironmentSettings -Access 'password' -RcloneConfig 'C:\fixture\rclone.conf' `
+            -RclonePasswordCommand $rclonePasswordCommand -RcloneCacheDirectory 'C:\fixture\cache'
+    } 'a backup with a password needs its password command'
+
+    $helperExit =Invoke-WithPlantedEnvironment {
         $environment = New-NativeChildEnvironment -TemporaryDirectory $temporary
         Invoke-NativeToFiles `
             -Executable $fakeNative `
@@ -404,5 +486,5 @@ finally {
 [pscustomobject]@{
     passed = $true
     assertions = $script:assertions
-    covered = 'verifier rclone, Restic and helper children; rclone password helper; installer Python'
+    covered = 'verifier rclone, Restic (with and without a password) and helper children; rclone password helper; installer Python'
 } | ConvertTo-Json -Compress
