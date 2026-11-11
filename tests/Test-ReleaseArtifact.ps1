@@ -264,8 +264,17 @@ try {
     }
 
     $scenarios = @(
-        (Invoke-ReleaseScenario -Access 'password'),
-        (Invoke-ReleaseScenario -Access 'no_password')
+        foreach ($access in @('password', 'no_password')) {
+            # What the packaged programs print goes to the console, as it did before there were two scenarios; only the
+            # scenario's own result goes in the summary.
+            $output = @(Invoke-ReleaseScenario -Access $access)
+            $output | Where-Object { $_ -is [string] } | Out-Host
+            $results = @($output | Where-Object { $_ -isnot [string] })
+            if ($results.Count -ne 1 -or [string]$results[0].access -cne $access) {
+                throw "The $access scenario did not return exactly one result."
+            }
+            $results[0]
+        }
     )
 
     [pscustomobject]@{
