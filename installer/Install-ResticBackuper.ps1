@@ -2213,7 +2213,7 @@ function Assert-PasswordAvailable {
 
 # Decides how Restic opens this install's backups (see Get-RepositoryAccessDecision) and records what it found. A plan runs it as
 # a stage once the backup folder is understood; an install runs it in its preflight. The console question for a new backup
-# comes later, once everything else has passed.
+# comes later, once the folders are chosen and before the checks that depend on the answer (see Invoke-InstallPreflight).
 function Resolve-RepositoryAccess {
     Assert-RepositoryAccessValue
     $script:repositoryAccessMode = $null
@@ -3404,8 +3404,9 @@ function Read-RepositoryAccessChoice {
     }
 }
 
-# Asked once everything else has passed and before the summary. A location that already holds backups is never asked: they keep
-# the way they open, and the console says so.
+# Asked once the location and the folders are chosen, before the checks that depend on the answer (Resolve-ProtectedBindings
+# checks the recovery key's place in the profile folder only for backups with a password) and before the summary. A location
+# that already holds backups is never asked: they keep the way they open, and the console says so.
 function Invoke-RepositoryAccessQuestion {
     if ($script:repositoryAccessSource -ceq 'default' -and -not $Unattended) {
         $choice = Read-RepositoryAccessChoice
@@ -3670,6 +3671,9 @@ function Invoke-InstallPreflight {
     Resolve-RepositorySelection
     Resolve-RepositoryAccess
     Resolve-SourceSelection
+    # Asked before the checks that depend on the answer: an old recovery key file in the profile folder matters only to backups
+    # with a password, so it must not stop someone who would choose none.
+    Invoke-RepositoryAccessQuestion
     Resolve-ProtectedBindings
     Assert-RepositoryTarget
     $conflicts = @(Get-InstallationConflicts)
@@ -3677,7 +3681,6 @@ function Invoke-InstallPreflight {
         Stop-InstallFinding -Finding $conflicts[0]
     }
 
-    Invoke-RepositoryAccessQuestion
     Write-InstallSummary
     foreach ($warning in @(Get-InstallWarnings)) {
         if ($warning.console) {

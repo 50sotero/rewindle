@@ -813,14 +813,19 @@ class OptionalPasswordInstallerTests(unittest.TestCase):
 
     # --- the console ---
 
-    def test_the_console_question_comes_last_and_is_never_asked_in_a_plan(self) -> None:
+    def test_the_console_question_comes_before_the_checks_that_depend_on_it_and_is_never_asked_in_a_plan(self) -> None:
         preflight = self.defined["Invoke-InstallPreflight"]
+        # Asked once the location and the folders are chosen, before Resolve-ProtectedBindings: an old recovery key file counts only
+        # for backups with a password, so it must not refuse an install before the person could choose none.
         order = [
-            "Assert-RepositoryTarget", "Get-InstallationConflicts", "Invoke-RepositoryAccessQuestion", "Write-InstallSummary",
-            "Read-Host 'Install this configuration? [y/N]'",
+            "\n    Resolve-RepositoryAccess\n", "\n    Resolve-SourceSelection\n", "\n    Invoke-RepositoryAccessQuestion\n",
+            "\n    Resolve-ProtectedBindings\n", "\n    Assert-RepositoryTarget\n", "Get-InstallationConflicts",
+            "\n    Write-InstallSummary\n", "Read-Host 'Install this configuration? [y/N]'",
         ]
         positions = [preflight.index(name) for name in order]
         self.assertEqual(sorted(positions), positions)
+        for name in ("Invoke-RepositoryAccessQuestion", "Resolve-ProtectedBindings"):
+            self.assertEqual(1, preflight.count(name), f"{name} is called once, so the order above is the only one")
         for name in ("Invoke-RepositoryAccessQuestion", "Read-RepositoryAccessChoice"):
             self.assertGreater(self.installer.index(f"function {name} "), self.marker, name)
         choice = self.defined["Read-RepositoryAccessChoice"]

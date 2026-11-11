@@ -473,14 +473,16 @@ the JSON summary on standard output after success (it carries `repository_access
 `recovery_key_file` for backups without a password); a wizard should ignore it and read the feed.
 
 The console installer asks about the password only for a backup folder that holds no backups and when `-RepositoryAccess` was
-not given, after every other check has passed and before the summary. It says "Anyone who can open the backup folder can
-restore every backed-up file, including saved sign-ins. That includes the folder in Google Drive or on a lost USB drive." and
-"You can't change this later for these backups.", then asks "Make backups without a password? Type yes for no password, or
-press Enter to keep the password (recommended)". Yes (or y) means no password; no, n or Enter means a password; anything else
-is asked again ("Please type yes or no, or press Enter."). A backup folder that holds backups is not asked about: the console
-says "These backups were made with a password, so Setup keeps them that way.", "These backups were made without a password, so
-Setup keeps them that way." or "Setup will check whether these backups have a password and keep them that way.". The summary
-shows "Password   : yes (recommended)", or "Password   : none" followed by the same two sentences as a warning, before the
+not given. It asks once the backup folder and the folders to back up are chosen, before the checks that depend on the answer
+and before the summary, so an old recovery key file in the profile folder, which matters only to backups with a password,
+doesn't stop someone who chooses none. It says "Anyone who can open the backup folder can restore every backed-up file,
+including saved sign-ins. That includes the folder in Google Drive or on a lost USB drive." and "You can't change this later
+for these backups.", then asks "Make backups without a password? Type yes for no password, or press Enter to keep the
+password (recommended)". Yes (or y) means no password; no, n or Enter means a password; anything else is asked again ("Please
+type yes or no, or press Enter."). A backup folder that holds backups is not asked about: the console says "These backups
+were made with a password, so Setup keeps them that way.", "These backups were made without a password, so Setup keeps them
+that way." or "Setup will check whether these backups have a password and keep them that way.". The summary shows
+"Password   : yes (recommended)", or "Password   : none" followed by the same two sentences as a warning, before the
 confirmation. `-Unattended` never asks and uses the password unless `-RepositoryAccess` says otherwise.
 
 ### 3.5 Failure semantics
