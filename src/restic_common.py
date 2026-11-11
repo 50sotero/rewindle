@@ -65,6 +65,19 @@ GENERATION_TAG_PREFIX = "restic-backuper-generation:"
 CLOUD_PLACEHOLDER_POLICIES = frozenset({"strict", "allow"})
 REPOSITORY_STORAGE_MODES = frozenset({"local_ntfs", "google_drivefs_stream"})
 DEFAULT_REPOSITORY_STORAGE_MODE = "local_ntfs"
+# How Restic opens a configuration's backups (backup-config.json "repository_access", chosen in Setup and never changed
+# afterwards). "password": the random password kept with DPAPI in secret_file, given to Restic through --password-command,
+# with a recovery key; a configuration written before the choice existed has no such key and means this. "no_password":
+# Restic's empty password, so anyone who can read the backup folder can restore it: --insecure-no-password on every Restic
+# command, and no password source at all (Restic refuses the flag next to one, after it has already run a password command).
+REPOSITORY_ACCESS_VALUES = ("password", "no_password")
+DEFAULT_REPOSITORY_ACCESS = "password"
+NO_PASSWORD_FLAG = "--insecure-no-password"
+# What gives Restic a password on its command line. None of these may stand next to NO_PASSWORD_FLAG.
+PASSWORD_SOURCE_OPTIONS = ("--password-command", "--password-file", "--new-password-file")
+# How long the read-only check of an existing backup's access may take (it reads the config and key files only; on Google
+# Drive they may have to be downloaded first).
+ACCESS_PROBE_TIMEOUT_SECONDS = 180
 GOOGLE_DRIVEFS_FILESYSTEMS = frozenset({"FAT32"})
 EXPECTED_DRIVEFS_MY_DRIVE_ROOT = r"G:\My Drive"
 EXPECTED_DRIVEFS_PROCESS = "GoogleDriveFS.exe"
@@ -147,6 +160,12 @@ class SourcePreflightFailed(EngineFailure):
     """A protected folder is missing, unreadable or on another drive."""
 
     failure_code = "source_preflight_failed"
+
+
+class RepositoryAccessMismatch(EngineFailure):
+    """Backups set up without a password now ask for one (changed outside Rewindle, or replaced by other backups)."""
+
+    failure_code = "repository_access_mismatch"
 
 
 def utc_now() -> str:
@@ -336,6 +355,18 @@ def repository_storage_mode(config: dict[str, Any]) -> str:
     return str(mode)
 
 
+def repository_access(config: dict[str, Any]) -> str:
+    """How Restic opens these backups: "password" (also when the key is absent) or "no_password".
+
+    Any other value is refused, never read as a default: these backups would then be opened the wrong way. The message
+    names only the key, because Rewindle's log filters hide whole messages that contain the word password.
+    """
+    value = config.get("repository_access", DEFAULT_REPOSITORY_ACCESS)
+    if not isinstance(value, str) or value not in REPOSITORY_ACCESS_VALUES:
+        raise ValueError("unsupported repository_access")
+    return value
+
+
 def load_config(path: Path = DEFAULT_CONFIG, *, require_repository: bool = True) -> dict[str, Any]:
     path = path.resolve(strict=True)
     config = json.loads(path.read_text(encoding="utf-8"))
@@ -375,6 +406,7 @@ def load_config(path: Path = DEFAULT_CONFIG, *, require_repository: bool = True)
 
     storage_mode = repository_storage_mode(config)
     config["repository_storage_mode"] = storage_mode
+    config["repository_access"] = repository_access(config)
     raw_drivefs_root = config.get("drivefs_my_drive_root")
     legacy_drivefs_root = config.get("repository_drivefs_root")
     if raw_drivefs_root is None and legacy_drivefs_root is not None:
@@ -2002,6 +2034,10 @@ def ensure_free_space(config: dict[str, Any]) -> int:
 
 
 def password_command(config: dict[str, Any]) -> str:
+    if repository_access(config) == "no_password":
+        # Restic runs a password command before it refuses one next to --insecure-no-password, so for these backups none
+        # is ever built: an older install's DPAPI file at secret_file is left alone.
+        raise RuntimeError("these backups open without a key, so no key reveal is built for them")
     helper = PROJECT_DIRECTORY / "secret_store.py"
     # Restic parses --password-command with POSIX shellword rules even on
     # Windows. Forward slashes prevent drive paths such as C:\\Users from being
@@ -2019,6 +2055,13 @@ def password_command(config: dict[str, Any]) -> str:
     return subprocess.list2cmdline(arguments)
 
 
+def restic_credential_arguments(config: dict[str, Any]) -> list[str]:
+    """The arguments that let Restic open these backups: the DPAPI password command, or the empty-password flag."""
+    if repository_access(config) == "no_password":
+        return [NO_PASSWORD_FLAG]
+    return ["--password-command", password_command(config)]
+
+
 def restic_base(config: dict[str, Any], *, json_output: bool = False) -> list[str]:
     cache = Path(config["state_directory"]) / "cache"
     cache.mkdir(parents=True, exist_ok=True)
@@ -2026,8 +2069,7 @@ def restic_base(config: dict[str, Any], *, json_output: bool = False) -> list[st
         config["restic_executable"],
         "--repo",
         config["repository"],
-        "--password-command",
-        password_command(config),
+        *restic_credential_arguments(config),
         "--cache-dir",
         str(cache),
         "--retry-lock",
@@ -2546,7 +2588,12 @@ def restic_child_environment(
     from the Windows API, TEMP and TMP point at the protected folder next to
     the command's --cache-dir, and RESTIC_PASSWORD is set only when the caller
     passes one. The launcher's cancellation channel is never included.
+
+    A command that opens backups without a password (NO_PASSWORD_FLAG) may
+    carry no password source: Restic refuses that pair, and only after it has
+    run the password command, so this refuses it first.
     """
+    assert_no_password_source_with_flag(command, password=password)
     windows = windows_directory()
     system = windows / "System32"
     environment = {
@@ -2577,6 +2624,74 @@ def restic_child_environment(
     if password is not None:
         environment["RESTIC_PASSWORD"] = password
     return environment
+
+
+def assert_no_password_source_with_flag(
+    command: list[str] | None, *, password: str | None = None
+) -> None:
+    """Refuse a Restic command that has NO_PASSWORD_FLAG and also a password option, or is given a password."""
+    if command is None or NO_PASSWORD_FLAG not in command:
+        return
+    if password is not None:
+        raise ValueError("a command for backups without a key was given a key")
+    for argument in command:
+        for option in PASSWORD_SOURCE_OPTIONS:
+            if argument == option or argument.startswith(option + "="):
+                raise ValueError(f"a command for backups without a key also has {option}")
+
+
+def probe_repository_access(
+    restic_executable: str | Path,
+    repository: str | Path,
+    *,
+    timeout_seconds: float = ACCESS_PROBE_TIMEOUT_SECONDS,
+    runner: Callable[..., Any] | None = None,
+) -> str:
+    """Find out, without changing anything, how an existing backup location opens.
+
+    Runs `restic --repo <repository> --insecure-no-password --no-lock --no-cache cat config` with an allow-listed
+    environment, stdin closed and a time limit, and returns exactly one of:
+    "no_password" (exit 0: it opens without a password; a backup that also has password keys answers this too),
+    "password" (exit 12: no key opens with an empty password, so it needs one; an empty or not yet downloaded keys
+    folder answers the same), "missing" (exit 10 and no config file there: there is no backup), or "unknown"
+    (anything else, including exit 10 next to a config file, a time-out and a program that can't be started).
+    Restic's own text is never returned, logged or shown.
+    """
+    command = [
+        str(restic_executable),
+        "--repo",
+        str(repository),
+        NO_PASSWORD_FLAG,
+        "--no-lock",
+        "--no-cache",
+        "cat",
+        "config",
+    ]
+    run = runner if runner is not None else subprocess.run
+    try:
+        result = run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_seconds,
+            env=restic_child_environment(command),
+            shell=False,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return "unknown"
+    if result.returncode == 0:
+        return "no_password"
+    if result.returncode == 12:
+        return "password"
+    if result.returncode == 10:
+        try:
+            config_present = (Path(repository) / "config").exists()
+        except OSError:
+            return "unknown"
+        return "unknown" if config_present else "missing"
+    return "unknown"
 
 
 def _child_environment_without_cancellation_identity(

@@ -20,7 +20,11 @@ if (-not $AllowSystemInstall) {
 #   3. two complete cycles, each a real unattended install with a progress feed, run as a test administrator named by
 #      -ExpectedUserSid, then an uninstall with a progress feed and a check that the machine is clean (only the data an
 #      uninstall keeps remains). The first cycle installs the dashboard and also covers a refused second install, the recovery
-#      key checks and a refused second uninstall; the second runs with -SkipDashboard to cover the skipped phases.
+#      key checks and a refused second uninstall; the second runs with -SkipDashboard to cover the skipped phases, and with
+#      -RepositoryAccess no_password to cover backups without a password: no stored password and no recovery key, the three
+#      phases about them named for what they do, an older password and key left exactly as they were, and backups that keep the
+#      way they open on a reinstall with no choice given (from the kept state, and from the backups themselves). The first
+#      cycle also shows that an install asking for no password over backups with a password is refused and changes nothing.
 # It needs the release the build step produced. Hosted runners run every step as an administrator with UAC off, so the test
 # accounts are real local users started through the secondary-logon service, the same pattern as the restore-manager step.
 
@@ -282,6 +286,11 @@ function Get-ExpectedSequence {
     return $sequence
 }
 
+# The templates start the script under test with $ErrorActionPreference = 'Continue'. A template that runs as a task
+# (Invoke-AsUserElevated) has its streams captured with 2>, so Windows PowerShell turns every line the script, or a program it
+# starts, writes to stderr into an error record. Under 'Stop' the first one ended the template, and with it the run, while the
+# script was still working: the initializer's one-line refusal on stderr cut an install off before it wrote its result. The
+# script's own exit code says how it went. (Invoke-AsUser redirects at the process level, which has no such effect.)
 $planTemplate = @'
 $ErrorActionPreference = 'Stop'
 $directory = Join-Path ([IO.Path]::GetTempPath()) ('RewindleSetup-' + [Guid]::NewGuid().ToString('N'))
@@ -289,6 +298,7 @@ New-Item -ItemType Directory -Path $directory | Out-Null
 $planPath = Join-Path $directory 'plan.json'
 [IO.File]::WriteAllText('{{HANDOFF}}', $planPath)
 $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '{{SCRIPT}}', '-PlanOnly', '-PlanOutput', $planPath) + @({{ARGUMENTS}})
+$ErrorActionPreference = 'Continue'
 & '{{POWERSHELL}}' @arguments
 exit $LASTEXITCODE
 '@
@@ -307,6 +317,7 @@ $security.SetOwner([Security.Principal.SecurityIdentifier]::new($sid))
 $progress = Join-Path $directory 'progress.jsonl'
 [IO.File]::WriteAllText('{{HANDOFF}}', $progress)
 $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '{{SCRIPT}}', '-Unattended', '-ExpectedUserSid', $sid, '-ProgressPath', $progress) + @({{ARGUMENTS}})
+$ErrorActionPreference = 'Continue'
 & '{{POWERSHELL}}' @arguments
 exit $LASTEXITCODE
 '@
@@ -332,8 +343,30 @@ function Get-WebView2Version {
     return $null
 }
 
+# The stored password and the recovery key of the first cycle, which the cycle for backups without a password brings back in
+# place before its install to show that it leaves both exactly as they were.
+$script:olderSecret = $null
+$script:olderKey = $null
+$script:olderKeyPath = $null
+
+# How the installed program says the backups in a folder open: 20 without a password, 21 with one, 22 when it holds none.
+function Get-DetectionExit {
+    param([string]$Folder)
+    $null = & (Join-Path $installRoot 'Python\python.exe') -I -S -B (Join-Path $installRoot 'initialize_repository.py') --detect-access --repository $Folder --restic (Join-Path $installRoot 'restic.exe')
+    return $LASTEXITCODE
+}
+
+# A fingerprint of every file below a folder: where it is and what it holds.
+function Get-FolderFingerprint {
+    param([string]$Path)
+    $lines = @(foreach ($file in @(Get-ChildItem -LiteralPath $Path -Recurse -File -Force | Sort-Object FullName)) {
+        '{0}|{1}' -f $file.FullName.Substring($Path.Length), (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+    })
+    return [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($lines -join "`n")))
+}
+
 # One complete cycle on the clean machine: an install with a progress feed, what it leaves, an uninstall with a progress feed,
-# and what that leaves. -Extras adds the checks that only need to run once.
+# and what that leaves. -Extras adds the checks that only need to run once; -NoPassword makes the backups without a password.
 function Invoke-InstallCycle {
     param(
         [Parameter(Mandatory)][string]$Id,
@@ -343,12 +376,28 @@ function Invoke-InstallCycle {
         [Parameter(Mandatory)]$StandardUser,
         [Parameter(Mandatory)][string]$InstallerScript,
         [switch]$SkipDashboard,
-        [switch]$Extras
+        [switch]$Extras,
+        [switch]$NoPassword
     )
     Write-Section "$Label : a real install with a progress feed"
     $dashboard = -not $SkipDashboard
     $arguments = @('-Repository', $Repository, '-SourceList', "$docs;$photos", '-MinimumFreeGiB', '1', '-Schedule', '03:15')
     if ($SkipDashboard) { $arguments += '-SkipDashboard' }
+    # What an install with no choice given is run with; backups without a password are asked for on top of it.
+    $argumentsWithoutChoice = @($arguments)
+    $access = if ($NoPassword) { 'no_password' } else { 'password' }
+    if ($NoPassword) { $arguments += @('-RepositoryAccess', 'no_password') }
+    # An earlier installation's stored password and recovery key (kept by its uninstall) are in place before an install of
+    # backups without a password: they are none of its business, and it must leave them exactly as they are.
+    $seededSecretHash = $null
+    $seededKeyHash = $null
+    if ($NoPassword -and $null -ne $script:olderSecret) {
+        New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
+        [IO.File]::WriteAllBytes((Join-Path $stateRoot 'repository-password.dpapi.json'), $script:olderSecret)
+        [IO.File]::WriteAllBytes($script:olderKeyPath, $script:olderKey)
+        $seededSecretHash = (Get-FileHash -LiteralPath (Join-Path $stateRoot 'repository-password.dpapi.json') -Algorithm SHA256).Hash
+        $seededKeyHash = (Get-FileHash -LiteralPath $script:olderKeyPath -Algorithm SHA256).Hash
+    }
     $installName = "install-$Id"
     $run = Invoke-AsUserElevated -User $AdministratorUser -Name $installName -Template $progressTemplate -TimeoutSeconds 1800 -Values @{
         HANDOFF = Join-Path $handoff "$installName.txt"; SCRIPT = $InstallerScript; POWERSHELL = $windowsPowerShell
@@ -361,11 +410,25 @@ function Invoke-InstallCycle {
     $lines = Read-ProgressFeed $feedPath
     $skipped = @('first_backup')
     if ($SkipDashboard) { $skipped += @('webview2', 'dashboard') }
+    if ($NoPassword) { $skipped += 'credential' }
     Assert-Equal (Get-ExpectedSequence -Order $installPhaseOrder -Skipped $skipped) @(Get-PhaseSequence $lines) "$Label : the phases arrive in the documented order"
     foreach ($entry in @($lines | Where-Object { $_.type -eq 'phase' })) {
         Assert-True (-not [string]::IsNullOrWhiteSpace($entry.title)) "$Label : phase line for $($entry.phase) has a title"
         Assert-True ($entry.state -ne 'failed') "$Label : phase $($entry.phase) did not fail"
         if ($entry.state -eq 'skipped') { Assert-True (-not [string]::IsNullOrWhiteSpace($entry.detail)) "$Label : the skipped phase $($entry.phase) says why" }
+    }
+    $credentialLine = @($lines | Where-Object { $_.type -eq 'phase' -and $_.phase -eq 'credential' })[-1]
+    $repositoryLine = @($lines | Where-Object { $_.type -eq 'phase' -and $_.phase -eq 'repository' })[-1]
+    $keyLine = @($lines | Where-Object { $_.type -eq 'phase' -and $_.phase -eq 'recovery_key' })[-1]
+    if ($NoPassword) {
+        Assert-Equal @('skipped', 'Choosing no password', 'No password: this backup opens without one.') @($credentialLine.state, $credentialLine.title, $credentialLine.detail) "$Label : there is no password to create, and the phase says so"
+        Assert-Equal 'Creating the backup location' $repositoryLine.title "$Label : the backup location is not called encrypted"
+        Assert-Equal @('Saving the recovery tools', 'This backup has no password, so there is no recovery key.') @($keyLine.title, $keyLine.detail) "$Label : there is no recovery key, and the phase says so"
+    }
+    else {
+        Assert-Equal 'Creating the backup password and storing it for your account' $credentialLine.title "$Label : the credential phase keeps its title for backups with a password"
+        Assert-Equal 'Creating the encrypted backup location' $repositoryLine.title "$Label : and so does the repository phase"
+        Assert-Equal 'Writing your recovery key' $keyLine.title "$Label : and the recovery key phase"
     }
     $result = $lines[$lines.Count - 1]
     Assert-True ($result.ok -eq $true -and $null -eq $result.error) "$Label : the install ends with a successful result line"
@@ -378,23 +441,56 @@ function Invoke-InstallCycle {
     else {
         Assert-True ($null -eq $result.dashboard_executable) "$Label : there is no dashboard program without the dashboard"
     }
-    Assert-True (Test-Path -LiteralPath $result.recovery_key_path -PathType Leaf) "$Label : the recovery key file exists"
-    Assert-Equal 'ResticBackuper-RecoveryKey.txt' (Split-Path -Leaf $result.recovery_key_path) "$Label : the recovery key has its documented name"
-    Assert-True ($result.recovery_key_readable_by_user -eq $true) "$Label : the installer reports that the user can read the recovery key"
+    if ($NoPassword) {
+        Assert-True ($null -eq $result.recovery_key_path) "$Label : a backup without a password reports no recovery key"
+        Assert-True ($null -eq $result.recovery_key_readable_by_user) "$Label : and nothing about whether the user can read one"
+    }
+    else {
+        Assert-True (Test-Path -LiteralPath $result.recovery_key_path -PathType Leaf) "$Label : the recovery key file exists"
+        Assert-Equal 'ResticBackuper-RecoveryKey.txt' (Split-Path -Leaf $result.recovery_key_path) "$Label : the recovery key has its documented name"
+        Assert-True ($result.recovery_key_readable_by_user -eq $true) "$Label : the installer reports that the user can read the recovery key"
+    }
+    Assert-Equal $access $result.repository_access "$Label : the result says how the backups open"
     Assert-True (@($result.PSObject.Properties.Name) -contains 'warnings') "$Label : the result carries its warnings array"
+    $resultNames = @($result.PSObject.Properties.Name)
+    Assert-Equal @('version', 'repository_access', 'warnings') @($resultNames[([Array]::IndexOf($resultNames, 'version'))..([Array]::IndexOf($resultNames, 'warnings'))]) "$Label : the result carries the access right after the version and before the warnings"
 
     # What is on the machine.
     Assert-True (Test-Path -LiteralPath (Join-Path $installRoot 'runtime-manifest.json') -PathType Leaf) "$Label : the runtime manifest exists"
     Assert-True (Test-Path -LiteralPath (Join-Path $Repository 'config') -PathType Leaf) "$Label : the repository was initialized"
-    Assert-True (Test-Path -LiteralPath (Join-Path $stateRoot 'repository-password.dpapi.json') -PathType Leaf) "$Label : the password is stored"
+    if (-not $NoPassword) {
+        Assert-True (Test-Path -LiteralPath (Join-Path $stateRoot 'repository-password.dpapi.json') -PathType Leaf) "$Label : the password is stored"
+    }
     Assert-True (Test-Path -LiteralPath $registryKey) "$Label : the Installed apps entry exists"
     Assert-True ($null -ne (Get-ScheduledTask -TaskName 'ResticBackuper' -ErrorAction SilentlyContinue)) "$Label : the backup task exists"
     Assert-Equal $dashboard ($null -ne (Get-ScheduledTask -TaskName 'ResticBackuperDashboard' -ErrorAction SilentlyContinue)) "$Label : the dashboard task exists exactly when the dashboard was installed"
     Assert-Equal $dashboard (Test-Path -LiteralPath $shortcutPath -PathType Leaf) "$Label : the Start menu shortcut exists exactly when the dashboard was installed"
     $configuration = [IO.File]::ReadAllText((Join-Path $installRoot 'backup-config.json')) | ConvertFrom-Json
     Assert-Equal $Repository $configuration.repository "$Label : the configuration names the repository"
-    Assert-Equal $result.recovery_key_path $configuration.recovery_key_file "$Label : the configuration names the recovery key the result reports"
-    Assert-True ([IO.File]::ReadAllText($result.recovery_key_path) -match '(?m)^Password:\s*\S{40,}') "$Label : the recovery key holds a password"
+    Assert-Equal $access $configuration.repository_access "$Label : the configuration says how the backups open"
+    $recoveryManifest = [IO.File]::ReadAllText((Join-Path $configuration.recovery_tools_directory 'recovery-manifest.json')) | ConvertFrom-Json
+    Assert-Equal $access $recoveryManifest.repository_access "$Label : the recovery tools say the same"
+    if ($NoPassword) {
+        # No stored password and no recovery key of its own; an older pair that was there is exactly as it was.
+        $secretPath = Join-Path $stateRoot 'repository-password.dpapi.json'
+        if ($null -ne $seededSecretHash) {
+            Assert-Equal $seededSecretHash (Get-FileHash -LiteralPath $secretPath -Algorithm SHA256).Hash "$Label : an older stored password is exactly as it was"
+            Assert-Equal $seededKeyHash (Get-FileHash -LiteralPath $script:olderKeyPath -Algorithm SHA256).Hash "$Label : an older recovery key is exactly as it was"
+        }
+        else {
+            Assert-True (-not (Test-Path -LiteralPath $secretPath)) "$Label : no password is stored"
+            Assert-True (-not (Test-Path -LiteralPath $configuration.recovery_key_file)) "$Label : no recovery key is written"
+        }
+        Assert-Equal 20 (Get-DetectionExit -Folder $Repository) "$Label : the installed program says these backups have no password"
+        # Restic opens the new backups with its no-password flag and no password command, and no backup is started to prove it.
+        $openCheck = @(& (Join-Path $installRoot 'Python\python.exe') -I -S -B -c "import json, sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import restic_common; config = json.loads(Path(sys.argv[1], 'backup-config.json').read_text(encoding='utf-8')); command = restic_common.restic_base(config); assert '--insecure-no-password' in command and '--password-command' not in command, command; done = restic_common.run_capture(command + ['cat', 'config']); assert done.returncode == 0, done.returncode; print('opened')" $installRoot 2>&1)
+        Write-Host ($openCheck -join [Environment]::NewLine)
+        Assert-Equal 'opened' ([string]$openCheck[-1]).Trim() "$Label : Restic opens the new backups without a password"
+    }
+    else {
+        Assert-Equal $result.recovery_key_path $configuration.recovery_key_file "$Label : the configuration names the recovery key the result reports"
+        Assert-True ([IO.File]::ReadAllText($result.recovery_key_path) -match '(?m)^Password:\s*\S{40,}') "$Label : the recovery key holds a password"
+    }
     $manifestBefore = (Get-FileHash -LiteralPath (Join-Path $installRoot 'runtime-manifest.json') -Algorithm SHA256).Hash
 
     if ($Extras) {
@@ -425,6 +521,12 @@ function Invoke-InstallCycle {
         # rightly refuses to remove a folder that holds one.
         Assert-Equal 0 @(Get-ChildItem -LiteralPath $installRoot -Recurse -Force -Filter '__pycache__' -Directory).Count "$Label : running the engine leaves no bytecode cache in the program folder"
         Assert-True (Test-Path -LiteralPath (Join-Path $stateRoot 'plan-state.json') -PathType Leaf) "$Label : the plan state is in the state folder the uninstall keeps"
+
+        # How the installed program tells backups with a password from a folder that holds none: by exit code, changing nothing.
+        Assert-Equal 21 (Get-DetectionExit -Folder $Repository) "$Label : the installed program says these backups have a password"
+        $emptyBackups = Join-Path $root 'detect-empty'
+        New-Item -ItemType Directory -Path $emptyBackups -Force | Out-Null
+        Assert-Equal 22 (Get-DetectionExit -Folder $emptyBackups) "$Label : and that an empty folder holds no backups"
     }
 
     Write-Section "$Label : uninstall with a progress feed"
@@ -450,7 +552,13 @@ function Invoke-InstallCycle {
     Assert-True ($uninstallResult.removed.installed_apps_entry -eq $true) "$Label : the Installed apps entry is reported removed"
     Assert-Equal $stateRoot $uninstallResult.kept.state_root "$Label : the uninstall keeps the state folder"
     Assert-Equal $Repository $uninstallResult.kept.repository "$Label : the uninstall keeps the repository"
-    Assert-Equal $result.recovery_key_path $uninstallResult.kept.recovery_key "$Label : the uninstall keeps the recovery key"
+    Assert-Equal $access $uninstallResult.kept.repository_access "$Label : the uninstall says how the backups it keeps open"
+    if ($NoPassword) {
+        Assert-True ($null -eq $uninstallResult.kept.recovery_key) "$Label : there is no recovery key to keep"
+    }
+    else {
+        Assert-Equal $result.recovery_key_path $uninstallResult.kept.recovery_key "$Label : the uninstall keeps the recovery key"
+    }
     Assert-True (-not [string]::IsNullOrWhiteSpace($uninstallResult.kept.recovery_tools)) "$Label : the uninstall reports the recovery tools it keeps"
 
     Write-Section "$Label : the machine is clean, and only the kept data remains"
@@ -461,12 +569,43 @@ function Invoke-InstallCycle {
         Assert-True ($null -eq (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) "$Label : the scheduled task $name is gone"
     }
     Assert-True (Test-Path -LiteralPath (Join-Path $Repository 'config') -PathType Leaf) "$Label : the repository is kept"
-    Assert-True (Test-Path -LiteralPath $result.recovery_key_path -PathType Leaf) "$Label : the recovery key is kept"
+    if ($NoPassword) {
+        if ($null -ne $seededSecretHash) {
+            Assert-Equal $seededSecretHash (Get-FileHash -LiteralPath (Join-Path $stateRoot 'repository-password.dpapi.json') -Algorithm SHA256).Hash "$Label : the older stored password is still exactly as it was"
+            Assert-Equal $seededKeyHash (Get-FileHash -LiteralPath $script:olderKeyPath -Algorithm SHA256).Hash "$Label : and so is the older recovery key"
+        }
+    }
+    else {
+        Assert-True (Test-Path -LiteralPath $result.recovery_key_path -PathType Leaf) "$Label : the recovery key is kept"
+    }
     Assert-True (Test-Path -LiteralPath $stateRoot -PathType Container) "$Label : the state folder is kept"
     Assert-True (Test-Path -LiteralPath $uninstallResult.kept.recovery_tools -PathType Container) "$Label : the recovery tools are kept"
     Assert-Equal @($stateRoot) @(Get-InstallationFootprint) "$Label : only the state folder remains of the Rewindle footprint (the repository and recovery key live elsewhere)"
 
     if ($Extras) {
+        # Existing backups never change the way they open: asking for no password over backups with a password is refused,
+        # before anything is changed, with the words for it, and the backups, the stored password and the key stay as they are.
+        $treeBefore = Get-FolderFingerprint -Path $Repository
+        $secretBefore = (Get-FileHash -LiteralPath (Join-Path $stateRoot 'repository-password.dpapi.json') -Algorithm SHA256).Hash
+        $keyBefore = (Get-FileHash -LiteralPath $result.recovery_key_path -Algorithm SHA256).Hash
+        $run = Invoke-AsUserElevated -User $AdministratorUser -Name 'install-no-password-over-password' -Template $progressTemplate -TimeoutSeconds 1800 -Values @{
+            HANDOFF = Join-Path $handoff 'install-no-password-over-password.txt'; SCRIPT = $InstallerScript; POWERSHELL = $windowsPowerShell
+            ARGUMENTS = (ConvertTo-LiteralList ($argumentsWithoutChoice + @('-RepositoryAccess', 'no_password')))
+        }
+        Show-Run $run
+        Assert-True ($run.ExitCode -ne 0) "$Label : an install that asks for no password over backups with a password fails"
+        $refused = Read-ProgressFeed (Get-HandoffPath 'install-no-password-over-password.txt')
+        $refusedResult = $refused[$refused.Count - 1]
+        Assert-Equal 'repository_access_mismatch' $refusedResult.error.code "$Label : the refusal says the backups do not open the way that was chosen"
+        Assert-Equal 'repository:failed' (@(Get-PhaseSequence $refused)[-1]) "$Label : the repository phase is the one that failed"
+        Assert-True ($refusedResult.error.message.StartsWith('The backups in this location are protected by a password, but you chose no password.')) "$Label : the refusal says what happened in plain words"
+        Assert-True ($refusedResult.error.message.EndsWith('Setup undid its changes, and your backups were not touched.')) "$Label : and that the backups were not touched"
+        Assert-Equal 'no_password' $refusedResult.repository_access "$Label : the refused install's result says what was asked for"
+        Assert-Equal $treeBefore (Get-FolderFingerprint -Path $Repository) "$Label : the refused install left every file of the backups as it was"
+        Assert-Equal $secretBefore (Get-FileHash -LiteralPath (Join-Path $stateRoot 'repository-password.dpapi.json') -Algorithm SHA256).Hash "$Label : and the stored password"
+        Assert-Equal $keyBefore (Get-FileHash -LiteralPath $result.recovery_key_path -Algorithm SHA256).Hash "$Label : and the recovery key"
+        Assert-True (-not (Test-Path -LiteralPath $installRoot)) "$Label : and nothing of the program was left installed"
+
         # A reinstall over the state the uninstall kept (with the plan recorded above) continues the same backup plan, which the
         # engine requires: it refuses every backup whose plan_id differs from the kept plan-state.json or whose generation is lower.
         $run = Invoke-AsUserElevated -User $AdministratorUser -Name 'reinstall-kept-state' -Template $progressTemplate -TimeoutSeconds 1800 -Values @{
@@ -546,9 +685,57 @@ function Invoke-InstallCycle {
         Assert-True ($null -eq (Get-ScheduledTask -TaskName 'ResticBackuperGoogleDriveSync' -ErrorAction SilentlyContinue)) "$Label : the leftover launcher-started Google Drive task is gone"
     }
 
+    if ($NoPassword) {
+        # Reinstalls with no choice given keep backups without a password: first from the state the uninstall kept (the kept
+        # record says so), then, with that state and the recovery tools gone, from the backups themselves (the installed
+        # program asks Restic). Each is followed by an uninstall.
+        $laterArguments = $argumentsWithoutChoice
+        foreach ($round in @(
+            @{ Name = 'recorded'; Wipe = $false; Detail = ' They have no password.' },
+            @{ Name = 'detected'; Wipe = $true; Detail = ' They have no password, so Setup kept that.' }
+        )) {
+            if ($round.Wipe) {
+                Remove-Item -LiteralPath $stateRoot -Recurse -Force
+                Remove-Item -LiteralPath $uninstallResult.kept.recovery_tools -Recurse -Force
+            }
+            $roundName = "reinstall-no-choice-$($round.Name)"
+            $run = Invoke-AsUserElevated -User $AdministratorUser -Name $roundName -Template $progressTemplate -TimeoutSeconds 1800 -Values @{
+                HANDOFF = Join-Path $handoff "$roundName.txt"; SCRIPT = $InstallerScript; POWERSHELL = $windowsPowerShell
+                ARGUMENTS = (ConvertTo-LiteralList $laterArguments)
+            }
+            Show-Run $run
+            Assert-Equal 0 $run.ExitCode "$Label : a reinstall with no choice given exits 0 (backups known from $($round.Name))"
+            $roundLines = Read-ProgressFeed (Get-HandoffPath "$roundName.txt")
+            $roundResult = $roundLines[$roundLines.Count - 1]
+            Assert-True ($roundResult.ok -eq $true) "$Label : the reinstall ends with a successful result line ($($round.Name))"
+            Assert-Equal 'no_password' $roundResult.repository_access "$Label : the backups keep their way of opening ($($round.Name))"
+            Assert-True ($null -eq $roundResult.recovery_key_path) "$Label : and have no recovery key ($($round.Name))"
+            $roundCredential = @($roundLines | Where-Object { $_.type -eq 'phase' -and $_.phase -eq 'credential' })[-1]
+            Assert-Equal 'skipped' $roundCredential.state "$Label : so no password is made ($($round.Name))"
+            $roundRepository = @($roundLines | Where-Object { $_.type -eq 'phase' -and $_.phase -eq 'repository' -and $_.state -eq 'completed' })[-1]
+            Assert-Equal ('Your existing backups in this location were kept and reused.' + $round.Detail) $roundRepository.detail "$Label : the repository phase says the backups were kept, and how they open ($($round.Name))"
+            $roundConfiguration = [IO.File]::ReadAllText((Join-Path $installRoot 'backup-config.json')) | ConvertFrom-Json
+            Assert-Equal 'no_password' $roundConfiguration.repository_access "$Label : the configuration says the same ($($round.Name))"
+            $run = Invoke-AsUserElevated -User $AdministratorUser -Name "uninstall-$roundName" -Template $progressTemplate -TimeoutSeconds 900 -Values @{
+                HANDOFF = Join-Path $handoff "uninstall-$roundName.txt"; SCRIPT = (Join-Path $installRoot 'Uninstall-ResticBackuper.ps1'); POWERSHELL = $windowsPowerShell; ARGUMENTS = ''
+            }
+            Assert-Equal 0 $run.ExitCode "$Label : the reinstalled copy uninstalls ($($round.Name))"
+        }
+        if ($null -ne $seededKeyHash) {
+            Assert-Equal $seededKeyHash (Get-FileHash -LiteralPath $script:olderKeyPath -Algorithm SHA256).Hash "$Label : the older recovery key is still exactly as it was after the reinstalls"
+        }
+    }
+
     # Leave a clean machine for the next cycle: the data an uninstall keeps is removed here, because this test created it.
+    if (-not $NoPassword) {
+        # The next cycle brings this installation's stored password and recovery key back before its own install.
+        $script:olderSecret = [IO.File]::ReadAllBytes((Join-Path $stateRoot 'repository-password.dpapi.json'))
+        $script:olderKey = [IO.File]::ReadAllBytes($result.recovery_key_path)
+        $script:olderKeyPath = $result.recovery_key_path
+    }
     Remove-Item -LiteralPath $stateRoot -Recurse -Force
-    Remove-Item -LiteralPath $result.recovery_key_path -Force
+    if ($null -ne $result.recovery_key_path) { Remove-Item -LiteralPath $result.recovery_key_path -Force }
+    if ($null -ne $script:olderKeyPath -and (Test-Path -LiteralPath $script:olderKeyPath)) { Remove-Item -LiteralPath $script:olderKeyPath -Force }
     Remove-Item -LiteralPath (Split-Path -Parent $Repository) -Recurse -Force
     Assert-Equal @() @(Get-InstallationFootprint) "$Label : nothing of Rewindle remains after the test removed the data an uninstall keeps"
 }
@@ -682,6 +869,7 @@ try {
 $ErrorActionPreference = 'Stop'
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $outside = Join-Path $env:SystemRoot 'rewindle-contract-progress.jsonl'
+$ErrorActionPreference = 'Continue'
 & '{{POWERSHELL}}' -NoProfile -ExecutionPolicy Bypass -File '{{SCRIPT}}' -Unattended -ExpectedUserSid $sid -ProgressPath $outside {{ARGUMENTS}}
 exit $LASTEXITCODE
 '@ -Values @{ SCRIPT = $installerScript; POWERSHELL = $windowsPowerShell; ARGUMENTS = (($common | ForEach-Object { "'" + $_ + "'" }) -join ' ') }
@@ -692,8 +880,8 @@ exit $LASTEXITCODE
     # ---------------------------------------------------------------------------------------------------------------------
     Invoke-InstallCycle -Id 'cycle1' -Label 'cycle 1 (with the dashboard)' -Repository $firstRepository -AdministratorUser $administratorUser `
         -StandardUser $standardUser -InstallerScript $installerScript -Extras
-    Invoke-InstallCycle -Id 'cycle2' -Label 'cycle 2 (without the dashboard)' -Repository (Join-Path $root 'install-2\Backup') -AdministratorUser $administratorUser `
-        -StandardUser $standardUser -InstallerScript $installerScript -SkipDashboard
+    Invoke-InstallCycle -Id 'cycle2' -Label 'cycle 2 (without the dashboard, without a password)' -Repository (Join-Path $root 'install-2\Backup') -AdministratorUser $administratorUser `
+        -StandardUser $standardUser -InstallerScript $installerScript -SkipDashboard -NoPassword
 
     $succeeded = $true
     [pscustomobject]@{
@@ -703,6 +891,8 @@ exit $LASTEXITCODE
         failing_installs = 'passed'
         install_with_progress = 'passed'
         install_without_dashboard = 'passed'
+        install_without_password = 'passed'
+        existing_backups_never_switched = 'passed'
         uninstall_with_progress = 'passed'
         machine_clean_after_uninstall = 'passed'
     } | ConvertTo-Json

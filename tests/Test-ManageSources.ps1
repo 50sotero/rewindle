@@ -272,6 +272,69 @@ function Invoke-WrappersBlockedByJournal {
     }
 }
 
+# Markers for Set-FixtureAccess: leave a file's repository_access as it is, or take the key out (the older shape).
+$script:LeaveAccess = [pscustomobject]@{ marker = 'leave' }
+$script:RemoveAccess = [pscustomobject]@{ marker = 'remove' }
+
+function Set-JsonFileAccess {
+    param([string]$Path, [object]$Value)
+    if ([object]::ReferenceEquals($Value, $script:LeaveAccess)) { return }
+    $json = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    $property = $json.PSObject.Properties['repository_access']
+    if ([object]::ReferenceEquals($Value, $script:RemoveAccess)) {
+        if ($null -ne $property) { $json.PSObject.Properties.Remove('repository_access') }
+    }
+    elseif ($null -eq $property) { $json | Add-Member -NotePropertyName 'repository_access' -NotePropertyValue $Value }
+    else { $property.Value = $Value }
+    Write-JsonFile -Path $Path -Value $json
+}
+
+function Set-FixtureAccess {
+    # Writes repository_access (or takes it out) in the protected configuration, the recovery copy of it and the recovery
+    # manifest, then rebinds the two manifests' records of the configurations, so only the mode differs between them.
+    param(
+        [object]$Live = $script:LeaveAccess,
+        [object]$RecoveryConfig = $script:LeaveAccess,
+        [object]$RecoveryManifest = $script:LeaveAccess
+    )
+    Set-JsonFileAccess -Path $script:configPath -Value $Live
+    Set-JsonFileAccess -Path $script:recoveryConfigPath -Value $RecoveryConfig
+    Set-JsonFileAccess -Path $script:recoveryManifestPath -Value $RecoveryManifest
+    $runtime = Get-Content -LiteralPath $script:runtimeManifestPath -Raw | ConvertFrom-Json
+    $runtimeRecord = @($runtime.files | Where-Object relative_path -eq 'backup-config.json')
+    $runtimeRecord[0].bytes = (Get-Item -LiteralPath $script:configPath).Length
+    $runtimeRecord[0].sha256 = Get-Hash -Path $script:configPath
+    Write-JsonFile -Path $script:runtimeManifestPath -Value $runtime
+    $recovery = Get-Content -LiteralPath $script:recoveryManifestPath -Raw | ConvertFrom-Json
+    $recoveryRecord = @($recovery.files | Where-Object name -eq 'backup-config.json')
+    $recoveryRecord[0].bytes = (Get-Item -LiteralPath $script:recoveryConfigPath).Length
+    $recoveryRecord[0].sha256 = Get-Hash -Path $script:recoveryConfigPath
+    Write-JsonFile -Path $script:recoveryManifestPath -Value $recovery
+}
+
+function Get-JsonFileAccess {
+    # The value at repository_access, or 'absent'.
+    param([string]$Path)
+    $json = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    $property = $json.PSObject.Properties['repository_access']
+    if ($null -eq $property) { return 'absent' }
+    return [string]$property.Value
+}
+
+function Assert-AccessRefused {
+    # A source change and a plain listing both refuse the fixture as it is now, with the reason named, and change nothing.
+    param([string]$Label, [string]$Pattern)
+    $before = Get-TransactionDigests
+    foreach ($action in @('List', 'Add')) {
+        $result = Invoke-Manager -Action $action -Path $(if ($action -eq 'Add') { $addSource } else { '' })
+        Assert-True -Condition ($result.ExitCode -eq 1 -and -not [bool]$result.Json.ok -and
+            [string]$result.Json.error -match $Pattern) `
+            -Message "$Label is refused by $action with its reason: $($result.Text)"
+        Assert-DigestsEqual -Expected $before -Actual (Get-TransactionDigests) `
+            -Message "$Label changed no tracked file for $action"
+    }
+}
+
 function Invoke-RecoveryAndAssertOld {
     param([Collections.IDictionary]$Expected, [string]$Boundary)
     $result = Invoke-Manager -Action 'List' -Path ''
@@ -562,6 +625,83 @@ try {
     Assert-True -Condition ($script:provedChildAliveCount -eq 11) `
         -Message 'all eleven abrupt-boundary tests proved the child alive before Stop-Process -Force'
 
+    # Whether the backups have a password: backup-config.json "repository_access". Everything above ran on a configuration
+    # without the key, the shape every older install has: that still works. A missing key counts as 'password' in each
+    # of the three files, so the key written as 'password' in only one of them is the same mode.
+    Assert-True -Condition ((Get-JsonFileAccess -Path $script:configPath) -ceq 'absent' -and
+        (Get-JsonFileAccess -Path $script:recoveryConfigPath) -ceq 'absent' -and
+        (Get-JsonFileAccess -Path $script:recoveryManifestPath) -ceq 'absent') `
+        -Message 'the fixture so far has no repository_access in any file (an older install)'
+    Set-FixtureAccess -RecoveryConfig 'password'
+    $mixedAdd = Invoke-Manager -Action 'Add' -Path $addSource
+    Assert-True -Condition ($mixedAdd.ExitCode -eq 0 -and [bool]$mixedAdd.Json.ok) `
+        -Message "a recovery copy that says password beside a configuration without the key is the same mode: $($mixedAdd.Text)"
+    Assert-True -Condition ((Get-JsonFileAccess -Path $script:configPath) -ceq 'absent' -and
+        (Get-JsonFileAccess -Path $script:recoveryConfigPath) -ceq 'password') `
+        -Message 'a source change adds no repository_access to the configuration and keeps the recovery copy as it was'
+    Assert-TransactionValid
+    $mixedRemove = Invoke-Manager -Action 'Remove' -Path $addSource
+    Assert-True -Condition ($mixedRemove.ExitCode -eq 0 -and [bool]$mixedRemove.Json.ok) -Message "mixed-shape remove: $($mixedRemove.Text)"
+    Set-FixtureAccess -RecoveryConfig $script:RemoveAccess
+
+    # A backup without a password: a source change keeps the mode in the protected configuration, the recovery copy of it
+    # and the recovery manifest, and the manifests still bind the configurations.
+    Set-FixtureAccess -Live 'no_password' -RecoveryConfig 'no_password' -RecoveryManifest 'no_password'
+    Assert-TransactionValid
+    $noPasswordList = Invoke-Manager -Action 'List' -Path ''
+    Assert-True -Condition ($noPasswordList.ExitCode -eq 0 -and [bool]$noPasswordList.Json.ok) `
+        -Message "a listing accepts backups without a password when all three files say so: $($noPasswordList.Text)"
+    $noPasswordAdd = Invoke-Manager -Action 'Add' -Path $addSource
+    Assert-True -Condition ($noPasswordAdd.ExitCode -eq 0 -and [bool]$noPasswordAdd.Json.ok) `
+        -Message "a source change on backups without a password: $($noPasswordAdd.Text)"
+    Assert-True -Condition ((Get-JsonFileAccess -Path $script:configPath) -ceq 'no_password' -and
+        (Get-JsonFileAccess -Path $script:recoveryConfigPath) -ceq 'no_password' -and
+        (Get-JsonFileAccess -Path $script:recoveryManifestPath) -ceq 'no_password') `
+        -Message 'a source change keeps repository_access in the live configuration, the recovery copy and the manifest'
+    Assert-True -Condition (@((Get-Content -LiteralPath $script:recoveryConfigPath -Raw | ConvertFrom-Json).sources) -contains $addSource) `
+        -Message 'the source reached the recovery copy of a configuration without a password'
+    Assert-TransactionValid
+    $noPasswordRemove = Invoke-Manager -Action 'Remove' -Path $addSource
+    Assert-True -Condition ($noPasswordRemove.ExitCode -eq 0 -and [bool]$noPasswordRemove.Json.ok) `
+        -Message "removing a source from backups without a password: $($noPasswordRemove.Text)"
+    Assert-True -Condition ((Get-JsonFileAccess -Path $script:configPath) -ceq 'no_password' -and
+        (Get-JsonFileAccess -Path $script:recoveryConfigPath) -ceq 'no_password') `
+        -Message 'a source removal keeps repository_access too'
+    Assert-TransactionValid
+
+    # A recovery bundle (its copy of the configuration, or its manifest) that names the other mode is refused, never
+    # taken over: the next source change or listing stops with the reason and every tracked file stays as it was.
+    foreach ($case in @(
+        [pscustomobject]@{ Label = 'a recovery copy without the key beside a live no_password'; Live = 'no_password'; Config = $script:RemoveAccess; Manifest = 'no_password' }
+        [pscustomobject]@{ Label = 'a recovery copy that says password beside a live no_password'; Live = 'no_password'; Config = 'password'; Manifest = 'no_password' }
+        [pscustomobject]@{ Label = 'a recovery manifest without the key beside a live no_password'; Live = 'no_password'; Config = 'no_password'; Manifest = $script:RemoveAccess }
+        [pscustomobject]@{ Label = 'a recovery manifest that says password beside a live no_password'; Live = 'no_password'; Config = 'no_password'; Manifest = 'password' }
+        [pscustomobject]@{ Label = 'a recovery copy that says no_password beside a live configuration without the key'; Live = $script:RemoveAccess; Config = 'no_password'; Manifest = $script:RemoveAccess }
+        [pscustomobject]@{ Label = 'a recovery manifest that says no_password beside a live configuration that says password'; Live = 'password'; Config = 'password'; Manifest = 'no_password' }
+    )) {
+        Set-FixtureAccess -Live $case.Live -RecoveryConfig $case.Config -RecoveryManifest $case.Manifest
+        Assert-AccessRefused -Label $case.Label -Pattern 'repository_access is not synchronized'
+    }
+
+    # Only the two exact lower-case values are accepted, in each of the three files; an unsupported value is refused by
+    # name, never read as one of them.
+    foreach ($unsupported in @('NO_PASSWORD', 'Password', 'no-password', '', 5, $true)) {
+        $text = if ($unsupported -is [string]) { "'$unsupported'" } else { [string]$unsupported }
+        Set-FixtureAccess -Live $unsupported -RecoveryConfig $script:RemoveAccess -RecoveryManifest $script:RemoveAccess
+        Assert-AccessRefused -Label "an unsupported live repository_access $text" -Pattern 'unsupported repository_access'
+        Set-FixtureAccess -Live $script:RemoveAccess -RecoveryConfig $unsupported -RecoveryManifest $script:RemoveAccess
+        Assert-AccessRefused -Label "an unsupported recovery-copy repository_access $text" -Pattern 'unsupported repository_access'
+        Set-FixtureAccess -Live $script:RemoveAccess -RecoveryConfig $script:RemoveAccess -RecoveryManifest $unsupported
+        Assert-AccessRefused -Label "an unsupported recovery-manifest repository_access $text" -Pattern 'unsupported repository_access'
+    }
+
+    # Back to the older shape, as the owner's installation has it: the rest of this suite runs on that.
+    Set-FixtureAccess -Live $script:RemoveAccess -RecoveryConfig $script:RemoveAccess -RecoveryManifest $script:RemoveAccess
+    $olderShapeList = Invoke-Manager -Action 'List' -Path ''
+    Assert-True -Condition ($olderShapeList.ExitCode -eq 0 -and [bool]$olderShapeList.Json.ok) `
+        -Message "a configuration without repository_access in any file works again: $($olderShapeList.Text)"
+    Assert-TransactionValid
+
     [IO.Directory]::Delete($firstSource, $true)
     $replacementAdd = Invoke-Manager -Action 'Add' -Path $replacementSource
     Assert-True -Condition ($replacementAdd.ExitCode -eq 0 -and [bool]$replacementAdd.Json.ok) `
@@ -636,7 +776,7 @@ try {
     $global:LASTEXITCODE = 0
     [pscustomobject]@{
         ok = $true
-        tests = 23
+        tests = 27
         add_remove = 'passed'
         nonce_bound_result_channel = 'passed'
         exact_canary_required = 'passed'
@@ -653,6 +793,10 @@ try {
         two_simultaneously_offline_source_removals = 'passed'
         offline_sole_source_replacement = 'passed'
         runtime_manifest_after_add_remove = 'passed'
+        repository_access_kept_by_a_source_change = 'passed'
+        repository_access_older_shape_still_works = 'passed'
+        repository_access_mismatch_refused = 'passed'
+        repository_access_unsupported_value_refused = 'passed'
     } | ConvertTo-Json -Depth 3
 }
 finally {

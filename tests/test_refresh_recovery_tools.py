@@ -26,6 +26,10 @@ from refresh_recovery_tools import (  # noqa: E402
 )
 
 
+import refresh_recovery_tools as refresher  # noqa: E402
+import restic_common  # noqa: E402
+
+
 PLAN_ID = "7f51ea2a-a888-4c46-83a6-d572bf234847"
 
 
@@ -387,6 +391,181 @@ class RecoveryRefreshTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "journal header"):
                 refresh(source_path, bundle)
             validate_bundle(bundle)
+
+
+class RepositoryAccessTests(unittest.TestCase):
+    """Whether the backups have a password (repository_access): carried by the bundle, never silently changed."""
+
+    UNSUPPORTED = ("No_Password", "PASSWORD", "", None, 5, True, ["no_password"], {"mode": "no_password"})
+
+    def config_with(self, access: object = None, **changes: object) -> dict[str, object]:
+        config = plan_config([r"E:\Projects"], **changes)
+        if access is not None:
+            config["repository_access"] = access
+        return config
+
+    def make_bundle(self, root: Path, config: dict[str, object], manifest_access: object = None) -> Path:
+        bundle = root / "RecoveryTools"
+        create_bundle(bundle, config)
+        if manifest_access is not None:
+            manifest = json.loads((bundle / MANIFEST_NAME).read_text(encoding="utf-8"))
+            manifest["repository_access"] = manifest_access
+            (bundle / MANIFEST_NAME).write_bytes(json_bytes(manifest))
+        return bundle
+
+    def snapshot(self, bundle: Path) -> dict[str, bytes]:
+        return {item.name: item.read_bytes() for item in sorted(bundle.parent.iterdir()) if item.is_file()} | {
+            item.name: item.read_bytes() for item in sorted(bundle.iterdir()) if item.is_file()
+        }
+
+    def test_the_rule_is_the_one_restic_common_has(self) -> None:
+        self.assertEqual(restic_common.REPOSITORY_ACCESS_VALUES, refresher.REPOSITORY_ACCESS_VALUES)
+        self.assertEqual(restic_common.DEFAULT_REPOSITORY_ACCESS, refresher.DEFAULT_REPOSITORY_ACCESS)
+        for config in ({}, {"repository_access": "password"}, {"repository_access": "no_password"}):
+            with self.subTest(config=config):
+                self.assertEqual(restic_common.repository_access(config), refresher.repository_access(config))
+        for value in self.UNSUPPORTED:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError) as ours:
+                    refresher.repository_access({"repository_access": value})
+                with self.assertRaises(ValueError) as theirs:
+                    restic_common.repository_access({"repository_access": value})
+                self.assertEqual("unsupported repository_access", str(ours.exception))
+                self.assertEqual(str(theirs.exception), str(ours.exception))
+
+    def test_the_mode_is_not_a_recovery_local_field(self) -> None:
+        # A local field is kept from the bundle when the live configuration is merged over it; the mode must come from the
+        # live configuration (and a difference is refused first).
+        self.assertNotIn("repository_access", refresher.RECOVERY_LOCAL_FIELDS)
+
+    def test_an_older_bundle_without_the_key_refreshes_as_a_bundle_with_a_password(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="recovery-refresh-access-old-") as root_text:
+            root = Path(root_text)
+            source_path = root / "source-config.json"
+            source_path.write_bytes(json_bytes(self.config_with(generation=2, use_vss=True)))
+            bundle = self.make_bundle(root, self.config_with())
+
+            result = refresh(source_path, bundle)
+
+            self.assertEqual("refreshed", result["state"])
+            self.assertNotIn("repository_access", result["changed_fields"])
+            final = validate_bundle(bundle)
+            self.assertNotIn("repository_access", final["config"])
+            self.assertEqual("password", final["manifest"]["repository_access"])
+
+    def test_a_current_older_bundle_is_left_byte_for_byte_alone(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="recovery-refresh-access-current-") as root_text:
+            root = Path(root_text)
+            source_path = root / "source-config.json"
+            source_path.write_bytes(json_bytes(self.config_with()))
+            bundle = self.make_bundle(root, self.config_with())
+            before = self.snapshot(bundle)
+
+            self.assertEqual("already_current", refresh(source_path, bundle)["state"])
+
+            self.assertEqual(before, self.snapshot(bundle))
+            self.assertNotIn("repository_access", json.loads((bundle / MANIFEST_NAME).read_text(encoding="utf-8")))
+
+    def test_a_bundle_without_a_password_keeps_its_mode_through_a_refresh(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="recovery-refresh-access-none-") as root_text:
+            root = Path(root_text)
+            source_path = root / "source-config.json"
+            source_path.write_bytes(json_bytes(self.config_with("no_password", generation=2, use_vss=True)))
+            bundle = self.make_bundle(root, self.config_with("no_password"), manifest_access="no_password")
+
+            result = refresh(source_path, bundle)
+
+            self.assertEqual("refreshed", result["state"])
+            final = validate_bundle(bundle)
+            self.assertEqual("no_password", final["config"]["repository_access"])
+            self.assertEqual("no_password", final["manifest"]["repository_access"])
+            self.assertEqual({"keep": True}, final["manifest"]["standalone_marker"])
+
+    def test_a_difference_between_the_live_configuration_and_the_bundle_is_refused_before_anything_is_merged(self) -> None:
+        cases = (
+            ("no_password", None),
+            (None, "no_password"),
+            ("password", "no_password"),
+            ("no_password", "password"),
+        )
+        for live, recorded in cases:
+            with self.subTest(live=live, bundle=recorded):
+                with tempfile.TemporaryDirectory(prefix="recovery-refresh-access-differ-") as root_text:
+                    root = Path(root_text)
+                    source_path = root / "source-config.json"
+                    source_path.write_bytes(json_bytes(self.config_with(live, generation=2, use_vss=True)))
+                    bundle = self.make_bundle(root, self.config_with(recorded), manifest_access=recorded)
+                    before = self.snapshot(bundle)
+
+                    with mock.patch.object(refresher, "merge_config", side_effect=AssertionError("merged")):
+                        with self.assertRaisesRegex(RuntimeError, "different repository_access"):
+                            refresh(source_path, bundle)
+
+                    self.assertEqual(before, self.snapshot(bundle))
+                    self.assertFalse(journal_path_for(bundle.resolve()).exists())
+
+    def test_a_missing_key_and_the_word_password_are_the_same_mode(self) -> None:
+        for live, recorded in ((None, "password"), ("password", None)):
+            with self.subTest(live=live, bundle=recorded):
+                with tempfile.TemporaryDirectory(prefix="recovery-refresh-access-same-") as root_text:
+                    root = Path(root_text)
+                    source_path = root / "source-config.json"
+                    source_path.write_bytes(json_bytes(self.config_with(live, generation=2)))
+                    bundle = self.make_bundle(root, self.config_with(recorded), manifest_access=recorded)
+
+                    self.assertEqual("refreshed", refresh(source_path, bundle)["state"])
+
+                    self.assertEqual("password", validate_bundle(bundle)["manifest"]["repository_access"])
+
+    def test_an_unsupported_value_is_refused_on_either_side_and_nothing_changes(self) -> None:
+        for value in self.UNSUPPORTED:
+            for side in ("live", "bundle"):
+                with self.subTest(value=value, side=side):
+                    with tempfile.TemporaryDirectory(prefix="recovery-refresh-access-bad-") as root_text:
+                        root = Path(root_text)
+                        source_path = root / "source-config.json"
+                        live_config = self.config_with(generation=2)
+                        bundle_config = self.config_with()
+                        (live_config if side == "live" else bundle_config)["repository_access"] = value
+                        source_path.write_bytes(json_bytes(live_config))
+                        bundle = self.make_bundle(root, bundle_config)
+                        before = self.snapshot(bundle)
+
+                        with self.assertRaisesRegex(RuntimeError, "repository_access is invalid"):
+                            refresh(source_path, bundle)
+
+                        self.assertEqual(before, self.snapshot(bundle))
+
+    def test_a_manifest_that_disagrees_with_its_configuration_is_not_a_valid_bundle(self) -> None:
+        cases = (
+            ("the configuration has none, the manifest says no_password", None, "no_password"),
+            ("the configuration says password, the manifest says no_password", "password", "no_password"),
+            ("the configuration says no_password, the manifest has none", "no_password", None),
+            ("the configuration says no_password, the manifest says password", "no_password", "password"),
+        )
+        for label, configured, recorded in cases:
+            with self.subTest(label):
+                with tempfile.TemporaryDirectory(prefix="recovery-refresh-access-bundle-") as root_text:
+                    bundle = self.make_bundle(Path(root_text), self.config_with(configured), manifest_access=recorded)
+                    with self.assertRaisesRegex(RuntimeError, "recovery manifest and configuration repository_access mismatch"):
+                        validate_bundle(bundle)
+
+    def test_an_unsupported_manifest_value_is_not_a_valid_bundle(self) -> None:
+        for value in self.UNSUPPORTED:
+            if value is None:
+                continue  # the helper leaves the key out for None
+            with self.subTest(value=value):
+                with tempfile.TemporaryDirectory(prefix="recovery-refresh-access-manifest-bad-") as root_text:
+                    bundle = self.make_bundle(Path(root_text), self.config_with(), manifest_access=value)
+                    with self.assertRaisesRegex(RuntimeError, "recovery manifest repository_access is invalid"):
+                        validate_bundle(bundle)
+
+    def test_bundles_that_agree_on_either_mode_are_valid(self) -> None:
+        for access in (None, "password", "no_password"):
+            with self.subTest(access=access):
+                with tempfile.TemporaryDirectory(prefix="recovery-refresh-access-valid-") as root_text:
+                    bundle = self.make_bundle(Path(root_text), self.config_with(access), manifest_access=access)
+                    validate_bundle(bundle)
 
 
 if __name__ == "__main__":

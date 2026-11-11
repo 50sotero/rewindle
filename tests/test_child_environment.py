@@ -32,6 +32,7 @@ import stale_lock_repair  # noqa: E402
 from restic_common import (  # noqa: E402
     CANCEL_ENVIRONMENT_NAMES,
     CHILD_PATHEXT,
+    NO_PASSWORD_FLAG,
     restic_child_environment,
     run_capture,
     stream_command,
@@ -183,6 +184,38 @@ class ChildEnvironmentTests(unittest.TestCase):
                     self.assertEqual(str(root / "state" / "temp"), values["TEMP"])
                     self.assertNotIn("RESTIC_PASSWORD", values)
 
+    def test_a_command_for_backups_without_a_password_gets_the_allow_list_and_no_password_source(self) -> None:
+        # --insecure-no-password makes Restic refuse every password source, and refuse them only after it has run a
+        # password command. So a planted RESTIC_PASSWORD* must not reach such a child, and the engine's own launchers
+        # must not start one whose command line names a password option.
+        with tempfile.TemporaryDirectory(prefix="child-environment-no-password-") as root_text:
+            root = Path(root_text)
+            dump = root / "dump_environment.py"
+            dump.write_text(DUMP_ENVIRONMENT, encoding="utf-8")
+            cache = root / "state" / "cache"
+            captured = root / "captured.json"
+            streamed = root / "streamed.json"
+            base = [sys.executable, "-I", "-S", str(dump), NO_PASSWORD_FLAG, "--cache-dir", str(cache)]
+            with planted_environment():
+                result = run_capture([*base, str(captured)])
+                log = io.StringIO()
+                code = stream_command([*base, str(streamed)], log)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(0, code, log.getvalue())
+            for path in (captured, streamed):
+                with self.subTest(child=path.name):
+                    values = self.assert_allow_listed(json.loads(path.read_text(encoding="utf-8")))
+                    self.assertEqual([], [name for name in values if name.startswith("RESTIC_")])
+            for option in ("--password-command", "--password-file", "--new-password-file"):
+                command = [*base, option, "anything", str(root / "never.json")]
+                with self.subTest(refused=option), mock.patch("subprocess.Popen") as popen:
+                    with self.assertRaisesRegex(ValueError, "without a key"):
+                        run_capture(command)
+                    with self.assertRaisesRegex(ValueError, "without a key"):
+                        stream_command(command, io.StringIO())
+                    popen.assert_not_called()
+            self.assertRaises(ValueError, restic_child_environment, base, password="a-key")
+
     def test_credential_repair_gives_restic_only_the_allow_list(self) -> None:
         with tempfile.TemporaryDirectory(prefix="child-environment-repair-") as root_text:
             config_path, _ = test_credential_repair.build_fixture(Path(root_text))
@@ -332,11 +365,13 @@ class PowerShellLauncherTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertNotRegex(text, r"&\s*\$python\b")
-        self.assertEqual(2, text.count("Invoke-ProtectedPython -Python $python "))
+        # Three calls: the detection of how existing backups open (--detect-access), the initializer, and the
+        # recovery key commit.
+        self.assertEqual(3, text.count("Invoke-ProtectedPython -Python $python "))
         # Once elevated, the install keeps its temporary files in a folder only
         # administrators can change; the cleared environment gets it by name.
         self.assertEqual(
-            2,
+            3,
             len(
                 re.findall(
                     r"Invoke-ProtectedPython -Python \$python [^\n]*`\n\s*"
@@ -345,6 +380,16 @@ class PowerShellLauncherTests(unittest.TestCase):
                 )
             ),
         )
+        # The detection call is written in exactly one layout (continuation lines indented four spaces further than
+        # the statement), so the two checks above count it.
+        detection = (
+            r"^( *)\$accessExit = Invoke-ProtectedPython -Python \$python -WorkingDirectory \$installRoot `\n"
+            r"\1    -TemporaryDirectory \$script:protectedTemporaryFolder `\n"
+            r"\1    -Arguments @\('-I', '-S', '-B', \$initializer, '--detect-access', '--repository', "
+            r"\$repositoryPath, '--restic', \(Join-Path \$installRoot 'restic\.exe'\)\)$"
+        )
+        self.assertEqual(1, len(re.findall(detection, text, flags=re.MULTILINE)))
+        self.assertEqual(1, text.count("'--detect-access'"))
         launcher = _powershell_function(text, "Invoke-ProtectedPython")
         self.assertIn("$start.EnvironmentVariables.Clear()", launcher)
         self.assertIn(

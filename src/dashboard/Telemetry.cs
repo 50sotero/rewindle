@@ -2297,7 +2297,11 @@ namespace ResticBackuper.Dashboard
             }
             if (snapshot.IsFailure)
             {
-                string described = DescribeFailureCode(GetString(document, "failure_code", string.Empty));
+                // The run's own record says how its backups are opened (repository_access, absent in every older record); it is
+                // informational, so a record without it reads as a backup with a password, as it always has.
+                string described = DescribeFailureCode(
+                    GetString(document, "failure_code", string.Empty),
+                    SourceConfiguration.ReadRepositoryAccess(document));
                 if (described.Length > 0)
                 {
                     return described;
@@ -2344,7 +2348,9 @@ namespace ResticBackuper.Dashboard
         // A failed run in plain words, by the stable failure_code the backup engine records (src/backup.py classify_failure), so the
         // sentence never depends on an exception's own text, which can name a path. Each says what happened and, where the person can do
         // something about it, what. Empty for a code this version does not know; the run's recorded failure stays in its details.
-        private static string DescribeFailureCode(string code)
+        // repositoryAccess is how the run's backups are opened ("password", "no_password", or null when not known): only a backup with
+        // a password has anything to unlock, so every other value gets the words that claim nothing about one.
+        private static string DescribeFailureCode(string code, string repositoryAccess)
         {
             switch ((code ?? string.Empty).Trim().ToLowerInvariant())
             {
@@ -2359,7 +2365,11 @@ namespace ResticBackuper.Dashboard
                 case "source_preflight_failed":
                     return "One of the protected folders couldn\u2019t be opened. Check that each protected folder still exists.";
                 case "repository_authentication_failed":
+                    if (!string.Equals(repositoryAccess, "password", StringComparison.Ordinal))
+                        return "Rewindle couldn\u2019t open your backups, so the backup stopped before it began. Check that the backup drive or Google Drive folder is connected, then try again. Your earlier backups are not affected.";
                     return "Rewindle couldn\u2019t unlock the backup location, so the backup stopped before it began. Your earlier backups are not affected.";
+                case "repository_access_mismatch":
+                    return "These backups now ask for a password that Rewindle doesn\u2019t have, usually because they were changed outside Rewindle. Rewindle can\u2019t carry on with them. To keep backing up, start new backups in another place.";
                 case "restic_backup_failed":
                     return "The backup stopped before it finished. Your earlier backups are not affected.";
                 case "snapshot_verification_failed":

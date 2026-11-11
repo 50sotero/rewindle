@@ -22,6 +22,7 @@ from restic_common import (
     CancellationToken,
     DEFAULT_CONFIG,
     EngineFailure,
+    RepositoryAccessMismatch,
     RunLockUnavailable,
     SourcePreflightFailed,
     SourceUpdateJournalPresent,
@@ -37,6 +38,7 @@ from restic_common import (
     process_start_filetime,
     read_pinned_restic_version,
     read_recorded_repository_id,
+    repository_access,
     restic_base,
     run_capture,
     sanitized_command,
@@ -53,6 +55,9 @@ from restic_common import (
 
 
 PROGRESS_PERSIST_INTERVAL_SECONDS = 0.5
+# Restic's exit code for "wrong password or no key found", which is also what backups with a password answer when they are
+# opened with --insecure-no-password.
+RESTIC_EXIT_WRONG_PASSWORD = 12
 BACKUP_APP_NAME = "ResticBackuper"
 BACKUP_APP_VERSION = "0.1.0-alpha.8"
 MAX_PRIOR_SUCCESS_BYTES = 4 * 1024 * 1024
@@ -817,6 +822,13 @@ def authenticate_repository_id(
         on_cancellation=on_cancellation,
     )
     if result.returncode != 0:
+        if result.returncode == RESTIC_EXIT_WRONG_PASSWORD and repository_access(config) == "no_password":
+            # The backups were set up without a password and now ask for a key Rewindle does not have (changed outside
+            # Rewindle, or replaced by other backups). The run records its own failure code, so the reader is not told to
+            # check the drive; Restic's text stays out of the message.
+            raise RepositoryAccessMismatch(
+                "these backups now ask for a key that Rewindle doesn't have"
+            )
         raise RuntimeError(
             "could not authenticate repository identity: "
             + (result.stderr.strip() or f"Restic exited {result.returncode}")
@@ -971,6 +983,7 @@ def _run_locked(
         "repository_storage_mode": config.get(
             "repository_storage_mode", "local_ntfs"
         ),
+        "repository_access": repository_access(config),
         "repository_readiness": None,
         "repository_volume_serial": config["repository_volume_serial"],
         "repository_id": read_recorded_repository_id(config),

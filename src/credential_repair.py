@@ -4,6 +4,9 @@ The recovery key is authenticated against the configured repository before any
 protected state is changed.  The only mutation is one atomic DPAPI-envelope
 replacement; the repository, its keys, snapshots, and recovery key are never
 modified by this workflow.
+
+Backups set up without a password have no key to repair: this is refused at
+once, before any key, secret or journal is read.
 """
 
 from __future__ import annotations
@@ -18,7 +21,13 @@ import re
 import subprocess
 from typing import Any, Callable
 
-from recovery_health import authenticate, parse_recovery_key, password_command, utc_now
+from recovery_health import (
+    authenticate,
+    parse_recovery_key,
+    password_command,
+    refuse_when_backups_have_no_key,
+    utc_now,
+)
 from restic_common import load_config_under_lock, restic_child_environment
 from secret_store import (
     _current_user_sid,
@@ -29,6 +38,7 @@ from secret_store import (
 
 
 SCHEMA = "ResticBackuper.CredentialRepair.v1"
+NO_KEY_TO_REPAIR = "This backup opens without a key, so there is nothing to repair."
 MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 
 
@@ -155,6 +165,9 @@ def repair(
         raise RuntimeError("The protected configuration changed before credential repair.")
     if sid_reader().casefold() != expected_user_sid.casefold():
         raise RuntimeError("Credential repair must be approved by the requesting Windows account.")
+    # Backups without a password have no key to repair. Only the configuration file (whose hash was just checked) has
+    # been read so far: no key, no secret and no journal.
+    refuse_when_backups_have_no_key(config_path, NO_KEY_TO_REPAIR)
     if require_manifest:
         validate_runtime_manifest(config_path.parent)
 

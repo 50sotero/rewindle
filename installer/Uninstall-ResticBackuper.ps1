@@ -817,18 +817,38 @@ function Add-UninstallWarning {
     $script:uninstallWarnings.Add([ordered]@{ code = $Code; message = $Message })
 }
 
-# What an uninstall keeps, so a setup program can tell the user. A path is null when it is not known.
+# The access a configuration or state record names. This function is byte-identical in Install-ResticBackuper.ps1 and
+# Uninstall-ResticBackuper.ps1 (tests/test_setup_contract.py keeps the two equal); it never stops an install's plan or an uninstall.
+function Get-RecordedRepositoryAccess {
+    # The access a configuration or state record names: 'password' (also when the key is absent), 'no_password', or
+    # $null when it names anything else. Callers treat $null as "can't tell".
+    param([object]$Record)
+    if ($null -eq $Record) { return $null }
+    $property = $Record.PSObject.Properties['repository_access']
+    if ($null -eq $property) { return 'password' }
+    $value = $property.Value
+    if ($value -is [string] -and $value -cin @('password', 'no_password')) { return [string]$value }
+    return $null
+}
+
+# What an uninstall keeps, so a setup program can tell the user. A path is null when it is not known. Backups without a password
+# have no recovery key, so that path is reported only for backups with one (repository_access says which kind these are; it is
+# null when the configuration names a kind this program doesn't know).
 function Get-KeptData {
     $kept = [ordered]@{
         state_root = $stateRoot
         repository = $null
+        repository_access = $null
         recovery_key = $null
         recovery_tools = $null
         cloud_verification_root = $null
     }
     if ($null -ne $script:configuration) {
         $kept['repository'] = [string]$script:configuration.repository
-        $kept['recovery_key'] = [string]$script:configuration.recovery_key_file
+        $kept['repository_access'] = Get-RecordedRepositoryAccess -Record $script:configuration
+        if ($kept['repository_access'] -ceq 'password') {
+            $kept['recovery_key'] = [string]$script:configuration.recovery_key_file
+        }
         $kept['recovery_tools'] = [string]$script:configuration.recovery_tools_directory
     }
     if (Test-Path -LiteralPath $cloudVerificationRoot -PathType Container) {
@@ -1002,7 +1022,13 @@ try {
         Write-Host "  Preserved   : $stateRoot"
         if ($configuration) {
             Write-Host "  Repository  : $($configuration.repository) (preserved)"
-            Write-Host "  Recovery key: $($configuration.recovery_key_file) (preserved)"
+            $keptAccess = Get-RecordedRepositoryAccess -Record $configuration
+            if ($keptAccess -ceq 'password') {
+                Write-Host "  Recovery key: $($configuration.recovery_key_file) (preserved)"
+            }
+            elseif ($keptAccess -ceq 'no_password') {
+                Write-Host '  Backups have no password, so there is no recovery key.'
+            }
         }
         $confirmation = Read-Host 'Remove the app runtime and scheduled tasks? Backup data is kept. [y/N]'
         if ($confirmation -notmatch '^(?i)y(?:es)?$') {
@@ -1139,7 +1165,13 @@ try {
     }
     if ($configuration) {
         Write-Host "Preserved repository: $($configuration.repository)"
-        Write-Host "Preserved recovery key: $($configuration.recovery_key_file)"
+        $keptAccess = Get-RecordedRepositoryAccess -Record $configuration
+        if ($keptAccess -ceq 'password') {
+            Write-Host "Preserved recovery key: $($configuration.recovery_key_file)"
+        }
+        elseif ($keptAccess -ceq 'no_password') {
+            Write-Host 'Backups have no password, so there is no recovery key.'
+        }
         Write-Host "Preserved recovery tools: $($configuration.recovery_tools_directory)"
     }
     Write-FeedResult -Ok $true -ErrorInfo $null -Fields ([ordered]@{

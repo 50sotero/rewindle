@@ -229,6 +229,17 @@ public static class FakeRestic {
     Console.Error.WriteLine("fake restic refused: " + message);
     return 92;
   }
+  static int standardInputByte;
+  // A closed or empty standard input ends at once. An open pipe that nobody writes to never does: the state in which the
+  // real Restic waits for a password.
+  static bool StandardInputIsOpen() {
+    System.Threading.Thread reader = new System.Threading.Thread(delegate() {
+      try { standardInputByte = Console.In.Read(); } catch (Exception) { standardInputByte = -1; }
+    });
+    reader.IsBackground = true;
+    reader.Start();
+    return !reader.Join(1500);
+  }
   public static int Main(string[] ignored) {
     List<string> argv = GoArgv(Environment.CommandLine);
     if (argv.Count > 0) argv.RemoveAt(0);
@@ -241,9 +252,11 @@ public static class FakeRestic {
     string repo = null;
     string passwordCommand = null;
     string cacheDirectory = null;
+    bool noPasswordFlag = false;
     List<string> words = new List<string>();
     for (int i = 0; i < args.Length; i++) {
       string a = args[i];
+      if (a == "--insecure-no-password") { noPasswordFlag = true; continue; }
       if (a == "--repo" || a == "--password-command" || a == "--cache-dir" || a == "--retry-lock") {
         if (i + 1 >= args.Length) return Refuse("missing value for " + a);
         string value = args[++i];
@@ -257,17 +270,44 @@ public static class FakeRestic {
       if (a.StartsWith("-")) return Refuse("unknown flag " + a);
       words.Add(a);
     }
-    if (String.IsNullOrEmpty(passwordCommand)) return Refuse("no --password-command");
-    string[] expected = new string[] {
-      Path.Combine(installRoot, "Python\\python.exe"), "-I", "-S", "-B", Path.Combine(installRoot, "secret_store.py"),
-      "reveal", "--secret-file", Path.Combine(stateRoot, "repository-password.dpapi.json")
-    };
-    List<string> actual;
-    try { actual = SplitShell(passwordCommand); }
-    catch (InvalidOperationException error) { return Refuse("password command: " + error.Message); }
-    bool same = actual.Count == expected.Length;
-    for (int i = 0; same && i < expected.Length; i++) same = SamePath(actual[i], expected[i]);
-    if (!same) return Refuse("password command does not name the expected helper: [" + String.Join("|", actual.ToArray()) + "]");
+    // Restic 0.19.1's three rules for backups with and without a password (tests/restic_access.py), in this order. The
+    // kind of backups here is the text of fake-restic-access.txt in the fixture; without the file they have a password,
+    // as every older install's do. Whether the standard input was closed is logged for every call.
+    string access = "password";
+    string accessFile = Path.Combine(fixtureRoot, "fake-restic-access.txt");
+    if (File.Exists(accessFile)) access = File.ReadAllText(accessFile).Trim();
+    bool standardInputOpen = StandardInputIsOpen();
+    File.AppendAllText(Path.Combine(fixtureRoot, "fake-restic-stdin.log"), (standardInputOpen ? "open" : "closed") + Environment.NewLine);
+    bool passwordSource = !String.IsNullOrEmpty(passwordCommand);
+    foreach (string variable in new string[] { "RESTIC_PASSWORD", "RESTIC_PASSWORD_FILE", "RESTIC_PASSWORD_COMMAND" }) {
+      if (!String.IsNullOrEmpty(Environment.GetEnvironmentVariable(variable))) passwordSource = true;
+    }
+    if (noPasswordFlag && passwordSource) {
+      Console.Error.WriteLine("Fatal: --insecure-no-password must not be specified together with providing a password via a cli option or environment variable");
+      return 1;
+    }
+    if (access == "no_password" && !noPasswordFlag) {
+      if (standardInputOpen) return Refuse("waited for a password on a standard input that stayed open");
+      Console.Error.WriteLine("Fatal: an empty password is not allowed by default. Pass the flag `--insecure-no-password` to restic to disable this check");
+      return 1;
+    }
+    if (access == "password" && noPasswordFlag) {
+      Console.Error.WriteLine("Fatal: wrong password or no key found");
+      return 12;
+    }
+    if (!noPasswordFlag) {
+      if (String.IsNullOrEmpty(passwordCommand)) return Refuse("no --password-command");
+      string[] expected = new string[] {
+        Path.Combine(installRoot, "Python\\python.exe"), "-I", "-S", "-B", Path.Combine(installRoot, "secret_store.py"),
+        "reveal", "--secret-file", Path.Combine(stateRoot, "repository-password.dpapi.json")
+      };
+      List<string> actual;
+      try { actual = SplitShell(passwordCommand); }
+      catch (InvalidOperationException error) { return Refuse("password command: " + error.Message); }
+      bool same = actual.Count == expected.Length;
+      for (int i = 0; same && i < expected.Length; i++) same = SamePath(actual[i], expected[i]);
+      if (!same) return Refuse("password command does not name the expected helper: [" + String.Join("|", actual.ToArray()) + "]");
+    }
 
     IDictionary environment = Environment.GetEnvironmentVariables();
     foreach (DictionaryEntry entry in environment) {
@@ -338,7 +378,16 @@ public static class FakeRestic {
 Add-Type -TypeDefinition $fakeSource -OutputAssembly $fakeRestic -OutputType ConsoleApplication
 
 function New-Fixture {
-    param([switch]$NoRepositoryRecord)
+    param(
+        [switch]$NoRepositoryRecord,
+        # The configuration's repository_access: '' leaves the key out (every older install's shape), or 'password' or
+        # 'no_password'. A backup without a password has no saved secret and no recovery key in this fixture, and the
+        # fake Restic opens it only with the flag.
+        [string]$Access = '',
+        # A recovery_key_file path other than the fixture's own, for a backup without a password whose key path must never
+        # be looked at.
+        [string]$RecoveryKeyFile = ''
+    )
     # The space matters: the installed paths are under "Program Files", and a password command that is quoted wrongly
     # still splits into the right words when no path in it has a space.
     $root = Join-Path ([IO.Path]::GetTempPath()) ('RRM T-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -366,7 +415,12 @@ function New-Fixture {
     [IO.File]::WriteAllText((Join-Path $installRoot 'secret_store.py'), "# fixture secret helper`n", $encoding)
     [IO.File]::WriteAllText((Join-Path $installRoot 'excludes.txt'), "node_modules`n", $encoding)
     [IO.File]::WriteAllText((Join-Path $source 'canary.txt'), "canary`n", $encoding)
-    [IO.File]::WriteAllText((Join-Path $stateRoot 'repository-password.dpapi.json'), "fixture dpapi envelope`n", $encoding)
+    if ($Access -ne 'no_password') {
+        [IO.File]::WriteAllText((Join-Path $stateRoot 'repository-password.dpapi.json'), "fixture dpapi envelope`n", $encoding)
+    }
+    else {
+        [IO.File]::WriteAllText((Join-Path $root 'fake-restic-access.txt'), "no_password`n", $encoding)
+    }
     [IO.File]::WriteAllBytes((Join-Path $stateRoot 'run.lock'), [byte[]](0))
     [IO.File]::WriteAllText((Join-Path $source 'document.txt'), "source data`n", $encoding)
 
@@ -411,6 +465,8 @@ function New-Fixture {
         topology_paths = [ordered]@{ diagnostics = $diagnostics }
         custom_marker = 'preserve-me'
     }
+    if ($Access) { $config['repository_access'] = $Access }
+    if ($RecoveryKeyFile) { $config['recovery_key_file'] = $RecoveryKeyFile }
     $configPath = Join-Path $installRoot 'backup-config.json'
     Write-JsonFile -Path $configPath -Value $config
 
@@ -424,15 +480,16 @@ function New-Fixture {
         schema_version = 1; repository = $oldRepository; created_utc = [DateTime]::UtcNow.ToString('o')
         note = 'fixture'; files = @($payloads | ForEach-Object { New-FileRecord -Name $_ -Path (Join-Path $oldRecovery $_) })
     }
+    if ($Access) { $recoveryManifest['repository_access'] = $Access }
     Write-JsonFile -Path (Join-Path $oldRecovery 'recovery-manifest.json') -Value $recoveryManifest
 
     # The record initialize_repository.py writes, plus a field this manager does not know about.
     $recordPath = Join-Path $stateRoot 'repository.json'
     if (-not $NoRepositoryRecord) {
-        Write-JsonFile -Path $recordPath -Value ([ordered]@{
+        $record = [ordered]@{
             custom_marker = 'preserve-me'
             initialized_utc = '2026-01-02T03:04:05+00:00'
-            recovery_key_created = $true
+            recovery_key_created = ($Access -ne 'no_password')
             recovery_key_names_other_repository = $false
             recovery_tools_directory = $oldRecovery
             recovery_tools_manifest = $recoveryManifest
@@ -442,8 +499,10 @@ function New-Fixture {
             repository_version = 2
             repository_volume_serial = $serial
             schema_version = 1
-            secret_created = $true
-        })
+            secret_created = ($Access -ne 'no_password')
+        }
+        if ($Access) { $record['repository_access'] = $Access }
+        Write-JsonFile -Path $recordPath -Value $record
     }
 
     $manifestFiles = @(Get-ChildItem -LiteralPath $installRoot -Recurse -File -Force | Sort-Object FullName)
@@ -530,6 +589,75 @@ function Set-InstallerStyleCanary {
     Write-JsonFile -Path $Fixture.ManifestPath -Value $runtimeManifest
 }
 
+function Set-RecoveryBundleAccess {
+    # Writes repository_access into the fixture's recovery copy of the configuration and its recovery manifest, or takes
+    # it out ($null), and rebinds the manifest's record of the configuration. Only the two named files change.
+    param([pscustomobject]$Fixture, [AllowNull()] [object]$InConfig, [AllowNull()] [object]$InManifest)
+    $recoveryConfigPath = Join-Path $Fixture.OldRecovery 'backup-config.json'
+    $recoveryManifestPath = Join-Path $Fixture.OldRecovery 'recovery-manifest.json'
+    foreach ($entry in @(
+        [pscustomobject]@{ Path = $recoveryConfigPath; Value = $InConfig },
+        [pscustomobject]@{ Path = $recoveryManifestPath; Value = $InManifest }
+    )) {
+        $json = Get-Content -LiteralPath $entry.Path -Raw | ConvertFrom-Json
+        $property = $json.PSObject.Properties['repository_access']
+        if ($null -eq $entry.Value) {
+            if ($null -ne $property) { $json.PSObject.Properties.Remove('repository_access') }
+        }
+        elseif ($null -eq $property) { $json | Add-Member -NotePropertyName 'repository_access' -NotePropertyValue $entry.Value }
+        else { $property.Value = $entry.Value }
+        Write-JsonFile -Path $entry.Path -Value $json
+    }
+    $manifest = Get-Content -LiteralPath $recoveryManifestPath -Raw | ConvertFrom-Json
+    $record = @($manifest.files | Where-Object name -eq 'backup-config.json')
+    $record[0].bytes = (Get-Item -LiteralPath $recoveryConfigPath).Length
+    $record[0].sha256 = Get-Hash -Path $recoveryConfigPath
+    Write-JsonFile -Path $recoveryManifestPath -Value $manifest
+}
+
+function Set-LiveConfigurationAccess {
+    # Writes repository_access into the protected configuration (or takes it out with $null) and rebinds the runtime
+    # manifest's record of it, so the next request is bound to the changed file.
+    param([pscustomobject]$Fixture, [AllowNull()] [object]$Value)
+    $json = Get-Content -LiteralPath $Fixture.ConfigPath -Raw | ConvertFrom-Json
+    $property = $json.PSObject.Properties['repository_access']
+    if ($null -eq $Value) {
+        if ($null -ne $property) { $json.PSObject.Properties.Remove('repository_access') }
+    }
+    elseif ($null -eq $property) { $json | Add-Member -NotePropertyName 'repository_access' -NotePropertyValue $Value }
+    else { $property.Value = $Value }
+    Write-JsonFile -Path $Fixture.ConfigPath -Value $json
+    $runtime = Get-Content -LiteralPath $Fixture.ManifestPath -Raw | ConvertFrom-Json
+    $record = @($runtime.files | Where-Object relative_path -eq 'backup-config.json')
+    $record[0].bytes = (Get-Item -LiteralPath $Fixture.ConfigPath).Length
+    $record[0].sha256 = Get-Hash -Path $Fixture.ConfigPath
+    Write-JsonFile -Path $Fixture.ManifestPath -Value $runtime
+}
+
+function Get-JsonAccess {
+    # The repository_access in a JSON file, or 'absent'.
+    param([string]$Path)
+    $json = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    $property = $json.PSObject.Properties['repository_access']
+    if ($null -eq $property) { return 'absent' }
+    return [string]$property.Value
+}
+
+function Get-ResticCalls {
+    # Every command line the fake Restic was started with, one entry per call, its words joined by tabs.
+    param([pscustomobject]$Fixture)
+    if (-not (Test-Path -LiteralPath $Fixture.Log)) { return @() }
+    return @(Get-Content -LiteralPath $Fixture.Log | Where-Object { $_ })
+}
+
+function Get-ResticStandardInputStates {
+    # 'closed' or 'open' for every call the fake Restic saw.
+    param([pscustomobject]$Fixture)
+    $path = Join-Path $Fixture.Root 'fake-restic-stdin.log'
+    if (-not (Test-Path -LiteralPath $path)) { return @() }
+    return @(Get-Content -LiteralPath $path | Where-Object { $_ })
+}
+
 function Invoke-Relocation {
     param(
         [pscustomobject]$Fixture,
@@ -547,7 +675,10 @@ function Invoke-Relocation {
         [int]$PauseDuringCopyAfterFiles = 0,
         [scriptblock]$WhilePaused = $null,
         # Makes the Google Drive hold check fail, as if a folder's file ID did not survive a rename there.
-        [switch]$FailFolderHoldProbe
+        [switch]$FailFolderHoldProbe,
+        # Starts the manager with its own standard input an open pipe that nobody writes to, as an elevated or scheduled
+        # launch can leave it. Restic must not inherit it: the real one waits on it for a password.
+        [switch]$HoldStdinOpen
     )
     $current = if ($CurrentRepository) { $CurrentRepository } else { $Fixture.OldRepository }
     $nonce = ([Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')).ToLowerInvariant()
@@ -574,7 +705,27 @@ function Invoke-Relocation {
     if ($FailFolderHoldProbe) { $arguments += '-TestFailFolderHoldProbe' }
     $paused = $false
     $whilePausedResult = $null
-    if ($PauseDuringCopyAfterFiles -le 0) {
+    if ($HoldStdinOpen) {
+        $heldStart = [Diagnostics.ProcessStartInfo]::new($powershell,
+            ((@($arguments | ForEach-Object { ConvertTo-ProcessArgument -Value ([string]$_) })) -join ' '))
+        $heldStart.UseShellExecute = $false
+        $heldStart.CreateNoWindow = $true
+        $heldStart.RedirectStandardInput = $true
+        $heldStart.RedirectStandardOutput = $true
+        $heldStart.RedirectStandardError = $true
+        $heldProcess = [Diagnostics.Process]::Start($heldStart)
+        $heldOutput = $heldProcess.StandardOutput.ReadToEndAsync()
+        $heldError = $heldProcess.StandardError.ReadToEndAsync()
+        if (-not $heldProcess.WaitForExit(240000)) {
+            $heldProcess.Kill()
+            throw 'The repository manager did not finish with its standard input held open.'
+        }
+        $exitCode = $heldProcess.ExitCode
+        $output = @(("$($heldOutput.Result)`n$($heldError.Result)") -split "`r?`n" | Where-Object { $_ })
+        $heldProcess.StandardInput.Close()
+        $heldProcess.Dispose()
+    }
+    elseif ($PauseDuringCopyAfterFiles -le 0) {
         $priorPreference = $ErrorActionPreference
         try {
             $ErrorActionPreference = 'Continue'
@@ -763,6 +914,189 @@ try {
     Assert-True (-not [string]::IsNullOrWhiteSpace([string]$record.relocated_utc)) 'repository record says when it moved'
     Assert-True ((Get-Acl -LiteralPath $fixture.RecordPath).GetSecurityDescriptorSddlForm('Access') -ceq $recordDaclBefore) 'repository record keeps its permissions'
     Assert-True ((Read-RecordedRepositoryId -ConfigPath $fixture.ConfigPath) -ceq $fixture.RepositoryId) 'backup reads the repository ID after the move'
+
+    # Backups with and without a password (backup-config.json "repository_access"). The move above ran on a configuration
+    # without the key, the shape every older install has: it opened the backups with the saved-password command, never
+    # with the flag, and Restic never saw the manager's own standard input.
+    $passwordCallPattern = '^--repo\t[^\t]+\t--password-command\t[^\t]+\t--cache-dir\t[^\t]+\t--retry-lock\t0s\t'
+    $noPasswordCallPattern = '^--repo\t[^\t]+\t--insecure-no-password\t--cache-dir\t[^\t]+\t--retry-lock\t0s\t'
+    $olderCalls = @(Get-ResticCalls -Fixture $fixture)
+    Assert-True ($olderCalls.Count -ge 3 -and @($olderCalls | Where-Object {
+        $_ -notmatch $passwordCallPattern -or $_ -match 'insecure-no-password'
+    }).Count -eq 0) 'a configuration without repository_access opens the backups with the saved-password command and never the flag'
+    $olderInput = @(Get-ResticStandardInputStates -Fixture $fixture)
+    Assert-True ($olderInput.Count -eq $olderCalls.Count -and @($olderInput | Where-Object { $_ -ne 'closed' }).Count -eq 0) 'Restic gets no standard input from a move of older backups'
+    Assert-True ((Get-JsonAccess -Path $fixture.ConfigPath) -ceq 'absent' -and
+        (Get-JsonAccess -Path (Join-Path $newRecovery 'backup-config.json')) -ceq 'absent' -and
+        (Get-JsonAccess -Path (Join-Path $newRecovery 'recovery-manifest.json')) -ceq 'absent' -and
+        (Get-JsonAccess -Path $fixture.RecordPath) -ceq 'absent') 'a move adds no repository_access to an older install'
+
+    # The functions that decide how Restic is opened, read from the manager and run here under StrictMode as they are.
+    & {
+        $accessAst = [Management.Automation.Language.Parser]::ParseFile($managerSource, [ref]$null, [ref]$null)
+        $accessFunctions = @($accessAst.EndBlock.Statements | Where-Object {
+                $_ -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $_.Name -in @('Get-RepositoryAccess', 'ConvertTo-PasswordCommand', 'Get-ResticCredentialArguments')
+            })
+        Assert-True ($accessFunctions.Count -eq 3) 'the manager defines Get-RepositoryAccess, ConvertTo-PasswordCommand and Get-ResticCredentialArguments once each'
+        foreach ($definition in $accessFunctions) { . ([scriptblock]::Create($definition.Extent.Text)) }
+        $installRoot = 'C:\Fixture\ProgramFiles\ResticBackuper'
+        Assert-True ((Get-RepositoryAccess -Configuration ([pscustomobject]@{ plan_id = 'older shape' })) -ceq 'password') 'a configuration without the key is a backup with a password'
+        Assert-True ((Get-RepositoryAccess -Configuration ([pscustomobject]@{ repository_access = 'password' })) -ceq 'password') 'password is read as password'
+        Assert-True ((Get-RepositoryAccess -Configuration ([pscustomobject]@{ repository_access = 'no_password' })) -ceq 'no_password') 'no_password is read as no_password'
+        foreach ($unsupported in @('Password', 'NO_PASSWORD', 'no-password', '', ' password', $null, 5, $true, @('password'))) {
+            $refusal = try { Get-RepositoryAccess -Configuration ([pscustomobject]@{ repository_access = $unsupported }); 'accepted' } catch { $_.Exception.Message }
+            Assert-True ($refusal -ceq 'unsupported repository_access') "an unsupported repository_access is refused by name: $unsupported (got: $refusal)"
+        }
+        $withPassword = [pscustomobject]@{ RepositoryAccess = 'password'; PythonExecutable = 'C:\Fixture\Python\python.exe'; SecretFile = 'C:\Fixture\state\secret.json' }
+        $withoutPassword = [pscustomobject]@{ RepositoryAccess = 'no_password'; PythonExecutable = 'C:\Fixture\Python\python.exe'; SecretFile = 'C:\Fixture\state\secret.json' }
+        $passwordArguments = @(Get-ResticCredentialArguments -Validated $withPassword)
+        Assert-True ($passwordArguments.Count -eq 2 -and $passwordArguments[0] -ceq '--password-command' -and
+            $passwordArguments[1] -ceq (ConvertTo-PasswordCommand -Validated $withPassword)) 'a backup with a password is opened with the saved-password command'
+        $noPasswordArguments = @(Get-ResticCredentialArguments -Validated $withoutPassword)
+        Assert-True ($noPasswordArguments.Count -eq 1 -and $noPasswordArguments[0] -ceq '--insecure-no-password') 'a backup without a password is opened with the flag alone'
+        $commandRefusal = try { ConvertTo-PasswordCommand -Validated $withoutPassword; 'built' } catch { $_.Exception.Message }
+        Assert-True ($commandRefusal -ceq 'This backup opens without a key, so there is no key command to build.') "no command that reveals a saved secret is built for a backup without a password (got: $commandRefusal)"
+    }
+
+    # A configuration that says password moves exactly as the older shape does, and keeps what it says.
+    $passwordFixture = New-Fixture -Access password
+    $passwordRun = Invoke-Relocation -Fixture $passwordFixture -Destination $passwordFixture.NewRepository -HoldStdinOpen
+    if ($passwordRun.ExitCode -ne 0) { Write-Output ("password-case output: " + ($passwordRun.Output -join ' | ')) }
+    Assert-True ($passwordRun.ExitCode -eq 0 -and $passwordRun.Result.ok -eq $true) 'a configuration that says password moves'
+    $passwordCalls = @(Get-ResticCalls -Fixture $passwordFixture)
+    Assert-True ($passwordCalls.Count -ge 3 -and @($passwordCalls | Where-Object {
+        $_ -notmatch $passwordCallPattern -or $_ -match 'insecure-no-password'
+    }).Count -eq 0) 'a configuration that says password opens the backups with the saved-password command and never the flag'
+    $passwordInput = @(Get-ResticStandardInputStates -Fixture $passwordFixture)
+    Assert-True ($passwordInput.Count -eq $passwordCalls.Count -and @($passwordInput | Where-Object { $_ -ne 'closed' }).Count -eq 0) 'Restic gets no standard input even when the manager''s own stays open (password)'
+    $passwordNewRecovery = Join-Path $passwordFixture.NewParent 'RecoveryTools'
+    Assert-True ((Get-JsonAccess -Path $passwordFixture.ConfigPath) -ceq 'password' -and
+        (Get-JsonAccess -Path (Join-Path $passwordNewRecovery 'backup-config.json')) -ceq 'password' -and
+        (Get-JsonAccess -Path (Join-Path $passwordNewRecovery 'recovery-manifest.json')) -ceq 'password' -and
+        (Get-JsonAccess -Path $passwordFixture.RecordPath) -ceq 'password') 'a move keeps password in the configuration, the recovery copy, the recovery manifest and the record'
+
+    # Backups without a password: Restic gets the flag alone, no saved secret and no recovery key is looked at (the fixture
+    # has no secret file, and its recovery key path is on a drive that does not exist), the progress line says "backups"
+    # rather than "encrypted repository", and the mode survives the move in every file that names it.
+    $usedLetters = @([Environment]::GetLogicalDrives() | ForEach-Object { $_.Substring(0, 1).ToUpperInvariant() })
+    $missingDrive = @('Z', 'Y', 'X', 'W', 'V', 'U', 'T', 'S', 'R', 'Q') | Where-Object { $usedLetters -notcontains $_ } | Select-Object -First 1
+    Assert-True ($null -ne $missingDrive) 'a drive letter nobody uses is found for the recovery key path'
+    $missingKeyPath = "${missingDrive}:\Rewindle-no-key\RecoveryKey.txt"
+    $noPasswordFixture = New-Fixture -Access no_password -RecoveryKeyFile $missingKeyPath
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $noPasswordFixture.StateRoot 'repository-password.dpapi.json'))) 'the no-password fixture has no saved secret'
+    $noPasswordDigest = Get-TreeDigest -Root $noPasswordFixture.OldRepository -ExcludeLocks
+    $noPasswordRun = Invoke-Relocation -Fixture $noPasswordFixture -Destination $noPasswordFixture.NewRepository -HoldStdinOpen
+    if ($noPasswordRun.ExitCode -ne 0) {
+        Write-Output ("no-password-case output: " + ($noPasswordRun.Output -join ' | '))
+        if ($null -ne $noPasswordRun.Result) { Write-Output ("no-password-case result: " + ($noPasswordRun.Result | ConvertTo-Json -Compress -Depth 8)) }
+    }
+    Assert-True ($noPasswordRun.ExitCode -eq 0 -and $noPasswordRun.Result.ok -eq $true -and $noPasswordRun.Result.changed -eq $true) 'backups without a password move without a saved secret or a recovery key'
+    $noPasswordCalls = @(Get-ResticCalls -Fixture $noPasswordFixture)
+    Assert-True ($noPasswordCalls.Count -ge 3 -and @($noPasswordCalls | Where-Object { $_ -notmatch $noPasswordCallPattern }).Count -eq 0) "every Restic call carries the flag alone: $($noPasswordCalls -join ' || ')"
+    Assert-True (@($noPasswordCalls | Where-Object { $_ -match 'password-command|password-file' }).Count -eq 0) 'no Restic call names a password command or file'
+    Assert-True ((@($noPasswordCalls | Where-Object { $_ -match '\tcat\tconfig' }).Count -ge 1) -and
+        (@($noPasswordCalls | Where-Object { $_ -match '\tsnapshots\t--json' }).Count -ge 1) -and
+        (@($noPasswordCalls | Where-Object { $_ -match '\tcheck$' }).Count -ge 1)) 'the move still reads the ID and the snapshots and checks the copy'
+    $noPasswordInput = @(Get-ResticStandardInputStates -Fixture $noPasswordFixture)
+    Assert-True ($noPasswordInput.Count -eq $noPasswordCalls.Count -and @($noPasswordInput | Where-Object { $_ -ne 'closed' }).Count -eq 0) 'Restic gets no standard input even when the manager''s own stays open (no password)'
+    Assert-True ((Get-TreeDigest -Root $noPasswordFixture.OldRepository -ExcludeLocks) -eq $noPasswordDigest) 'the backups without a password are kept in the old place'
+    Assert-True (Test-Path -LiteralPath (Join-Path $noPasswordFixture.NewRepository 'config') -PathType Leaf) 'the backups without a password arrive in the new place'
+    $noPasswordRecovery = Join-Path $noPasswordFixture.NewParent 'RecoveryTools'
+    $noPasswordConfig = Get-Content -LiteralPath $noPasswordFixture.ConfigPath -Raw | ConvertFrom-Json
+    Assert-True ([string]$noPasswordConfig.repository -eq $noPasswordFixture.NewRepository -and [long]$noPasswordConfig.config_generation -eq 8) 'the configuration of backups without a password follows the move'
+    Assert-True ((Get-JsonAccess -Path $noPasswordFixture.ConfigPath) -ceq 'no_password' -and
+        (Get-JsonAccess -Path (Join-Path $noPasswordRecovery 'backup-config.json')) -ceq 'no_password' -and
+        (Get-JsonAccess -Path (Join-Path $noPasswordRecovery 'recovery-manifest.json')) -ceq 'no_password') 'a move keeps no_password in the configuration, the recovery copy and the recovery manifest'
+    $noPasswordRecord = Get-Content -LiteralPath $noPasswordFixture.RecordPath -Raw | ConvertFrom-Json
+    Assert-True ([string]$noPasswordRecord.repository_access -ceq 'no_password' -and [string]$noPasswordRecord.repository -eq $noPasswordFixture.NewRepository -and
+        $noPasswordRecord.secret_created -eq $false -and $noPasswordRecord.recovery_key_created -eq $false -and
+        [string]$noPasswordRecord.recovery_tools_manifest.repository_access -ceq 'no_password') 'the repository record keeps no_password, and that no secret or key was ever created'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $noPasswordFixture.StateRoot 'repository-password.dpapi.json')) -and
+        -not (Test-Path -LiteralPath (Join-Path $noPasswordRecovery 'repository-password.dpapi.json'))) 'a move of backups without a password creates no saved secret'
+    $noPasswordRuntime = Get-Content -LiteralPath $noPasswordFixture.ManifestPath -Raw | ConvertFrom-Json
+    $noPasswordRuntimeRecord = @($noPasswordRuntime.files | Where-Object relative_path -eq 'backup-config.json')
+    Assert-True ($noPasswordRuntimeRecord.Count -eq 1 -and [string]$noPasswordRuntimeRecord[0].sha256 -eq (Get-Hash -Path $noPasswordFixture.ConfigPath)) 'the runtime manifest binds the moved configuration of backups without a password'
+    Assert-True ((Read-RecordedRepositoryId -ConfigPath $noPasswordFixture.ConfigPath) -ceq $noPasswordFixture.RepositoryId) 'the backup reads the repository ID after a move without a password'
+
+    $neutralFixture = New-Fixture -Access no_password
+    $neutralRun = Invoke-Relocation -Fixture $neutralFixture -Destination $neutralFixture.NewRepository `
+        -PauseDuringCopyAfterFiles 1 -WhilePaused {
+            param([string]$Nonce)
+            $progressFile = Join-Path $neutralFixture.StateRoot "RepositoryManagerResults\$Nonce.json.progress.json"
+            return [string](Get-Content -LiteralPath $progressFile -Raw | ConvertFrom-Json).message
+        }
+    Assert-True ($neutralRun.Paused -and $neutralRun.ExitCode -eq 0) 'the neutral-wording case paused during the copy and finished'
+    Assert-True ([string]$neutralRun.WhilePaused -ceq 'Copying your backups and the recovery tools.') "the copy progress line names backups, not an encrypted repository (got: $($neutralRun.WhilePaused))"
+
+    # Backups that really have a password, though the configuration says they have none: the first Restic call fails
+    # with Restic's own refusal and nothing is moved. The move never fixes the mode.
+    $swappedFixture = New-Fixture -Access no_password
+    [IO.File]::WriteAllText((Join-Path $swappedFixture.Root 'fake-restic-access.txt'), "password`n", $encoding)
+    $swappedConfigHash = Get-Hash -Path $swappedFixture.ConfigPath
+    $swappedRun = Invoke-Relocation -Fixture $swappedFixture -Destination $swappedFixture.NewRepository
+    Assert-True ($swappedRun.ExitCode -ne 0 -and [string]$swappedRun.Result.error -match 'exit code 12') "backups that ask for a password stop a move that says they have none: $($swappedRun.Output -join ' | ')"
+    Assert-True (-not (Test-Path -LiteralPath $swappedFixture.NewRepository) -and
+        -not (Test-Path -LiteralPath $swappedFixture.JournalPath)) 'a move that cannot open the backups copies nothing and leaves no journal'
+    Assert-True ((Get-Hash -Path $swappedFixture.ConfigPath) -eq $swappedConfigHash -and (Get-JsonAccess -Path $swappedFixture.ConfigPath) -ceq 'no_password') 'a refused move leaves the configuration and its mode as they were'
+    Assert-True (@(Get-ResticCalls -Fixture $swappedFixture | Where-Object { $_ -match 'password-command' }).Count -eq 0) 'a configuration without a password never runs the secret helper, even when Restic refuses'
+
+    # A recovery bundle (its copy of the configuration or its manifest) that names the other mode is refused before
+    # Restic runs or anything is copied, and is never taken over.
+    $bundleCases = @(
+        [pscustomobject]@{ Label = 'a recovery copy without the key beside no_password'; Access = 'no_password'; InConfig = $null; InManifest = 'no_password' },
+        [pscustomobject]@{ Label = 'a recovery copy that says password beside no_password'; Access = 'no_password'; InConfig = 'password'; InManifest = 'no_password' },
+        [pscustomobject]@{ Label = 'a recovery manifest without the key beside no_password'; Access = 'no_password'; InConfig = 'no_password'; InManifest = $null },
+        [pscustomobject]@{ Label = 'a recovery manifest that says password beside no_password'; Access = 'no_password'; InConfig = 'no_password'; InManifest = 'password' },
+        [pscustomobject]@{ Label = 'a recovery copy that says no_password beside password'; Access = 'password'; InConfig = 'no_password'; InManifest = 'password' },
+        [pscustomobject]@{ Label = 'a recovery manifest that says no_password beside password'; Access = 'password'; InConfig = 'password'; InManifest = 'no_password' },
+        [pscustomobject]@{ Label = 'a recovery copy that says no_password beside an older configuration'; Access = ''; InConfig = 'no_password'; InManifest = $null }
+    )
+    foreach ($case in $bundleCases) {
+        $mismatchFixture = New-Fixture -Access $case.Access
+        Set-RecoveryBundleAccess -Fixture $mismatchFixture -InConfig $case.InConfig -InManifest $case.InManifest
+        $mismatchConfigHash = Get-Hash -Path $mismatchFixture.ConfigPath
+        $mismatchBundleDigest = Get-TreeDigest -Root $mismatchFixture.OldRecovery
+        $mismatchRun = Invoke-Relocation -Fixture $mismatchFixture -Destination $mismatchFixture.NewRepository
+        Assert-True ($mismatchRun.ExitCode -ne 0 -and [string]$mismatchRun.Result.error -match 'repository_access is not synchronized') "$($case.Label) is refused with its reason: $($mismatchRun.Output -join ' | ')"
+        Assert-True (@(Get-ResticCalls -Fixture $mismatchFixture).Count -eq 0 -and -not (Test-Path -LiteralPath $mismatchFixture.NewRepository) -and
+            -not (Test-Path -LiteralPath $mismatchFixture.JournalPath)) "$($case.Label): Restic is never run, nothing is copied and no journal is left"
+        Assert-True ((Get-Hash -Path $mismatchFixture.ConfigPath) -eq $mismatchConfigHash -and
+            (Get-TreeDigest -Root $mismatchFixture.OldRecovery) -eq $mismatchBundleDigest) "$($case.Label): the configuration and the recovery bundle are left as they were"
+    }
+
+    # The same mode written as password in the recovery bundle beside a configuration without the key is the same mode
+    # (a missing key counts as password), so the move goes ahead and keeps each file as it was.
+    $normalisedFixture = New-Fixture
+    Set-RecoveryBundleAccess -Fixture $normalisedFixture -InConfig 'password' -InManifest 'password'
+    $normalisedRun = Invoke-Relocation -Fixture $normalisedFixture -Destination $normalisedFixture.NewRepository
+    if ($normalisedRun.ExitCode -ne 0) { Write-Output ("normalised-case output: " + ($normalisedRun.Output -join ' | ')) }
+    Assert-True ($normalisedRun.ExitCode -eq 0 -and $normalisedRun.Result.ok -eq $true) 'a recovery bundle that says password beside a configuration without the key is the same mode'
+    Assert-True ((Get-JsonAccess -Path $normalisedFixture.ConfigPath) -ceq 'absent' -and
+        (Get-JsonAccess -Path (Join-Path $normalisedFixture.NewParent 'RecoveryTools\backup-config.json')) -ceq 'password') 'a move writes no repository_access into the configuration and keeps the recovery copy as it was'
+
+    # An unsupported value is refused by name, never read as one of the two.
+    foreach ($unsupported in @('NO_PASSWORD', 'Password', '')) {
+        $unsupportedFixture = New-Fixture -Access no_password
+        Set-LiveConfigurationAccess -Fixture $unsupportedFixture -Value $unsupported
+        $unsupportedHash = Get-Hash -Path $unsupportedFixture.ConfigPath
+        $unsupportedRun = Invoke-Relocation -Fixture $unsupportedFixture -Destination $unsupportedFixture.NewRepository
+        Assert-True ($unsupportedRun.ExitCode -ne 0 -and [string]$unsupportedRun.Result.error -match 'unsupported repository_access') "repository_access '$unsupported' is refused by name: $($unsupportedRun.Output -join ' | ')"
+        Assert-True (@(Get-ResticCalls -Fixture $unsupportedFixture).Count -eq 0 -and -not (Test-Path -LiteralPath $unsupportedFixture.NewRepository) -and
+            (Get-Hash -Path $unsupportedFixture.ConfigPath) -eq $unsupportedHash) "repository_access '$unsupported': Restic is never run and nothing changes"
+    }
+
+    # The checks of the saved secret and the recovery key still run for backups with a password, so the skipping above is
+    # the mode's doing: an older install without its saved secret, and one whose recovery key sits on a drive that is gone.
+    $noSecretFixture = New-Fixture
+    [IO.File]::Delete((Join-Path $noSecretFixture.StateRoot 'repository-password.dpapi.json'))
+    $noSecretRun = Invoke-Relocation -Fixture $noSecretFixture -Destination $noSecretFixture.NewRepository
+    Assert-True ($noSecretRun.ExitCode -ne 0 -and [string]$noSecretRun.Result.error -match 'Required regular file is missing: .*repository-password\.dpapi\.json') "a backup with a password still needs its saved secret: $($noSecretRun.Output -join ' | ')"
+    Assert-True (@(Get-ResticCalls -Fixture $noSecretFixture).Count -eq 0 -and -not (Test-Path -LiteralPath $noSecretFixture.NewRepository)) 'a backup with a password and no saved secret is refused before Restic runs'
+    $lostKeyFixture = New-Fixture -RecoveryKeyFile $missingKeyPath
+    $lostKeyRun = Invoke-Relocation -Fixture $lostKeyFixture -Destination $lostKeyFixture.NewRepository
+    Assert-True ($lostKeyRun.ExitCode -ne 0 -and [string]$lostKeyRun.Result.error -match 'Volume is not ready') "a backup with a password still checks where its recovery key is kept: $($lostKeyRun.Output -join ' | ')"
+    Assert-True (@(Get-ResticCalls -Fixture $lostKeyFixture).Count -eq 0 -and -not (Test-Path -LiteralPath $lostKeyFixture.NewRepository)) 'a recovery key that cannot be checked refuses the move before Restic runs'
 
     # DriveFS is an explicit backend: only the encrypted repository moves onto
     # its synthetic filesystem, while recovery material stays on protected NTFS.
@@ -1431,6 +1765,11 @@ ConvertTo-Json -InputObject $result -Depth 4 -Compress
         success_copy_and_verify = 'passed'
         empty_destination = 'passed'
         password_command_and_allow_listed_environment = 'passed'
+        no_password_move_with_the_flag_alone_and_no_secret_or_key = 'passed'
+        restic_gets_no_standard_input = 'passed'
+        recovery_bundle_mode_mismatch_refused = 'passed'
+        unsupported_repository_access_refused = 'passed'
+        secret_and_recovery_key_checks_still_run_for_a_password = 'passed'
         repository_record_follows_the_move = 'passed'
         unsafe_destinations_and_capacity = 'passed'
         activation_rollback_points = 5

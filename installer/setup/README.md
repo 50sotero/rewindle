@@ -46,8 +46,11 @@ only places that know the contract's shapes, so a change to `docs/setup-contract
 
 - **Plan mode** (`getPlan`, not elevated, changes nothing):
   `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File Install-ResticBackuper.ps1 -PlanOnly -PlanOutput <json in the temp folder> [-Repository p] [-RepositoryStorageMode m] [-DriveFsMyDriveRoot p] [-SourceList "a;b"] [-Schedule HH:mm] [-DisableVss]`.
-  The plan is read when the process exits, with a time limit; a newer request replaces one still running.
-- **Install**: the same plan check once more, then one elevated start (`runas`) with `-Unattended -ExpectedUserSid <sid>
+  The plan is read when the process exits, with a time limit; a newer request replaces one still running. These plans
+  describe the location alone, so they never carry the person's password choice (`-RepositoryAccess`).
+- **Install**: the same plan check once more, this time with `-RepositoryAccess <password|no_password>` exactly when the
+  install carries it (the wizard sends the choice only for a location without backups), so the check judges the install
+  as it will run. Then one elevated start (`runas`) with `-Unattended -ExpectedUserSid <sid>
   -ProgressPath <progress.jsonl in a folder Setup made> ...` and `-StartBackup` if asked. A declined Windows prompt is
   a cancellation, not an error. Cancel works until Windows has been asked.
 - **Uninstall**: `Uninstall-ResticBackuper.ps1 -Unattended -ExpectedUserSid <sid> -ProgressPath ...`, from the installed

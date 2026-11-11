@@ -648,6 +648,121 @@ function New-NativeChildEnvironment {
     return $environment
 }
 
+function Get-RepositoryAccess {
+    # How Restic opens these backups (backup-config.json "repository_access"): 'password' (also when the key is absent,
+    # as in every configuration written before the choice existed) or 'no_password'. Anything else is refused.
+    param([Parameter(Mandatory = $true)] [object]$Configuration)
+    $property = $Configuration.PSObject.Properties['repository_access']
+    if ($null -eq $property) { return 'password' }
+    $value = $property.Value
+    if ($value -isnot [string] -or $value -cnotin @('password', 'no_password')) {
+        throw 'unsupported repository_access'
+    }
+    return [string]$value
+}
+
+function Get-ResticCommonArguments {
+    # The start of every Restic command line of this check. A backup without a password is opened with
+    # --insecure-no-password, which Restic wants on every command: without it Restic stops at once, or, if its standard
+    # input is open, waits for a password (see Invoke-NativeToFiles). A backup with a password needs nothing here;
+    # Restic reads the command that gives it the saved password from RESTIC_PASSWORD_COMMAND (see
+    # Get-CloudEnvironmentSettings). The extra options come last.
+    param(
+        [Parameter(Mandatory)] [string]$Access,
+        [Parameter(Mandatory)] [string]$Repository,
+        [string[]]$Options = @()
+    )
+
+    $arguments = @('--repo', $Repository)
+    if ($Access -ceq 'no_password') {
+        $arguments += '--insecure-no-password'
+    }
+    elseif ($Access -cne 'password') {
+        throw 'unsupported repository_access'
+    }
+    $arguments += @('--no-lock', '--no-cache')
+    $arguments += $Options
+    return $arguments
+}
+
+function New-ResticPasswordCommand {
+    # The command Restic runs to read the saved password of a backup that has one. A backup without a password has no
+    # such command: Restic would run it and then refuse --insecure-no-password next to it. The parameters are named as
+    # the script's own variables, so the statement below reads as it always has.
+    param(
+        [Parameter(Mandatory)] [string]$Access,
+        [Parameter(Mandatory)] [string]$pythonExecutable,
+        [Parameter(Mandatory)] [string]$secretStore,
+        [Parameter(Mandatory)] [string]$secretFile
+    )
+
+    if ($Access -cne 'password') {
+        throw 'Only a backup that has a saved secret gets a command to read it.'
+    }
+    $resticPasswordCommand = (
+        '"{0}" -I -S -B "{1}" reveal --secret-file "{2}"' -f
+        $pythonExecutable,
+        $secretStore,
+        $secretFile
+    )
+    return $resticPasswordCommand
+}
+
+function Get-CloudEnvironmentSettings {
+    # The settings Restic and rclone (which Restic starts) get on top of the fixed environment (see
+    # New-NativeChildEnvironment). A backup with a password also gets the command that reads its saved password. A backup
+    # without one gets no setting of that kind: Restic refuses --insecure-no-password next to any of them, and runs a
+    # password command before it refuses.
+    param(
+        [Parameter(Mandatory)] [string]$Access,
+        [Parameter(Mandatory)] [string]$RcloneConfig,
+        [Parameter(Mandatory)] [string]$RclonePasswordCommand,
+        [Parameter(Mandatory)] [string]$RcloneCacheDirectory,
+        [string]$ResticPasswordCommand = ''
+    )
+
+    $settings = [ordered]@{
+        RCLONE_CONFIG = [System.IO.Path]::GetFullPath($RcloneConfig)
+        RCLONE_PASSWORD_COMMAND = $RclonePasswordCommand
+        RCLONE_ASK_PASSWORD = 'false'
+        RCLONE_CACHE_DIR = $RcloneCacheDirectory
+    }
+    if ($Access -ceq 'password') {
+        if ([string]::IsNullOrWhiteSpace($ResticPasswordCommand)) {
+            throw 'The command that reads the saved secret of this backup is missing.'
+        }
+        $settings['RESTIC_PASSWORD_COMMAND'] = $ResticPasswordCommand
+    }
+    elseif ($Access -ceq 'no_password') {
+        if ($ResticPasswordCommand.Length -ne 0) {
+            throw 'This backup has no saved secret, so there is no command to read one.'
+        }
+    }
+    else {
+        throw 'unsupported repository_access'
+    }
+    return $settings
+}
+
+function Get-PasswordFilePaths {
+    # The files only a backup with a password needs: its saved password and the program that reads it. A backup without a
+    # password needs neither, so the check does not ask for them. An older install may have left files at those paths;
+    # they are not this backup's and the check leaves them alone.
+    param(
+        [Parameter(Mandatory)] [string]$Access,
+        [Parameter(Mandatory)] [string]$SecretFile,
+        [Parameter(Mandatory)] [string]$SecretStore
+    )
+
+    if ($Access -ceq 'password') {
+        return @($SecretFile, $SecretStore)
+    }
+    if ($Access -ceq 'no_password') {
+        return @()
+    }
+    throw 'unsupported repository_access'
+}
+
 function Get-ReadOnlyRemoteSpec {
     # The remote as an rclone connection string. Its options outrank the
     # configuration file and every RCLONE_* variable, so the read-only scope
@@ -831,6 +946,9 @@ function Invoke-NativeToFiles {
     }
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
+    # No child keeps this task's standard input: it is closed as soon as the child has started. Restic that has no
+    # password to use stops at once when its standard input is closed, but waits for one on an open input.
+    $start.RedirectStandardInput = $true
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
     $process = [System.Diagnostics.Process]::new()
@@ -853,6 +971,7 @@ function Invoke-NativeToFiles {
         if (-not $process.Start()) {
             throw 'The native verification process did not start.'
         }
+        $process.StandardInput.Close()
         $stdoutTask = $process.StandardOutput.BaseStream.CopyToAsync($stdout)
         $stderrTask = $process.StandardError.BaseStream.CopyToAsync($stderr)
         $copies = [System.Threading.Tasks.Task[]]@($stdoutTask, $stderrTask)
@@ -1669,6 +1788,9 @@ foreach ($property in @(
 if ([string]$config.repository_storage_mode -cne 'google_drivefs_stream') {
     throw 'Direct cloud verification requires google_drivefs_stream storage mode.'
 }
+# How Restic opens this backup: 'password' (also for a configuration written before the choice existed) or
+# 'no_password'. It decides which files the check needs and how every Restic command is started.
+$repositoryAccess = Get-RepositoryAccess -Configuration $config
 
 $configuredRepository = [System.IO.Path]::GetFullPath(
     [string]$config.repository
@@ -1800,8 +1922,6 @@ Assert-NormalDirectory -Path $evidenceRoot | Out-Null
 foreach ($requiredFile in @(
     $resticExecutable,
     $pythonExecutable,
-    $secretFile,
-    $secretStore,
     $inventoryHelper,
     $runLockPath,
     $lastSuccessPath,
@@ -1812,6 +1932,13 @@ foreach ($requiredFile in @(
     $powershellExecutable
 )) {
     Assert-NormalFile -Path $requiredFile | Out-Null
+}
+# Only a backup with a password has a saved password and a program that reads it.
+foreach ($passwordFile in @(Get-PasswordFilePaths `
+    -Access $repositoryAccess `
+    -SecretFile $secretFile `
+    -SecretStore $secretStore)) {
+    Assert-NormalFile -Path $passwordFile | Out-Null
 }
 $rcloneProgram = $rcloneExecutable.Replace('\', '/')
 
@@ -2054,23 +2181,25 @@ try {
         ([System.IO.Path]::GetFullPath($rclonePasswordHelperPath)),
         ([System.IO.Path]::GetFullPath($rcloneCredentialPath))
     )
-    $resticPasswordCommand = (
-        '"{0}" -I -S -B "{1}" reveal --secret-file "{2}"' -f
-        $pythonExecutable,
-        $secretStore,
-        $secretFile
-    )
+    # Built for a backup with a password only; a backup without one has no such command.
+    $resticPasswordCommand = ''
+    if ($repositoryAccess -ceq 'password') {
+        $resticPasswordCommand = New-ResticPasswordCommand `
+            -Access $repositoryAccess `
+            -pythonExecutable $pythonExecutable `
+            -secretStore $secretStore `
+            -secretFile $secretFile
+    }
     # Restic and rclone (which Restic starts) get the settings below on top of
     # the fixed list; the inventory helper gets the fixed list alone.
     $cloudEnvironment = New-NativeChildEnvironment `
         -TemporaryDirectory $nativeTemporaryDirectory `
-        -Settings ([ordered]@{
-            RCLONE_CONFIG = [System.IO.Path]::GetFullPath($rcloneRunConfig)
-            RCLONE_PASSWORD_COMMAND = $rclonePasswordCommand
-            RCLONE_ASK_PASSWORD = 'false'
-            RCLONE_CACHE_DIR = $rcloneCacheDirectory
-            RESTIC_PASSWORD_COMMAND = $resticPasswordCommand
-        })
+        -Settings (Get-CloudEnvironmentSettings `
+            -Access $repositoryAccess `
+            -RcloneConfig $rcloneRunConfig `
+            -RclonePasswordCommand $rclonePasswordCommand `
+            -RcloneCacheDirectory $rcloneCacheDirectory `
+            -ResticPasswordCommand $resticPasswordCommand)
     $helperEnvironment = New-NativeChildEnvironment `
         -TemporaryDirectory $nativeTemporaryDirectory
     $readOnlyRemote = Get-ReadOnlyRemoteSpec `
@@ -2092,13 +2221,10 @@ try {
     }
     Invoke-RequiredNative `
         -Executable $resticExecutable `
-        -Arguments @(
-            '--repo', $localRepositoryFull,
-            '--no-lock',
-            '--no-cache',
+        -Arguments (@(Get-ResticCommonArguments -Access $repositoryAccess -Repository $localRepositoryFull) + @(
             'cat',
             'config'
-        ) `
+        )) `
         -StdoutPath $localCatStdout `
         -StderrPath $localCatStderr `
         -Environment $cloudEnvironment `
@@ -2109,11 +2235,13 @@ try {
     Set-CheckStep 'connecting_to_google_drive'
     $remoteRepository = 'rclone:' + $readOnlyRemote + ':' + $CloudRepositoryPath
     $resticCloudCommon = @(
-        '--repo', $remoteRepository,
-        '--no-lock',
-        '--no-cache',
-        '-o', ('rclone.program=' + $rcloneProgram),
-        '-o', 'rclone.timeout=2m'
+        Get-ResticCommonArguments `
+            -Access $repositoryAccess `
+            -Repository $remoteRepository `
+            -Options @(
+                '-o', ('rclone.program=' + $rcloneProgram),
+                '-o', 'rclone.timeout=2m'
+            )
     )
     Invoke-RequiredNative `
         -Executable $resticExecutable `

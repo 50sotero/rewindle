@@ -59,6 +59,11 @@ JOURNAL_SCHEMA = "ResticBackuper.RecoveryRefreshJournal.v1"
 LOCAL_NTFS_MODE = "local_ntfs"
 GOOGLE_DRIVEFS_MODE = "google_drivefs_stream"
 STORAGE_MODES = frozenset({LOCAL_NTFS_MODE, GOOGLE_DRIVEFS_MODE})
+# How Restic opens the backups ("repository_access"): the same values and default as restic_common, whose copy this is
+# (the recovery bundle runs standalone, so this module cannot import it). It is not a RECOVERY_LOCAL_FIELD: the live
+# configuration and the bundle must always agree, and a difference is refused, never copied over.
+REPOSITORY_ACCESS_VALUES = ("password", "no_password")
+DEFAULT_REPOSITORY_ACCESS = "password"
 EXPECTED_DRIVEFS_MY_DRIVE_ROOT = r"G:\My Drive"
 
 
@@ -151,6 +156,21 @@ def is_within(candidate: str, parent: str) -> bool:
     return normalized_candidate == normalized_parent or normalized_candidate.startswith(
         normalized_parent.rstrip("\\") + "\\"
     )
+
+
+def repository_access(config: Mapping[str, Any]) -> str:
+    """The rule of restic_common.repository_access: "password" (also when the key is absent) or "no_password"."""
+    value = config.get("repository_access", DEFAULT_REPOSITORY_ACCESS)
+    if not isinstance(value, str) or value not in REPOSITORY_ACCESS_VALUES:
+        raise ValueError("unsupported repository_access")
+    return value
+
+
+def validate_access_config(config: Mapping[str, Any], label: str) -> str:
+    try:
+        return repository_access(config)
+    except ValueError as error:
+        raise RuntimeError(f"{label} repository_access is invalid") from error
 
 
 def validate_storage_config(config: dict[str, Any], label: str) -> dict[str, str | None]:
@@ -267,6 +287,7 @@ def validate_plan_config(config: dict[str, Any], label: str) -> list[str]:
     if config.get("cloud_placeholder_policy") not in {"strict", "allow"}:
         raise RuntimeError(f"{label} cloud_placeholder_policy is invalid")
     validate_storage_config(config, label)
+    validate_access_config(config, label)
 
     sources = config.get("sources")
     if not isinstance(sources, list) or not sources or not all(
@@ -336,6 +357,11 @@ def validate_config_pair(
         raise RuntimeError(
             "source and recovery configurations have different repository storage bindings"
         )
+    # Compared as normalised values (absent == "password") before merge_config can copy one over the other.
+    if validate_access_config(source, "source") != validate_access_config(recovery, "recovery"):
+        raise RuntimeError(
+            "source and recovery configurations have different repository_access"
+        )
     if source["config_generation"] < recovery["config_generation"]:
         raise RuntimeError("source configuration would roll back the recovery generation")
     return sources, bool(source["use_vss"])
@@ -390,6 +416,9 @@ def validate_bundle(directory: Path) -> dict[str, Any]:
     if manifest.get("repository") != config.get("repository"):
         raise RuntimeError("recovery manifest and configuration repository mismatch")
     storage = validate_storage_config(config, "recovery")
+    configured_access = validate_access_config(config, "recovery")
+    if validate_access_config(manifest, "recovery manifest") != configured_access:
+        raise RuntimeError("recovery manifest and configuration repository_access mismatch")
     manifest_mode = manifest.get("repository_storage_mode")
     if manifest_mode is not None and manifest_mode != storage["mode"]:
         raise RuntimeError(
@@ -565,6 +594,7 @@ def refresh(
     new_manifest["repository"] = merged["repository"]
     storage = validate_storage_config(merged, "merged recovery")
     new_manifest["repository_storage_mode"] = storage["mode"]
+    new_manifest["repository_access"] = validate_access_config(merged, "merged recovery")
     if storage["mode"] == GOOGLE_DRIVEFS_MODE:
         new_manifest["drivefs_my_drive_root"] = merged["drivefs_my_drive_root"]
         new_manifest["drivefs_cache_directory"] = merged[

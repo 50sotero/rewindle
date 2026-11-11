@@ -60,9 +60,20 @@ export function installSetupSampleBridge(): void {
   const exists = (path: string) => !sample.missing.includes(lower(path));
   // Whether the sample has been uninstalled: a reinstall starts from a PC without Rewindle on it, whose kept state names the backups.
   let uninstalled = false;
+  // The mode of the backups this sample's own install made: a reinstall after it finds the backups in that mode, whatever the scenario says.
+  let installedAccess: 'password' | 'no_password' | null = null;
+  // The mode the kept records name for the backups (null when none does, as in the kept-unknown-access sample).
+  const keptAccessNow = (): 'password' | 'no_password' | null =>
+    installedAccess ?? (sample.access === 'unknown' ? null : sample.existing.kept_repository_access ?? sample.access ?? 'password');
   const existingNow = () => uninstalled
-    ? { ...sample.existing, rewindle: null, kept_repository: sample.existing.kept_repository ?? sample.defaultRepository }
+    ? { ...sample.existing, rewindle: null, kept_repository: sample.existing.kept_repository ?? sample.defaultRepository, kept_repository_access: keptAccessNow() }
     : sample.existing;
+  // What the backups already in this folder have: a mode, 'unknown' when no record names it, or null when there are none there.
+  const backupsAt = (repository: string | null | undefined): 'password' | 'no_password' | 'unknown' | null => {
+    const kept = existingNow().kept_repository;
+    if (!repository || !kept || lower(repository) !== lower(kept)) return null;
+    return installedAccess ?? sample.access ?? 'password';
+  };
 
   // The checks the real installer makes in plan mode, imitated closely enough to show every message the wizard can get.
   type Finding = { code: string; field: string; message: string; path: string | null; detail: string | null };
@@ -80,6 +91,8 @@ export function installSetupSampleBridge(): void {
     const sources = Array.isArray(inputs?.sources) ? inputs.sources as string[] : sample.defaultSources;
     const vss = inputs?.vss !== false;
     const schedule = typeof inputs?.schedule === 'string' ? inputs.schedule : '02:00';
+    // A plan describes the location only: the person's password choice is never part of it, and what is already there decides.
+    const here = backupsAt(repository);
 
     if (inputs && typeof inputs.schedule === 'string' && !/^([01]\d|2[0-3]):[0-5]\d$/.test(schedule)) {
       errors.push(finding('schedule_invalid', 'schedule', 'Choose a time between 00:00 and 23:59.'));
@@ -143,6 +156,8 @@ export function installSetupSampleBridge(): void {
       resolved: {
         repository: mode === 'google_drivefs_stream' ? (repository ?? `${sample.drivefs.my_drive_root}\\Rewindle\\Backups`) : repository,
         storage_mode: mode,
+        repository_access: here === null ? 'password' : here === 'unknown' ? null : here,
+        existing_repository_access: here,
         drivefs_my_drive_root: mode === 'google_drivefs_stream' ? sample.drivefs.my_drive_root : null,
         sources,
         canary_source: 'C:\\ProgramData\\ResticBackuper\\Canary',
@@ -228,21 +243,36 @@ export function installSetupSampleBridge(): void {
     job.elevated = true;
     stage('running');
 
+    // What the install does about the backups' mode, as the real installer decides it: the person's pick for a location with no backups
+    // (the page sends it only then), the recorded mode for backups that are already there, and what it finds when no record names one.
+    const location = typeof choices?.repository === 'string' ? choices.repository : sample.defaultRepository;
+    const there = kind === 'install' ? backupsAt(location) : null;
+    const access: 'password' | 'no_password' = there === null ? (choices?.repositoryAccess === 'no_password' ? 'no_password' : 'password')
+      : there === 'unknown' ? (sample.detected ?? 'password') : there;
+    const noPassword = access === 'no_password';
+    const mismatch = sample.install === 'access-mismatch';
+    const keptDetail = 'Your existing backups in this location were kept and reused.'
+      + (there === 'unknown' ? ` They have ${noPassword ? 'no password' : 'a password'}, so Setup kept that.` : noPassword ? ' They have no password.' : '');
+    const failureText = mismatch
+      ? 'These backups no longer match what Setup recorded for them, usually because they were changed outside Rewindle. Setup can’t carry on with them here. Choose another location, or see Switching an existing backup in SECURITY.md on Rewindle’s GitHub page. Setup undid its changes, and your backups were not touched.'
+      : `The drive E: stopped responding while the backup location was being prepared. Setup removed what it had installed and kept your backups${noPassword ? '' : ' and recovery key'}.`;
+
     // The installer's own phases and titles, as docs/setup-contract.md lists them (the wizard shows its own plainer words for them).
+    // Without a password the installer skips the credential phase and words the other two differently.
     const steps: [string, string, number, ('skipped' | 'fail')?, string?][] = kind === 'install' ? [
       ['preflight', 'Checking your PC and the choices you made', 700],
       ['webview2', 'Making sure Microsoft Edge WebView2 is available', 250],
       ['payload', 'Copying Rewindle onto this PC', 1100],
       ['canary', 'Preparing the restore test file', 500],
-      ['credential', 'Creating the backup password and storing it for your account', 500],
-      ['repository', 'Creating the encrypted backup repository', 1500, sample.install === 'failure' ? 'fail' : undefined,
-        'The drive E: stopped responding while the backup location was being prepared. Setup removed what it had installed and kept your backups and recovery key.'],
-      ['recovery_key', 'Writing your recovery key', 500],
+      noPassword ? ['credential', 'Choosing no password', 500, 'skipped', 'No password: this backup opens without one.']
+        : ['credential', 'Creating the backup password and storing it for your account', 500],
+      ['repository', noPassword ? 'Creating the backup location' : 'Creating the encrypted backup repository', 1500, sample.install === 'failure' || mismatch ? 'fail' : undefined, failureText],
+      ['recovery_key', noPassword ? 'Saving the recovery tools' : 'Writing your recovery key', 500],
       ['permissions', 'Locking the Rewindle folders so only administrators can change them', 600],
       ['tasks', 'Scheduling the daily backup and registering Rewindle with Windows', 800],
       ['dashboard', 'Setting up the Rewindle dashboard', 700],
       ['verification', 'Checking that everything was installed correctly', 1600],
-      ['first_backup', 'Starting the first backup', 800, choices?.startBackup === false ? 'skipped' : undefined],
+      ['first_backup', 'Starting the first backup', 800, choices?.startBackup === false ? 'skipped' : undefined, 'A first backup was not requested.'],
     ] : [
       ['preflight', 'Checking what is installed', 700],
       ['stop', 'Stopping Rewindle', 900],
@@ -254,36 +284,50 @@ export function installSetupSampleBridge(): void {
     ];
     const KEY_PATH = `${HOME}\\ResticBackuper-RecoveryKey.txt`;
     for (const [phase, title, duration, outcome, failure] of steps) {
-      if (outcome === 'skipped') { line({ phase, state: 'skipped', title }); await wait(duration); continue; }
+      if (outcome === 'skipped') { line({ phase, state: 'skipped', title, detail: failure ?? null }); await wait(duration); continue; }
       line({ phase, state: 'started', title });
       await wait(duration);
       if (outcome === 'fail') {
         line({ phase, state: 'failed', title, detail: failure ?? null });
-        const failed = { type: 'result', ok: false, error: { code: 'repository_initialization_failed', message: failure, detail: null }, install_root: null, recovery_key_path: null, recovery_key_readable_by_user: null, dashboard_executable: null, version: '0.2.0-alpha.2', warnings: [] };
+        const failed = {
+          type: 'result', ok: false, error: { code: mismatch ? 'repository_access_mismatch' : 'repository_initialization_failed', message: failure, detail: null },
+          install_root: null, recovery_key_path: null, recovery_key_readable_by_user: null, dashboard_executable: null, version: '0.2.0-alpha.2',
+          repository_access: access, warnings: [],
+        };
         line(failed);
         await wait(300);
         return finish('failed', failure ?? 'Setup could not finish.', failed, 1);
       }
       line({
         phase, state: 'completed', title,
-        detail: phase === 'webview2' ? 'Already installed' : phase === 'repository' ? 'Created a new, empty backup location' : phase === 'first_backup' ? 'Windows started your first backup.' : null,
+        detail: phase === 'webview2' ? 'Already installed'
+          : phase === 'repository' ? (there === null ? 'Created a new, empty backup location' : keptDetail)
+            : phase === 'recovery_key' && noPassword ? 'This backup has no password, so there is no recovery key.'
+              : phase === 'first_backup' ? 'Windows started your first backup.' : null,
       });
     }
     const result = kind === 'install' ? {
       type: 'result', ok: true, error: null, install_root: 'C:\\Program Files\\ResticBackuper',
-      recovery_key_path: KEY_PATH,
-      recovery_key_readable_by_user: sample.install !== 'key-unreadable',
+      // Without a password there is no key: the result says so, whatever an older install left on the disk.
+      recovery_key_path: noPassword ? null : KEY_PATH,
+      recovery_key_readable_by_user: noPassword ? null : sample.install !== 'key-unreadable',
       dashboard_executable: 'C:\\Program Files\\ResticBackuper\\ResticBackuperDashboard.exe', version: '0.2.0-alpha.2',
-      warnings: sample.install === 'key-unreadable' ? [{ code: 'recovery_key_not_readable_by_user', message: 'The recovery key can only be opened by administrators.' }] : [],
+      repository_access: access,
+      warnings: sample.install === 'key-unreadable' && !noPassword ? [{ code: 'recovery_key_not_readable_by_user', message: 'The recovery key can only be opened by administrators.' }] : [],
     } : {
       type: 'result', ok: true, error: null, operation: 'uninstall', install_root: 'C:\\Program Files\\ResticBackuper',
       removed: { install_root: true, scheduled_tasks: ['ResticBackuper', 'ResticBackuperDashboard'], start_menu_shortcut: true, installed_apps_entry: true },
-      kept: { state_root: 'C:\\ProgramData\\ResticBackuper', repository: sample.defaultRepository, recovery_key: KEY_PATH, recovery_tools: sample.defaultRepository ? `${sample.defaultRepository.replace(/\\[^\\]*$/, '')}\\RecoveryTools` : null, cloud_verification_root: null },
+      kept: {
+        state_root: 'C:\\ProgramData\\ResticBackuper', repository: sample.defaultRepository, recovery_key: keptAccessNow() === 'no_password' ? null : KEY_PATH,
+        recovery_tools: sample.defaultRepository ? `${sample.defaultRepository.replace(/\\[^\\]*$/, '')}\\RecoveryTools` : null, cloud_verification_root: null,
+        repository_access: keptAccessNow(),
+      },
       warnings: [],
     };
     line(result);
     await wait(250);
     if (kind === 'uninstall') uninstalled = true;
+    else installedAccess = access;
     finish('succeeded', '', result, 0);
   }
 
@@ -320,10 +364,15 @@ export function installSetupSampleBridge(): void {
         return { cancelled: !!job };
       }
       case 'install':
-      case 'uninstall':
+      case 'uninstall': {
         if (operation) throw new Refusal('busy', 'Setup is already working on something.');
+        const pick = (payload?.choices as Payload)?.repositoryAccess;
+        if (command === 'install' && pick !== undefined && pick !== null && pick !== 'password' && pick !== 'no_password') {
+          throw new Refusal('invalid', 'The password choice is not valid.');
+        }
         void runOperation(command, payload?.choices as Payload);
         return { started: true };
+      }
       case 'cancelInstall':
         if (!operation || operation.elevated) return { cancelled: false };
         operation.cancelled = true;

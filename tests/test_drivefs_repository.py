@@ -69,6 +69,26 @@ class DriveFsRepositoryTests(unittest.TestCase):
         self.assertEqual("local_ntfs", loaded["repository_storage_mode"])
         self.assertNotIn("repository_drivefs_root", loaded)
 
+    def test_legacy_config_is_a_backup_with_a_password_and_either_storage_mode_may_have_none(self) -> None:
+        # A configuration written before the password choice existed has no repository_access: it means a password.
+        with tempfile.TemporaryDirectory(prefix="drivefs-access-") as root_text:
+            root = Path(root_text)
+            self.assertEqual("password", self._load_document(root, self._config_document(root))["repository_access"])
+            document = self._config_document(root)
+            document["repository_access"] = "no_password"
+            self.assertEqual("no_password", self._load_document(root, document)["repository_access"])
+            document.update(
+                {
+                    "repository": str(root / "My Drive" / "ResticBackups"),
+                    "repository_storage_mode": "google_drivefs_stream",
+                    "drivefs_my_drive_root": str(root / "My Drive"),
+                    "drivefs_cache_directory": str(root / "Google" / "DriveFS"),
+                }
+            )
+            (root / "My Drive").mkdir()
+            (root / "Google" / "DriveFS").mkdir(parents=True)
+            self.assertEqual("no_password", self._load_document(root, document)["repository_access"])
+
     def test_g_drive_requires_explicit_drivefs_mode(self) -> None:
         with tempfile.TemporaryDirectory(prefix="drivefs-explicit-") as root_text:
             root = Path(root_text)
@@ -505,6 +525,8 @@ class DriveFsRepositoryTests(unittest.TestCase):
                 )
             )
             self.assertEqual("failed", status["state"])
+            # Even a run that stops before it reaches Restic records how its backups open (an older configuration: a password).
+            self.assertEqual("password", status["repository_access"])
             self.assertIn("DriveFS is unavailable", status["failure"])
             self.assertEqual("repository_storage", status["failure_phase"])
             self.assertEqual(

@@ -2211,6 +2211,11 @@ namespace ResticBackuper.Dashboard
             repository["volumeReady"] = repositoryVolumeReady;
             // How full the backup location is and when it fills (DashboardWindow.BackupSpace.cs).
             repository["space"] = BuildWebSpaceState();
+            // How the backups are opened: "password", "no_password", or null when the configuration is unavailable or names anything
+            // else, in which case the page says nothing about encryption either way (SourceConfiguration.ReadRepositoryAccess).
+            repository["repositoryAccess"] = currentSourceConfiguration == null
+                ? null
+                : currentSourceConfiguration.RepositoryAccess;
             return repository;
         }
 
