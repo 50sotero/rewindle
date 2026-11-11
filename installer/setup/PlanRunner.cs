@@ -24,7 +24,12 @@ namespace Rewindle.Setup
     {
         // Asks the installer to describe this PC and check `inputs`. Blocks until the plan is read; throws SetupFailure when
         // the installer cannot produce one and OperationCanceledException when `cancel` fires.
-        IDictionary<string, object> GetPlan(InstallerInputs inputs, CancellationToken cancel);
+        //
+        // forInstall is true only for the check an install makes just before it starts: that plan judges the install as it will
+        // run, so it carries the person's password choice (inputs.RepositoryAccess) exactly when the install will. The plans the
+        // wizard asks for pass false: they describe the location alone and never carry the choice. Every request is its own run
+        // of the installer and its own plan file, so one kind of plan is never served in place of the other.
+        IDictionary<string, object> GetPlan(InstallerInputs inputs, bool forInstall, CancellationToken cancel);
     }
 
     // Plan mode: runs Install-ResticBackuper.ps1 -PlanOnly in a normal (not elevated) Windows PowerShell with an argument array,
@@ -59,7 +64,7 @@ namespace Rewindle.Setup
             return Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
         }
 
-        public IDictionary<string, object> GetPlan(InstallerInputs inputs, CancellationToken cancel)
+        public IDictionary<string, object> GetPlan(InstallerInputs inputs, bool forInstall, CancellationToken cancel)
         {
             if (!File.Exists(scriptPath))
             {
@@ -72,7 +77,7 @@ namespace Rewindle.Setup
             }
             Directory.CreateDirectory(plansFolder);
             string planPath = Path.Combine(plansFolder, "plan-" + Guid.NewGuid().ToString("N") + ".json");
-            List<string> arguments = InstallerContract.PlanArguments(scriptPath, planPath, inputs);
+            List<string> arguments = InstallerContract.PlanArguments(scriptPath, planPath, inputs, forInstall);
 
             ProcessStartInfo startInfo = new ProcessStartInfo();
             startInfo.FileName = powershell;

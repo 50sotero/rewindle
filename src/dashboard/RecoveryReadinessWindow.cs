@@ -21,6 +21,15 @@ namespace ResticBackuper.Dashboard
         private const string RotateLabel = "Rotate keys";
         private const string ResumeLabel = "Resume key rotation";
         private const string InspectingHint = "Actions unlock after the independent inspection completes.";
+        // What differs for a backup without a password (repository_access "no_password"): it has no recovery key and no saved
+        // password, so no key row, no key repair and no key rotation, and the texts that name them say what is checked instead.
+        // A backup with a password keeps every text below its own, as it always had.
+        private const string NoPasswordDescription =
+            "These checks only look; they change nothing. They test that Rewindle can open your backups, that there is free space, that nothing is left locked, and that a restore works.";
+        private const string NoPasswordLockRepairHelp =
+            "Available only when leftover locks are present and Rewindle can open your backups.";
+        private const string NoPasswordDrillHelp =
+            "Available only when a restore drill is due, Rewindle can open your backups, your recovery information checks out, the latest backup was checked, and no locks or unfinished changes remain.";
 
         private readonly SourceConfiguration configuration;
         private readonly DashboardThemePalette palette;
@@ -47,6 +56,8 @@ namespace ResticBackuper.Dashboard
         // Whether the key button currently resumes an interrupted rotation rather than starting one. It is set with the
         // button's label from the same report, so nothing has to read the label back to find out.
         private bool resumingRotation;
+        // True for a backup without a password: from the configuration until a report has loaded, then from the report.
+        private bool noPassword;
 
         internal RecoveryReadinessWindow(
             SourceConfiguration configuration,
@@ -56,6 +67,7 @@ namespace ResticBackuper.Dashboard
             if (palette == null) throw new ArgumentNullException("palette");
             this.configuration = configuration;
             this.palette = palette;
+            noPassword = string.Equals(configuration.RepositoryAccess, "no_password", StringComparison.Ordinal);
             Title = "Recovery readiness";
             Width = 1160;
             Height = 650;
@@ -95,7 +107,9 @@ namespace ResticBackuper.Dashboard
             headline.Margin = new Thickness(0, 8, 0, 0);
             headerCopy.Children.Add(headline);
             detail = Text(
-                "These checks only look; they change nothing. They test that Rewindle's saved password and your recovery key each open your backups, that there is free space, that nothing is left locked, and that a restore works.",
+                noPassword
+                    ? NoPasswordDescription
+                    : "These checks only look; they change nothing. They test that Rewindle's saved password and your recovery key each open your backups, that there is free space, that nothing is left locked, and that a restore works.",
                 12,
                 palette.TextSecondary,
                 FontWeights.Normal);
@@ -223,7 +237,9 @@ namespace ResticBackuper.Dashboard
             lockRepairButton.Click += async delegate { await RepairStaleLocks(); };
             SetActionHelp(
                 lockRepairButton,
-                "Available only when leftover locks are present and Rewindle's saved password works.");
+                noPassword
+                    ? NoPasswordLockRepairHelp
+                    : "Available only when leftover locks are present and Rewindle's saved password works.");
             actionBar.Children.Add(lockRepairButton);
             keyRotationButton = Button(RotateLabel, false);
             keyRotationButton.Margin = new Thickness(0, 0, 8, 0);
@@ -233,6 +249,7 @@ namespace ResticBackuper.Dashboard
                 keyRotationButton,
                 "Creates a new recovery key and saved password and checks both first, keeps the old ones in case something goes wrong, and finishes an interrupted key change.");
             actionBar.Children.Add(keyRotationButton);
+            ShowKeyActions();
             closeButton = Button("Close", false);
             closeButton.IsCancel = true;
             closeButton.Click += delegate { Close(); };
@@ -291,6 +308,9 @@ namespace ResticBackuper.Dashboard
                 Announce();
                 return;
             }
+            // The report says how these backups are opened (RecoveryHealthLauncher has checked that it is what the configuration says).
+            noPassword = string.Equals(report.RepositoryAccess, "no_password", StringComparison.Ordinal);
+            ShowKeyActions();
             if (report.OverallStatus == "healthy")
             {
                 headline.Text = "Your recovery setup checks out";
@@ -324,7 +344,7 @@ namespace ResticBackuper.Dashboard
                     : report.ActiveLockCount.Value.ToString(CultureInfo.CurrentCulture) + " left over")
                 : "Unavailable";
             checksGrid.ItemsSource = report.Checks;
-            repairEligible = CheckPassed(report, "recovery_key") &&
+            repairEligible = !noPassword && CheckPassed(report, "recovery_key") &&
                 !CheckPassed(report, "active_credential");
             repairButton.IsEnabled = repairEligible && !inspecting;
             lockRepairEligible = report.ActiveLockCount.HasValue &&
@@ -334,7 +354,7 @@ namespace ResticBackuper.Dashboard
                 report,
                 "pending_transaction",
                 "credential-rotation.journal.json");
-            keyRotationEligible = CheckPassed(report, "active_credential") &&
+            keyRotationEligible = !noPassword && CheckPassed(report, "active_credential") &&
                 CheckPassed(report, "recovery_key") &&
                 report.ActiveLockCount.HasValue && report.ActiveLockCount.Value == 0 &&
                 (CheckPassed(report, "pending_transaction") || rotationJournalPending);
@@ -342,25 +362,35 @@ namespace ResticBackuper.Dashboard
             SetKeyRotationLabel(rotationJournalPending);
             // The same sentence is the help text and the tooltip. Tooltips show on a dimmed button, so the reason a button is
             // unavailable is on the button, not only in the accessibility tree.
-            SetActionHelp(
-                repairButton,
-                repairEligible
-                    ? "Uses your recovery key to replace Rewindle's saved password for this Windows account. Nothing else changes."
-                    : "Available only when your recovery key works but Rewindle's saved password for this Windows account doesn't.");
+            if (!noPassword)
+            {
+                SetActionHelp(
+                    repairButton,
+                    repairEligible
+                        ? "Uses your recovery key to replace Rewindle's saved password for this Windows account. Nothing else changes."
+                        : "Available only when your recovery key works but Rewindle's saved password for this Windows account doesn't.");
+            }
             SetActionHelp(
                 lockRepairButton,
                 lockRepairEligible
                     ? "Windows will ask for your permission. Rewindle then removes only locks left over from interrupted backups, and only while no backup is running."
-                    : "Available only when leftover locks are present and Rewindle's saved password works.");
-            SetActionHelp(
-                keyRotationButton,
-                rotationJournalPending
-                    ? "Finishes the key change that was interrupted, and checks it."
-                    : keyRotationEligible
-                        ? "Creates a new recovery key and saved password, checks that both work, and keeps the old ones in case something goes wrong."
-                        : "Available only when your recovery key and saved password both work, no locks are left over, and no other change is unfinished.");
+                    : noPassword
+                        ? NoPasswordLockRepairHelp
+                        : "Available only when leftover locks are present and Rewindle's saved password works.");
+            if (!noPassword)
+            {
+                SetActionHelp(
+                    keyRotationButton,
+                    rotationJournalPending
+                        ? "Finishes the key change that was interrupted, and checks it."
+                        : keyRotationEligible
+                            ? "Creates a new recovery key and saved password, checks that both work, and keeps the old ones in case something goes wrong."
+                            : "Available only when your recovery key and saved password both work, no locks are left over, and no other change is unfinished.");
+            }
+            // A backup with a password is drilled with its recovery key, so that key has to check out; a backup without one has no key,
+            // and what has to check out instead is that Rewindle can open it.
             drillEligible = CheckNeedsReview(report, "restore_drill") &&
-                CheckPassed(report, "recovery_key") &&
+                (noPassword ? CheckPassed(report, "active_credential") : CheckPassed(report, "recovery_key")) &&
                 CheckPassed(report, "recovery_bundle") &&
                 CheckPassed(report, "last_verification") &&
                 CheckPassed(report, "pending_transaction") &&
@@ -370,9 +400,21 @@ namespace ResticBackuper.Dashboard
                 drillButton,
                 drillEligible
                     ? "Restores the restore test file and a small sample of your files from the latest backup into a new folder, checks them and records the result. Nothing is overwritten."
-                    : "Available only when a restore drill is due, your recovery key and recovery information check out, the latest backup was checked, and no locks or unfinished changes remain.");
+                    : noPassword
+                        ? NoPasswordDrillHelp
+                        : "Available only when a restore drill is due, your recovery key and recovery information check out, the latest backup was checked, and no locks or unfinished changes remain.");
             UpdateActionHint();
             Announce();
+        }
+
+        // A backup without a password has no recovery key and no saved password, so the buttons that repair or rotate them are not
+        // shown (a dimmed button that can never be used would only raise the question what it is for).
+        private void ShowKeyActions()
+        {
+            if (repairButton == null || keyRotationButton == null) return;
+            Visibility visibility = noPassword ? Visibility.Collapsed : Visibility.Visible;
+            repairButton.Visibility = visibility;
+            keyRotationButton.Visibility = visibility;
         }
 
         // The key button starts a rotation, or resumes one that was interrupted. The flag is what RotateKey consults.
@@ -505,12 +547,16 @@ namespace ResticBackuper.Dashboard
                 palette,
                 "Run a restore drill?",
                 "Rewindle will restore a small sample of your latest backup into a new folder and check " +
-                    "every restored file. Your original files, backups and keys are not touched.",
+                    "every restored file. " + (noPassword
+                        ? "Your original files and backups are not touched."
+                        : "Your original files, backups and keys are not touched."),
                 new[]
                 {
                     "It uses your latest checked backup: the restore test file plus a small sample of your files.",
                     "Rewindle puts them in a new folder in its own data folder, checks every restored file and records the result.",
-                    "Nothing is overwritten or deleted: not your files, your backups, your keys or an earlier restore folder. The restored sample is kept so you can look at it."
+                    noPassword
+                        ? "Nothing is overwritten or deleted: not your files, your backups or an earlier restore folder. The restored sample is kept so you can look at it."
+                        : "Nothing is overwritten or deleted: not your files, your backups, your keys or an earlier restore folder. The restored sample is kept so you can look at it."
                 },
                 DrillLabel,
                 "Not now",
@@ -520,7 +566,9 @@ namespace ResticBackuper.Dashboard
             SetInspecting(true);
             headline.Text = "Waiting for the Windows permission prompt";
             headline.Foreground = palette.TextPrimary;
-            detail.Text = "Choose Yes in the Windows permission prompt to continue. Your recovery key stays inside Rewindle's restore tool.";
+            detail.Text = noPassword
+                ? "Choose Yes in the Windows permission prompt to continue."
+                : "Choose Yes in the Windows permission prompt to continue. Your recovery key stays inside Rewindle's restore tool.";
             Announce();
             RestoreManagerResult result;
             try
@@ -871,7 +919,9 @@ namespace ResticBackuper.Dashboard
             {
                 headline.Text = "Running independent checks";
                 headline.Foreground = palette.TextPrimary;
-                detail.Text = "Authenticating both recovery paths and validating protected artifacts.";
+                detail.Text = noPassword
+                    ? "Checking that Rewindle can open your backups and validating protected artifacts."
+                    : "Authenticating both recovery paths and validating protected artifacts.";
                 Announce();
             }
         }

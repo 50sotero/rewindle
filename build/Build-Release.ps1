@@ -301,7 +301,9 @@ Copy-PayloadFile -Source $pythonLicense -RelativeDestination 'licenses\PYTHON.tx
 foreach ($name in @('Install.cmd', 'Install-ResticBackuper.ps1')) {
     Copy-Item -LiteralPath (Join-Path $projectRoot "installer\$name") -Destination (Join-Path $bundleRoot $name) -Force
 }
-foreach ($name in @('README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'dependencies.json', 'VERSION')) {
+# SECURITY.md sits next to README.md because README links to it (a relative link) and a few of Rewindle's messages send people to
+# its section "Switching an existing backup".
+foreach ($name in @('README.md', 'SECURITY.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'dependencies.json', 'VERSION')) {
     Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination (Join-Path $bundleRoot $name) -Force
 }
 $bundleLicenses = Join-Path $bundleRoot 'licenses'

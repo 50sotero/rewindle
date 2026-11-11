@@ -12,8 +12,10 @@ import unittest
 PROJECT = Path(__file__).resolve().parents[1]
 SOURCE = PROJECT / "src"
 sys.path.insert(0, str(SOURCE))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from recovery_health import inspect  # noqa: E402
+from restic_access import restic_access_result  # noqa: E402
 from refresh_recovery_tools import MANIFEST_NAME, PAYLOAD_NAMES, json_bytes, sha256_file  # noqa: E402
 
 
@@ -23,13 +25,15 @@ SNAPSHOT_ID = "c" * 64
 PASSWORD = "correct-recovery-password-material-that-is-long-enough-12345"
 
 
-def config_for(root: Path, generation: int = 3) -> dict[str, object]:
+def config_for(root: Path, generation: int = 3, access: str | None = None) -> dict[str, object]:
+    """The configuration of a fixture. `access` None leaves out "repository_access", as every configuration written
+    before the choice existed does (it then means a password); "password" and "no_password" write it."""
     source = r"E:\Projects"
     install = root / "Install"
     state = root / "State"
     repository = root / "Repository" / "Personal"
     recovery = root / "Repository" / "RecoveryTools"
-    return {
+    config: dict[str, object] = {
         "schema_version": 1,
         "plan_id": PLAN_ID,
         "config_generation": generation,
@@ -52,6 +56,9 @@ def config_for(root: Path, generation: int = 3) -> dict[str, object]:
         "sources": [source],
         "source_identities": {source: {"expected_volume_serial": "11223344"}},
     }
+    if access is not None:
+        config["repository_access"] = access
+    return config
 
 
 def create_bundle(directory: Path, config: dict[str, object]) -> None:
@@ -72,6 +79,9 @@ def create_bundle(directory: Path, config: dict[str, object]) -> None:
             for name in PAYLOAD_NAMES
         ],
     }
+    if "repository_access" in config:
+        # The manifest names the same mode as the configuration copy beside it.
+        manifest["repository_access"] = config["repository_access"]
     (directory / MANIFEST_NAME).write_bytes(json_bytes(manifest))
 
 
@@ -90,8 +100,18 @@ def data_check_record(age: timedelta, repository_id: str = REPOSITORY_ID) -> dic
     }
 
 
-def build_fixture(root: Path, *, history: bool = True, data_check: bool = True) -> Path:
-    config = config_for(root)
+def build_fixture(
+    root: Path,
+    *,
+    history: bool = True,
+    data_check: bool = True,
+    access: str | None = None,
+    leftover_key_files: bool = False,
+) -> Path:
+    """`access` as in config_for. Backups without a password have no DPAPI file and no recovery key, so a
+    "no_password" fixture writes neither unless `leftover_key_files` asks for the files an older install left."""
+    config = config_for(root, access=access)
+    no_password = access == "no_password"
     install = Path(config["restic_executable"]).parent
     state = Path(config["state_directory"])
     repository = Path(config["repository"])
@@ -101,20 +121,21 @@ def build_fixture(root: Path, *, history: bool = True, data_check: bool = True) 
     for path in (
         Path(config["restic_executable"]),
         Path(config["python_executable"]),
-        Path(config["secret_file"]),
         install / "secret_store.py",
         Path(config["exclude_file"]),
         Path(config["canary_file"]),
         repository / "config",
     ):
         path.write_text("fixture\n", encoding="utf-8")
-    recovery_key = Path(config["recovery_key_file"])
-    recovery_key.write_text(
-        "RESTIC PERSONAL BACKUP RECOVERY KEY\n"
-        f"Repository: {repository}\n"
-        f"Password: {PASSWORD}\n",
-        encoding="utf-8",
-    )
+    if not no_password or leftover_key_files:
+        Path(config["secret_file"]).write_text("fixture\n", encoding="utf-8")
+        recovery_key = Path(config["recovery_key_file"])
+        recovery_key.write_text(
+            "RESTIC PERSONAL BACKUP RECOVERY KEY\n"
+            f"Repository: {repository}\n"
+            f"Password: {PASSWORD}\n",
+            encoding="utf-8",
+        )
     config_path = install / "backup-config.json"
     config_path.write_bytes(json_bytes(config))
     create_bundle(Path(config["recovery_tools_directory"]), config)
@@ -145,7 +166,7 @@ def build_fixture(root: Path, *, history: bool = True, data_check: bool = True) 
                     "entries": [
                         {
                             "kind": "recovery_key_representative_drill",
-                            "credential_source": "recovery_key",
+                            "credential_source": "none" if no_password else "recovery_key",
                             "plan_id": PLAN_ID,
                             "config_generation": 3,
                             "snapshot_generation": 3,
@@ -170,14 +191,22 @@ def build_fixture(root: Path, *, history: bool = True, data_check: bool = True) 
 
 
 class FakeRunner:
-    def __init__(self, locks: int = 0, recovery_password_valid: bool = True) -> None:
+    """Restic as the backups open: `access` says whether they were made with a password or without."""
+
+    def __init__(self, locks: int = 0, recovery_password_valid: bool = True, access: str = "password") -> None:
         self.locks = locks
         self.recovery_password_valid = recovery_password_valid
+        self.access = access
         self.commands: list[list[str]] = []
+        self.environments: list[dict[str, str]] = []
 
     def __call__(self, command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         self.commands.append(list(command))
         environment = kwargs.get("env")
+        self.environments.append(dict(environment) if isinstance(environment, dict) else {})
+        refusal = restic_access_result(command, environment, self.access)
+        if refusal is not None:
+            return subprocess.CompletedProcess(command, refusal[0], "", refusal[1])
         is_recovery = isinstance(environment, dict) and "RESTIC_PASSWORD" in environment
         if is_recovery and (
             not self.recovery_password_valid or environment["RESTIC_PASSWORD"] != PASSWORD

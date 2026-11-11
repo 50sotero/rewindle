@@ -333,7 +333,8 @@ namespace Rewindle.Setup
                     try
                     {
                         WaitForBundle(mine.Token);
-                        IDictionary<string, object> plan = environment.Plans.GetPlan(inputs, mine.Token);
+                        // Not for an install: the wizard's plans describe the location alone and never carry the password choice.
+                        IDictionary<string, object> plan = environment.Plans.GetPlan(inputs, false, mine.Token);
                         Respond(id, plan);
                     }
                     catch (OperationCanceledException)
@@ -734,6 +735,12 @@ namespace Rewindle.Setup
             lock (gate)
             {
                 reported = installResult;
+            }
+            // Backups without a password have no recovery key. A key file an earlier install left at the usual place is not theirs, so
+            // whatever path the result line carries, it is not copied or shown (the installer reports none for these backups anyway).
+            if (reported != null && string.Equals(reported.RepositoryAccess, InstallerContract.AccessNone, StringComparison.Ordinal))
+            {
+                throw new SetupFailure("no_recovery_key", "These backups have no password, so there is no recovery key to copy.");
             }
             if (reported == null || string.IsNullOrEmpty(reported.RecoveryKeyPath))
             {

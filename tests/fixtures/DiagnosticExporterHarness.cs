@@ -36,6 +36,9 @@ namespace ResticBackuper.Dashboard
             EngineProfile.UseFolderRootsForTesting(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "rewindle-harness-" + System.Guid.NewGuid().ToString("N")));
             if (args.Length < 2) return 10;
             string root = Path.GetFullPath(args[0]);
+            // An optional third argument is the "repository_access" the configuration and the run's status carry (how the backups are
+            // opened); without it neither carries the key, as before the choice existed.
+            string access = args.Length > 2 ? args[2] : null;
             bool unsafeDestination = string.Equals(
                 args[1],
                 "unsafe",
@@ -65,6 +68,7 @@ namespace ResticBackuper.Dashboard
             rawConfig["password"] = FixturePassword;
             rawConfig["recovery_key_file"] = Path.Combine(root, "recovery-secret.txt");
             rawConfig["support_contact"] = FixtureEmail;
+            if (access != null) rawConfig["repository_access"] = access;
             WriteJson(configPath, rawConfig);
             // The installer's random value for this installation: an identifier, so it is pseudonymized like the plan ID.
             Dictionary<string, object> runtimeManifest = new Dictionary<string, object>();
@@ -90,6 +94,7 @@ namespace ResticBackuper.Dashboard
                 " --password-file " + Path.Combine(root, "secret.txt");
             status["dpapi_blob"] = longBlob;
             status["opaque_token"] = longBlob;
+            if (access != null) status["repository_access"] = access;
             WriteJson(Path.Combine(state, "status.json"), status);
 
             Dictionary<string, object> cloudEvidence =

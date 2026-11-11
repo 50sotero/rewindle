@@ -3,6 +3,11 @@ param(
     [string]$Repository,
     [ValidateSet('local_ntfs', 'google_drivefs_stream')]
     [string]$RepositoryStorageMode = 'local_ntfs',
+    # How Restic opens the backups: password (the recommended choice) or no_password. Left out, a location that already holds
+    # backups keeps the way they were made, and a new one gets a password. ValidateSet ignores case in Windows PowerShell, so
+    # Assert-RepositoryAccessValue checks the exact spelling.
+    [ValidateSet('password', 'no_password')]
+    [string]$RepositoryAccess,
     [string]$DriveFsMyDriveRoot,
     [string]$DriveFsCacheDirectory,
     [string]$SourceList,
@@ -148,6 +153,15 @@ $planErrors = $null
 $planWarnings = $null
 $installWarnings = [Collections.Generic.List[object]]::new()
 $recoveryKeyReadable = $null
+# How Restic opens the backups of this install: 'password' or 'no_password', or $null while that is not known (a location whose
+# backups no record describes: the install asks the installed program once its files are copied). The second is how the backups
+# already in the chosen folder are recorded ('password', 'no_password', 'unknown', or $null when there are none), the third
+# where the answer came from: parameter, prompt, recorded, detected or default (Resolve-RepositoryAccess). The first is not
+# called $script:repositoryAccess: variable names ignore case, so that would be the -RepositoryAccess parameter itself, whose
+# value set refuses $null and which says what was asked for, not what was decided.
+$script:repositoryAccessMode = $null
+$script:existingRepositoryAccess = $null
+$script:repositoryAccessSource = $null
 
 # Findings are the stable, machine-readable form of every validation message. Each carries a code, the field of the wizard it
 # belongs to, one plain sentence for the user, and the console text this installer has always printed.
@@ -624,6 +638,9 @@ function Invoke-SelfElevation {
         '-RepositoryStorageMode', (Quote-ProcessArgument $RepositoryStorageMode),
         '-ExpectedUserSid', (Quote-ProcessArgument $sid)
     )
+    if ($invocationParameters.ContainsKey('RepositoryAccess')) {
+        $arguments += @('-RepositoryAccess', (Quote-ProcessArgument $RepositoryAccess))
+    }
     if ($invocationParameters.ContainsKey('Repository')) {
         $arguments += @('-Repository', (Quote-ProcessArgument $Repository))
     }
@@ -1986,21 +2003,35 @@ function ConvertTo-KeptRecordTime {
     return $parsed
 }
 
+# The access a configuration or state record names. This function is byte-identical in Install-ResticBackuper.ps1 and
+# Uninstall-ResticBackuper.ps1 (tests/test_setup_contract.py keeps the two equal); it never stops an install's plan or an uninstall.
+function Get-RecordedRepositoryAccess {
+    # The access a configuration or state record names: 'password' (also when the key is absent), 'no_password', or
+    # $null when it names anything else. Callers treat $null as "can't tell".
+    param([object]$Record)
+    if ($null -eq $Record) { return $null }
+    $property = $Record.PSObject.Properties['repository_access']
+    if ($null -eq $property) { return 'password' }
+    $value = $property.Value
+    if ($value -is [string] -and $value -cin @('password', 'no_password')) { return [string]$value }
+    return $null
+}
+
 # Where the backups of an earlier installation are, from the records it left in the state folder that an uninstall keeps:
 # repository.json (written when its backup location was set up, and rewritten with relocated_utc when Manage-Repository.ps1
 # completes a move of it) and last-success.json and status.json (written by every backup, so they name the place each backup
-# used). The newest record wins. Returns { repository, storage_mode }, or $null when there is no such record, when this account
-# can't read the records (only the account that installed is given access), when they are malformed, or when the stored
-# password those backups need is gone, so setup could not carry on with them. It reads those small files only, never the
-# backup folder (which may be on Google Drive), and never throws. As everywhere else (Assert-StateFolderOwner), nothing is read
-# from a state folder that is a link or that Administrators or SYSTEM don't own, since any account can create that folder;
-# here an owner that can't be read counts as one they don't own.
+# used). The newest record wins. Returns { repository, storage_mode, repository_access }, or $null when there is no such record,
+# when this account can't read the records (only the account that installed is given access), when they are malformed or name
+# a way of opening the backups setup doesn't know, or when those backups have a password and the stored password they need is
+# gone, so setup could not carry on with them (backups without a password need nothing stored). It reads those small files only,
+# never the backup folder (which may be on Google Drive), and never throws. As everywhere else (Assert-StateFolderOwner), nothing
+# is read from a state folder that is a link or that Administrators or SYSTEM don't own, since any account can create that
+# folder; here an owner that can't be read counts as one they don't own.
 function Get-KeptRepository {
     try {
         if (-not (Test-Path -LiteralPath $stateRoot -PathType Container)) { return $null }
         if ((Get-Item -LiteralPath $stateRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { return $null }
         if (-not (Test-TrustedStateOwner -OwnerSid (Get-FeedOwnerSid -Path $stateRoot))) { return $null }
-        if (-not (Test-Path -LiteralPath $secretFile -PathType Leaf)) { return $null }
         $kept = $null
         $keptTime = $null
         foreach ($record in @(
@@ -2022,6 +2053,8 @@ function Get-KeptRepository {
                     $mode = $document.repository_storage_mode
                     if ($mode -isnot [string] -or $mode -cnotin @('local_ntfs', 'google_drivefs_stream')) { continue }
                 }
+                $access = Get-RecordedRepositoryAccess -Record $document
+                if ($null -eq $access) { continue }
                 $written = $null
                 foreach ($name in $record[1]) {
                     if ($null -eq $properties[$name]) { continue }
@@ -2030,7 +2063,7 @@ function Get-KeptRepository {
                 }
                 if ($null -eq $written) { continue }
                 if ($null -eq $keptTime -or $written -gt $keptTime) {
-                    $kept = [pscustomobject]@{ repository = [string]$document.repository; storage_mode = $mode }
+                    $kept = [pscustomobject]@{ repository = [string]$document.repository; storage_mode = $mode; repository_access = $access }
                     $keptTime = $written
                 }
             }
@@ -2039,11 +2072,159 @@ function Get-KeptRepository {
                 continue
             }
         }
+        # Backups with a password can be carried on only with the password stored for them; backups without one need none.
+        if ($null -ne $kept -and $kept.repository_access -ceq 'password' -and -not (Test-Path -LiteralPath $secretFile -PathType Leaf)) {
+            return $null
+        }
         return $kept
     }
     catch {
         return $null
     }
+}
+
+# Whether two folder paths name the same folder (Windows compares names without regard to case); a path that isn't one is
+# never the same.
+function Test-SameFolderPath {
+    param([string]$First, [string]$Second)
+    try {
+        return [string]::Equals((Get-NormalizedPath -Path $First), (Get-NormalizedPath -Path $Second), [StringComparison]::OrdinalIgnoreCase)
+    }
+    catch {
+        return $false
+    }
+}
+
+# What the recovery tools next to the backups say about how they are opened. Setup wrote backup-config.json and
+# recovery-manifest.json there when the backups were set up; both must name this backup folder and say the same. Returns
+# 'password' or 'no_password' when they do, $null when the folder holds neither file, and 'unknown' when it holds only one, when
+# one can't be read or names another folder or an access setup doesn't know, or when the two disagree. It never throws.
+function Get-RecoveryToolsRepositoryAccess {
+    $paths = @((Join-Path $recoveryTools 'backup-config.json'), (Join-Path $recoveryTools 'recovery-manifest.json'))
+    try {
+        $present = @($paths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+        if ($present.Count -eq 0) { return $null }
+        if ($present.Count -ne $paths.Count) { return 'unknown' }
+        $answers = @()
+        foreach ($path in $paths) {
+            if ((Get-Item -LiteralPath $path -Force).Length -gt 16MB) { return 'unknown' }
+            $document = [IO.File]::ReadAllText($path, [Text.UTF8Encoding]::new($false)) | ConvertFrom-Json
+            if ($null -eq $document -or $document -isnot [Management.Automation.PSCustomObject]) { return 'unknown' }
+            $folder = $document.PSObject.Properties['repository']
+            if ($null -eq $folder -or $folder.Value -isnot [string] -or -not (Test-SameFolderPath -First $folder.Value -Second $repositoryPath)) { return 'unknown' }
+            $access = Get-RecordedRepositoryAccess -Record $document
+            if ($null -eq $access) { return 'unknown' }
+            $answers += $access
+        }
+        if ($answers[0] -ceq $answers[1]) { return $answers[0] }
+        return 'unknown'
+    }
+    catch {
+        return 'unknown'
+    }
+}
+
+# How the backups already in the chosen backup folder are opened, as earlier installations recorded it: 'password' or
+# 'no_password' when a record says so (the kept record that names this folder, else the recovery tools beside it), 'unknown'
+# when the folder holds backups (a Restic config file) that no record describes, and $null when it holds none. Only records are
+# read, never the backups: the install itself asks Restic, and nothing here is a verdict. It runs after Resolve-RepositorySelection.
+function Get-ExistingRepositoryAccess {
+    if (-not $repositoryPreviouslyInitialized) { return $null }
+    $kept = Get-KeptRepository
+    if ($null -ne $kept -and (Test-SameFolderPath -First ([string]$kept.repository) -Second $repositoryPath)) {
+        return [string]$kept.repository_access
+    }
+    $tools = Get-RecoveryToolsRepositoryAccess
+    if ($null -ne $tools) { return $tools }
+    return 'unknown'
+}
+
+# The choice for this install, from -RepositoryAccess and from how the backups already in the folder are recorded. Nothing
+# ever changes the way existing backups open: a parameter that says otherwise is not followed here, it is checked against the
+# backups themselves by the install (and refused there).
+function Get-RepositoryAccessDecision {
+    param([string]$Given, [string]$Existing)
+    if (-not [string]::IsNullOrEmpty($Given)) {
+        return [pscustomobject]@{ access = $Given; source = 'parameter' }
+    }
+    if ($Existing -ceq 'password' -or $Existing -ceq 'no_password') {
+        return [pscustomobject]@{ access = $Existing; source = 'recorded' }
+    }
+    if ($Existing -ceq 'unknown') {
+        return [pscustomobject]@{ access = $null; source = $null }
+    }
+    return [pscustomobject]@{ access = 'password'; source = 'default' }
+}
+
+# The warning for a choice that contradicts what is recorded for the backups already in the folder, or $null when there is none.
+function Get-RepositoryAccessDifferenceMessage {
+    param([string]$Existing, [string]$Chosen)
+    if ($Existing -ceq 'no_password' -and $Chosen -ceq 'password') {
+        return 'The backups in this location were made without a password. If they still open without one, Setup stops before changing anything. Choose no password to continue them, or choose another location.'
+    }
+    if ($Existing -ceq 'password' -and $Chosen -ceq 'no_password') {
+        return 'The backups in this location were made with a password. If they still need one, Setup stops before changing anything. Choose a password to continue them, or choose another location.'
+    }
+    return $null
+}
+
+# ValidateSet ignores case in Windows PowerShell, and every reader of backup-config.json refuses anything but the two exact
+# spellings, so a value written in capitals is refused here, before it can reach the configuration (a plan reports it too).
+function Assert-RepositoryAccessValue {
+    if (-not $invocationParameters.ContainsKey('RepositoryAccess')) { return }
+    if ($RepositoryAccess -cnotin @('password', 'no_password')) {
+        Stop-InstallValidation -Code 'repository_access_invalid' -Field 'repository' `
+            -Message "Setup doesn't know the password choice '$RepositoryAccess'. Use password or no_password, written in lower case." `
+            -Console "RepositoryAccess must be password or no_password, written in lower case (received '$RepositoryAccess')."
+    }
+}
+
+# Backups without a password can't be started while an unfinished change to the keys of earlier backups is waiting in the kept
+# state: the engine refuses everything until that change is finished, and finishing it needs a password.
+function Assert-NoPendingKeyChange {
+    if ($script:repositoryAccessMode -cne 'no_password') { return }
+    $journal = Join-Path $stateRoot 'credential-rotation.journal.json'
+    if (Test-Path -LiteralPath $journal -PathType Leaf) {
+        Stop-InstallValidation -Code 'repository_access_rotation_pending' -Field 'repository' -Path $stateRoot `
+            -Message "An unfinished change to the keys of earlier backups is waiting. To finish it, run Setup with a password for those backups. To start new backups without a password, move the folder $stateRoot aside first." `
+            -Console "credential-rotation.journal.json in $stateRoot belongs to earlier backups with a password; finish it, or move the folder aside to start new backups without a password."
+    }
+}
+
+# What Setup says about backups with a password whose password this PC doesn't have. The plan and the preflight say it as it is
+# (nothing has been started yet); the install's refusal (initializer exit 7) adds the ending of the others. It is defined here,
+# before the plan-only exit, because a plan says it too.
+function Get-PasswordUnavailableMessage {
+    return "The backups in this location have a password that Rewindle doesn't have on this PC, so Setup can't continue them. Choose another location for new backups. You can still restore files from these backups with their recovery key."
+}
+
+# Backups with a password can be carried on only with the password this PC stored for them. When the folder holds backups that
+# are recorded as having one and that password is not here (they were made on another PC, or the state folder was moved aside),
+# nothing in Setup could open them and a new password would not either, so the plan and the install's preflight say so now,
+# before anything is changed. Only backups recorded as having a password count: backups no record describes are asked about
+# later (the initializer refuses them with exit 7), and a choice of no password is checked against the backups themselves.
+function Assert-PasswordAvailable {
+    if ($script:repositoryAccessMode -cne 'password' -or $script:existingRepositoryAccess -cne 'password') { return }
+    if (-not $repositoryPreviouslyInitialized) { return }
+    if (Test-Path -LiteralPath $secretFile -PathType Leaf) { return }
+    Stop-InstallValidation -Code 'repository_password_unavailable' -Field 'repository' -Path $repositoryPath `
+        -Message (Get-PasswordUnavailableMessage)
+}
+
+# Decides how Restic opens this install's backups (see Get-RepositoryAccessDecision) and records what it found. A plan runs it as
+# a stage once the backup folder is understood; an install runs it in its preflight. The console question for a new backup
+# comes later, once the folders are chosen and before the checks that depend on the answer (see Invoke-InstallPreflight).
+function Resolve-RepositoryAccess {
+    Assert-RepositoryAccessValue
+    $script:repositoryAccessMode = $null
+    $script:repositoryAccessSource = $null
+    $script:existingRepositoryAccess = Get-ExistingRepositoryAccess
+    $given = if ($invocationParameters.ContainsKey('RepositoryAccess')) { [string]$RepositoryAccess } else { $null }
+    $decision = Get-RepositoryAccessDecision -Given $given -Existing $script:existingRepositoryAccess
+    $script:repositoryAccessMode = $decision.access
+    $script:repositoryAccessSource = $decision.source
+    Assert-NoPendingKeyChange
+    Assert-PasswordAvailable
 }
 
 function Get-DriveFsInfo {
@@ -2683,19 +2864,24 @@ function Resolve-ProtectedBindings {
         }
     }
     $script:sourceIdentities = $identities
-    Assert-NoReparsePath -Path $recoveryKey -Code 'recovery_key_path_unsafe' -Field 'environment' `
-        -Message "The recovery key's location in your profile folder is a link, so setup can't use it safely."
-    if (Test-Path -LiteralPath $recoveryKey) {
-        $recoveryKeyItem = Get-Item -LiteralPath $recoveryKey -Force
-        if ($recoveryKeyItem.PSIsContainer -or ($recoveryKeyItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-            Stop-InstallValidation -Code 'recovery_key_path_unsafe' -Field 'environment' `
-                -Message "Something other than a file is where Rewindle keeps the recovery key in your profile folder ($recoveryKey)." `
-                -Console "Recovery key path is not a regular file: $recoveryKey" -Path $recoveryKey
-        }
-        if (-not (Test-Path -LiteralPath $secretFile -PathType Leaf)) {
-            Stop-InstallValidation -Code 'recovery_key_stale' -Field 'environment' `
-                -Message "A recovery key from an earlier setup is still in your profile folder, but the password that goes with it is gone. Move that file somewhere safe, then run setup again." `
-                -Console "A recovery key already exists but the matching DPAPI credential is absent. Move the stale key aside only after identifying it: $recoveryKey" -Path $recoveryKey
+    # Backups without a password have no recovery key and no stored password, so none of the checks on them apply, whatever an
+    # earlier installation left in the profile folder. While the way the backups open is not known yet ($null), the key's
+    # location is still checked, but a key without its stored password is not held against the install.
+    if ($script:repositoryAccessMode -cne 'no_password') {
+        Assert-NoReparsePath -Path $recoveryKey -Code 'recovery_key_path_unsafe' -Field 'environment' `
+            -Message "The recovery key's location in your profile folder is a link, so setup can't use it safely."
+        if (Test-Path -LiteralPath $recoveryKey) {
+            $recoveryKeyItem = Get-Item -LiteralPath $recoveryKey -Force
+            if ($recoveryKeyItem.PSIsContainer -or ($recoveryKeyItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                Stop-InstallValidation -Code 'recovery_key_path_unsafe' -Field 'environment' `
+                    -Message "Something other than a file is where Rewindle keeps the recovery key in your profile folder ($recoveryKey)." `
+                    -Console "Recovery key path is not a regular file: $recoveryKey" -Path $recoveryKey
+            }
+            if ($script:repositoryAccessMode -ceq 'password' -and -not (Test-Path -LiteralPath $secretFile -PathType Leaf)) {
+                Stop-InstallValidation -Code 'recovery_key_stale' -Field 'environment' `
+                    -Message "A recovery key from an earlier setup is still in your profile folder, but the password that goes with it is gone. Move that file somewhere safe, then run setup again." `
+                    -Console "A recovery key already exists but the matching DPAPI credential is absent. Move the stale key aside only after identifying it: $recoveryKey" -Path $recoveryKey
+            }
         }
     }
     foreach ($protectedBinding in @(
@@ -2705,6 +2891,7 @@ function Resolve-ProtectedBindings {
         @($recoveryKey, 'Recovery key'),
         @($recoveryTools, 'Recovery tools')
     )) {
+        if ($script:repositoryAccessMode -ceq 'no_password' -and $protectedBinding[1] -cin @('DPAPI credential', 'Recovery key')) { continue }
         Assert-NtfsProtectedPath -Path $protectedBinding[0] -Label $protectedBinding[1]
     }
     $script:preservedPlan = Get-PreservedPlanIdentity
@@ -2827,6 +3014,14 @@ function Get-InstallWarnings {
             -Path $repositoryPath
         $finding.console = $null
         $warnings += $finding
+    }
+    # A choice that contradicts the recorded way those backups open. The install checks the backups themselves before it
+    # changes anything and refuses a choice that doesn't match; this only says so beforehand.
+    if ($script:repositoryAccessSource -ceq 'parameter') {
+        $differs = Get-RepositoryAccessDifferenceMessage -Existing $script:existingRepositoryAccess -Chosen $script:repositoryAccessMode
+        if ($null -ne $differs) {
+            $warnings += New-InstallFinding -Code 'repository_access_differs' -Field 'repository' -Message $differs -Path $repositoryPath
+        }
     }
     return $warnings
 }
@@ -2976,9 +3171,14 @@ function Invoke-PlanMode {
     }
     $scheduleOk = Invoke-PlanStage -Field 'schedule' { Assert-ScheduleValue }
     $storageOk = Invoke-PlanStage -Field 'storage_mode' { Resolve-StorageSettings }
+    # Reported whether or not the backup folder is understood (Resolve-RepositoryAccess checks it again; the plan lists it once).
+    [void](Invoke-PlanStage -Field 'repository' { Assert-RepositoryAccessValue })
     $repositoryOk = $false
     if ($storageOk -or $RepositoryStorageMode -eq 'local_ntfs') {
         $repositoryOk = Invoke-PlanStage -Field 'repository' { Resolve-RepositorySelection }
+    }
+    if ($repositoryOk) {
+        [void](Invoke-PlanStage -Field 'repository' { Resolve-RepositoryAccess })
     }
     [void](Invoke-PlanStage -Field 'sources' { Resolve-SourceSelection })
     if ($repositoryOk) {
@@ -3021,6 +3221,8 @@ function Invoke-PlanMode {
         resolved = [ordered]@{
             repository = $script:repositoryPath
             storage_mode = $RepositoryStorageMode
+            repository_access = $script:repositoryAccessMode
+            existing_repository_access = $script:existingRepositoryAccess
             drivefs_my_drive_root = $drivefsRootResolved
             sources = @($script:sources)
             canary_source = $canarySource
@@ -3046,6 +3248,7 @@ function Invoke-PlanMode {
                 rewindle = $rewindleInstall
                 legacy_personal_edition = [bool]$legacy
                 kept_repository = if ($null -ne $keptRepository) { $keptRepository.repository } else { $null }
+                kept_repository_access = if ($null -ne $keptRepository) { $keptRepository.repository_access } else { $null }
             }
             volumes = @(
                 foreach ($entry in $volumes) {
@@ -3103,6 +3306,13 @@ $installPhaseTitles = @{
     verification = 'Checking that everything was installed correctly'
     first_backup = 'Starting the first backup'
 }
+# The titles of the phases that read differently for backups without a password (the other phases keep theirs). Setup's window
+# shows its own titles; these are what the progress feed carries.
+$noPasswordPhaseTitles = @{
+    credential = 'Choosing no password'
+    repository = 'Creating the backup location'
+    recovery_key = 'Saving the recovery tools'
+}
 # What a failure in each phase is called when nothing more specific (a validation code) applies, and what is said about it.
 $installPhaseFailures = @{
     preflight = @('preflight_failed', 'Setup could not finish checking this PC.')
@@ -3118,9 +3328,19 @@ $installPhaseFailures = @{
     verification = @('verification_failed', 'Setup could not confirm that everything was installed correctly.')
 }
 
+# The title a phase carries in the progress feed: the same for every phase, except that backups without a password don't create
+# a password, a recovery key or an encrypted location.
+function Get-InstallPhaseTitle {
+    param([Parameter(Mandatory)][string]$Phase)
+    if ($script:repositoryAccessMode -ceq 'no_password' -and $noPasswordPhaseTitles.ContainsKey($Phase)) {
+        return [string]$noPasswordPhaseTitles[$Phase]
+    }
+    return [string]$installPhaseTitles[$Phase]
+}
+
 function Start-InstallPhase {
     param([Parameter(Mandatory)][string]$Phase)
-    Write-FeedPhase -Phase $Phase -State 'started' -Title $installPhaseTitles[$Phase]
+    Write-FeedPhase -Phase $Phase -State 'started' -Title (Get-InstallPhaseTitle -Phase $Phase)
 }
 
 function Complete-InstallPhase {
@@ -3128,7 +3348,7 @@ function Complete-InstallPhase {
         [Parameter(Mandatory)][string]$Phase,
         [string]$Detail
     )
-    Write-FeedPhase -Phase $Phase -State 'completed' -Title $installPhaseTitles[$Phase] -Detail $Detail
+    Write-FeedPhase -Phase $Phase -State 'completed' -Title (Get-InstallPhaseTitle -Phase $Phase) -Detail $Detail
 }
 
 function Skip-InstallPhase {
@@ -3136,7 +3356,7 @@ function Skip-InstallPhase {
         [Parameter(Mandatory)][string]$Phase,
         [string]$Detail
     )
-    Write-FeedPhase -Phase $Phase -State 'skipped' -Title $installPhaseTitles[$Phase] -Detail $Detail
+    Write-FeedPhase -Phase $Phase -State 'skipped' -Title (Get-InstallPhaseTitle -Phase $Phase) -Detail $Detail
 }
 
 function Add-InstallWarning {
@@ -3147,9 +3367,142 @@ function Add-InstallWarning {
     $script:installWarnings.Add([ordered]@{ code = $Code; message = $Message })
 }
 
+# ---------------------------------------------------------------------------------------------------------------------------
+# Choosing how the backups open: with a password (recommended) or without one
+# ---------------------------------------------------------------------------------------------------------------------------
+# Everything here runs only in a real installation, after the plan-only exit above: a plan never asks a question and never starts
+# a program from the install folder.
+
+# The two sentences every place that offers or confirms backups without a password has to say, in these words.
+function Get-NoPasswordWarning {
+    return 'Anyone who can open the backup folder can restore every backed-up file, including saved sign-ins. That includes the folder in Google Drive or on a lost USB drive.'
+}
+
+# What a typed answer to the password question means: 'no_password' for yes, 'password' for no or just Enter, $null for
+# anything else.
+function ConvertTo-RepositoryAccessChoice {
+    param([string]$Answer)
+    $typed = if ($null -eq $Answer) { '' } else { $Answer.Trim() }
+    if ($typed -match '^(?:y|yes)$') { return 'no_password' }
+    if ($typed -match '^(?:n|no)?$') { return 'password' }
+    return $null
+}
+
+# The console question for a new backup location. It says the consequence first, in plain words, then asks; Enter keeps the
+# password. It asks nothing in a plan or an unattended run.
+function Read-RepositoryAccessChoice {
+    if ($PlanOnly -or $Unattended) { return $null }
+    Write-Host ''
+    Write-Host 'Setup normally protects your backups with a password that it makes and keeps safe for you.'
+    Write-Host (Get-NoPasswordWarning) -ForegroundColor Yellow
+    Write-Host "You can't change this later for these backups."
+    while ($true) {
+        $answer = Read-Host 'Make backups without a password? Type yes for no password, or press Enter to keep the password (recommended)'
+        $choice = ConvertTo-RepositoryAccessChoice -Answer $answer
+        if ($null -ne $choice) { return $choice }
+        Write-Host 'Please type yes or no, or press Enter.'
+    }
+}
+
+# Asked once the location and the folders are chosen, before the checks that depend on the answer (Resolve-ProtectedBindings
+# checks the recovery key's place in the profile folder unless the backups have no password) and before the summary. A location
+# that already holds backups is never asked: they keep the way they open, and the console says so.
+function Invoke-RepositoryAccessQuestion {
+    if ($script:repositoryAccessSource -ceq 'default' -and -not $Unattended) {
+        $choice = Read-RepositoryAccessChoice
+        if ($null -ne $choice) {
+            $script:repositoryAccessMode = $choice
+            $script:repositoryAccessSource = 'prompt'
+            Assert-NoPendingKeyChange
+        }
+        return
+    }
+    if ($script:repositoryAccessSource -ceq 'recorded') {
+        if ($script:repositoryAccessMode -ceq 'no_password') {
+            Write-Host 'These backups were made without a password, so Setup keeps them that way.'
+        }
+        else {
+            Write-Host 'These backups were made with a password, so Setup keeps them that way.'
+        }
+    }
+    elseif ($null -eq $script:repositoryAccessMode) {
+        Write-Host 'Setup will check whether these backups have a password and keep them that way.'
+    }
+}
+
+# What Setup says when the backups don't open the way this install expects (initializer exit 4 or 5), can't be opened at all
+# (exit 6) or need a password this PC doesn't have (exit 7). Every one of these ends the install with nothing changed; the
+# sentence says so, and the failure helper leaves it as it is instead of adding a generic tail.
+function Get-RepositoryAccessRefusalMessage {
+    param([int]$ExitCode, [string]$Source)
+    $ending = ' Setup undid its changes, and your backups were not touched.'
+    if ($ExitCode -eq 6) {
+        return "Setup couldn't open the backups in this location to continue them. Check that the backup drive or Google Drive folder is connected and available, then try again. If they still can't be opened, they may be damaged: choose another location for new backups, and keep this folder until you've checked it.$ending"
+    }
+    if ($ExitCode -eq 7) {
+        return "$(Get-PasswordUnavailableMessage)$ending"
+    }
+    if ($Source -ceq 'recorded' -or $Source -ceq 'detected') {
+        return "These backups no longer match what Setup recorded for them, usually because they were changed outside Rewindle. Setup can't carry on with them here. Choose another location, or see Switching an existing backup in SECURITY.md on Rewindle's GitHub page.$ending"
+    }
+    if ($ExitCode -eq 4) {
+        return "The backups in this location are protected by a password, but you chose no password. To continue these backups, choose a password. To start without one, choose another location.$ending"
+    }
+    return "The backups in this location were made without a password, but you chose a password. To continue these backups, choose no password. To start with a password, choose another location.$ending"
+}
+
+# What the initializer's --detect-access exit means: 20 backups without a password, 21 backups with one, 22 no backups there
+# (so the usual default), anything else $null (it could not tell).
+function Get-RepositoryAccessFromDetectionExit {
+    param([int]$ExitCode)
+    if ($ExitCode -eq 20) { return [pscustomobject]@{ access = 'no_password'; source = 'detected' } }
+    if ($ExitCode -eq 21) { return [pscustomobject]@{ access = 'password'; source = 'detected' } }
+    if ($ExitCode -eq 22) { return [pscustomobject]@{ access = 'password'; source = 'default' } }
+    return $null
+}
+
+# What the repository phase says about backups kept from before.
+function Get-RepositoryPhaseDetail {
+    if (-not $repositoryPreviouslyInitialized) { return $null }
+    $detail = 'Your existing backups in this location were kept and reused.'
+    if ($script:repositoryAccessSource -ceq 'detected') {
+        if ($script:repositoryAccessMode -ceq 'no_password') { return "$detail They have no password, so Setup kept that." }
+        return "$detail They have a password, so Setup kept that."
+    }
+    if ($script:repositoryAccessMode -ceq 'no_password') { return "$detail They have no password." }
+    return $detail
+}
+
+# Asks the installed program how the backups already in the folder open, when no record said (the program is the only thing
+# that can look inside them). It runs after the program files are copied and before the configuration is written, and changes
+# nothing. A folder that holds no backups is a new backup with a password, as ever.
+function Invoke-RepositoryAccessDetection {
+    $accessExit = Invoke-ProtectedPython -Python $python -WorkingDirectory $installRoot `
+        -TemporaryDirectory $script:protectedTemporaryFolder `
+        -Arguments @('-I', '-S', '-B', $initializer, '--detect-access', '--repository', $repositoryPath, '--restic', (Join-Path $installRoot 'restic.exe'))
+    $found = Get-RepositoryAccessFromDetectionExit -ExitCode $accessExit
+    if ($null -eq $found) {
+        Stop-InstallValidation -Code 'repository_access_unreadable' -Field 'repository' -Path $repositoryPath `
+            -Message (Get-RepositoryAccessRefusalMessage -ExitCode 6 -Source 'detected') `
+            -Console "Setup could not tell how the backups in $repositoryPath are opened (exit code $accessExit)."
+    }
+    $script:repositoryAccessMode = $found.access
+    $script:repositoryAccessSource = $found.source
+    Assert-NoPendingKeyChange
+}
+
 # One initialization step creates the DPAPI credential, the repository and the recovery key. When it fails, what exists on disk
 # says how far it got, so the feed blames the right phase.
 function Set-InitializationFailurePhase {
+    if ($script:repositoryAccessMode -ceq 'no_password') {
+        # No credential is created, so the credential phase was skipped and the repository phase is the one running; only the
+        # backup folder says how far it got. Nothing is read from the stored password's place.
+        if (Test-Path -LiteralPath (Join-Path $repositoryPath 'config') -PathType Leaf) {
+            Complete-InstallPhase 'repository'
+            Start-InstallPhase 'recovery_key'
+        }
+        return
+    }
     if (-not (Test-Path -LiteralPath $secretFile -PathType Leaf)) { return }
     Complete-InstallPhase 'credential'
     Start-InstallPhase 'repository'
@@ -3160,6 +3513,10 @@ function Set-InitializationFailurePhase {
 }
 
 function Get-RecoveryKeyFacts {
+    # Backups without a password have no recovery key, whatever an earlier installation left in the profile folder.
+    if ($script:repositoryAccessMode -ceq 'no_password') {
+        return [ordered]@{ path = $null; readable = $null }
+    }
     if (Test-Path -LiteralPath $recoveryKey -PathType Leaf) {
         return [ordered]@{
             path = $recoveryKey
@@ -3186,20 +3543,42 @@ function Write-InstallFailure {
     elseif ($null -ne $phase -and $installPhaseFailures.ContainsKey($phase)) {
         $code = $installPhaseFailures[$phase][0]
         $message = $installPhaseFailures[$phase][1]
+        if ($phase -ceq 'repository' -and $script:repositoryAccessMode -cne 'password') {
+            # Not a password in sight: nothing about an encrypted location.
+            $message = 'Setup could not create the backup location.'
+        }
+        elseif ($phase -ceq 'recovery_key' -and $script:repositoryAccessMode -cne 'password') {
+            # Nor a recovery key: what is saved in this phase, for backups without a password (or of a kind not known), is the
+            # recovery tools beside the backups.
+            $message = 'Setup could not save the recovery tools.'
+        }
     }
     else {
         $code = 'setup_failed'
         $message = 'Setup could not finish.'
     }
+    # The refusals about how the backups open (see Get-RepositoryAccessRefusalMessage) end by saying that Setup undid its changes
+    # and left the backups alone, so they take no generic tail; with program files left behind that ending is swapped for the
+    # leftover sentence. Everything else keeps the wording it always had for backups with a password; for backups without one,
+    # or when it is not known, there is no recovery key to mention.
+    $refusal = ($code -ceq 'repository_access_mismatch' -or $code -ceq 'repository_access_unreadable' -or $code -ceq 'repository_password_unavailable')
+    $refusalEnding = ' Setup undid its changes, and your backups were not touched.'
     if ($RolledBack -and $Leftover) {
         # The program folder is still there, so a new install refuses until it is removed; say how, in Setup's own words.
-        $message += " Setup undid its other changes, but some of Rewindle's program files could not be removed yet, usually because one of them was still in use. Restart your PC, then run Setup again and choose Reinstall or repair, which removes them first. Backups and the recovery key it had already created were kept."
+        $keptTail = if ($refusal) { 'Your backups were not touched.' } elseif ($script:repositoryAccessMode -ceq 'password') { 'Backups and the recovery key it had already created were kept.' } else { 'Backups it had already created were kept.' }
+        if ($refusal -and $message.EndsWith($refusalEnding)) { $message = $message.Substring(0, $message.Length - $refusalEnding.Length) }
+        $message += " Setup undid its other changes, but some of Rewindle's program files could not be removed yet, usually because one of them was still in use. Restart your PC, then run Setup again and choose Reinstall or repair, which removes them first. $keptTail"
     }
     elseif ($RolledBack) {
-        $message += ' Setup undid its changes. Backups and the recovery key it had already created were kept.'
+        if (-not $refusal -and $script:repositoryAccessMode -ceq 'password') {
+            $message += ' Setup undid its changes. Backups and the recovery key it had already created were kept.'
+        }
+        elseif (-not $refusal) {
+            $message += ' Setup undid its changes. Backups it had already created were kept.'
+        }
     }
     if ($phase) {
-        Write-FeedPhase -Phase $phase -State 'failed' -Title $installPhaseTitles[$phase] -Detail $message
+        Write-FeedPhase -Phase $phase -State 'failed' -Title (Get-InstallPhaseTitle -Phase $phase) -Detail $message
     }
     $keyFacts = Get-RecoveryKeyFacts
     Write-FeedResult -Ok $false -ErrorInfo ([ordered]@{
@@ -3212,6 +3591,7 @@ function Write-InstallFailure {
         recovery_key_readable_by_user = $keyFacts.readable
         dashboard_executable = $null
         version = $script:version
+        repository_access = $script:repositoryAccessMode
         warnings = @($script:installWarnings)
     })
 }
@@ -3228,6 +3608,7 @@ function Complete-InstallFeed {
             recovery_key_readable_by_user = $null
             dashboard_executable = $null
             version = $script:version
+            repository_access = $script:repositoryAccessMode
             warnings = @($script:installWarnings)
         })
     }
@@ -3243,6 +3624,16 @@ function Write-InstallSummary {
         Write-Host "  DriveFS    : $DriveFsMyDriveRoot"
         Write-Host "  Cache      : $DriveFsCacheDirectory"
     }
+    if ($script:repositoryAccessMode -ceq 'no_password') {
+        Write-Host '  Password   : none'
+        Write-Warning (Get-NoPasswordWarning)
+    }
+    elseif ($script:repositoryAccessMode -ceq 'password') {
+        Write-Host '  Password   : yes (recommended)'
+    }
+    else {
+        Write-Host '  Password   : the same as the backups already in this location'
+    }
     Write-Host "  Sources    : $($sources.Count)"
     foreach ($source in $sources) { Write-Host "    - $source" }
     if (-not $canaryAlreadyCovered) { Write-Host "    + protected restore canary ($canarySource)" }
@@ -3255,6 +3646,7 @@ function Write-InstallSummary {
 function Invoke-InstallPreflight {
     Start-InstallPhase 'preflight'
     Assert-ScheduleValue
+    Assert-RepositoryAccessValue
     Assert-MicrosoftSignedExecutable -Path $windowsPowerShell
     Assert-MicrosoftSignedExecutable -Path $icacls
     Assert-DotNetFramework48
@@ -3277,7 +3669,11 @@ function Invoke-InstallPreflight {
     Read-PayloadVersion
     Resolve-StorageSettings
     Resolve-RepositorySelection
+    Resolve-RepositoryAccess
     Resolve-SourceSelection
+    # Asked before the checks that depend on the answer: an old recovery key file in the profile folder isn't checked for backups
+    # without a password, so it must not stop someone who would choose none.
+    Invoke-RepositoryAccessQuestion
     Resolve-ProtectedBindings
     Assert-RepositoryTarget
     $conflicts = @(Get-InstallationConflicts)
@@ -3332,8 +3728,11 @@ function Assert-InstallationVerified {
         if (-not (Test-Path -LiteralPath $startMenuShortcut -PathType Leaf)) { Stop-Verification 'the Start menu shortcut exists' }
     }
     if (-not (Test-Path -LiteralPath $installRegistry)) { Stop-Verification 'Rewindle is listed in Installed apps' }
-    if (-not (Test-Path -LiteralPath $secretFile -PathType Leaf)) { Stop-Verification 'the backup password is stored for your account' }
-    if (-not (Test-Path -LiteralPath $recoveryKey -PathType Leaf)) { Stop-Verification 'the recovery key was written' }
+    # Backups without a password need neither (and an older one that happens to be there is none of this install's business).
+    if ($script:repositoryAccessMode -cne 'no_password') {
+        if (-not (Test-Path -LiteralPath $secretFile -PathType Leaf)) { Stop-Verification 'the backup password is stored for your account' }
+        if (-not (Test-Path -LiteralPath $recoveryKey -PathType Leaf)) { Stop-Verification 'the recovery key was written' }
+    }
     if (-not (Test-Path -LiteralPath (Join-Path $repositoryPath 'config') -PathType Leaf)) { Stop-Verification 'the backup repository was created' }
     if (-not (Test-Path -LiteralPath (Join-Path $stateRoot 'repository.json') -PathType Leaf)) { Stop-Verification 'the repository was recorded' }
     if (-not (Test-Path -LiteralPath $canaryFile -PathType Leaf)) { Stop-Verification 'the restore test file exists' }
@@ -3572,6 +3971,16 @@ try {
         Copy-Item -LiteralPath $item.FullName -Destination $installRoot -Recurse -Force
     }
     Assert-TreeMatchesManifest -Root $installRoot -Manifest $payloadManifest -Label 'Installed payload' -Code 'payload_copy_failed'
+    $python = Join-Path $installRoot 'Python\python.exe'
+    $initializer = Join-Path $installRoot 'initialize_repository.py'
+    # Backups already in the folder that no record describes are asked about now, by the program just installed and before the
+    # configuration (which the list of installed files hashes) is written.
+    if ($null -eq $script:repositoryAccessMode) {
+        Invoke-RepositoryAccessDetection
+    }
+    if ($script:repositoryAccessMode -cnotin @('password', 'no_password')) {
+        throw 'Setup could not tell how the backups in this location are opened.'
+    }
 
     $stateDirectory = $stateRoot
     $configPath = Join-Path $installRoot 'backup-config.json'
@@ -3582,6 +3991,7 @@ try {
         config_generation = 1
         repository = $repositoryPath
         repository_storage_mode = $RepositoryStorageMode
+        repository_access = $script:repositoryAccessMode
         repository_volume_serial = $volume.serial
         restic_executable = Join-Path $installRoot 'restic.exe'
         recovery_tools_directory = $recoveryTools
@@ -3651,20 +4061,50 @@ try {
     Complete-InstallPhase 'canary'
 
     # One initializer creates the DPAPI credential, the repository and the recovery key, so the three phases finish together.
-    Start-InstallPhase 'credential'
-    $python = Join-Path $installRoot 'Python\python.exe'
-    $initializer = Join-Path $installRoot 'initialize_repository.py'
+    # Backups without a password have no credential and no recovery key: that phase is skipped, and the initializer only
+    # creates (or checks) the backup location.
+    if ($script:repositoryAccessMode -ceq 'no_password') {
+        Skip-InstallPhase 'credential' 'No password: this backup opens without one.'
+        Start-InstallPhase 'repository'
+    }
+    else {
+        Start-InstallPhase 'credential'
+    }
     $initializerExit = Invoke-ProtectedPython -Python $python -WorkingDirectory $installRoot `
         -TemporaryDirectory $script:protectedTemporaryFolder `
         -Arguments @('-I', '-S', '-B', $initializer, '--config', $configPath)
+    if ($initializerExit -eq 4 -or $initializerExit -eq 5) {
+        # The backups open the other way from the one chosen (or recorded); nothing was changed, and nothing ever is.
+        Stop-InstallValidation -Code 'repository_access_mismatch' -Field 'repository' -Path $repositoryPath `
+            -Message (Get-RepositoryAccessRefusalMessage -ExitCode $initializerExit -Source $script:repositoryAccessSource) `
+            -Console "The backups in $repositoryPath do not open the way this installation expects (exit code $initializerExit)."
+    }
+    if ($initializerExit -eq 6) {
+        Stop-InstallValidation -Code 'repository_access_unreadable' -Field 'repository' -Path $repositoryPath `
+            -Message (Get-RepositoryAccessRefusalMessage -ExitCode $initializerExit -Source $script:repositoryAccessSource) `
+            -Console "The backups in $repositoryPath could not be opened (exit code $initializerExit)."
+    }
+    if ($initializerExit -eq 7) {
+        # The backups have a password and this PC has none saved for them; nothing was changed, and no new password is made.
+        Stop-InstallValidation -Code 'repository_password_unavailable' -Field 'repository' -Path $repositoryPath `
+            -Message (Get-RepositoryAccessRefusalMessage -ExitCode $initializerExit -Source $script:repositoryAccessSource) `
+            -Console "The backups in $repositoryPath have a password that is not stored on this PC (exit code $initializerExit)."
+    }
     if ($initializerExit -ne 0) {
         throw "Repository initialization failed with exit code $initializerExit."
     }
-    Complete-InstallPhase 'credential'
-    Start-InstallPhase 'repository'
-    Complete-InstallPhase 'repository' $(if ($repositoryPreviouslyInitialized) { 'Your existing backups in this location were kept and reused.' })
-    Start-InstallPhase 'recovery_key'
-    Complete-InstallPhase 'recovery_key'
+    if ($script:repositoryAccessMode -ceq 'no_password') {
+        Complete-InstallPhase 'repository' (Get-RepositoryPhaseDetail)
+        Start-InstallPhase 'recovery_key'
+        Complete-InstallPhase 'recovery_key' 'This backup has no password, so there is no recovery key.'
+    }
+    else {
+        Complete-InstallPhase 'credential'
+        Start-InstallPhase 'repository'
+        Complete-InstallPhase 'repository' (Get-RepositoryPhaseDetail)
+        Start-InstallPhase 'recovery_key'
+        Complete-InstallPhase 'recovery_key'
+    }
 
     Start-InstallPhase 'permissions'
     Set-ProtectedDirectory -Path $installRoot -UserSid $currentSid
@@ -3687,7 +4127,7 @@ try {
     $backupTrigger.StartBoundary = $scheduleTime.ToString('yyyy-MM-dd''T''HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
     $backupSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Priority 7
     $backupPrincipal = New-ScheduledTaskPrincipal -UserId $identity.Name -LogonType Interactive -RunLevel Highest
-    Register-ScheduledTask -TaskName $backupTaskName -Action $backupAction -Trigger $backupTrigger -Settings $backupSettings -Principal $backupPrincipal -Description 'Verified encrypted incremental Restic backup supervised by ResticBackuper.' | Out-Null
+    Register-ScheduledTask -TaskName $backupTaskName -Action $backupAction -Trigger $backupTrigger -Settings $backupSettings -Principal $backupPrincipal -Description 'Verified incremental Restic backup supervised by ResticBackuper.' | Out-Null
     $backupTaskCreated = $true
 
     New-Item -Path $installRegistry | Out-Null
@@ -3752,11 +4192,14 @@ try {
     if ($commitExit -ne 0) {
         throw "Updating the recovery key failed with exit code $commitExit."
     }
-    $recoveryKeyReadable = Test-FileReadableByUser -Path $recoveryKey
     $verificationDetail = $null
-    if ($recoveryKeyReadable -ne $true) {
-        $verificationDetail = 'Your recovery key is stored where only an administrator can open it. Setup will need to help you save a copy.'
-        Add-InstallWarning -Code 'recovery_key_not_readable_by_user' -Message $verificationDetail
+    # Backups without a password have no recovery key to read, whatever an earlier installation left in the profile folder.
+    if ($script:repositoryAccessMode -cne 'no_password') {
+        $recoveryKeyReadable = Test-FileReadableByUser -Path $recoveryKey
+        if ($recoveryKeyReadable -ne $true) {
+            $verificationDetail = 'Your recovery key is stored where only an administrator can open it. Setup will need to help you save a copy.'
+            Add-InstallWarning -Code 'recovery_key_not_readable_by_user' -Message $verificationDetail
+        }
     }
     Complete-InstallPhase 'verification' $verificationDetail
 
@@ -3779,9 +4222,15 @@ try {
     }
 
     Write-Host ''
-    Write-Host 'Rewindle installed successfully.' -ForegroundColor Green
-    Write-Host "Recovery key: $recoveryKey" -ForegroundColor Yellow
-    Write-Host 'Copy that key off this computer before relying on the backup.' -ForegroundColor Yellow
+    if ($script:repositoryAccessMode -ceq 'no_password') {
+        Write-Host 'Rewindle installed successfully. This backup has no password, so there is no recovery key to keep.' -ForegroundColor Green
+    }
+    else {
+        Write-Host 'Rewindle installed successfully.' -ForegroundColor Green
+        Write-Host "Recovery key: $recoveryKey" -ForegroundColor Yellow
+        Write-Host 'Copy that key off this computer before relying on the backup.' -ForegroundColor Yellow
+    }
+    $resultRecoveryKey = if ($script:repositoryAccessMode -ceq 'no_password') { $null } else { $recoveryKey }
     if (-not $firstBackupStarted) {
         Write-Host "Start the first real backup with: Start-ScheduledTask -TaskName '$backupTaskName'"
     }
@@ -3790,6 +4239,7 @@ try {
         version = $version
         repository = $repositoryPath
         repository_storage_mode = $RepositoryStorageMode
+        repository_access = $script:repositoryAccessMode
         source_count = $configuredSources.Count
         user_source_count = $sources.Count
         schedule = $Schedule
@@ -3798,15 +4248,16 @@ try {
         backup_task = $backupTaskName
         dashboard_task = if ($dashboardTaskCreated) { $dashboardTaskName } else { $null }
         first_backup_started = $firstBackupStarted
-        recovery_key_file = $recoveryKey
+        recovery_key_file = $resultRecoveryKey
         repository_preserved_on_uninstall = $true
     } | ConvertTo-Json -Depth 4
     Write-FeedResult -Ok $true -ErrorInfo $null -Fields ([ordered]@{
         install_root = $installRoot
-        recovery_key_path = $recoveryKey
+        recovery_key_path = $resultRecoveryKey
         recovery_key_readable_by_user = $recoveryKeyReadable
         dashboard_executable = if ($SkipDashboard) { $null } else { Join-Path $installRoot 'ResticBackuperDashboard.exe' }
         version = $version
+        repository_access = $script:repositoryAccessMode
         warnings = @($script:installWarnings)
     })
     exit 0
@@ -3814,7 +4265,10 @@ try {
 catch {
     $caught = $_
     $failure = $caught.Exception.Message
-    if ($script:FeedCurrentPhase -eq 'credential') {
+    # A failure of the initializer that no check named says how far it got by what exists on disk; a classified refusal already
+    # says what failed, and in a backup without a password nothing is inferred from the place the stored password would be.
+    if ($null -eq (Get-InstallFinding -ErrorRecord $caught) -and
+        ($script:FeedCurrentPhase -ceq 'credential' -or ($script:repositoryAccessMode -ceq 'no_password' -and $script:FeedCurrentPhase -ceq 'repository'))) {
         Set-InitializationFailurePhase
     }
     # The dashboard (started before the last checks) and the backup program run from the program folder and keep it in use,
@@ -3845,7 +4299,8 @@ catch {
     if ($leftover) {
         Write-Warning "Some program files could not be removed and are still in $leftover. Restart Windows, then remove them with Rewindle Setup (Reinstall or repair, or Uninstall) or with $(Join-Path $payloadRoot 'Uninstall-ResticBackuper.ps1')."
     }
-    Write-Error "INSTALLATION FAILED: $failure`nRepository, recovery key, recovery tools, and ProgramData state are intentionally preserved if they were created."
+    $preservedWhat = if ($script:repositoryAccessMode -ceq 'password') { 'Repository, recovery key, recovery tools, and ProgramData state' } else { 'Repository, recovery tools, and ProgramData state' }
+    Write-Error "INSTALLATION FAILED: $failure`n$preservedWhat are intentionally preserved if they were created."
     exit 1
 }
 finally {

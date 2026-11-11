@@ -1,7 +1,7 @@
 # Direct Google Drive repository verification
 
 ResticBackuper supports one deliberately explicit Google Drive architecture:
-the live encrypted Restic repository is a strict descendant of the Google Drive
+the live Restic repository is a strict descendant of the Google Drive
 for desktop **My Drive** streaming mount. Restic writes that repository through
 DriveFS, and a separate elevated task verifies the same objects through the
 Google Drive API. There is no second local mirror, ZIP, copy destination, or
@@ -11,14 +11,17 @@ This mode is useful when one repository path is the priority, but it is not an
 offline copy. A synchronization mistake, account loss, provider outage, or an
 attacker with access to the Drive account can still affect availability. Keep
 the recovery key offline and maintain another independent backup when the data
-matters.
+matters. A backup made without a password has no recovery key, and anyone who
+can open the Google Drive folder can restore it (see
+[Backups without a password](../SECURITY.md#backups-without-a-password)); the
+check then opens it with `--insecure-no-password`.
 
 ## Data flow and trust boundaries
 
 ```mermaid
 flowchart LR
     S["Selected sources"] --> B["02:00 protected backup task"]
-    B --> R["Live encrypted Restic repository<br/>My Drive streaming path"]
+    B --> R["Live Restic repository<br/>My Drive streaming path"]
     R --> D["Google Drive cloud objects"]
     V["03:00 Highest / Interactive verifier"] --> L["Exact local inventory"]
     V --> A["Read-only rclone API inventory"]
@@ -306,8 +309,9 @@ restore bound to the latest successful backup.
 
 ## Operational limitations
 
-- The task needs the installing user to be signed in because both Restic and
-  rclone credentials use CurrentUser DPAPI and an interactive token.
+- The task needs the installing user to be signed in because rclone's
+  credentials (and Restic's saved password, for a backup with a password) use
+  CurrentUser DPAPI and an interactive token.
 - This verifier supports the explicit My Drive streaming repository mode only.
   A `local_ntfs` repository needs a separately designed off-site system.
 - Rclone and Restic ignore your own `RCLONE_*`, `RESTIC_*` and proxy
@@ -318,8 +322,8 @@ restore bound to the latest successful backup.
   configuration password, changing accounts, or changing the remote requires a
   reviewed reprovisioning procedure. Existing protected assets are never
   silently overwritten.
-- An exact API inventory and direct restore prove that the verified encrypted
-  repository generation was readable from Google Drive at that time. They do
+- An exact API inventory and direct restore prove that the verified repository
+  generation was readable from Google Drive at that time. They do
   not make the provider account immutable or offline.
 - A destructive-change anomaly still requires exact operator acknowledgement
   before future deletion or retention work. That review does not pause DriveFS

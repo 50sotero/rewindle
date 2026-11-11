@@ -37,6 +37,11 @@ export function installSampleBridge(): void {
   // `?range=stale` (counted by the Restore list three days before the newest backup, so the line is dated).
   const range = new URLSearchParams(window.location.search).get('range');
   state.backupRange = range === 'none' ? null : sampleBackupRange(Date.now(), range === 'stale' ? 3 : 0);
+  // How the sample's backups are opened (what the footer and the Save the backup step say): `?access=no_password` for backups made without
+  // a password, `?access=unknown` for a host that cannot say. Anything else is the sample's own, with a password.
+  const access = new URLSearchParams(window.location.search).get('access');
+  if (access === 'no_password') state.repository.repositoryAccess = 'no_password';
+  else if (access === 'unknown') state.repository.repositoryAccess = null;
   // What the host would answer to the command being handled when it says something on success.
   let answer = '';
   const idleStatus = JSON.stringify(state.status);

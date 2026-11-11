@@ -12,12 +12,15 @@ namespace Rewindle.Setup
     // The host never forwards what the page sent as a command line: the page's choices are checked into InstallerInputs, and the
     // argument arrays below are built from that and from paths the host itself made.
 
-    // What the person chose, as the installer takes it. A null Repository or Schedule is left out, so the installer uses its own default.
+    // What the person chose, as the installer takes it. A null Repository, Schedule or RepositoryAccess is left out, so the installer uses
+    // its own default (for the password choice: what it recorded for backups already in the folder, a password for a new one).
     internal sealed class InstallerInputs
     {
         public string Repository;
         public string StorageMode = InstallerContract.StorageLocalNtfs;
         public string DriveFsMyDriveRoot;
+        // "password" or "no_password": the person's choice for backups that are being started. Only an install, and the plan made just before it, carry it.
+        public string RepositoryAccess;
         public readonly List<string> Sources = new List<string>();
         public string Schedule;
         public bool Vss = true;
@@ -36,6 +39,8 @@ namespace Rewindle.Setup
         public string RecoveryKeyPath;
         // True or false as the installer worked it out, null when it could not say (or there is no key). Only false stops a copy.
         public bool? RecoveryKeyReadableByUser;
+        // "password" or "no_password" as the installer reports the backups it made or kept; null when it did not say.
+        public string RepositoryAccess;
         public string DashboardExecutable;
         public string InstallRoot;
     }
@@ -48,6 +53,8 @@ namespace Rewindle.Setup
         public const string UninstallScript = "Uninstall-ResticBackuper.ps1";
         public const string StorageLocalNtfs = "local_ntfs";
         public const string StorageDriveFs = "google_drivefs_stream";
+        public const string AccessPassword = "password";
+        public const string AccessNone = "no_password";
         public const int MaximumPathLength = 1024;
         public const int MaximumSources = 64;
         // The folders travel as one -SourceList argument (joined with ';'). Windows starts no process whose command line is over
@@ -161,6 +168,19 @@ namespace Rewindle.Setup
                 inputs.DriveFsMyDriveRoot = text;
             }
 
+            // The pick on the Password page. Missing or null means no pick (the installer uses its records, or a password for new backups).
+            object access = Json.Get(raw, "repositoryAccess");
+            if (access != null)
+            {
+                if (!string.Equals(access as string, AccessPassword, StringComparison.Ordinal) &&
+                    !string.Equals(access as string, AccessNone, StringComparison.Ordinal))
+                {
+                    error = "The password choice is not valid.";
+                    return false;
+                }
+                inputs.RepositoryAccess = (string)access;
+            }
+
             object sources = Json.Get(raw, "sources");
             if (sources != null)
             {
@@ -247,7 +267,12 @@ namespace Rewindle.Setup
             return arguments;
         }
 
-        private static void AddChoices(List<string> arguments, InstallerInputs inputs)
+        // withAccess is true for the install and for the plan made just before it (PlanArguments' forInstall), and for nothing else. The
+        // plans the wizard asks for describe the location alone, so they never carry the person's password choice (the installer would
+        // then warn about a mode the person never saw at a location that may already have backups). The check before the install must
+        // judge the install as it will run, so it carries the choice when the install will: without it the installer takes a password
+        // for a new location, and refuses over a recovery key file that an install without a password never reads.
+        private static void AddChoices(List<string> arguments, InstallerInputs inputs, bool withAccess)
         {
             if (inputs.Repository != null)
             {
@@ -260,6 +285,11 @@ namespace Rewindle.Setup
             {
                 arguments.Add("-DriveFsMyDriveRoot");
                 arguments.Add(inputs.DriveFsMyDriveRoot);
+            }
+            if (withAccess && inputs.RepositoryAccess != null)
+            {
+                arguments.Add("-RepositoryAccess");
+                arguments.Add(inputs.RepositoryAccess);
             }
             if (inputs.Sources.Count > 0)
             {
@@ -277,14 +307,16 @@ namespace Rewindle.Setup
             }
         }
 
-        // Plan mode: runs without elevation and changes nothing, and writes the plan to planOutput.
-        public static List<string> PlanArguments(string scriptPath, string planOutput, InstallerInputs inputs)
+        // Plan mode: runs without elevation and changes nothing, and writes the plan to planOutput. forInstall is true for the check
+        // made just before an install, which carries -RepositoryAccess exactly when InstallArguments does (when inputs has a choice);
+        // it is false for the plans the wizard asks for, which never carry it.
+        public static List<string> PlanArguments(string scriptPath, string planOutput, InstallerInputs inputs, bool forInstall)
         {
             List<string> arguments = ScriptArguments(scriptPath);
             arguments.Add("-PlanOnly");
             arguments.Add("-PlanOutput");
             arguments.Add(planOutput);
-            AddChoices(arguments, inputs);
+            AddChoices(arguments, inputs, forInstall);
             return arguments;
         }
 
@@ -301,7 +333,7 @@ namespace Rewindle.Setup
             arguments.Add(userSid);
             arguments.Add("-ProgressPath");
             arguments.Add(progressPath);
-            AddChoices(arguments, inputs);
+            AddChoices(arguments, inputs, true);
             if (inputs.StartBackup)
             {
                 arguments.Add("-StartBackup");
@@ -399,6 +431,7 @@ namespace Rewindle.Setup
                 }
                 line.RecoveryKeyPath = Json.String(line.Fields, "recovery_key_path", MaximumPathLength);
                 line.RecoveryKeyReadableByUser = Json.Bool(line.Fields, "recovery_key_readable_by_user");
+                line.RepositoryAccess = Json.String(line.Fields, "repository_access", 32);
                 line.DashboardExecutable = Json.String(line.Fields, "dashboard_executable", MaximumPathLength);
                 line.InstallRoot = Json.String(line.Fields, "install_root", MaximumPathLength);
             }

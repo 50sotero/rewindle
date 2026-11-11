@@ -1117,7 +1117,7 @@ function Copy-Inventory {
         }
         if ($ReportProgress -and ([DateTime]::UtcNow - $lastProgressUtc).TotalSeconds -ge 0.75) {
             $fraction = if ($bytesTotal -gt 0) { [double]$bytesCopied / $bytesTotal } else { 1.0 }
-            Write-Progress -Stage copying -Message 'Copying the encrypted repository and recovery tools.' `
+            Write-Progress -Stage copying -Message 'Copying your backups and the recovery tools.' `
                 -Percent (5.0 + 70.0 * $fraction) -Cancellable $false
         }
     }
@@ -1486,6 +1486,19 @@ function Set-ProtectedTreeAcl {
     Assert-ProtectedTreeAcl -Path $Path
 }
 
+function Get-RepositoryAccess {
+    # How Restic opens these backups (backup-config.json "repository_access"): 'password' (also when the key is absent,
+    # as in every configuration written before the choice existed) or 'no_password'. Anything else is refused.
+    param([Parameter(Mandatory = $true)] [object]$Configuration)
+    $property = $Configuration.PSObject.Properties['repository_access']
+    if ($null -eq $property) { return 'password' }
+    $value = $property.Value
+    if ($value -isnot [string] -or $value -cnotin @('password', 'no_password')) {
+        throw 'unsupported repository_access'
+    }
+    return [string]$value
+}
+
 function Get-RequiredProperty {
     param([object]$Object, [string]$Name)
     $property = $Object.PSObject.Properties[$Name]
@@ -1727,6 +1740,8 @@ function Get-ValidatedConfiguration {
         'python_executable', 'state_directory', 'secret_file', 'recovery_key_file', 'exclude_file',
         'canary_file', 'hostname', 'scheduled_tag', 'sources', 'use_vss'
     )) { [void](Get-RequiredProperty -Object $configuration -Name $name) }
+    # 'password' (also for a configuration without the key) or 'no_password'; anything else is refused here.
+    $access = Get-RepositoryAccess -Configuration $configuration
 
     $repository = Get-CanonicalLocalPath -Value ([string]$configuration.repository)
     if (-not (Test-PathEqual -Left $repository -Right $canonicalCurrent)) {
@@ -1756,17 +1771,28 @@ function Get-ValidatedConfiguration {
     foreach ($directory in @($installRoot, $stateRoot, $repository, $recoveryTools)) {
         Assert-NormalDirectoryChain -Directory $directory
     }
-    foreach ($file in @((Join-Path $repository 'config'), $resticExecutable, $pythonExecutable,
-        (Join-Path $installRoot 'secret_store.py'), $secretFile, $excludeFile, $canaryFile)) {
+    $requiredFiles = @((Join-Path $repository 'config'), $resticExecutable, $pythonExecutable)
+    if ($access -ceq 'password') {
+        # Only a backup with a password has a protected secret and the helper that reveals it.
+        $requiredFiles += @((Join-Path $installRoot 'secret_store.py'), $secretFile)
+    }
+    $requiredFiles += @($excludeFile, $canaryFile)
+    foreach ($file in $requiredFiles) {
         [void](Assert-NormalFile -File $file)
     }
-    foreach ($binding in @(
+    $protectedBindings = @(
         @($installRoot, 'Protected runtime'),
-        @($stateRoot, 'ProgramData state'),
-        @($secretFile, 'DPAPI secret file'),
-        @($recoveryTools, 'Recovery tools'),
-        @([string]$configuration.recovery_key_file, 'Recovery key')
-    )) {
+        @($stateRoot, 'ProgramData state')
+    )
+    if ($access -ceq 'password') {
+        $protectedBindings += ,@($secretFile, 'DPAPI secret file')
+    }
+    $protectedBindings += ,@($recoveryTools, 'Recovery tools')
+    if ($access -ceq 'password') {
+        # A backup without a password has no recovery key; an older install's file is left alone and never looked at.
+        $protectedBindings += ,@([string]$configuration.recovery_key_file, 'Recovery key')
+    }
+    foreach ($binding in $protectedBindings) {
         Assert-NtfsProtectedPath -Path $binding[0] -Label $binding[1]
     }
     if ($storage.Mode -eq $localNtfsMode) {
@@ -1829,7 +1855,7 @@ function Get-ValidatedConfiguration {
         CloudPlaceholderPolicy = $plan.CloudPlaceholderPolicy; IdentityMap = $identities.Map;
         ExpectedSerials = $identities.ExpectedSerials; ProtectedPaths = @($protectedPaths);
         StorageMode = $storage.Mode; DriveFsRoot = $storage.DriveFsRoot;
-        DriveFsCache = $storage.DriveFsCache
+        DriveFsCache = $storage.DriveFsCache; RepositoryAccess = $access
     }
 }
 
@@ -1867,6 +1893,17 @@ function Get-ValidatedRuntimeManifest {
         ))
     if ($actual.Count -ne $records.Count) { throw 'Runtime contains unmanifested or missing files.' }
     return [pscustomobject]@{ Json = $manifest; RawBytes = $loaded.RawBytes }
+}
+
+function Assert-RecoveryRepositoryAccess {
+    # Whether these backups have a password is the same in the protected configuration (Expected), the recovery copy of it
+    # and the recovery manifest (a missing key counts as 'password' in each). A difference is refused, never copied over.
+    param([object]$Expected, [object]$Configuration, [object]$Manifest)
+    $expectedAccess = Get-RepositoryAccess -Configuration $Expected
+    if ((Get-RepositoryAccess -Configuration $Configuration) -cne $expectedAccess -or
+        (Get-RepositoryAccess -Configuration $Manifest) -cne $expectedAccess) {
+        throw 'Recovery repository_access is not synchronized with the protected configuration.'
+    }
 }
 
 function Get-ValidatedRecoveryBundle {
@@ -1951,6 +1988,7 @@ function Get-ValidatedRecoveryBundle {
              -not (Test-PathEqual -Left $bundleStorage.DriveFsCache -Right $ExpectedPlan.DriveFsCache))) {
             throw 'Recovery DriveFS root/cache bindings are not synchronized.'
         }
+        Assert-RecoveryRepositoryAccess -Expected $ExpectedPlan.Json -Configuration $bundleConfig -Manifest $manifest
         Assert-SourceListsEqual -Expected $ExpectedPlan.Sources -Actual @($bundleSources) `
             -Message 'Recovery source list is not synchronized with the protected configuration.'
         Assert-SourceIdentityMapsEqual -Expected $ExpectedPlan.IdentityMap -Actual $bundleIdentities.Map `
@@ -1980,6 +2018,11 @@ function Get-ValidatedRecoveryBundle {
 
 function ConvertTo-PasswordCommand {
     param([pscustomobject]$Validated)
+    # Restic runs a password command before it refuses the no-password flag next to one, so a backup without a password
+    # never gets a command that reveals a saved secret, even when an older install left one behind.
+    if ($Validated.RepositoryAccess -cne 'password') {
+        throw 'This backup opens without a key, so there is no key command to build.'
+    }
     $helper = (Join-Path $installRoot 'secret_store.py').Replace('\', '/')
     $arguments = @(
         $Validated.PythonExecutable.Replace('\', '/'), '-I', '-S', '-B', $helper,
@@ -2033,6 +2076,14 @@ function Set-AllowListedChildEnvironment {
     $StartInfo.EnvironmentVariables['TMP'] = $TemporaryDirectory
 }
 
+function Get-ResticCredentialArguments {
+    # How this backup is opened: the saved-password command, or for a backup without a password the flag alone (Restic
+    # refuses the flag next to any password source).
+    param([pscustomobject]$Validated)
+    if ($Validated.RepositoryAccess -ceq 'no_password') { return @('--insecure-no-password') }
+    return @('--password-command', (ConvertTo-PasswordCommand -Validated $Validated))
+}
+
 function Invoke-ResticCapture {
     param([pscustomobject]$Validated, [string]$Repository, [string[]]$CommandArguments)
     $cache = Join-Path $stateRoot 'cache'
@@ -2043,8 +2094,7 @@ function Invoke-ResticCapture {
         if (-not (Test-Path -LiteralPath $directory)) { [void][IO.Directory]::CreateDirectory($directory) }
         Assert-NormalDirectoryChain -Directory $directory
     }
-    $arguments = @(
-        '--repo', $Repository, '--password-command', (ConvertTo-PasswordCommand -Validated $Validated),
+    $arguments = @('--repo', $Repository) + @(Get-ResticCredentialArguments -Validated $Validated) + @(
         '--cache-dir', $cache, '--retry-lock', '0s'
     ) + $CommandArguments
     # Windows PowerShell 5.1 does not escape the quotes inside a native argument, so the password
@@ -2057,6 +2107,9 @@ function Invoke-ResticCapture {
     $start.WorkingDirectory = $installRoot
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
+    # Restic gets no input: with the manager's own console or pipe as its input, a backup that opens without the flag
+    # would make it wait for a password for ever while this move holds the run lock.
+    $start.RedirectStandardInput = $true
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
     $start.StandardOutputEncoding = $utf8
@@ -2065,6 +2118,7 @@ function Invoke-ResticCapture {
     $process = [Diagnostics.Process]::new(); $process.StartInfo = $start
     try {
         if (-not $process.Start()) { throw 'Windows did not start the backup service to check the backup.' }
+        $process.StandardInput.Close()
         # Read both pipes at once so a long check output cannot block Restic.
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
@@ -2706,6 +2760,10 @@ function Assert-PublishedConfiguration {
           -not (Test-PathEqual -Left $publishedStorage.DriveFsCache -Right $ExpectedPlan.DriveFsCache)))) {
         throw 'Published repository storage binding differs from the staged transaction.'
     }
+    # A move never changes whether the backups have a password.
+    if ((Get-RepositoryAccess -Configuration $published) -cne (Get-RepositoryAccess -Configuration $ExpectedPlan.Json)) {
+        throw 'Published repository_access differs from the staged transaction.'
+    }
     $publishedPlan = Get-ValidatedPlanSchema -Configuration $published
     if (-not [string]::Equals($publishedPlan.PlanId, $ExpectedPlan.PlanId, [StringComparison]::Ordinal) -or
         $publishedPlan.ConfigGeneration -ne [long]$ExpectedPlan.ConfigGeneration -or
@@ -2993,7 +3051,7 @@ try {
         throw 'The record of the current backup location belongs to a different backup, so nothing was moved. Run Rewindle Setup and choose reinstall or repair, then try again.'
     }
     $copyStartedUtc = [DateTime]::UtcNow
-    Write-Progress -Stage copying -Message 'Copying the encrypted repository and recovery tools.' -Percent 5 -Cancellable $false
+    Write-Progress -Stage copying -Message 'Copying your backups and the recovery tools.' -Percent 5 -Cancellable $false
     # Each stage is held from its creation until it has its final name (see Open-PinnedDirectory), so every write below
     # by path lands in it and nowhere else.
     $repositoryStagePin = New-RepositoryStagingDirectory -Path $repositoryStage -StorageMode $destinationStorageMode

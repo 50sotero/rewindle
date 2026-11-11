@@ -544,6 +544,19 @@ namespace Rewindle.Setup.Tests
             Check(!InstallerContract.TryReadInputs(Obj(@"{""repository"":""E:\\b"",""sources"":[],""schedule"":""02:00""}"), true, out inputs, out error), "an install needs a folder");
             Check(!InstallerContract.TryReadInputs(Obj(@"{""sources"":[""C:\\a""],""schedule"":""02:00""}"), true, out inputs, out error), "an install needs a repository");
             Check(!InstallerContract.TryReadInputs(Obj(@"{""repository"":""E:\\b"",""sources"":[""C:\\a""]}"), true, out inputs, out error), "an install needs a schedule");
+
+            // The password choice: one of two words, or none; nothing else is passed on to the installer.
+            Check(InstallerContract.TryReadInputs(full, true, out inputs, out error) && inputs.RepositoryAccess == null, "no password choice is read as none (the installer uses its records)");
+            Check(InstallerContract.TryReadInputs(Obj(@"{""repositoryAccess"":null}"), false, out inputs, out error) && inputs.RepositoryAccess == null, "a null password choice is none");
+            Check(InstallerContract.TryReadInputs(Obj(@"{""repositoryAccess"":""password""}"), false, out inputs, out error) && inputs.RepositoryAccess == "password", "the choice of a password is read");
+            Check(InstallerContract.TryReadInputs(Obj(@"{""repositoryAccess"":""no_password""}"), false, out inputs, out error) && inputs.RepositoryAccess == "no_password", "the choice of no password is read");
+            foreach (string badChoice in new string[] { "\"none\"", "\"No_Password\"", "\"PASSWORD\"", "\"\"", "\"password \"", "5", "true", "[\"password\"]", "{}" })
+            {
+                Check(!InstallerContract.TryReadInputs(Obj("{\"repositoryAccess\":" + badChoice + "}"), false, out inputs, out error) && error == "The password choice is not valid.",
+                    "a password choice of " + badChoice + " is refused with a plain sentence");
+                Check(!InstallerContract.TryReadInputs(Obj("{\"repository\":\"E:\\\\b\",\"sources\":[\"C:\\\\a\"],\"schedule\":\"02:00\",\"repositoryAccess\":" + badChoice + "}"), true, out inputs, out error),
+                    "and so is it for an install: " + badChoice);
+            }
         }
 
         private static void InstallerArguments()
@@ -573,7 +586,7 @@ namespace Rewindle.Setup.Tests
                     @"C:\t\plan.json", "-Repository", @"E:\Rewindle Backups", "-RepositoryStorageMode", "local_ntfs", "-SourceList",
                     @"C:\Users\you\Desktop;C:\Users\you\Documents", "-Schedule", "02:00"
                 },
-                InstallerContract.PlanArguments(@"C:\t\Install-ResticBackuper.ps1", @"C:\t\plan.json", inputs),
+                InstallerContract.PlanArguments(@"C:\t\Install-ResticBackuper.ps1", @"C:\t\plan.json", inputs, false),
                 "plan arguments");
 
             inputs.Vss = false;
@@ -589,10 +602,95 @@ namespace Rewindle.Setup.Tests
                 install,
                 "install arguments, open files off and a first backup");
             Check(!install.Contains("-PlanOnly"), "an install never carries -PlanOnly");
+            Check(!install.Contains("-RepositoryAccess"), "without a password choice, an install leaves the parameter out");
+
+            // The password choice goes with the install only, right after the storage mode (and the Google Drive root), before the folders.
+            inputs.RepositoryAccess = "no_password";
+            SequenceEqual(
+                new string[]
+                {
+                    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", @"C:\t\Install-ResticBackuper.ps1", "-Unattended", "-ExpectedUserSid",
+                    "S-1-5-21-1-2-3-1001", "-ProgressPath", @"C:\t\progress.jsonl", "-Repository", @"E:\Rewindle Backups", "-RepositoryStorageMode", "local_ntfs",
+                    "-RepositoryAccess", "no_password",
+                    "-SourceList", @"C:\Users\you\Desktop;C:\Users\you\Documents", "-Schedule", "02:00", "-DisableVss", "-StartBackup"
+                },
+                InstallerContract.InstallArguments(@"C:\t\Install-ResticBackuper.ps1", "S-1-5-21-1-2-3-1001", @"C:\t\progress.jsonl", inputs),
+                "install arguments with no password");
+            SequenceEqual(
+                new string[]
+                {
+                    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", @"C:\t\Install-ResticBackuper.ps1", "-PlanOnly", "-PlanOutput",
+                    @"C:\t\plan.json", "-Repository", @"E:\Rewindle Backups", "-RepositoryStorageMode", "local_ntfs", "-SourceList",
+                    @"C:\Users\you\Desktop;C:\Users\you\Documents", "-Schedule", "02:00", "-DisableVss"
+                },
+                InstallerContract.PlanArguments(@"C:\t\Install-ResticBackuper.ps1", @"C:\t\plan.json", inputs, false),
+                "a plan request never carries the password choice, even when one was read");
+            Check(!InstallerContract.PlanArguments(@"C:\t\Install-ResticBackuper.ps1", @"C:\t\plan.json", inputs, false).Contains("-RepositoryAccess"),
+                "a plan the wizard asks for never carries -RepositoryAccess");
+
+            // The plan made just before an install judges the install as it will run: the same choices, with the password choice when there is one.
+            SequenceEqual(
+                new string[]
+                {
+                    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", @"C:\t\Install-ResticBackuper.ps1", "-PlanOnly", "-PlanOutput",
+                    @"C:\t\plan.json", "-Repository", @"E:\Rewindle Backups", "-RepositoryStorageMode", "local_ntfs",
+                    "-RepositoryAccess", "no_password",
+                    "-SourceList", @"C:\Users\you\Desktop;C:\Users\you\Documents", "-Schedule", "02:00", "-DisableVss"
+                },
+                InstallerContract.PlanArguments(@"C:\t\Install-ResticBackuper.ps1", @"C:\t\plan.json", inputs, true),
+                "the plan made just before an install carries the password choice, where the install carries it");
+            Func<InstallerInputs, bool> gateMatchesInstall = delegate(InstallerInputs given)
+            {
+                List<string> gate = InstallerContract.PlanArguments("s.ps1", "p.json", given, true);
+                List<string> run = InstallerContract.InstallArguments("s.ps1", "S-1", "p.jsonl", given);
+                // Past -ProgressPath's value, the install's choices are the plan's, and then -StartBackup, which a plan never has.
+                return gate.Skip(9).SequenceEqual(run.Skip(11).Where(word => word != "-StartBackup").ToList());
+            };
+            Check(gateMatchesInstall(inputs), "the plan made just before an install has the install's choices, with no password");
+            inputs.RepositoryAccess = "password";
+            List<string> passwordGate = InstallerContract.PlanArguments("s.ps1", "p.json", inputs, true);
+            Check(passwordGate.IndexOf("-RepositoryAccess") >= 0 && passwordGate[passwordGate.IndexOf("-RepositoryAccess") + 1] == "password", "and with a password");
+            Check(gateMatchesInstall(inputs), "the plan made just before an install has the install's choices, with a password");
+            Check(!InstallerContract.PlanArguments("s.ps1", "p.json", inputs, false).Contains("-RepositoryAccess"), "while the wizard's plan still leaves the choice out");
+            inputs.RepositoryAccess = null;
+            Check(!InstallerContract.PlanArguments("s.ps1", "p.json", inputs, true).Contains("-RepositoryAccess"), "without a choice, the plan made just before an install leaves the parameter out");
+            Check(gateMatchesInstall(inputs), "the plan made just before an install has the install's choices, with no choice");
+            inputs.RepositoryAccess = "password";
+            Check(InstallerContract.InstallArguments("s.ps1", "S-1", "p.jsonl", inputs).SequenceEqual(new string[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "s.ps1", "-Unattended", "-ExpectedUserSid", "S-1",
+                "-ProgressPath", "p.jsonl", "-Repository", @"E:\Rewindle Backups", "-RepositoryStorageMode", "local_ntfs", "-RepositoryAccess", "password",
+                "-SourceList", @"C:\Users\you\Desktop;C:\Users\you\Documents", "-Schedule", "02:00", "-DisableVss", "-StartBackup" }), "install arguments with a password");
 
             inputs.StorageMode = InstallerContract.StorageDriveFs;
             inputs.DriveFsMyDriveRoot = @"G:\My Drive";
-            Check(InstallerContract.PlanArguments("s.ps1", "p.json", inputs).Contains("-DriveFsMyDriveRoot"), "the Google Drive root is passed");
+            Check(InstallerContract.PlanArguments("s.ps1", "p.json", inputs, false).Contains("-DriveFsMyDriveRoot"), "the Google Drive root is passed");
+            List<string> driveInstall = InstallerContract.InstallArguments("s.ps1", "S-1", "p.jsonl", inputs);
+            Check(driveInstall.IndexOf("-DriveFsMyDriveRoot") + 2 == driveInstall.IndexOf("-RepositoryAccess") && driveInstall.IndexOf("-RepositoryAccess") + 2 == driveInstall.IndexOf("-SourceList"),
+                "the password choice follows the Google Drive pair and comes before the folders");
+
+            // The plan made just before an install carries the choice for a Google Drive location too: the Google Drive pair, then the
+            // choice, then the folders, the same choices the install has; and the plans the wizard asks for still never carry it.
+            foreach (string drivePick in new string[] { "no_password", "password", null })
+            {
+                inputs.RepositoryAccess = drivePick;
+                List<string> driveGate = InstallerContract.PlanArguments(@"C:\t\Install-ResticBackuper.ps1", @"C:\t\plan.json", inputs, true);
+                List<string> expectedDriveGate = new List<string>(new string[]
+                {
+                    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", @"C:\t\Install-ResticBackuper.ps1", "-PlanOnly", "-PlanOutput",
+                    @"C:\t\plan.json", "-Repository", @"E:\Rewindle Backups", "-RepositoryStorageMode", "google_drivefs_stream", "-DriveFsMyDriveRoot", @"G:\My Drive"
+                });
+                if (drivePick != null)
+                {
+                    expectedDriveGate.AddRange(new string[] { "-RepositoryAccess", drivePick });
+                }
+                expectedDriveGate.AddRange(new string[] { "-SourceList", @"C:\Users\you\Desktop;C:\Users\you\Documents", "-Schedule", "02:00", "-DisableVss" });
+                SequenceEqual(expectedDriveGate, driveGate, "the plan made just before a Google Drive install carries the choice (" + (drivePick ?? "none") + ") where the install does");
+                List<string> driveRun = InstallerContract.InstallArguments("s.ps1", "S-1", "p.jsonl", inputs);
+                Check(driveGate.Skip(9).SequenceEqual(driveRun.Skip(11).Where(word => word != "-StartBackup").ToList()),
+                    "and has the install's choices (" + (drivePick ?? "none") + ")");
+                Check(!InstallerContract.PlanArguments(@"C:\t\Install-ResticBackuper.ps1", @"C:\t\plan.json", inputs, false).Contains("-RepositoryAccess"),
+                    "while the wizard's Google Drive plan leaves the choice out (" + (drivePick ?? "none") + ")");
+            }
+            inputs.RepositoryAccess = null;
 
             SequenceEqual(
                 new string[]
@@ -623,6 +721,9 @@ namespace Rewindle.Setup.Tests
             Check(phase.Fields != null && !phase.IsResult, "a phase line is an object, not a result");
             ProgressLine ok = InstallerContract.ReadProgressLine("{\"schema\":\"Rewindle.InstallProgress.v1\",\"type\":\"result\",\"ok\":true,\"error\":null,\"recovery_key_path\":\"C:\\\\Users\\\\you\\\\key.txt\",\"recovery_key_readable_by_user\":true,\"dashboard_executable\":\"C:\\\\Program Files\\\\ResticBackuper\\\\ResticBackuperDashboard.exe\",\"install_root\":\"C:\\\\Program Files\\\\ResticBackuper\"}");
             Check(ok.IsResult && ok.ResultOk && ok.RecoveryKeyReadableByUser == true && ok.RecoveryKeyPath == @"C:\Users\you\key.txt", "a successful result line");
+            Check(ok.RepositoryAccess == null, "a result line without repository_access reports none (an older installer)");
+            ProgressLine noPassword = InstallerContract.ReadProgressLine("{\"schema\":\"Rewindle.InstallProgress.v1\",\"type\":\"result\",\"ok\":true,\"error\":null,\"recovery_key_path\":null,\"recovery_key_readable_by_user\":null,\"version\":\"0.2.0\",\"repository_access\":\"no_password\",\"warnings\":[]}");
+            Check(noPassword.ResultOk && noPassword.RepositoryAccess == "no_password" && noPassword.RecoveryKeyPath == null, "a result line for backups without a password");
             ProgressLine failed = InstallerContract.ReadProgressLine("{\"schema\":\"Rewindle.InstallProgress.v1\",\"type\":\"result\",\"ok\":false,\"error\":{\"code\":\"x\",\"message\":\"It broke.\"}}");
             Check(failed.IsResult && !failed.ResultOk && failed.ResultErrorMessage == "It broke.", "a failed result line");
             ProgressLine unknown = InstallerContract.ReadProgressLine("{\"schema\":\"Rewindle.InstallProgress.v1\",\"type\":\"result\",\"ok\":true,\"error\":null,\"recovery_key_path\":\"C:\\\\k.txt\",\"recovery_key_readable_by_user\":null}");
@@ -962,10 +1063,10 @@ namespace Rewindle.Setup.Tests
             string script = Path.Combine(folder, "Install-ResticBackuper.ps1");
             File.WriteAllText(script, @"
 param([switch]$PlanOnly, [string]$PlanOutput, [string]$Repository, [string]$RepositoryStorageMode, [string]$DriveFsMyDriveRoot,
-      [string]$SourceList, [string]$Schedule, [switch]$DisableVss)
+      [string]$RepositoryAccess, [string]$SourceList, [string]$Schedule, [switch]$DisableVss)
 $mode = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'mode.txt') -Raw).Trim()
 $received = [ordered]@{ plan_only = [bool]$PlanOnly; repository = $Repository; mode = $RepositoryStorageMode; drivefs = $DriveFsMyDriveRoot;
-    sources = $SourceList; schedule = $Schedule; disable_vss = [bool]$DisableVss }
+    access = $RepositoryAccess; sources = $SourceList; schedule = $Schedule; disable_vss = [bool]$DisableVss }
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'received.json'), ($received | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
 switch ($mode) {
     'ok' { [IO.File]::WriteAllText($PlanOutput, '{""schema"":""Rewindle.InstallPlan.v1"",""ok"":true,""errors"":[],""warnings"":[]}', [Text.UTF8Encoding]::new($true)); exit 0 }
@@ -991,9 +1092,10 @@ switch ($mode) {
             inputs.Sources.Add(@"D:\Photo Archive\");
             inputs.Schedule = "04:15";
             inputs.Vss = false;
+            inputs.RepositoryAccess = "no_password";
 
             File.WriteAllText(modeFile, "ok");
-            IDictionary<string, object> plan = runner.GetPlan(inputs, CancellationToken.None);
+            IDictionary<string, object> plan = runner.GetPlan(inputs, false, CancellationToken.None);
             Check(plan != null && Json.Bool(plan, "ok") == true, "the stub's plan is returned");
             IDictionary<string, object> received = Obj(File.ReadAllText(Path.Combine(folder, "received.json")));
             Check(Json.Bool(received, "plan_only") == true, "the script got -PlanOnly");
@@ -1002,47 +1104,88 @@ switch ($mode) {
             Equal("04:15", Json.String(received, "schedule", 64), "the schedule");
             Check(Json.Bool(received, "disable_vss") == true, "-DisableVss");
             Equal("local_ntfs", Json.String(received, "mode", 64), "the storage mode");
+            Check(string.IsNullOrEmpty(Json.String(received, "access", 64)), "a plan the wizard asks for never receives the password choice, even from inputs that hold one");
             Check(Directory.GetFiles(Path.Combine(folder, "plans")).Length == 0, "the plan file is removed once read");
 
+            // The check just before an install is made as the install will run: it receives the choice (and only when there is one),
+            // and the wizard's plan right after it is still made without it.
+            File.WriteAllText(Path.Combine(folder, "received.json"), "{}");
+            Check(runner.GetPlan(inputs, true, CancellationToken.None) != null, "the check before an install is answered");
+            received = Obj(File.ReadAllText(Path.Combine(folder, "received.json")));
+            Equal("no_password", Json.String(received, "access", 64), "the check before an install receives the password choice");
+            Equal(@"E:\", Json.String(received, "repository", 4096), "and the rest of the choices as the wizard's plans do");
+            inputs.RepositoryAccess = null;
+            File.WriteAllText(Path.Combine(folder, "received.json"), "{}");
+            Check(runner.GetPlan(inputs, true, CancellationToken.None) != null, "the check before an install is answered when there is no choice");
+            received = Obj(File.ReadAllText(Path.Combine(folder, "received.json")));
+            Check(string.IsNullOrEmpty(Json.String(received, "access", 64)), "and without a choice it receives none");
+            inputs.RepositoryAccess = "no_password";
+            File.WriteAllText(Path.Combine(folder, "received.json"), "{}");
+            Check(runner.GetPlan(inputs, false, CancellationToken.None) != null, "a plan the wizard asks for right after is answered");
+            received = Obj(File.ReadAllText(Path.Combine(folder, "received.json")));
+            Check(string.IsNullOrEmpty(Json.String(received, "access", 64)), "and is made without the choice, as if the check before an install had never run");
+            Check(Directory.GetFiles(Path.Combine(folder, "plans")).Length == 0, "no plan file is left behind");
+
+            // The same for a backup location in Google Drive: the check before an install receives the choice there too (with the Google
+            // Drive pair), and the plan the wizard asks for still does not.
+            InstallerInputs driveChoice = new InstallerInputs();
+            driveChoice.Repository = @"G:\My Drive\Rewindle Backups";
+            driveChoice.StorageMode = InstallerContract.StorageDriveFs;
+            driveChoice.DriveFsMyDriveRoot = @"G:\My Drive";
+            driveChoice.Sources.Add(@"C:\Users\you\Documents");
+            driveChoice.RepositoryAccess = "no_password";
+            File.WriteAllText(Path.Combine(folder, "received.json"), "{}");
+            Check(runner.GetPlan(driveChoice, true, CancellationToken.None) != null, "the check before a Google Drive install is answered");
+            received = Obj(File.ReadAllText(Path.Combine(folder, "received.json")));
+            Equal("google_drivefs_stream", Json.String(received, "mode", 64), "it was asked about a Google Drive location");
+            Equal(@"G:\My Drive", Json.String(received, "drivefs", 4096), "with the drive's My Drive root");
+            Equal("no_password", Json.String(received, "access", 64), "and the check before a Google Drive install receives the password choice");
+            File.WriteAllText(Path.Combine(folder, "received.json"), "{}");
+            Check(runner.GetPlan(driveChoice, false, CancellationToken.None) != null, "a plan the wizard asks for about a Google Drive location is answered");
+            received = Obj(File.ReadAllText(Path.Combine(folder, "received.json")));
+            Equal("google_drivefs_stream", Json.String(received, "mode", 64), "it was asked about a Google Drive location too");
+            Check(string.IsNullOrEmpty(Json.String(received, "access", 64)), "and is made without the choice");
+            Check(Directory.GetFiles(Path.Combine(folder, "plans")).Length == 0, "no plan file is left behind for Google Drive either");
+
             File.WriteAllText(modeFile, "nofile");
-            try { runner.GetPlan(inputs, CancellationToken.None); Check(false, "no plan file is a failure"); }
+            try { runner.GetPlan(inputs, false, CancellationToken.None); Check(false, "no plan file is a failure"); }
             catch (SetupFailure failure) { Check(failure.Code == "plan_failed" && failure.Message.Contains("3"), "no plan file: plan_failed with the exit code (" + failure.Message + ")"); }
 
             File.WriteAllText(modeFile, "badjson");
-            try { runner.GetPlan(inputs, CancellationToken.None); Check(false, "bad JSON is a failure"); }
+            try { runner.GetPlan(inputs, false, CancellationToken.None); Check(false, "bad JSON is a failure"); }
             catch (SetupFailure failure) { Equal("plan_invalid", failure.Code, "bad JSON: plan_invalid"); }
 
             File.WriteAllText(modeFile, "otherschema");
-            try { runner.GetPlan(inputs, CancellationToken.None); Check(false, "another schema is a failure"); }
+            try { runner.GetPlan(inputs, false, CancellationToken.None); Check(false, "another schema is a failure"); }
             catch (SetupFailure failure) { Equal("plan_invalid", failure.Code, "another schema: plan_invalid"); }
 
             File.WriteAllText(modeFile, "sleep");
             PlanRunner impatient = new PlanRunner(script, Path.Combine(folder, "plans"), TimeSpan.FromSeconds(3));
             System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
-            try { impatient.GetPlan(inputs, CancellationToken.None); Check(false, "a slow installer times out"); }
+            try { impatient.GetPlan(inputs, false, CancellationToken.None); Check(false, "a slow installer times out"); }
             catch (SetupFailure failure) { Check(failure.Code == "plan_timeout" && clock.Elapsed < TimeSpan.FromSeconds(30), "a slow installer is stopped: plan_timeout after " + clock.Elapsed.TotalSeconds.ToString("0.0") + " s"); }
 
             // Google Drive mode gets its own, longer limit: plan mode checks every file of an existing repository there.
             File.WriteAllText(modeFile, "nap");
             PlanRunner patientForDrive = new PlanRunner(script, Path.Combine(folder, "plans"), TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(60));
-            try { patientForDrive.GetPlan(inputs, CancellationToken.None); Check(false, "a local check over the local limit times out"); }
+            try { patientForDrive.GetPlan(inputs, false, CancellationToken.None); Check(false, "a local check over the local limit times out"); }
             catch (SetupFailure failure) { Equal("plan_timeout", failure.Code, "a local check is held to the local limit"); }
             InstallerInputs driveInputs = new InstallerInputs();
             driveInputs.Repository = @"G:\My Drive\Rewindle\Backups";
             driveInputs.StorageMode = InstallerContract.StorageDriveFs;
             driveInputs.DriveFsMyDriveRoot = @"G:\My Drive";
             driveInputs.Sources.Add(@"C:\Users\you\Documents");
-            Check(patientForDrive.GetPlan(driveInputs, CancellationToken.None) != null, "a Google Drive check may take longer than the local limit");
+            Check(patientForDrive.GetPlan(driveInputs, false, CancellationToken.None) != null, "a Google Drive check may take longer than the local limit");
             File.WriteAllText(modeFile, "sleep");
 
             CancellationTokenSource cancel = new CancellationTokenSource();
             cancel.CancelAfter(1500);
             clock.Restart();
-            Throws<OperationCanceledException>(() => runner.GetPlan(inputs, cancel.Token), "a cancelled request stops the installer");
+            Throws<OperationCanceledException>(() => runner.GetPlan(inputs, false, cancel.Token), "a cancelled request stops the installer");
             Check(clock.Elapsed < TimeSpan.FromSeconds(30), "and does not wait for it");
 
             PlanRunner missing = new PlanRunner(Path.Combine(folder, "missing.ps1"), Path.Combine(folder, "plans"), TimeSpan.FromSeconds(5));
-            try { missing.GetPlan(inputs, CancellationToken.None); Check(false, "a missing script is a failure"); }
+            try { missing.GetPlan(inputs, false, CancellationToken.None); Check(false, "a missing script is a failure"); }
             catch (SetupFailure failure) { Equal("payload_missing", failure.Code, "a missing script: payload_missing"); }
         }
 
@@ -1076,15 +1219,31 @@ switch ($mode) {
             public bool Ok = true;
             public ManualResetEvent Block;
             public InstallerInputs Seen;
+            // The forInstall flag of every request, in the order they came (true: the check an install makes just before it starts).
+            public readonly List<bool> Asked = new List<bool>();
+            // Behaves like the installer for a new, empty location where an old recovery key file is in the profile: that is an error
+            // (recovery_key_stale) unless the request carries -RepositoryAccess no_password, which an install without a password never
+            // reads the key for. Whether the request carries it is decided from the arguments PlanRunner would build, not from the flag.
+            public bool StaleKeyUnlessNoPassword;
 
-            public IDictionary<string, object> GetPlan(InstallerInputs inputs, CancellationToken cancel)
+            public IDictionary<string, object> GetPlan(InstallerInputs inputs, bool forInstall, CancellationToken cancel)
             {
                 Seen = inputs;
+                lock (Asked) { Asked.Add(forInstall); }
                 if (Block != null)
                 {
                     while (!Block.WaitOne(20)) { cancel.ThrowIfCancellationRequested(); }
                 }
                 cancel.ThrowIfCancellationRequested();
+                if (StaleKeyUnlessNoPassword)
+                {
+                    List<string> arguments = InstallerContract.PlanArguments("s.ps1", "p.json", inputs, forInstall);
+                    int access = arguments.IndexOf("-RepositoryAccess");
+                    if (access < 0 || arguments[access + 1] != "no_password")
+                    {
+                        return Obj("{\"schema\":\"Rewindle.InstallPlan.v1\",\"ok\":false,\"errors\":[{\"code\":\"recovery_key_stale\",\"field\":\"environment\",\"message\":\"An older recovery key file is in the way.\"}],\"warnings\":[]}");
+                    }
+                }
                 return Obj(Ok
                     ? "{\"schema\":\"Rewindle.InstallPlan.v1\",\"ok\":true,\"errors\":[],\"warnings\":[]}"
                     : "{\"schema\":\"Rewindle.InstallPlan.v1\",\"ok\":false,\"errors\":[{\"code\":\"repository_not_empty\",\"field\":\"repository\",\"message\":\"The folder is not empty.\"}],\"warnings\":[]}");
@@ -1193,6 +1352,16 @@ switch ($mode) {
             return inputs;
         }
 
+        // The same choices for a backup location in Google Drive for desktop.
+        private static InstallerInputs SampleDriveInputs()
+        {
+            InstallerInputs inputs = SampleInputs();
+            inputs.Repository = @"G:\My Drive\Rewindle Backups";
+            inputs.StorageMode = InstallerContract.StorageDriveFs;
+            inputs.DriveFsMyDriveRoot = @"G:\My Drive";
+            return inputs;
+        }
+
         private static void OperationFlow()
         {
             string folder = NewFolder("operation");
@@ -1228,6 +1397,92 @@ switch ($mode) {
                 {
                     Check(events.All.Where(e => e.Key == "operationLine").Select(e => (string)e.Value["raw"]).Contains("this line is not JSON") &&
                           events.All.Where(e => e.Key == "operationLine").Any(e => e.Value["line"] == null), "a line that is not JSON is still forwarded as text");
+                }
+            }
+
+            // 1b. The password choice reaches the installer with the install, and only when there is one.
+            {
+                Events events = new Events();
+                FakeLauncher launcher = new FakeLauncher();
+                launcher.Lines = new string[] { OkResult };
+                InstallerInputs picked = SampleInputs();
+                picked.RepositoryAccess = "no_password";
+                SetupOperation operation = make(SetupOperation.Install, new FakePlans(), launcher, events, null);
+                operation.Run(picked);
+                Check(launcher.Arguments.IndexOf("-RepositoryAccess") >= 0 && launcher.Arguments[launcher.Arguments.IndexOf("-RepositoryAccess") + 1] == "no_password",
+                    "the install is started with the person's password choice");
+                Events plainEvents = new Events();
+                FakeLauncher plainLauncher = new FakeLauncher();
+                plainLauncher.Lines = new string[] { OkResult };
+                make(SetupOperation.Install, new FakePlans(), plainLauncher, plainEvents, null).Run(SampleInputs());
+                Check(!plainLauncher.Arguments.Contains("-RepositoryAccess"), "and without a choice, the installer is left to use what it recorded");
+            }
+
+            // 1c. The check just before the install is made as the install will run. For a new location where the person chose no
+            // password, an installer that is not told so takes a password and finds an old recovery key file in the way (an error),
+            // though the install itself, which is told, never reads that file. The install must not stop for it.
+            {
+                Events events = new Events();
+                FakeLauncher launcher = new FakeLauncher();
+                launcher.Lines = new string[] { OkResult };
+                FakePlans plans = new FakePlans();
+                plans.StaleKeyUnlessNoPassword = true;
+                InstallerInputs picked = SampleInputs();
+                picked.RepositoryAccess = "no_password";
+                make(SetupOperation.Install, plans, launcher, events, null).Run(picked);
+                Check(plans.Asked.Count == 1 && plans.Asked[0], "an install asks for its check as an install's own (forInstall)");
+                Check(launcher.Starts == 1 && events.Names().Last() == "finished:succeeded" && !events.Names().Contains("finished:blocked"),
+                    "an install without a password is not blocked by a recovery key file it never reads");
+                Check(launcher.Arguments.IndexOf("-RepositoryAccess") >= 0 && launcher.Arguments[launcher.Arguments.IndexOf("-RepositoryAccess") + 1] == "no_password",
+                    "and it starts with the choice the check was made with");
+
+                // With a password, or with no choice at all, the same old key file is a real problem, and the install stops before Windows is asked.
+                foreach (string other in new string[] { "password", null })
+                {
+                    Events otherEvents = new Events();
+                    FakeLauncher otherLauncher = new FakeLauncher();
+                    FakePlans otherPlans = new FakePlans();
+                    otherPlans.StaleKeyUnlessNoPassword = true;
+                    InstallerInputs unpicked = SampleInputs();
+                    unpicked.RepositoryAccess = other;
+                    make(SetupOperation.Install, otherPlans, otherLauncher, otherEvents, null).Run(unpicked);
+                    Check(otherPlans.Asked.Count == 1 && otherPlans.Asked[0], "an install with " + (other ?? "no choice") + " also asks for its check as an install's own");
+                    SequenceEqual(new string[] { "stage:preparing", "finished:blocked" }, otherEvents.Names(), "an install with " + (other ?? "no choice") + " is still blocked by the old recovery key file");
+                    Check(otherLauncher.Starts == 0, "and starts nothing");
+                }
+            }
+
+            // 1d. The same for a backup location in Google Drive: the check just before the install is asked for as the install's own there
+            // too, so it carries the choice, and an install without a password is not blocked by a recovery key file it never reads.
+            {
+                Events events = new Events();
+                FakeLauncher launcher = new FakeLauncher();
+                launcher.Lines = new string[] { OkResult };
+                FakePlans plans = new FakePlans();
+                plans.StaleKeyUnlessNoPassword = true;
+                InstallerInputs picked = SampleDriveInputs();
+                picked.RepositoryAccess = "no_password";
+                make(SetupOperation.Install, plans, launcher, events, null).Run(picked);
+                Check(plans.Seen != null && plans.Seen.StorageMode == InstallerContract.StorageDriveFs, "the check was asked about a Google Drive location");
+                Check(plans.Asked.Count == 1 && plans.Asked[0], "an install to Google Drive asks for its check as an install's own (forInstall)");
+                Check(launcher.Starts == 1 && events.Names().Last() == "finished:succeeded" && !events.Names().Contains("finished:blocked"),
+                    "an install to Google Drive without a password is not blocked by a recovery key file it never reads");
+                Check(launcher.Arguments.IndexOf("-DriveFsMyDriveRoot") >= 0 && launcher.Arguments.IndexOf("-RepositoryAccess") >= 0 &&
+                      launcher.Arguments[launcher.Arguments.IndexOf("-RepositoryAccess") + 1] == "no_password",
+                    "and it starts for Google Drive with the choice the check was made with");
+
+                foreach (string other in new string[] { "password", null })
+                {
+                    Events otherEvents = new Events();
+                    FakeLauncher otherLauncher = new FakeLauncher();
+                    FakePlans otherPlans = new FakePlans();
+                    otherPlans.StaleKeyUnlessNoPassword = true;
+                    InstallerInputs unpicked = SampleDriveInputs();
+                    unpicked.RepositoryAccess = other;
+                    make(SetupOperation.Install, otherPlans, otherLauncher, otherEvents, null).Run(unpicked);
+                    Check(otherPlans.Asked.Count == 1 && otherPlans.Asked[0], "an install to Google Drive with " + (other ?? "no choice") + " also asks for its check as an install's own");
+                    SequenceEqual(new string[] { "stage:preparing", "finished:blocked" }, otherEvents.Names(), "an install to Google Drive with " + (other ?? "no choice") + " is still blocked by the old recovery key file");
+                    Check(otherLauncher.Starts == 0, "and starts nothing");
                 }
             }
 
@@ -1529,6 +1784,7 @@ switch ($mode) {
             bridge.Receive(Request("g2", "getPlan", "{\"inputs\":{\"repository\":\"E:\\\\Backups\",\"sources\":[\"C:\\\\Users\\\\you\\\\Desktop\"],\"schedule\":\"02:00\",\"vss\":true}}"));
             Check(ui.WaitResponse("g2") && Ok(ui.Response("g2")) && Json.String(ResultOf(ui.Response("g2")), "schema", 64) == "Rewindle.InstallPlan.v1", "getPlan answers with the plan");
             Check(plans.Seen != null && plans.Seen.Repository == @"E:\Backups" && plans.Seen.Sources.Count == 1, "from the validated inputs");
+            lock (plans.Asked) { Check(plans.Asked.Count == 1 && !plans.Asked[0], "a plan request from the page is asked for as no install's check (forInstall false)"); }
             // A newer plan replaces one that is still running.
             plans.Block = new ManualResetEvent(false);
             bridge.Receive(Request("g3", "getPlan", "{\"inputs\":{}}"));
@@ -1668,6 +1924,63 @@ switch ($mode) {
             Check(lockedUi.WaitResponse("l1") && WaitFor(() => lockedUi.Events("operationFinished").Count == 1, 10000), "an install whose key only administrators can read finishes");
             lockedBridge.Receive(Request("l2", "saveRecoveryKeyCopy", null));
             Check(ErrorCode(lockedUi.Response("l2")) == "recovery_key_unreadable" && ((string)Json.String(Json.AsObject(Json.Get(lockedUi.Response("l2"), "error")), "message", 2000)).Contains("Show in folder"), "an unreadable key is an error that tells what to do instead");
+
+            // The password choice goes through the bridge to the install, validated; a plan request never forwards it to the installer.
+            {
+                FakeLauncher pickLauncher = new FakeLauncher();
+                FakeUi pickUi = new FakeUi();
+                FakePlans pickPlans = new FakePlans();
+                SetupBridge pickBridge = new SetupBridge(pickUi, NewEnvironment(NewFolder("pick"), pickPlans, pickLauncher));
+                pickLauncher.Lines = new string[] { OkResult };
+                string withChoice = choices.Replace("\"startBackup\":false", "\"startBackup\":false,\"repositoryAccess\":\"no_password\"");
+                pickBridge.Receive(Request("p1", "install", withChoice));
+                Check(pickUi.WaitResponse("p1") && Ok(pickUi.Response("p1")) && WaitFor(() => pickUi.Events("operationFinished").Count == 1, 10000), "an install with a password choice starts and finishes");
+                Check(pickLauncher.Arguments != null && pickLauncher.Arguments.IndexOf("-RepositoryAccess") >= 0 &&
+                      pickLauncher.Arguments[pickLauncher.Arguments.IndexOf("-RepositoryAccess") + 1] == "no_password", "the choice is passed to the installer as -RepositoryAccess");
+                lock (pickPlans.Asked) { Check(pickPlans.Asked.Count == 1 && pickPlans.Asked[0], "and the install's own check is asked for as an install's"); }
+                pickBridge.Receive(Request("p2", "install", choices.Replace("\"startBackup\":false", "\"startBackup\":false,\"repositoryAccess\":\"none\"")));
+                Equal("invalid_choices", ErrorCode(pickUi.Response("p2")), "an install with a password choice that is neither word is refused");
+                pickBridge.Receive(Request("p3", "getPlan", "{\"inputs\":{\"repositoryAccess\":\"sideways\"}}"));
+                Equal("invalid_inputs", ErrorCode(pickUi.Response("p3")), "and so is a plan request that carries one");
+                pickBridge.Receive(Request("p4", "getPlan", "{\"inputs\":{\"repository\":\"E:\\\\Backups\",\"repositoryAccess\":\"no_password\"}}"));
+                Check(pickUi.WaitResponse("p4") && Ok(pickUi.Response("p4")), "a plan request that carries a valid choice is answered");
+                lock (pickPlans.Asked) { Check(pickPlans.Asked.Count == 2 && !pickPlans.Asked[1], "and is asked for as no install's check, so the choice never reaches the installer"); }
+                pickBridge.Shutdown();
+            }
+
+            // Backups without a password have no recovery key: the host copies and shows none, whatever path a result line carries.
+            {
+                string keyForNone = Path.Combine(NewFolder("nokey"), "ResticBackuper-RecoveryKey.txt");
+                File.WriteAllText(keyForNone, "an older install's key");
+                foreach (string access in new string[] { "no_password", "password" })
+                {
+                    FakeLauncher keyLauncher = new FakeLauncher();
+                    FakeUi keyUi = new FakeUi();
+                    SetupBridge keyBridge = new SetupBridge(keyUi, NewEnvironment(NewFolder("keys-" + access), new FakePlans(), keyLauncher));
+                    keyLauncher.Lines = new string[]
+                    {
+                        "{\"schema\":\"Rewindle.InstallProgress.v1\",\"type\":\"result\",\"ok\":true,\"error\":null,\"recovery_key_path\":" + Json.Serialize(keyForNone) +
+                            ",\"recovery_key_readable_by_user\":true,\"repository_access\":\"" + access + "\"}"
+                    };
+                    keyBridge.Receive(Request("n1", "install", choices));
+                    Check(keyUi.WaitResponse("n1") && WaitFor(() => keyUi.Events("operationFinished").Count == 1, 10000), "an install reporting " + access + " finishes");
+                    keyUi.SaveToReturn = Path.Combine(NewFolder("copy-" + access), "key.txt");
+                    keyBridge.Receive(Request("n2", "saveRecoveryKeyCopy", null));
+                    keyBridge.Receive(Request("n3", "showRecoveryKey", null));
+                    if (access == "no_password")
+                    {
+                        Check(ErrorCode(keyUi.Response("n2")) == "no_recovery_key" && ErrorCode(keyUi.Response("n3")) == "no_recovery_key" && keyUi.Revealed.Count == 0 && !File.Exists(keyUi.SaveToReturn),
+                            "no key is copied or shown for backups without a password, even when a key file sits at the reported path");
+                        Check(((string)Json.String(Json.AsObject(Json.Get(keyUi.Response("n2"), "error")), "message", 2000)).Contains("no password"), "and the refusal says why");
+                    }
+                    else
+                    {
+                        Check(keyUi.WaitResponse("n2") && Ok(keyUi.Response("n2")) && File.Exists(keyUi.SaveToReturn) && Ok(keyUi.Response("n3")) && keyUi.Revealed.Count == 1,
+                            "the same result line for backups with a password is copied and shown as before");
+                    }
+                    keyBridge.Shutdown();
+                }
+            }
 
             // After Shutdown nothing more is answered.
             int before = ui.Sent.Count;

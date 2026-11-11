@@ -81,9 +81,9 @@ class DiagnosticRedactionTests(unittest.TestCase):
         if hasattr(cls, "build_directory"):
             cls.build_directory.cleanup()
 
-    def run_harness(self, root: Path, mode: str) -> dict[str, object]:
+    def run_harness(self, root: Path, mode: str, access: str | None = None) -> dict[str, object]:
         completed = subprocess.run(
-            [str(self.executable), str(root), mode],
+            [str(self.executable), str(root), mode, *([access] if access is not None else [])],
             cwd=PROJECT,
             text=True,
             capture_output=True,
@@ -144,6 +144,41 @@ class DiagnosticRedactionTests(unittest.TestCase):
             self.assertGreater(report["secrets_redacted"], 0)
             self.assertGreater(report["identities_redacted"], 0)
             self.assertFalse(report["original_values_included"])
+
+    def test_how_the_backups_are_opened_stays_visible_in_the_export(self) -> None:
+        # "repository_access" says whether the backups have a password. It is what a person reading the bundle needs to know first, and
+        # nothing in it is secret: the key's name holds none of the words the redactor hides (password, secret, credential, dpapi,
+        # recovery_key), so its value must come through as it is, in the configuration and in the run's status, in both modes.
+        def values(node: object, key: str) -> list[object]:
+            found: list[object] = []
+            if isinstance(node, dict):
+                for name, value in node.items():
+                    if name == key:
+                        found.append(value)
+                    found.extend(values(value, key))
+            elif isinstance(node, list):
+                for item in node:
+                    found.extend(values(item, key))
+            return found
+
+        for access in ("password", "no_password"):
+            with self.subTest(access=access), tempfile.TemporaryDirectory(prefix="diagnostic-access-") as root_text:
+                result = self.run_harness(Path(root_text), "safe", access)
+                self.assertTrue(result["succeeded"], result.get("error"))
+                with zipfile.ZipFile(Path(str(result["path"]))) as archive:
+                    for name in ("configuration.json", "status.json"):
+                        with self.subTest(document=name):
+                            document = json.loads(archive.read(name).decode("utf-8"))
+                            self.assertEqual(values(document, "repository_access"), [access])
+
+    def test_a_configuration_from_before_the_choice_exports_without_inventing_one(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="diagnostic-owner-") as root_text:
+            result = self.run_harness(Path(root_text), "safe")
+            self.assertTrue(result["succeeded"], result.get("error"))
+            with zipfile.ZipFile(Path(str(result["path"]))) as archive:
+                for name in ("configuration.json", "status.json"):
+                    with self.subTest(document=name):
+                        self.assertNotIn("repository_access", archive.read(name).decode("utf-8"))
 
     def test_export_rejects_source_destination_and_never_overwrites(self) -> None:
         with tempfile.TemporaryDirectory(prefix="diagnostic-safety-") as root_text:

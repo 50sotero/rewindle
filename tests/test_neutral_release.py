@@ -61,6 +61,53 @@ class SingleVersionSourceTests(unittest.TestCase):
         self.assertIn('setup["appVersion"] = Program.DisplayVersion();', read(DASHBOARD / "DashboardWindow.Web.cs"))
 
 
+class ReleaseBundleDocumentsTests(unittest.TestCase):
+    """The release ZIP's top level carries the documents that a person reading README.md, or a message in Rewindle, is sent to.
+
+    README.md links to SECURITY.md by a relative path, and the messages about backups that were switched outside Rewindle name its
+    section "Switching an existing backup". Both are dead ends in the ZIP, and in the folder the installer copies from, unless
+    SECURITY.md sits next to README.md.
+    """
+
+    def bundle_files(self) -> list[str]:
+        builder = read(PROJECT / "build" / "Build-Release.ps1")
+        match = re.search(
+            r"foreach \(\$name in @\(([^)]*)\)\) \{\s*Copy-Item -LiteralPath \(Join-Path \$projectRoot \$name\) "
+            r"-Destination \(Join-Path \$bundleRoot \$name\)",
+            builder,
+        )
+        self.assertIsNotNone(match, "the build no longer copies the bundle's top-level documents in one list")
+        return re.findall(r"'([^']+)'", match.group(1))
+
+    def test_security_sits_next_to_the_readme_that_links_to_it(self) -> None:
+        files = self.bundle_files()
+        self.assertIn("README.md", files)
+        self.assertIn("SECURITY.md", files)
+        for name in files:
+            with self.subTest(name=name):
+                self.assertTrue((PROJECT / name).is_file(), f"the bundle lists {name}, which the repository does not have")
+        # The link that needs it, and the section the messages name.
+        self.assertIn("](SECURITY.md#switching-an-existing-backup)", read(PROJECT / "README.md"))
+        self.assertRegex(read(PROJECT / "SECURITY.md"), r"(?m)^## Switching an existing backup\s*$")
+
+    def test_every_shipped_message_that_names_security_md_finds_it_in_the_bundle(self) -> None:
+        files = self.bundle_files()
+        sources = (
+            PROJECT / "src" / "recovery_health.py",
+            PROJECT / "installer" / "Install-ResticBackuper.ps1",
+        )
+        naming = [path.name for path in sources if "SECURITY.md" in read(path)]
+        self.assertIn("recovery_health.py", naming, "the readiness check sends people to SECURITY.md")
+        self.assertIn("SECURITY.md", files)
+
+    def test_the_artifact_check_looks_for_it_in_the_unpacked_zip(self) -> None:
+        check = read(PROJECT / "tests" / "Test-ReleaseArtifact.ps1")
+        self.assertEqual(1, check.count("function Assert-BundleDocuments"))
+        # Called after it is defined, once the ZIP is unpacked.
+        self.assertEqual(2, check.count("Assert-BundleDocuments"), "defined once and called once")
+        self.assertIn("'SECURITY.md'", check)
+
+
 class NeutralDashboardTests(unittest.TestCase):
     def test_no_literal_drive_or_repository_binding(self) -> None:
         for name in ("EngineProfile.cs", "Telemetry.cs"):

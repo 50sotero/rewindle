@@ -172,12 +172,12 @@ than overdue until the task has run since the slot, or for at most 45 minutes af
 
 | File | Fields the dashboard uses | Rewindle | Legacy |
 | --- | --- | --- | --- |
-| `<install>\backup-config.json` (≤ 1 MiB, read with full sharing, retried once) | `plan_id` (canonical UUID), `config_generation` (> 0), `cloud_placeholder_policy`, `repository`, `state_directory`, `sources` (canonical, unique), `source_identities` (one 8-hex serial per source), `canary_file` (inside a source), `topology_paths`, `recovery_tools_directory` (source-picker guard only); for the Backup location card only, and never a reason to refuse the plan: `minimum_free_gib` (the reserve: a number 0 or more, converted to bytes as the engine does; anything else is unknown) and `repository_storage_mode` (`google_drivefs_stream` or anything else, read as a local drive) | Yes (written by the installer and `Manage-Sources.ps1`) | Yes |
+| `<install>\backup-config.json` (≤ 1 MiB, read with full sharing, retried once) | `plan_id` (canonical UUID), `config_generation` (> 0), `cloud_placeholder_policy`, `repository`, `state_directory`, `sources` (canonical, unique), `source_identities` (one 8-hex serial per source), `canary_file` (inside a source), `topology_paths`, `recovery_tools_directory` (source-picker guard only); for the Backup location card only, and never a reason to refuse the plan: `minimum_free_gib` (the reserve: a number 0 or more, converted to bytes as the engine does; anything else is unknown) and `repository_storage_mode` (`google_drivefs_stream` or anything else, read as a local drive); `repository_access` (`password`, `no_password` or absent, which means `password`; anything else is unknown and the page claims nothing about encryption either way; section 11) | Yes (written by the installer and `Manage-Sources.ps1`) | Yes |
 | `<install>\runtime-manifest.json`, `VERSION` | Diagnostics (redacted) and the engine version; the manifest's `installation_id` (a new random value the installer writes on every install, kept by the managers that rewrite the manifest) binds the clean-up setting (section 10) | Yes | Manifest only |
 | `<install>\engine-capabilities.json` (≤ 16 KiB, no link, strict UTF-8 JSON) | `schema` `<P>.EngineCapabilities.v1`, `schema_version` 1, `restore_session.protocol`, `.request_domain`, `.manager`: whether restore approval sessions are used, and `restore_session.find_files` (`<P>.FileSearch.v1`): whether a session also serves Find a file (section 9); `retention.manager`, `.request_domain`, `.policy_schema`, `.preview_schema`, `.history_schema`: whether clean-up of old backups is offered (section 10) | Yes (shipped in the payload, in the runtime manifest) | Not shipped |
-| `<state>\status.json` | Run identity, `state`, progress, summary, errors, cancel channel (`wrapper_pid`, `wrapper_start_filetime`, `launcher_pid`, `launcher_start_filetime`, `cancel_channel_id`, `cancel_channel_fingerprint`), plan binding, `repository_storage_mode`, `maintenance_hold`, `change_anomaly`, `failure_code` (a run stopped by `repository_low_space` is not repeated by the Backup location card's hero sentence). A backup's new, changed and unchanged file counts are Restic's own `summary.files_new`, `.files_changed` and `.files_unmodified` (all three non-negative integers, or none is shown; never for a dry run). Rewindle only, and not read by the dashboard: `unarchivable_links`, the WSL links and special files the run left out because Restic cannot store them (`null` until the source check has passed): `count`, up to 20 `samples` (paths), `tags` (counts for `lx_symlink`, `lx_fifo`, `lx_chr`, `lx_blk`), and `not_left_out` (`count`, `reasons` counted by `case_twin`, `control_character`, `invalid_unicode`, `trailing_dot_or_space`, `too_long` or `over_limit`, up to 20 `samples` with `path`, `tag` and `reason`), and, only on a run that ends as `partial` because WSL had put a regular file or folder at a left-out path by the time Restic finished, `replaced` (`count` and up to 20 `samples`). A sample path longer than 1,000 characters keeps its start and its end; `last-success.json` carries the same | Yes | Yes |
-| `<state>\last-success.json` | Verified run evidence; its SHA-256 binds anomaly reviews. For the Backup location card: `repository_bytes_after` (what the backups take after that run, a whole number of bytes or `null`), otherwise the Google Drive count before the run, `repository_readiness.total_bytes` (Rewindle) or `repository_storage_preflight.total_bytes` (legacy), plus `summary.data_added_packed` (else `data_added`), shown as an estimate. Anything that is not a whole number of bytes 0 or more is unknown. How far back the backups go is `snapshot_inventory` (`schema_version` 1, `count` 1 to 1,000,000, `oldest_utc` no later than `newest_utc`, `counted_utc`, `rule` `restore_browse`: the backups the Restore list offers, counted from the listing the backup already reads), bound to the record's own `plan_id` and `repository`, read only from a verified record and only shown. `status.json` carries the same key, which is not read | Yes (`repository_bytes_after` after every verified backup since this change; `null` when the size could not be measured; `snapshot_inventory` too) | Yes (never `repository_bytes_after`; the Google Drive count only; no `snapshot_inventory`: the backup range comes from the Restore list, section 6) |
-| `<state>\dry-run-latest.json` | Dry-run result and summary | Yes | Yes |
+| `<state>\status.json` | Run identity, `state`, progress, summary, errors, cancel channel (`wrapper_pid`, `wrapper_start_filetime`, `launcher_pid`, `launcher_start_filetime`, `cancel_channel_id`, `cancel_channel_fingerprint`), plan binding, `repository_storage_mode`, `repository_access` (read only to word a failed authentication; absent means `password`), `maintenance_hold`, `change_anomaly`, `failure_code` (a run stopped by `repository_low_space` is not repeated by the Backup location card's hero sentence). A backup's new, changed and unchanged file counts are Restic's own `summary.files_new`, `.files_changed` and `.files_unmodified` (all three non-negative integers, or none is shown; never for a dry run). Rewindle only, and not read by the dashboard: `unarchivable_links`, the WSL links and special files the run left out because Restic cannot store them (`null` until the source check has passed): `count`, up to 20 `samples` (paths), `tags` (counts for `lx_symlink`, `lx_fifo`, `lx_chr`, `lx_blk`), and `not_left_out` (`count`, `reasons` counted by `case_twin`, `control_character`, `invalid_unicode`, `trailing_dot_or_space`, `too_long` or `over_limit`, up to 20 `samples` with `path`, `tag` and `reason`), and, only on a run that ends as `partial` because WSL had put a regular file or folder at a left-out path by the time Restic finished, `replaced` (`count` and up to 20 `samples`). A sample path longer than 1,000 characters keeps its start and its end; `last-success.json` carries the same | Yes | Yes |
+| `<state>\last-success.json` | Verified run evidence; its SHA-256 binds anomaly reviews. For the Backup location card: `repository_bytes_after` (what the backups take after that run, a whole number of bytes or `null`), otherwise the Google Drive count before the run, `repository_readiness.total_bytes` (Rewindle) or `repository_storage_preflight.total_bytes` (legacy), plus `summary.data_added_packed` (else `data_added`), shown as an estimate. Anything that is not a whole number of bytes 0 or more is unknown. How far back the backups go is `snapshot_inventory` (`schema_version` 1, `count` 1 to 1,000,000, `oldest_utc` no later than `newest_utc`, `counted_utc`, `rule` `restore_browse`: the backups the Restore list offers, counted from the listing the backup already reads), bound to the record's own `plan_id` and `repository`, read only from a verified record and only shown. `status.json` carries the same key, which is not read. The record also carries `repository_access` next to `repository_storage_mode`, as `status.json` does (informational: nothing requires it) | Yes (`repository_bytes_after` after every verified backup since this change; `null` when the size could not be measured; `snapshot_inventory` too) | Yes (never `repository_bytes_after`; the Google Drive count only; no `snapshot_inventory`: the backup range comes from the Restore list, section 6) |
+| `<state>\dry-run-latest.json` | Dry-run result and summary (the Rewindle report also carries `repository_access` next to `repository_storage_mode`; informational) | Yes | Yes |
 | `<state>\retention-policy.json` (≤ 16 KiB) | `schema` `<P>.RetentionPolicy.v1`, `schema_version` 1, `enabled`, `keep_daily`, `keep_weekly`, `keep_monthly`, `group_by` `host,paths`, `plan_id`, `repository_id`, `install_id`, `policy_sha256`: clean-up is on only while every binding and the digest hold (section 10) | Yes (written only by `Manage-Retention.ps1`) | Not written |
 | `<state>\retention-preview.json` (≤ 8 MiB) | `schema` `<P>.RetentionPreview.v1`, `state` (`ready`, `blocked`, `error`, `disabled`), `blocked_reason`, `error_code`, plan, generation, `evidence.last_success_sha256`, `policy.policy_sha256`, `remove` and `keep` (ID, time, files, reasons), their counts, `remove_set_sha256` (checked against the listed IDs), `earlier_changes`, `earlier_changes_unknown`, `needs_files_confirmed`, `prune_pending`, `future_dated_utc`; its own SHA-256 binds a removal | Yes (written only by `Manage-Retention.ps1`) | Not written |
 | `<state>\retention-history.json` (≤ 1 MiB) | `schema` `<P>.RetentionHistory.v1`, `plan_id`, the newest entry's `request_nonce`, `outcome`, `confirmed_count`, `removed_count`, `prune_completed`, `check_completed`, `check_unfinished`, `removal_unverified`, `free_bytes_before`, `free_bytes_after`; from every entry that removed backups (`removed_count` above 0 or `removal_unverified`) or freed their space (`prune_completed`, or `outcome` `space_pending`), its `finished_utc` and `free_bytes_after` minus `free_bytes_before`, which the Backup location card's forecast takes away (section 10). A record that exists but cannot be trusted leaves the forecast unknown | Yes (written only by `Manage-Retention.ps1`) | Not written |
@@ -200,7 +200,9 @@ both fields, and must keep doing so.
 The read-only readiness check runs `<install>\Python\python.exe -E -S -B <install>\recovery_health.py --config …` as the
 user (60 s, 4 MiB stdout) and binds `schema` `<P>.RecoveryHealth.v1`, plan, generation, repository, and the check IDs
 `active_credential`, `recovery_key`, `rotation_rollback_key`, `pending_transaction`, `restore_drill`, `recovery_bundle`
-and `last_verification` (both engines; Rewindle adds `repository_storage` and `data_check`).
+and `last_verification` (both engines; Rewindle adds `repository_storage` and `data_check`). The Rewindle report also has a
+top-level `repository_access` (absent means `password`), which must equal the configuration's, or the dashboard does not use the
+report; for `no_password` it has no `recovery_key` and no `rotation_rollback_key` check (section 11).
 
 ## 6. Dashboard-owned files
 
@@ -468,3 +470,147 @@ removed backups after it was counted, until a later listing counts them again.
 disposable mode against a stand-in `restic.exe` that refuses any read without `--no-lock`), `tests/test_dashboard_retention.py`
 (the dashboard's reading, digests and result checks against the helper's, and the page's wording) and the clean-up section
 of `src/dashboard/tests/restore-flow-regressions.ps1`.
+
+## 11. Backups with a password or without one
+
+Backups are opened either with a password (the default and the recommended way: a generated password kept in a DPAPI
+envelope, and a recovery key) or, when the person chose so for a new backup, without one. Restic 0.19.1 cannot write
+unencrypted backups: "no password" is Restic's empty password, and every Restic command that opens such backups carries
+`--insecure-no-password`. Anyone who can open the backup folder can then restore every file, including saved sign-ins.
+Rewindle never switches the way existing backups open and builds no switching; `SECURITY.md` ("Switching an existing
+backup") says how a person can do it with Restic and what that does not undo. The installer's side (parameter, plan and result
+fields, finding codes) is in `docs/setup-contract.md`, section 2.8. Rewindle engine only; the legacy edition has no such
+choice, and a configuration without the field means a password, as it always did.
+
+**The setting.** `repository_access` in `<install>\backup-config.json`: exactly `password` or `no_password`, in lower case.
+The installer writes it right after `repository_storage_mode` for every new install, with either value. Absent means
+`password`: every configuration written before the choice existed, and its recovery copy. Anything else (another text, a
+different case, a number, `null`) is refused by every reader that acts on the backups (`restic_common.repository_access`,
+`restore.py` and `refresh_recovery_tools.py` raise `unsupported repository_access`; `Get-RepositoryAccess` in
+`Manage-Repository.ps1`, `Manage-Restore.ps1`, `Manage-Sources.ps1` and the Google Drive check throws the same text) and is
+read as unknown, never as a default, by the readers that must not fail: the installer and uninstaller
+(`Get-RecordedRepositoryAccess` gives null) and the dashboard (`SourceConfiguration.ReadRepositoryAccess` gives null, and the
+page then says nothing about encryption either way). The key name contains none of the words the diagnostics redactor hides, so
+a problem report shows its value. `secret_file` and `recovery_key_file` stay in every configuration with their default
+paths. Nothing ever changes the value for existing backups, and a recovery copy that names the other value is refused
+(compared with absent counted as `password`), never copied over.
+
+**No password, in the engine.** `restic_common.restic_base` (and `restore.py`'s own copy) adds `--insecure-no-password`
+instead of the `--password-command` pair. Restic refuses that option next to any non-empty password source
+(`RESTIC_PASSWORD`, `RESTIC_PASSWORD_FILE`, `RESTIC_PASSWORD_COMMAND`, `--password-file`, `--password-command`,
+`--new-password-file`), but only after it has run a password command, so the engine refuses to start such a command
+(`restic_child_environment`, and the same check in `restore.py`), and no component builds a password command in this mode.
+Nothing creates, reads, rewrites, deletes or reports a DPAPI envelope or a recovery key either: files an older installation
+left at `secret_file` and `recovery_key_file` stay exactly as they are. Backups that ask for a password and are opened with the
+option answer Restic exit 12 (also an empty or not yet downloaded `keys` folder); backups without a password that are opened
+without it fail at once with exit 1 when standard input is closed, and wait for a password when it is open, so every Restic
+child of the engine, the managers and the Google Drive check has its standard input closed.
+
+| Record | Carries |
+| --- | --- |
+| `<state>\repository.json` (written by the initializer, rewritten by a move) | `repository_access` (the verified mode); without a password also `secret_created`, `recovery_key_created` and `recovery_key_names_other_repository` all false |
+| `recovery-manifest.json` and `RecoveryTools\backup-config.json` | `repository_access`, normalised (absent becomes `password` when the manifest is written); it is not a recovery-local field. The manifest's `note` says by mode: with a password, "The repository password is intentionally not stored in this bundle."; without one, "These backups have no password: anyone who can read the backup folder can restore them." |
+| `status.json`, `last-success.json`, the dry-run report | `repository_access` next to `repository_storage_mode`; informational, and no reader may require it |
+| the recovery-readiness report (`<P>.RecoveryHealth.v1`) | optional top-level `repository_access` (absent means `password`) |
+| install plan and result, uninstall result | `resolved.repository_access`, `resolved.existing_repository_access`, `existing_install.kept_repository_access`; `repository_access` after `version` on the install result; `kept.repository_access` (`docs/setup-contract.md`) |
+
+**The initializer** (`initialize_repository.py`, run by the installer). Exit codes:
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | Done |
+| 1 | Any other failure (the wrapper maps every exception to it) |
+| 2 | A command line the parser refuses; the installer reads it as "can't tell" |
+| 4 | The configuration says `no_password`, but the backups in that location need a password |
+| 5 | The configuration says `password`, but the backups in that location have none |
+| 6 | The existing backups could not be opened to tell how they open: with `no_password`, `cat config` failed with anything but exit 12; with `password` and no saved password, the read-only look could not tell, or Restic said they need a password but their `keys` folder holds no file (a missing, empty or not yet downloaded folder: no password opens backups that hold no key); the same empty `keys` folder when the saved password did not open them (also `--detect-access` when it can't tell) |
+| 7 | The configuration says `password` and the backups need one, but this PC has no saved password that opens them: no saved password and the read-only look says they need a password, or the saved password did not open them (Restic exit 12) and they do not open without one either; in both the `keys` folder holds at least one file. No new password is ever made for them |
+| 20, 21, 22 | `--detect-access` only: the backups open without a password (20), need one (21), or are not there (22) |
+
+Exit 4, 5, 6 and 7 print one plain line on stderr ("The backups in this location don't match the choice made in Setup." for 4
+and 5, "Setup couldn't open the backups in this location." for 6, "This PC has nothing saved that opens the backups in this
+location." for 7) with none of Restic's text, and write nothing (the secret, the key, the recovery tools and `repository.json`
+are not created or changed); the installer undoes its own changes and leaves the backups as they were. It words them for the
+person itself (`docs/setup-contract.md`): 4 and 5 are `repository_access_mismatch`, 6 is `repository_access_unreadable`, 7 is
+`repository_password_unavailable`. In `no_password` mode an existing backup (a `config` file) is opened with `cat config`
+through `restic_base`: exit 0 goes on, Restic exit 12 returns 4, anything else returns 6. A new one is created with
+`init --repository-version 2` and checked with `cat config`; Restic's `init` text, which always warns about "knowledge of your
+password", is never shown, and `init` is never used as a probe. In `password` mode the old flow runs first, and only where it
+refuses an existing backup (no saved password, or the saved password does not open it) does a read-only look run: if the
+backups open without a password the answer is 5. Otherwise, with no saved password, the look's answer decides: "needs a
+password" is 7, and anything else (it could not tell, or there is no backup after all) is 6; with a saved password that Restic
+answered with exit 12, the answer is 7. Either 7 becomes 6 when the backups' `keys` folder holds no file, because Restic
+answers exit 12 for backups that hold no key at all just as it does for a password that was not given, so only the folder
+tells a password this PC lacks from backups that can't be opened. Any other failure of `cat config` with a saved password
+stays the old error (exit 1). The look is never run when the saved password opens the backups, so a backup that opens both
+ways keeps working with its password.
+
+`--detect-access --repository <path> --restic <restic.exe>` is exclusive with `--config` and `--commit-recovery-key`
+(otherwise exit 2), loads no configuration and writes nothing. It runs one read-only
+`restic --repo <path> --insecure-no-password --no-lock --no-cache cat config` with standard input closed, a minimal
+environment and a 180-second limit: exit 0 gives 20, Restic exit 12 gives 21, exit 10 with no `config` file there gives 22,
+and anything else, including exit 10 next to a `config` file (a half-synced folder), a time-out or Restic not starting,
+gives 6. Restic's text is never returned. `--commit-recovery-key` in `no_password` mode takes no run lock, reads no
+secret, prints `{"recovery_key_file": null, "recovery_key": "none"}`, exits 0 and leaves an older key file byte for byte as it
+was. The stdout summary adds `repository_access` and gives `secret_file` and `recovery_key_file` as `null` in that mode.
+
+**Failure code `repository_access_mismatch`.** When `backup.py` authenticates backups whose configuration says `no_password`
+and Restic exits 12, the run fails with `failure_code` `repository_access_mismatch`, `failure_phase`
+`repository_authentication` and the message "these backups now ask for a key that Rewindle doesn't have": the backups were
+changed outside Rewindle or replaced by others. Every other failure of that step, and every failure in `password` mode, stays
+`repository_authentication_failed`. The message holds none of the words the dashboard's filters hide. The dashboard words the
+code the same in every mode (run details and the Protection status line): "These backups now ask for a password that Rewindle
+doesn't have, usually because they were changed outside Rewindle. Rewindle can't carry on with them. To keep backing up, start
+new backups in another place." For `repository_authentication_failed` it words the next step by mode (read from
+`status.json`). The installer has findings of the same name for its own refusals (`docs/setup-contract.md`).
+
+**Recovery readiness.** `recovery_health.py` reads the mode first. For `no_password` it opens the backups with the option and
+no password source, and its report has no `recovery_key` and no `rotation_rollback_key` check; the other checks stay.
+`active_credential` passes with "Rewindle can open your backups."; when it fails it says "Rewindle couldn't open your backups.
+Check that the backup drive or Google Drive folder is connected, then run the checks again.", and, on Restic exit 12, "These
+backups now ask for a password, usually because one was added outside Rewindle. To keep backing up, start new backups in
+another place." In `password` mode nothing changes unless `active_credential` fails with exit 12: one read-only look (the
+option, `cat config`, `--no-lock --no-cache`, 20 seconds) then says "These backups now open without a password, usually
+because it was removed outside Rewindle. To keep using them, see Switching an existing backup in SECURITY.md on Rewindle's
+GitHub page, or start new backups in another place." when it succeeds; it never runs when the saved password works.
+`restore_drill` counts a history entry only when its `credential_source` matches the mode. The recovery copy's
+`repository_access` is compared with the live configuration's (normalised), and a difference fails `recovery_bundle` with
+`Recovery configuration drift: repository_access`. The dashboard uses a report only when its `repository_access` (absent means
+`password`) equals the configuration's, shows no recovery-key row for `no_password`, hides credential repair and key rotation,
+and gates **Run restore drill** on `active_credential`, `recovery_bundle`, `last_verification`, `pending_transaction` and no
+locks. `credential_repair.py` and `key_rotation.py` refuse a `no_password` backup at once, before they read a key, secret or
+journal, with exit 2 and a `failed` document: "This backup opens without a key, so there is nothing to repair." and "This
+backup opens without a key, so there are no keys to rotate."; the dashboard's launchers refuse in the same words before any
+prompt. `stale_lock_repair.py` runs its four Restic calls with the option and no password source.
+
+**Restore and the restore drill.** `restore.py` in `no_password` mode adds the option to every Restic call, never passes
+`--password-command` (not even when an older DPAPI file is still there), never reads a recovery key, never prompts (standard
+input is closed), and refuses `--recovery-key-file` with "This backup opens without a key, so there is no key file to use."
+`--find-json` works the same way; the file-search refusal for backups with a password is "File search needs Rewindle's saved
+key or your recovery key." When Restic answers exit 12 (the backups now ask for a password) to any way `restore.py` reads
+backups without a password (a listing, a folder, a search, a restore, the drill), `restore.py` says "These backups now ask
+for a password that Rewindle doesn't have, usually because they were changed outside Rewindle, so Rewindle can't open them.
+If you know that password, Restic can still restore your files with it, as RECOVERY.md in the recovery tools folder next to
+your backups explains." It says it as the whole of its last stderr line after `RESTORE FAILED: ` when a query ends the run, and
+as the `error` of the report when Restic itself ends a restore or the drill's restore with exit 12 (the last line is then
+`RESTORE INCOMPLETE: ...`). `Manage-Restore.ps1` has its own copy of that text and passes it on, for every request kind
+(listing, folder, search, restore, drill), when it is the whole of `restore.py`'s last stderr line after `RESTORE FAILED: ` for
+backups without a password and the run failed without timing out; it then reads no report, and it reads no other stderr, so no
+other word of the backend's output reaches the dashboard. A restore that Restic itself ended with exit 12 prints another line
+last, so the manager keeps its report and history entry, and that report's `error` starts with the same text (followed,
+when restored items were left in the restore folder, by the message that says so). The restore drill runs
+with no key and reports
+`credential_source` `none` (with a password: `recovery_key`); `drill_kind` stays `recovery_key_representative` and the history
+entry kind stays `recovery_key_representative_drill`. `Manage-Restore.ps1` then neither requires the recovery key file nor
+checks its ACL nor passes `--recovery-key-file`, and accepts only the `credential_source` that matches the mode;
+`RestoreManager.cs` does the same (`none` only for a `no_password` configuration, `recovery_key` only for `password`).
+
+**Managers and the Google Drive check.** `Manage-Repository.ps1` (a move of the backup location) and `Manage-Sources.ps1`
+read the field with `Get-RepositoryAccess` and refuse "Recovery repository_access is not synchronized with the protected
+configuration." when the recovery copy of the configuration or the manifest names the other mode. A move of backups without a
+password runs every Restic command with the option, builds no password command, requires no saved-secret file, `secret_store.py`
+or recovery key, keeps `repository_access` in the protected configuration, the recovery copy, the manifest and `repository.json`,
+and never changes it. The nightly Google Drive check puts the option after `--repo` on all four Restic runs (the local and the
+cloud `cat config`, `snapshots` and the canary `restore`), sets no `RESTIC_PASSWORD*` variable for them, and does not look for
+the saved-password file or `secret_store.py`; its reason and next-step texts hold none of the words `Telemetry.CleanOffsiteDetail`
+hides. The rclone side (its encrypted configuration and `RCLONE_PASSWORD_COMMAND`) is unchanged: that password is rclone's own.

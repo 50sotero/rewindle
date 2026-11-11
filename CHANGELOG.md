@@ -55,6 +55,20 @@ labels. Releases before 0.2.0 were published under the name ResticBackuper.
   and is not offered while a backup is running or about to start (the Find a
   file tab says why). It is not available with the earlier personal edition of
   the backup service.
+- **Backups without a password, if you choose them.** Setup has a new
+  Password page, and an unattended install takes `-RepositoryAccess
+  no_password`, to make backups that have no password. A password stays the
+  recommended default: Setup makes a strong one, keeps it safely for your
+  account and gives you a recovery key. Without one, anyone who can open the
+  backup folder can restore every backed-up file, including saved sign-ins.
+  That includes the folder in Google Drive or on a lost USB drive. There is no
+  recovery key to keep, so the Recovery key page, the key checks and the key
+  repair and rotation buttons don't appear for those backups, and the
+  instructions that come with them use Restic's `--insecure-no-password`
+  option. The choice is made once for a set of backups: backups you already
+  have, with or without a password, keep the way they were made, and Rewindle
+  never switches them. SECURITY.md has the details and a guide to switching an
+  existing backup yourself with Restic.
 - Tests: one test (`tests/test_rclone_version_parity.py`) ties together the two
   places that read `rclone version`, the nightly Google Drive check and the
   installer that sets it up. It gives both the same outputs and fails if they

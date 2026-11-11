@@ -7,11 +7,13 @@
 
 export type ScenarioName =
   | 'fresh' | 'no-second-drive' | 'drivefs' | 'existing-install' | 'legacy-installed'
-  | 'unsupported-os' | 'plan-errors' | 'install-failure' | 'uac-declined' | 'key-unreadable' | 'goes-online-only' | 'kept-backups';
+  | 'unsupported-os' | 'plan-errors' | 'install-failure' | 'uac-declined' | 'key-unreadable' | 'goes-online-only' | 'kept-backups'
+  | 'kept-no-password' | 'kept-unknown-access' | 'existing-no-password' | 'access-mismatch';
 
 export const SCENARIOS: readonly ScenarioName[] = [
   'fresh', 'no-second-drive', 'drivefs', 'existing-install', 'legacy-installed',
   'unsupported-os', 'plan-errors', 'install-failure', 'uac-declined', 'key-unreadable', 'goes-online-only', 'kept-backups',
+  'kept-no-password', 'kept-unknown-access', 'existing-no-password', 'access-mismatch',
 ];
 
 const GB = 1024 ** 3;
@@ -32,8 +34,21 @@ export interface Scenario {
   dotnet: boolean;
   volumes: SampleVolume[];
   drivefs: { detected: boolean; my_drive_root: string | null };
-  /** `kept_repository`: the backup folder an earlier installation left, as the installer reads it from the kept state. */
-  existing: { rewindle: null | { version: string; install_root: string }; legacy_personal_edition: boolean; kept_repository?: string | null };
+  /**
+   * `kept_repository`: the backup folder an earlier installation left, as the installer reads it from the kept state, and
+   * `kept_repository_access` the mode those records name for it ('password' or 'no_password'; absent: the records name none).
+   */
+  existing: {
+    rewindle: null | { version: string; install_root: string }; legacy_personal_edition: boolean;
+    kept_repository?: string | null; kept_repository_access?: 'password' | 'no_password' | null;
+  };
+  /**
+   * What the backups that already sit in the kept folder have: 'password' (the default), 'no_password', or 'unknown' (no record names a
+   * mode, so the installer checks when it installs; `detected` is what it then finds). Backups made by the sample's own install have the
+   * mode that install was given.
+   */
+  access?: 'password' | 'no_password' | 'unknown';
+  detected?: 'password' | 'no_password';
   knownFolders: { key: string; path: string; exists: boolean; default_selected: boolean }[];
   defaultSources: string[];
   defaultRepository: string | null;
@@ -45,7 +60,7 @@ export interface Scenario {
   missing: string[];
   /** Repository folders that already hold other files. */
   nonEmpty: string[];
-  install: 'success' | 'failure' | 'declined' | 'key-unreadable';
+  install: 'success' | 'failure' | 'declined' | 'key-unreadable' | 'access-mismatch';
   environmentErrors?: { code: string; message: string }[];
   /** Folders the "Add a folder…" button offers, one per click, and the backup folders "Choose a different folder…" offers. */
   browseFolders: string[];
@@ -128,9 +143,33 @@ export function scenario(name: ScenarioName): Scenario {
       };
     case 'existing-install':
       return { ...base, name, existing: { rewindle: { version: '0.2.0-alpha.1', install_root: 'C:\\Program Files\\ResticBackuper' }, legacy_personal_edition: false } };
+    case 'existing-no-password':
+      // Installed, with backups that have no password: Maintenance and its dialogs don't promise a recovery key.
+      return {
+        ...base, name, access: 'no_password',
+        existing: {
+          rewindle: { version: '0.2.0-alpha.1', install_root: 'C:\\Program Files\\ResticBackuper' }, legacy_personal_edition: false,
+          kept_repository: 'E:\\Rewindle\\Backups', kept_repository_access: 'no_password',
+        },
+      };
     case 'kept-backups':
       // Rewindle was removed from Installed apps; its backups are where the console installer suggested them, not where Setup would.
-      return { ...base, name, existing: { rewindle: null, legacy_personal_edition: false, kept_repository: 'E:\\ResticBackups\\Personal' } };
+      return { ...base, name, existing: { rewindle: null, legacy_personal_edition: false, kept_repository: 'E:\\ResticBackups\\Personal', kept_repository_access: 'password' } };
+    case 'kept-no-password':
+      // The same, with backups that have no password: the Password page says so and offers no choice, and no recovery key is asked for.
+      return {
+        ...base, name, access: 'no_password',
+        existing: { rewindle: null, legacy_personal_edition: false, kept_repository: 'E:\\ResticBackups\\Personal', kept_repository_access: 'no_password' },
+      };
+    case 'kept-unknown-access':
+      // No record names the mode of the kept backups, so the installer checks them when it installs (here it finds they have no password).
+      return {
+        ...base, name, access: 'unknown', detected: 'no_password',
+        existing: { rewindle: null, legacy_personal_edition: false, kept_repository: 'E:\\ResticBackups\\Personal' },
+      };
+    case 'access-mismatch':
+      // The install stops because the backups at the chosen place don't match what Setup recorded: the next step is another place.
+      return { ...base, name, install: 'access-mismatch' };
     case 'legacy-installed':
       return { ...base, name, existing: { rewindle: null, legacy_personal_edition: true } };
     case 'unsupported-os':

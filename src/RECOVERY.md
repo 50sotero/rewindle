@@ -2,15 +2,25 @@
 
 This directory is a recovery aid for the configured Restic repository. It
 contains Restic, the guarded restore wrapper, the generated configuration, and
-checksums. It intentionally does **not** contain the repository password.
+checksums. Backups are made either with a password or without one. To tell
+which kind yours are, open `backup-config.json` in this folder with Notepad and
+look for the line `"repository_access"`. If it says `"no_password"`, these
+backups have no password and there is no recovery key: use the section
+"Backups without a password" near the end of this file. If the line is missing
+or says `"password"`, these backups have a password: the rest of this file is
+written for them.
 
-Keep a separate copy of `ResticBackuper-RecoveryKey.txt` in a password manager,
-on removable media, or printed in a secure place. CurrentUser DPAPI alone will
-not survive loss of the Windows profile.
+For backups with a password, this directory intentionally does **not** contain
+the repository password. Keep a separate copy of `ResticBackuper-RecoveryKey.txt`
+in a password manager, on removable media, or printed in a secure place.
+CurrentUser DPAPI alone will not survive loss of the Windows profile.
 
 ## Same-machine restore
 
-If the installed runtime and DPAPI credential are still available:
+`restore.py` reads `backup-config.json` and opens the backups the right way by
+itself, with a password or without one. If the installed runtime and DPAPI
+credential are still available (backups without a password have no DPAPI
+credential: they need only the installed runtime):
 
 ```powershell
 & 'C:\Program Files\ResticBackuper\Python\python.exe' -I .\restore.py --list
@@ -65,7 +75,8 @@ backup. The next scheduled backup runs once there is room.
 
 ## Recovery-key restore
 
-When only this bundle, the repository, and the offline recovery key remain:
+For backups with a password. When only this bundle, the repository, and the
+offline recovery key remain:
 
 ```powershell
 .\restic.exe --repo 'X:\Path\To\Repository' snapshots
@@ -94,7 +105,8 @@ look through every backup without changing anything:
 .\restic.exe --repo 'X:\Path\To\Repository' find --long --ignore-case '*budget*'
 ```
 
-Restic asks for the password, as above. For each backup that holds a matching
+Restic asks for the password, as above (for backups without a password, see
+"Backups without a password" below). For each backup that holds a matching
 file or folder it prints a line with the backup's short ID and time, then one
 line for each match. With `--long`, as here, each of those lines ends with the
 item's size in bytes, the date and time it last changed, and its path inside the
@@ -110,6 +122,50 @@ Restores never need to modify or delete the repository. Prefer a new empty
 target on a different path, inspect the restored files, and only then decide
 how to put individual files back into service.
 
+## Backups without a password
+
+These backups were made without a password, so there is no recovery key and no
+saved password: anyone who can open the repository folder can restore every
+file in it, including saved sign-ins. Restic cannot write unencrypted backups.
+"No password" means Restic's empty password, and Restic has to be told so on
+every command.
+
+Every Restic command needs `--insecure-no-password` and no password option.
+Restic refuses that option next to any password, so first clear the three
+settings that can hold one in the PowerShell window you are going to use (they
+are usually empty, but a person who also uses Restic for other backups may have
+set them):
+
+```powershell
+$env:RESTIC_PASSWORD = $null
+$env:RESTIC_PASSWORD_FILE = $null
+$env:RESTIC_PASSWORD_COMMAND = $null
+```
+
+Then run the commands from the sections above with the option added right after
+`--repo`. Restic asks for nothing:
+
+```powershell
+.\restic.exe --insecure-no-password --repo 'X:\Path\To\Repository' snapshots
+.\restic.exe --insecure-no-password --repo 'X:\Path\To\Repository' restore `
+  'latest:/C/Users/you/Documents' `
+  --target 'X:\Restored-Documents' --overwrite never --verify
+.\restic.exe --insecure-no-password --repo 'X:\Path\To\Repository' find --long --ignore-case '*budget*'
+```
+
+What is said above about `--include`, about `[` in names, and about reading the
+`find` output applies unchanged. `restore.py` does all of this by itself: it
+reads `backup-config.json`, adds the option to every Restic command and never
+asks for a password or a key, so the same-machine restore commands work for
+these backups as written.
+
+If you leave the option out, Restic asks for a password, or stops saying that an
+empty password is not allowed by default: only the option is missing. If Restic
+says "wrong password or no key found" even with the option, these backups now
+have a password, usually because one was added outside Rewindle. Run the
+commands under "Recovery-key restore" without the option, and give Restic the
+password that was added when it asks.
+
 ## If clean-up of old backups was on
 
 When someone turned on clean-up of old backups, it removed only backups on a
@@ -122,5 +178,6 @@ restoring what is left.
 
 If Restic says the repository is locked, a clean-up may have stopped part-way.
 Add `--no-lock` to `snapshots`, `find` and `restore`: all three only read, and
-the option lets them run without touching the lock. Do not run `forget`,
+the option lets them run without touching the lock (for backups without a
+password, together with `--insecure-no-password`). Do not run `forget`,
 `prune` or `unlock` while you are recovering files.
