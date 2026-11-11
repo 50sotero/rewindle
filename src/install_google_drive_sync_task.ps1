@@ -1026,8 +1026,9 @@ function Update-ProtectedPasswordHelper {
     # The files they replace are kept in a new folder under evidence\, where the check looks only at permissions. The
     # replacements are written into that folder first, so they take the same permissions as everything else under the
     # assets root, and are checked before anything is swapped. The swaps happen while the run lock is held, so no backup
-    # or check runs meanwhile, and each is one rename. If the manifest cannot be swapped after the helper was, the earlier
-    # helper goes back; if even that fails, registering the check again finishes the refresh.
+    # or check runs meanwhile, and each is one rename. If this fails before the first swap, or that swap is refused,
+    # nothing was replaced and the folder is removed again. If the manifest cannot be swapped after the helper was, the
+    # earlier helper goes back; if even that fails, registering the check again finishes the refresh.
     param(
         [Parameter(Mandatory)] [string]$Root,
         [Parameter(Mandatory)] [ValidateSet('refresh', 'finish')] [string]$Plan,
@@ -1139,7 +1140,16 @@ function Update-ProtectedPasswordHelper {
                 throw
             }
         }
-        Move-FileReplacing -Source $stagedManifest -Target $manifestPath
+        try {
+            Move-FileReplacing -Source $stagedManifest -Target $manifestPath
+        }
+        catch {
+            if (-not $helperSwapped) {
+                # Finishing a refresh: the helper was not touched and this rename was refused, so nothing was replaced.
+                $swapStarted = $false
+            }
+            throw
+        }
         if ((Get-Sha256Hex -Path $helperPath) -cne $newHelperSha256 -or
             (Get-Sha256Hex -Path $manifestPath) -cne $newManifestSha256) {
             throw 'The refreshed rclone password helper could not be confirmed. Register the check again.'

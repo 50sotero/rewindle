@@ -958,6 +958,68 @@ ConvertTo-AsciiJson -Value ([ordered]@{
         # Nothing was replaced, so the copies made for the attempt are not left behind.
         self.assertEqual([], self.evidence_folders(), "a refused rename left its copies behind")
 
+    def test_finishing_leaves_nothing_behind_when_the_manifests_rename_is_refused(self):
+        # Finishing a refresh renames only the manifest. Another program opens it, shares it with no one, and keeps it
+        # open: that rename is refused, so nothing was replaced and the copies made for the attempt go again.
+        report = self.probe(
+            r"""
+New-AssetsRoot -Root $root -HelperBytes $earlierBytes
+# As a refresh leaves the folder when it stops between the helper and the manifest.
+[IO.File]::WriteAllBytes((Join-Path $root 'reveal-rclone-config-password.ps1'), [IO.File]::ReadAllBytes($packaged))
+$before = Get-FolderSnapshot -Root $root
+$plan = Get-RootPlan -Root $root -PackagedPath $packaged
+$realMove = ${function:Move-FileReplacing}
+$script:holder = $null
+function Move-FileReplacing {
+    param([string]$Source, [string]$Target)
+
+    if ($Target.EndsWith('assets-manifest.json') -and $null -eq $script:holder) {
+        $script:holder = [IO.File]::Open($Target, 'Open', 'Read', 'None')
+    }
+    & $realMove -Source $Source -Target $Target
+}
+$message = ''
+$warnings = @()
+try {
+    [void](Invoke-Refresh -Root $root -Plan $plan -PackagedPath $packaged -LockPath $lockPath 3>&1 |
+        ForEach-Object { $warnings += [string]$_ })
+}
+catch {
+    $message = $_.Exception.Message
+}
+finally {
+    if ($null -ne $script:holder) {
+        $script:holder.Dispose()
+    }
+}
+$lock = Enter-ProtectedRunLock -Path $lockPath
+$lockFree = $null -ne $lock
+Exit-ProtectedRunLock -Stream $lock
+ConvertTo-AsciiJson -Value ([ordered]@{
+    plan = $plan
+    held = $null -ne $script:holder
+    message = $message
+    warnings = $warnings
+    unchanged = ((ConvertTo-Json $before) -ceq (ConvertTo-Json (Get-FolderSnapshot -Root $root)))
+    plan_after = Get-RootPlan -Root $root -PackagedPath $packaged
+    lock_free = $lockFree
+})
+"""
+        )
+        self.assertEqual("finish", report["plan"])
+        self.assertTrue(report["held"], "the manifest was never held open")
+        self.assertRegex(
+            report["message"],
+            "^Could not replace "
+            + re.escape(str(self.fixture.root / "assets-manifest.json"))
+            + " with .+ If another program",
+        )
+        self.assertEqual([], report["warnings"])
+        self.assertEqual([], self.evidence_folders(), "a refused rename left its copies behind")
+        self.assertTrue(report["unchanged"], "the assets folder changed although nothing was replaced")
+        self.assertEqual("finish", report["plan_after"])
+        self.assertTrue(report["lock_free"], "the run lock was still held afterwards")
+
     def test_a_stop_during_the_helpers_rename_puts_the_earlier_helper_back(self):
         # A stop (Ctrl+C) runs finally blocks but no catch block, and PowerShell notices it only once a .NET call has
         # returned: a stop that arrives while the helper is renamed takes effect after the rename. The earlier helper
@@ -1054,6 +1116,14 @@ ConvertTo-AsciiJson -Value ([ordered]@{
         )
         self.assertEqual("refresh", report["plan_after"])
         self.assertTrue(report["lock_free"], "the run lock was still held after the stop")
+        # A stop is not a refused rename: the swap had begun, so its copies stay, the earlier helper among them.
+        folders = self.evidence_folders()
+        self.assertEqual(1, len(folders), "a stop during the swap must keep its copies")
+        self.assertEqual(
+            sorted([HELPER_NAME + ".previous", "assets-manifest.json.new", "assets-manifest.json.previous"]),
+            sorted(path.name for path in folders[0].iterdir()),
+        )
+        self.assertEqual(earlier_helper(2), (folders[0] / (HELPER_NAME + ".previous")).read_bytes())
 
     def test_assets_that_change_before_the_swap_are_left_alone(self):
         # Just after the run lock is taken, one file changes: the helper or the manifest in the assets root, or one of
