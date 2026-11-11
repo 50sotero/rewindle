@@ -1,5 +1,6 @@
 import { ArrowUpRight, Check, LayoutDashboard, RefreshCw, Trash2, TriangleAlert } from 'lucide-react';
 import { Button } from '@/components/atoms/Button';
+import { keptWords } from '../contract';
 import { Callout, ShieldIcon } from '../ui';
 import type { Wizard } from '../useWizard';
 
@@ -10,6 +11,8 @@ export function Maintenance({ wizard, onReinstall, onUninstall, openDashboard }:
   const installed = wizard.base?.environment.existingInstall.rewindle;
   const setupVersion = wizard.host?.version ?? wizard.base?.environment.version ?? '';
   const legacy = wizard.base?.environment.existingInstall.legacyPersonalEdition;
+  // What an uninstall keeps depends on the kind of backups: backups without a password have no recovery key to keep.
+  const kept = keptWords(wizard.base?.environment.existingInstall.keptRepositoryAccess);
   const same = installed?.version && setupVersion && installed.version === setupVersion;
   // Windows still lists Rewindle (or its shortcut or tasks remain) but the program folder is gone: the installer reports the
   // program folder as `already_installed` only when it exists. Uninstall clears such leftovers, so the choices below still work.
@@ -41,14 +44,14 @@ export function Maintenance({ wizard, onReinstall, onUninstall, openDashboard }:
           <span className="choice-icon"><RefreshCw size={18} aria-hidden="true" /></span>
           <span className="choice-text">
             <strong>Reinstall or repair <ShieldIcon size={13} /></strong>
-            <span>Remove the app, then go through the setup steps again. Your backups and recovery key are kept; your folders and schedule start from the suggestions.</span>
+            <span>Remove the app, then go through the setup steps again. {kept}; your folders and schedule start from the suggestions.</span>
           </span>
         </button>
         <button type="button" className="choice" onClick={onUninstall}>
           <span className="choice-icon is-danger"><Trash2 size={18} aria-hidden="true" /></span>
           <span className="choice-text">
             <strong>Uninstall <ShieldIcon size={13} /></strong>
-            <span>Remove the Rewindle app and its scheduled backups. Your backups and recovery key are kept.</span>
+            <span>Remove the Rewindle app and its scheduled backups. {kept}.</span>
           </span>
         </button>
       </div>

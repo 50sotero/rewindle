@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -12,11 +14,13 @@ from unittest import mock
 PROJECT = Path(__file__).resolve().parents[1]
 SOURCE = PROJECT / "src"
 sys.path.insert(0, str(SOURCE))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import credential_repair  # noqa: E402
 from credential_repair import repair, sha256_file  # noqa: E402
 from refresh_recovery_tools import json_bytes  # noqa: E402
-from restic_common import RunLock  # noqa: E402
+from restic_access import restic_access_result  # noqa: E402
+from restic_common import NO_PASSWORD_FLAG, RunLock  # noqa: E402
 
 
 PLAN_ID = "98eaecbb-56dc-45f1-8254-5a3357105855"
@@ -25,7 +29,13 @@ PASSWORD = "valid-recovery-password-material-with-more-than-forty-characters"
 SID = "S-1-5-21-111-222-333-1001"
 
 
-def build_fixture(root: Path) -> tuple[Path, dict[str, object]]:
+def build_fixture(
+    root: Path, *, access: str | None = None, leftover_key_files: bool = False
+) -> tuple[Path, dict[str, object]]:
+    """`access` None leaves out "repository_access" (every configuration written before the choice existed; it
+    means a password), "password" and "no_password" write it. Backups without a password have no DPAPI file and no
+    recovery key: a "no_password" fixture writes neither unless `leftover_key_files` asks for what an older install
+    left behind."""
     install = root / "Install"
     state = root / "State"
     repository = root / "Repository"
@@ -57,37 +67,46 @@ def build_fixture(root: Path) -> tuple[Path, dict[str, object]]:
         "sources": [source],
         "source_identities": {source: {"expected_volume_serial": "11223344"}},
     }
+    if access is not None:
+        config["repository_access"] = access
     for path in (
         Path(config["restic_executable"]),
         Path(config["python_executable"]),
-        Path(config["secret_file"]),
         Path(config["exclude_file"]),
         Path(config["canary_file"]),
         install / "secret_store.py",
         repository / "config",
     ):
         path.write_text("fixture\n", encoding="utf-8")
-    Path(config["recovery_key_file"]).write_text(
-        "RESTIC PERSONAL BACKUP RECOVERY KEY\n"
-        f"Repository: {repository}\n"
-        f"Password: {PASSWORD}\n",
-        encoding="utf-8",
-    )
+    if access != "no_password" or leftover_key_files:
+        Path(config["secret_file"]).write_text("fixture\n", encoding="utf-8")
+        Path(config["recovery_key_file"]).write_text(
+            "RESTIC PERSONAL BACKUP RECOVERY KEY\n"
+            f"Repository: {repository}\n"
+            f"Password: {PASSWORD}\n",
+            encoding="utf-8",
+        )
     config_path = install / "backup-config.json"
     config_path.write_bytes(json_bytes(config))
     return config_path, config
 
 
 class FakeRunner:
-    def __init__(self, recovery_ok: bool = True, active_ok: bool = True) -> None:
+    """Restic as the backups open: `access` says whether they were made with a password or without."""
+
+    def __init__(self, recovery_ok: bool = True, active_ok: bool = True, access: str = "password") -> None:
         self.recovery_ok = recovery_ok
         self.active_ok = active_ok
+        self.access = access
         self.calls: list[tuple[list[str], bool]] = []
 
     def __call__(self, command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         environment = kwargs.get("env")
         recovery = isinstance(environment, dict) and "RESTIC_PASSWORD" in environment
         self.calls.append((list(command), recovery))
+        refusal = restic_access_result(command, environment, self.access)
+        if refusal is not None:
+            return subprocess.CompletedProcess(command, refusal[0], "", refusal[1])
         if recovery and (not self.recovery_ok or environment["RESTIC_PASSWORD"] != PASSWORD):
             return subprocess.CompletedProcess(command, 12, "", "wrong key")
         if not recovery and not self.active_ok:
@@ -241,6 +260,131 @@ class CredentialRepairTests(unittest.TestCase):
                 "unmanifested or missing",
             ):
                 credential_repair.validate_runtime_manifest(install)
+
+
+NO_KEY_TO_REPAIR = "This backup opens without a key, so there is nothing to repair."
+
+
+class CredentialRepairWithoutKeyTests(unittest.TestCase):
+    """Backups made without a password have no key to repair: refused at once, nothing read or changed."""
+
+    def forbid_reads(self) -> contextlib.ExitStack:
+        stack = contextlib.ExitStack()
+        for name in (
+            "load_secret",
+            "replace_secret",
+            "parse_recovery_key",
+            "load_config_under_lock",
+            "authenticate",
+            "validate_runtime_manifest",
+        ):
+            stack.enter_context(
+                mock.patch.object(credential_repair, name, side_effect=AssertionError(f"{name} was called"))
+            )
+        return stack
+
+    def test_a_backup_without_a_password_is_refused_before_any_key_secret_or_journal_is_read(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="credential-no-password-") as root_text:
+            config_path, config = build_fixture(Path(root_text), access="no_password", leftover_key_files=True)
+            state = Path(config["state_directory"])
+            journal = state / "credential-rotation.journal.json"
+            journal.write_text("an unfinished rotation of an older backup", encoding="utf-8")
+            files = [Path(config["secret_file"]), Path(config["recovery_key_file"]), journal, config_path]
+            before = [path.read_bytes() for path in files]
+            runner = FakeRunner(access="no_password")
+
+            with self.forbid_reads():
+                # require_manifest left on: the refusal comes before even the runtime manifest is read.
+                with self.assertRaises(RuntimeError) as caught:
+                    repair(
+                        config_path,
+                        expected_config_sha256=sha256_file(config_path),
+                        expected_plan_id=PLAN_ID,
+                        expected_generation=4,
+                        expected_user_sid=SID,
+                        runner=runner,
+                        acl_verifier=lambda path: self.fail("a key file was looked at"),
+                        sid_reader=lambda: SID,
+                    )
+
+            self.assertEqual(NO_KEY_TO_REPAIR, str(caught.exception))
+            self.assertEqual([], runner.calls)
+            self.assertEqual(before, [path.read_bytes() for path in files])
+            # The message reaches the owner: no log filter turns it into "without exposing credential details".
+            self.assertEqual(NO_KEY_TO_REPAIR, credential_repair.sanitize(NO_KEY_TO_REPAIR))
+
+    def test_the_tool_reports_the_refusal_as_a_failed_run(self) -> None:
+        if sys.platform != "win32":
+            self.skipTest("the approving Windows account is a Windows notion")
+        from secret_store import _current_user_sid
+
+        with tempfile.TemporaryDirectory(prefix="credential-no-password-main-") as root_text:
+            config_path, _ = build_fixture(Path(root_text), access="no_password")
+            output = io.StringIO()
+            arguments = [
+                "--config",
+                str(config_path),
+                "--expected-config-sha256",
+                sha256_file(config_path),
+                "--expected-plan-id",
+                PLAN_ID,
+                "--expected-generation",
+                "4",
+                "--expected-user-sid",
+                _current_user_sid(),
+            ]
+            with mock.patch.object(credential_repair, "is_administrator", return_value=True):
+                with self.forbid_reads(), contextlib.redirect_stdout(output):
+                    exit_code = credential_repair.main(arguments)
+            self.assertEqual(2, exit_code)
+            result = json.loads(output.getvalue())
+            self.assertEqual("failed", result["state"])
+            self.assertEqual(NO_KEY_TO_REPAIR, result["error"])
+
+    def test_an_unsupported_value_is_refused_before_the_run_lock_is_taken(self) -> None:
+        for value in ("No_Password", "", 5):
+            with self.subTest(value=value), tempfile.TemporaryDirectory(prefix="credential-bad-mode-") as root_text:
+                config_path, config = build_fixture(Path(root_text))
+                config["repository_access"] = value
+                config_path.write_bytes(json_bytes(config))
+                runner = FakeRunner()
+                with self.forbid_reads(), self.assertRaisesRegex(ValueError, "^unsupported repository_access$"):
+                    repair(
+                        config_path,
+                        expected_config_sha256=sha256_file(config_path),
+                        expected_plan_id=PLAN_ID,
+                        expected_generation=4,
+                        expected_user_sid=SID,
+                        runner=runner,
+                        acl_verifier=lambda path: None,
+                        sid_reader=lambda: SID,
+                        require_manifest=False,
+                    )
+                self.assertEqual([], runner.calls)
+
+    def test_a_backup_with_a_password_is_repaired_as_before_with_or_without_the_key_in_its_configuration(self) -> None:
+        for access in (None, "password"):
+            with self.subTest(access=access), tempfile.TemporaryDirectory(prefix="credential-password-") as root_text:
+                config_path, _ = build_fixture(Path(root_text), access=access)
+                runner = FakeRunner()
+                with mock.patch("credential_repair.load_secret", side_effect=RuntimeError("broken")), mock.patch(
+                    "credential_repair.replace_secret"
+                ) as replace:
+                    result = repair(
+                        config_path,
+                        expected_config_sha256=sha256_file(config_path),
+                        expected_plan_id=PLAN_ID,
+                        expected_generation=4,
+                        expected_user_sid=SID,
+                        runner=runner,
+                        acl_verifier=lambda path: None,
+                        sid_reader=lambda: SID,
+                        require_manifest=False,
+                    )
+                self.assertEqual("repaired", result["state"])
+                replace.assert_called_once()
+                self.assertTrue(all(NO_PASSWORD_FLAG not in command for command, _ in runner.calls))
+                self.assertIn("--password-command", runner.calls[-1][0])
 
 
 if __name__ == "__main__":

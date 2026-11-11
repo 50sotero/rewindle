@@ -124,7 +124,7 @@ flowchart LR
     A["Selected source folders"] -->|"optional VSS view"| B["backup.py"]
     T["Task Scheduler<br/>Highest privilege"] --> L["Native task launcher"]
     L --> B
-    K["CurrentUser DPAPI envelope"] -->|"password command"| R["Restic"]
+    K["CurrentUser DPAPI envelope<br/>(backups with a password)"] -->|"password command"| R["Restic"]
     B --> R
     R --> Q["User-selected local NTFS or explicit DriveFS repository"]
     B --> V["Snapshot, structure, data-subset,<br/>and canary-restore checks"]
@@ -152,7 +152,7 @@ flowchart LR
     D -->|"readiness and guided repair"| Y["Recovery health helpers"]
     M --> C["Protected backup configuration"]
     C --> B
-    O["Offline recovery key"] -.->|"stored separately"| Q
+    O["Offline recovery key<br/>(backups with a password)"] -.->|"stored separately"| Q
 ```
 
 The scheduled task launches a small native supervisor from the protected
@@ -267,6 +267,56 @@ not count. `status.json` records what was left out and what was kept in, and why
 (`unarchivable_links`); the change-anomaly comparison still hashes only the
 installed list. The dry run, which Rewindle itself never starts, is unchanged.
 
+### With a password or without one
+
+One setting says how Restic opens a set of backups: `repository_access` in
+`backup-config.json`, `password` or `no_password`. The installer writes it for
+every new install, from Setup's Password page or `-RepositoryAccess`. A
+configuration without it, which is every configuration written before the
+choice existed, means `password`; any other value is refused. Rewindle never
+changes it for existing backups (see
+[Switching an existing backup](../SECURITY.md#switching-an-existing-backup)).
+The field, the records that echo it and the exit codes are in
+[`docs/engine-contract.md`](engine-contract.md), section 11.
+
+Restic cannot write unencrypted backups, so "no password" is Restic's empty
+password: `--insecure-no-password` on every Restic command, and never next to a
+password source, which Restic refuses only after it has run a password command.
+`restic_common.restic_base` builds the command line from the setting (with a
+password, the DPAPI password command; without one, the option alone), and
+`restic_child_environment` refuses a command that has both. `restore.py` and
+`refresh_recovery_tools.py` carry their own copy of the rule because they also
+run from the standalone recovery folder. `recovery_health.py` and
+`stale_lock_repair.py` follow it too, and `credential_repair.py` and
+`key_rotation.py` refuse a backup without a password at once, since it has no
+key to repair or rotate. The PowerShell side reads the field through
+`PSObject.Properties` with one throwing reader (`Get-RepositoryAccess`, in
+`Manage-Repository.ps1`, `Manage-Restore.ps1`, `Manage-Sources.ps1` and the
+Google Drive check) and one that never fails (`Get-RecordedRepositoryAccess`, in
+the installer and uninstaller); the dashboard reads it with
+`SourceConfiguration.ReadRepositoryAccess` and says nothing about encryption
+when the value is not one it knows. Every Restic child has its standard input
+closed, because Restic waits for a password on an open input when it opens a
+backup that has none without the option.
+
+In a backup without a password nothing creates, reads, rewrites, deletes or
+reports a DPAPI envelope or recovery key, and a file an older installation left
+at those paths stays exactly as it was. The recovery-readiness check leaves out
+its two key checks, the restore drill restores with no key, and the Google Drive
+check opens both the local and the cloud view with the option and no password
+command. The initializer checks the choice against the backups themselves: a
+backup that asks for a password when none was chosen, or opens without one
+when a password was, ends the install with exit code 4 or 5 and nothing
+changed, and `--detect-access` lets the installer ask a backup how it opens when
+no record says. If backups made without a password later answer Restic exit 12
+(they now ask for a key, usually because they were changed outside Rewindle), a
+backup run ends as `repository_access_mismatch` and not as an unavailable drive.
+The mode is echoed, for information only, in `repository.json`,
+`recovery-manifest.json`, `status.json`, `last-success.json`, the dry-run report
+and the recovery-readiness report; every bundle validator compares it with
+absent counted as `password` and refuses a difference instead of copying one
+over the other.
+
 ## Successful-run criteria
 
 A Restic process exit code alone does not mark a run successful. The wrapper
@@ -339,8 +389,8 @@ ordinary users must not be able to replace files in this tree.
 
 ### `C:\ProgramData\ResticBackuper`
 
-Contains the CurrentUser DPAPI password envelope, protected restore canary, run
-lock, status records, structured failure detail, JSONL logs, last-successful
+Contains the CurrentUser DPAPI password envelope (for a backup with a
+password), protected restore canary, run lock, status records, structured failure detail, JSONL logs, last-successful
 record, local metrics history, Restic's cache, and the `temp` folder for
 Restic's temporary pack files. During protected changes it may also contain
 source-update, repository-relocation, or credential-rotation journals plus
@@ -352,7 +402,9 @@ receives read access.
 
 ### User-selected repository
 
-Contains Restic's encrypted repository. The default `local_ntfs` mode accepts a
+Contains Restic's repository, encrypted with the backup's password (or with
+Restic's empty password, for a backup made without one, so anyone who can read
+the folder can open it). The default `local_ntfs` mode accepts a
 local fixed/removable NTFS drive-letter path. The explicit
 `google_drivefs_stream` mode accepts only a strict descendant of
 `G:\My Drive`, bound to the current user's `%LOCALAPPDATA%\Google\DriveFS`
@@ -379,12 +431,16 @@ beside the repository. For `google_drivefs_stream`, it places that bundle at
 `C:\ProgramData\ResticBackuperRecoveryTools`; recovery tools, the DPAPI
 envelope, ProgramData state, and the initially generated recovery key must all
 remain on NTFS outside DriveFS. Protected plan changes refresh the bundle
-transactionally. The tools intentionally do not contain the password. The user
-must move the key to separate, secure storage.
+transactionally. The tools intentionally do not contain the password. For a
+backup with a password, the user must move the key to separate, secure storage.
+A backup without a password has no key: its bundle carries the same files, its
+`recovery-manifest.json` and `backup-config.json` name `repository_access`, and
+`RECOVERY.md`'s first paragraph tells a person on another PC which kind of
+backup the bundle belongs to.
 
-The DPAPI envelope is convenient for unattended use on the current Windows
-profile. It is not a substitute for the recovery key: after loss of that
-profile, the envelope may be unusable.
+For a backup with a password, the DPAPI envelope is convenient for unattended
+use on the current Windows profile. It is not a substitute for the recovery key:
+after loss of that profile, the envelope may be unusable.
 
 ### Direct Google Drive verification
 
@@ -502,7 +558,8 @@ Installation creates:
 - a daily Highest-level backup task for the installing user;
 - optionally, a Limited-level dashboard task at logon;
 - a Start menu shortcut and a Windows uninstall registration; and
-- the DPAPI envelope, recovery key, and portable recovery tools.
+- the DPAPI envelope and recovery key (for a backup with a password), and
+  portable recovery tools.
 
 The installer refuses an in-place alpha upgrade and refuses conflicting task
 names or an existing runtime. The conservative uninstaller removes only the
@@ -516,9 +573,9 @@ the choices with the installer's own functions and describes the PC in one JSON
 document without changing anything or elevating; `-ProgressPath` makes the
 elevated install or uninstall append one JSON line per phase to a file in the
 user's temporary folder (checked for ownership, links and create-new), ending with
-a result line that is written even on failure. The recovery key is created with an
-explicit entry for the installing user, so the unelevated user can read it; the
-install reports whether that holds. The contract, with every code and phase, is in
+a result line that is written even on failure. The recovery key (for a backup
+with a password) is created with an explicit entry for the installing user, so
+the unelevated user can read it; the install reports whether that holds. The contract, with every code and phase, is in
 [setup-contract.md](setup-contract.md).
 
 The backup task uses an interactive logon token so CurrentUser DPAPI and the
@@ -661,7 +718,9 @@ Program Files folders and ProgramData are never taken from environment
 variables, which the requesting user can set for the elevated process.
 
 Recovery Readiness authenticates the active DPAPI credential and separately
-parses and authenticates the configured recovery key. It also checks the
+parses and authenticates the configured recovery key (a backup without a
+password has neither: it is opened with `--insecure-no-password`, and the
+`recovery_key` and `rotation_rollback_key` checks are left out). It also checks the
 portable bundle, repository capacity/identity, Restic locks, the age of the
 last passed data-subset check, and protected restore-drill evidence. The
 normal-user dashboard can request a representative drill but never invokes
@@ -671,7 +730,9 @@ plan-bound snapshot, derives a new nonce-bound protected destination, and uses
 the restricted recovery key to restore the protected canary plus a bounded
 ordinary-data sample with `--no-lock`, `--overwrite never`, and `--verify`.
 It independently checks the canary proof, expected file inventory, and sample
-sizes. Only then does it atomically append bounded protected history. Failed or
+sizes (for a backup without a password it uses no key, and the history entry
+says so with `credential_source` `none`). Only then does it atomically append
+bounded protected history. Failed or
 partially verified output is retained for inspection without a passing history
 entry. Readiness rejects malformed, legacy, partial, different-plan, stale-
 generation, wrong-repository, or writable-by-the-user history. Credential
@@ -772,6 +833,12 @@ engine profile have no clean-up. The requests, records and checks are in
   the last-successful record. A bounded failure-detail document records the
   failed phase and sanitized operator guidance; the dashboard never needs raw
   credentials or command lines to explain a run.
+- Backups made without a password that now ask for one, usually because they
+  were changed outside Rewindle, end a run as `repository_access_mismatch`. The
+  run says so and points to
+  [Switching an existing backup](../SECURITY.md#switching-an-existing-backup)
+  instead of advising a check of the backup drive. Nothing is retried or
+  switched.
 - Schedule-aware freshness is computed from the last verified run and installed
   task policy, so an overdue backup is visible even when no process is active or
   a heartbeat was lost. A slot that passed before the PC came back (the

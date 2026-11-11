@@ -2,7 +2,7 @@ import { Component, createContext, useCallback, useContext, useEffect, useId, us
 import { AnimatePresence, motion, MotionConfig } from 'motion/react';
 import {
   ShieldCheck, History, Settings, RefreshCw, ArrowUpRight, ArrowRight,
-  HardDrive, Clock3, LockKeyhole, Check, X, Play, Pause,
+  HardDrive, Clock3, LockKeyhole, LockKeyholeOpen, Check, X, Play, Pause,
   Search, Sun, Moon, Monitor, CloudCheck, ArchiveRestore,
   Files, Gauge, Database, CircleAlert, CircleCheck, Activity, ListChecks, TriangleAlert, Info, OctagonAlert, Copy,
   Type as TextSize, Keyboard, Bell,
@@ -33,6 +33,7 @@ import { createInFlight, sendOnceAtATime } from './oneShot';
 import { PendingCommands, usePendingCommand } from './pendingCommands';
 import { effectiveFrom, presetStart, rangeMenuValue, type ActivityDateFilter, type RangePreset } from './activityRange';
 import { backupRangeText } from './backupRange';
+import { NO_PASSWORD_NOTE, repositoryAccessOf, saveStepExplanation, type RepositoryAccess } from './repositoryAccess';
 
 // `onResult` hears how the host answered a command: false when it refused it, or when the page could not send it.
 type Send = (command: CommandName, payload?: Record<string, string | boolean>, onResult?: (ok: boolean) => void) => void;
@@ -396,7 +397,7 @@ function Protection({ state, send, folders, setFolders, stale, openRunDetails }:
   // One name per step, the same ones the page uses everywhere else: the restore test restores a small test file after every backup. A row says
   // its state once (its mark and pill), so it has no second line of its own; what it does is one line in its details.
   const names = ['Back up files', 'Save the backup', 'Check the backup', 'Restore test'];
-  const explanations = ['Reads your protected folders and copies what changed.', 'Saves an encrypted copy of your files as one backup.', 'Checks that the saved backup data is intact.', 'Restores a small test file after every backup and compares it with the original.'];
+  const explanations = ['Reads your protected folders and copies what changed.', saveStepExplanation(repositoryAccessOf(state.repository.repositoryAccess)), 'Checks that the saved backup data is intact.', 'Restores a small test file after every backup and compares it with the original.'];
   const rows: TaskRow[] = names.map((label, i) => ({
     key: `backup-${i}`, label, step: i + 1,
     status: stepStatus(i),
@@ -1103,6 +1104,15 @@ function OpeningLoader({ send }: { send: Send }) {
     <div role="status">{slow && hosted && <p>Taking longer than usual. <Button size="sm" onClick={() => send('ready')}>Try again</Button></p>}</div></>;
 }
 
+// The footer's one sentence about how the backups are protected. It follows how they are really opened: encrypted for a backup with a
+// password, "no password" (an open lock, in the same quiet style, with the consequence as its accessible name and its tooltip) for a
+// backup made without one. When that is not known it claims nothing either way, so no word of protection is on the page that might not be true.
+function ProtectionNote({ access, preview }: { access: RepositoryAccess | null; preview: boolean }) {
+  if (access === 'no_password') return <span role="note" aria-label={preview ? undefined : NO_PASSWORD_NOTE} title={preview ? undefined : NO_PASSWORD_NOTE}><LockKeyholeOpen size={10} aria-hidden="true" />{preview ? 'Animation preview · no backup is running' : 'Your backups have no password'}</span>;
+  if (access === null) return <span>{preview ? 'Animation preview · no backup is running' : null}</span>;
+  return <span><LockKeyhole size={10} />{preview ? 'Animation preview · no backup is running' : 'Your backups are encrypted'}</span>;
+}
+
 export default function App() {
   const { state: rawState, connected, send: post, notice, dismissNotice, holdNotice } = useDashboard();
   // Every button sends through this: a command it sends once per press is not sent again while its first press waits for the host's
@@ -1300,7 +1310,7 @@ export default function App() {
       <ErrorBoundary scope="page" label={`${page} page`} resetKey={state} onRetry={() => send('refresh')}>
         {page === 'Protection' ? <Protection state={state} send={send} folders={folderView} setFolders={setFolderView} stale={!connected} openRunDetails={openRunDetails} /> : page === 'Activity' ? <ActivityPage state={state} send={send} view={historyView} setView={setHistoryView} openRunDetails={openRunDetails} openRestore={() => navigate('Restore')} interactive={connected} /> : page === 'Restore' ? <RestorePage state={state} send={send} /> : <SettingsPage state={state} send={send} stale={!connected} />}
       </ErrorBoundary>
-      <footer className="app-footnote"><span><LockKeyhole size={10} />{state.preview ? 'Animation preview · no backup is running' : 'Your backups are encrypted'}</span><span>{state.status.active ? <Shimmer>{state.preview ? 'Preview running' : 'Backup is running'}</Shimmer> : updatedText}</span></footer>
+      <footer className="app-footnote"><ProtectionNote access={repositoryAccessOf(state.repository.repositoryAccess)} preview={!!state.preview} /><span>{state.status.active ? <Shimmer>{state.preview ? 'Preview running' : 'Backup is running'}</Shimmer> : updatedText}</span></footer>
     </motion.main></AnimatePresence></div></div>
     {/* The two regions are in the page from the start and empty until there is something to say, so a screen reader already knows them
         when a notice is put in: a live region that is created together with its text is often not announced. Only the toast inside

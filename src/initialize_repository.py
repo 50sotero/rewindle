@@ -21,6 +21,8 @@ from restic_common import (
     canonical_windows_path,
     ensure_free_space,
     load_config,
+    probe_repository_access,
+    repository_access,
     repository_storage_mode,
     restic_base,
     run_capture,
@@ -31,15 +33,59 @@ from restic_common import (
 from secret_store import create_secret, load_secret, secure_directory, write_recovery_key
 
 
+# Exit codes. 0 is success and 1 any other failure (the __main__ wrapper maps every exception to it). The others tell the
+# installer why it must stop without touching the backups, so it can say so in plain words.
+EXIT_NEEDS_PASSWORD = 4  # no password was chosen, but the backups in this location need one
+EXIT_HAS_NO_PASSWORD = 5  # a password was chosen, but the backups in this location have none
+EXIT_ACCESS_UNREADABLE = 6  # no password was chosen and the backups in this location could not be opened to tell
+# --detect-access answers with these (and EXIT_ACCESS_UNREADABLE for "can't tell"); it writes nothing.
+EXIT_DETECT_NO_PASSWORD = 20
+EXIT_DETECT_PASSWORD = 21
+EXIT_DETECT_NONE = 22
+DETECT_EXIT_CODES = {
+    "no_password": EXIT_DETECT_NO_PASSWORD,
+    "password": EXIT_DETECT_PASSWORD,
+    "missing": EXIT_DETECT_NONE,
+}
+# Restic's exit code for "wrong password or no key found" (also what a password backup answers to --insecure-no-password).
+RESTIC_EXIT_WRONG_PASSWORD = 12
+# One plain line each on stderr, with none of Restic's text.
+MISMATCH_MESSAGE = "The backups in this location don't match the choice made in Setup."
+UNREADABLE_MESSAGE = "Setup couldn't open the backups in this location."
+NO_PASSWORD_NOTE = (
+    "These backups have no password: anyone who can read the backup folder can restore them."
+)
+PASSWORD_NOTE = "The repository password is intentionally not stored in this bundle."
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    # None means "not given": --detect-access refuses an explicit --config, and everything else falls back to the default.
+    parser.add_argument("--config", type=Path, default=None)
     parser.add_argument(
         "--commit-recovery-key",
         action="store_true",
         help="once the installation has succeeded: make a kept recovery key name this repository",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--detect-access",
+        action="store_true",
+        help="tell whether the backups in --repository open without a password (exit 20), need one (21) or are not there (22)",
+    )
+    parser.add_argument("--repository", type=Path, help="with --detect-access: the backup location to look at")
+    parser.add_argument("--restic", type=Path, help="with --detect-access: the Restic program to look with")
+    args = parser.parse_args(argv)
+    if args.detect_access:
+        if args.config is not None or args.commit_recovery_key:
+            parser.error("--detect-access cannot be combined with --config or --commit-recovery-key")
+        if args.repository is None or args.restic is None:
+            parser.error("--detect-access needs --repository and --restic")
+    else:
+        if args.repository is not None or args.restic is not None:
+            parser.error("--repository and --restic are only for --detect-access")
+        if args.config is None:
+            args.config = DEFAULT_CONFIG
+    return args
 
 
 def sha256_file(path: Path) -> str:
@@ -99,13 +145,15 @@ def install_recovery_tools(config: dict, config_path: Path) -> dict:
         manifest_files.append(
             {"name": name, "bytes": target.stat().st_size, "sha256": sha256_file(target)}
         )
+    access = repository_access(config)
     manifest = {
         "schema_version": 1,
         "created_utc": utc_now(),
         "repository": config["repository"],
         "repository_storage_mode": repository_storage_mode(config),
+        "repository_access": access,
         "files": manifest_files,
-        "note": "The repository password is intentionally not stored in this bundle.",
+        "note": NO_PASSWORD_NOTE if access == "no_password" else PASSWORD_NOTE,
     }
     if manifest["repository_storage_mode"] == "google_drivefs_stream":
         manifest["drivefs_my_drive_root"] = config["drivefs_my_drive_root"]
@@ -176,16 +224,39 @@ def commit_recovery_key(recovery_file: Path, repository: Path, secret_file: Path
     return 0
 
 
+def detect_access(restic_executable: Path, repository: Path) -> int:
+    """--detect-access: how the backups at `repository` open, as an exit code. Reads only Restic's answer, writes nothing."""
+    answer = probe_repository_access(restic_executable, repository)
+    code = DETECT_EXIT_CODES.get(answer, EXIT_ACCESS_UNREADABLE)
+    if code == EXIT_ACCESS_UNREADABLE:
+        print(UNREADABLE_MESSAGE, file=sys.stderr)
+    return code
+
+
+def refuse(code: int) -> int:
+    """Stop with one of the exit codes that mean "these backups are not what was chosen"; the message is one plain line."""
+    print(UNREADABLE_MESSAGE if code == EXIT_ACCESS_UNREADABLE else MISMATCH_MESSAGE, file=sys.stderr)
+    return code
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.detect_access:
+        return detect_access(args.restic, args.repository)
     config = load_config(args.config, require_repository=False)
     repository = Path(config["repository"])
     state = Path(config["state_directory"])
     secret_file = Path(config["secret_file"])
     recovery_file = Path(config["recovery_key_file"])
     storage_mode = repository_storage_mode(config)
+    access = repository_access(config)
+    with_password = access == "password"
 
     if args.commit_recovery_key:
+        if not with_password:
+            # No key was ever made for these backups: an older install's key file (if any) is left exactly as it is.
+            print(json.dumps({"recovery_key_file": None, "recovery_key": "none"}))
+            return 0
         with RunLock(state / "run.lock"):
             return commit_recovery_key(recovery_file, repository, secret_file)
 
@@ -201,7 +272,9 @@ def main(argv: list[str] | None = None) -> int:
             raise RuntimeError(
                 f"refusing to initialize nonempty non-Restic directory: {repository}"
             )
-        if config_file.is_file() and not secret_file.is_file():
+        if with_password and config_file.is_file() and not secret_file.is_file():
+            if probe_repository_access(config["restic_executable"], repository) == "no_password":
+                return refuse(EXIT_HAS_NO_PASSWORD)
             raise RuntimeError(
                 "repository exists but its DPAPI password file is missing; "
                 "refusing to create an unrelated key"
@@ -209,13 +282,22 @@ def main(argv: list[str] | None = None) -> int:
 
         password: str | None = None
         secret_created = False
-        if not secret_file.is_file():
+        if with_password and not secret_file.is_file():
             password = create_secret(secret_file)
             secret_created = True
 
         if config_file.is_file():
             cat_result = run_capture(restic_base(config) + ["cat", "config"])
             if cat_result.returncode != 0:
+                if not with_password:
+                    # Exit 12: the backups ask for a password. Anything else: they could not be opened to tell.
+                    return refuse(
+                        EXIT_NEEDS_PASSWORD
+                        if cat_result.returncode == RESTIC_EXIT_WRONG_PASSWORD
+                        else EXIT_ACCESS_UNREADABLE
+                    )
+                if probe_repository_access(config["restic_executable"], repository) == "no_password":
+                    return refuse(EXIT_HAS_NO_PASSWORD)
                 raise RuntimeError(
                     f"repository authentication failed with exit {cat_result.returncode}: "
                     f"{cat_result.stderr.strip() or cat_result.stdout.strip()}"
@@ -230,15 +312,13 @@ def main(argv: list[str] | None = None) -> int:
                 restic_base(config) + ["init", "--repository-version", "2"]
             )
             if result.returncode != 0:
-                raise RuntimeError(
-                    f"restic init failed with exit {result.returncode}: "
-                    f"{result.stderr.strip() or result.stdout.strip()}"
-                )
+                # Restic's init text (it always warns about "knowledge of your password") is never shown for backups without one.
+                detail = f": {result.stderr.strip() or result.stdout.strip()}" if with_password else ""
+                raise RuntimeError(f"restic init failed with exit {result.returncode}{detail}")
             cat_result = run_capture(restic_base(config) + ["cat", "config"])
             if cat_result.returncode != 0:
-                raise RuntimeError(
-                    f"repository authentication failed after init: {cat_result.stderr.strip()}"
-                )
+                detail = f": {cat_result.stderr.strip()}" if with_password else ""
+                raise RuntimeError(f"repository authentication failed after init{detail}")
             repository_config = json.loads(cat_result.stdout)
         if storage_mode == "google_drivefs_stream":
             validate_repository_storage_readiness(
@@ -246,11 +326,15 @@ def main(argv: list[str] | None = None) -> int:
                 volume_validated=True,
             )
 
-        if password is None:
-            password = load_secret(secret_file)
-        recovery_state = reconcile_recovery_key(recovery_file, repository, password)
+        # Backups without a password have no DPAPI secret and no recovery key: neither is read, written or reported, and a
+        # file an older install left at either path is not looked at.
+        recovery_state: str | None = None
+        if with_password:
+            if password is None:
+                password = load_secret(secret_file)
+            recovery_state = reconcile_recovery_key(recovery_file, repository, password)
+            del password
         recovery_created = recovery_state == "created"
-        del password
 
         recovery_tools = install_recovery_tools(config, args.config)
 
@@ -262,6 +346,7 @@ def main(argv: list[str] | None = None) -> int:
             "repository_version": repository_config.get("version"),
             "repository_volume_serial": config["repository_volume_serial"],
             "repository_storage_mode": storage_mode,
+            "repository_access": access,
             "secret_created": secret_created,
             "recovery_key_created": recovery_created,
             "recovery_key_names_other_repository": recovery_state == "stale",
@@ -282,8 +367,9 @@ def main(argv: list[str] | None = None) -> int:
                 "repository_id": repository_config.get("id"),
                 "repository_version": repository_config.get("version"),
                 "repository_storage_mode": storage_mode,
-                "secret_file": str(secret_file),
-                "recovery_key_file": str(recovery_file),
+                "repository_access": access,
+                "secret_file": str(secret_file) if with_password else None,
+                "recovery_key_file": str(recovery_file) if with_password else None,
                 "secret_created": secret_created,
                 "recovery_key_created": recovery_created,
                 "recovery_key_names_other_repository": recovery_state == "stale",

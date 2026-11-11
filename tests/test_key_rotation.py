@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -14,9 +16,11 @@ from unittest import mock
 PROJECT = Path(__file__).resolve().parents[1]
 SRC = PROJECT / "src"
 sys.path.insert(0, str(SRC))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 RESTIC = PROJECT / "build" / "build-output" / "ResticBackuper" / "payload" / "restic.exe"
 
 import key_rotation  # noqa: E402
+import test_credential_repair as repair_fixture  # noqa: E402
 from recovery_health import authenticate, parse_recovery_key  # noqa: E402
 from restic_common import RunLock, load_config, restic_base  # noqa: E402
 from secret_store import create_secret, load_secret, write_recovery_key  # noqa: E402
@@ -233,6 +237,164 @@ class KeyRotationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "credential-rotation.journal.json"):
                 config, lock = key_rotation.load_config_under_lock(fixture.config_path)
                 lock.__exit__(None, None, None)
+
+
+NO_KEYS_TO_ROTATE = "This backup opens without a key, so there are no keys to rotate."
+
+
+def forbid_reads() -> contextlib.ExitStack:
+    """Every way key_rotation reads or changes a key, a secret or a journal, or touches Restic, fails the test."""
+    stack = contextlib.ExitStack()
+    for name in (
+        "_read_json",
+        "_finish_rotation",
+        "_write_protected_json",
+        "_restic_result",
+        "_authenticate_plaintext",
+        "load_secret",
+        "replace_secret",
+        "write_recovery_key",
+        "parse_recovery_key",
+        "load_config_under_lock",
+        "authenticate",
+        "validate_runtime_manifest",
+    ):
+        stack.enter_context(
+            mock.patch.object(key_rotation, name, side_effect=AssertionError(f"{name} was called"))
+        )
+    return stack
+
+
+def snapshot(root: Path) -> dict[str, bytes]:
+    return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+class KeyRotationWithoutKeyTests(unittest.TestCase):
+    """Backups made without a password have no keys to rotate: refused at once, nothing read or changed."""
+
+    def rotate_config(self, config_path: Path, **overrides: object):
+        parameters = {
+            "expected_config_sha256": key_rotation.sha256_file(config_path),
+            "expected_plan_id": repair_fixture.PLAN_ID,
+            "expected_generation": 4,
+            "expected_user_sid": repair_fixture.SID,
+            "sid_reader": lambda: repair_fixture.SID,
+            "acl_verifier": lambda path: self.fail("a key file was looked at"),
+            "runner": lambda *arguments, **keywords: self.fail("Restic was started"),
+        }
+        parameters.update(overrides)
+        return key_rotation.rotate(config_path, **parameters)
+
+    def test_a_backup_without_a_password_is_refused_before_the_journal_is_read(self) -> None:
+        for journal in (None, "an unfinished rotation of an older backup"):
+            with self.subTest(journal=journal), tempfile.TemporaryDirectory(prefix="rotation-no-password-") as root_text:
+                root = Path(root_text)
+                config_path, config = repair_fixture.build_fixture(
+                    root, access="no_password", leftover_key_files=True
+                )
+                if journal is not None:
+                    (Path(config["state_directory"]) / key_rotation.JOURNAL_NAME).write_text(
+                        journal, encoding="utf-8"
+                    )
+                before = snapshot(root)
+
+                with forbid_reads(), self.assertRaises(RuntimeError) as caught:
+                    # require_manifest left on: the refusal comes before even the runtime manifest is read.
+                    self.rotate_config(config_path)
+
+                self.assertEqual(NO_KEYS_TO_ROTATE, str(caught.exception))
+                self.assertEqual(before, snapshot(root), "nothing was created, changed or removed")
+                # The message reaches the owner: no log filter turns it into "without exposing credential details".
+                self.assertEqual(NO_KEYS_TO_ROTATE, key_rotation.sanitize(NO_KEYS_TO_ROTATE))
+
+    def test_the_tool_reports_the_refusal_as_a_failed_run(self) -> None:
+        if sys.platform != "win32":
+            self.skipTest("the approving Windows account is a Windows notion")
+        from secret_store import _current_user_sid
+
+        with tempfile.TemporaryDirectory(prefix="rotation-no-password-main-") as root_text:
+            config_path, _ = repair_fixture.build_fixture(Path(root_text), access="no_password")
+            output = io.StringIO()
+            arguments = [
+                "--config",
+                str(config_path),
+                "--expected-config-sha256",
+                key_rotation.sha256_file(config_path),
+                "--expected-plan-id",
+                repair_fixture.PLAN_ID,
+                "--expected-generation",
+                "4",
+                "--expected-user-sid",
+                _current_user_sid(),
+            ]
+            with mock.patch.object(key_rotation, "is_administrator", return_value=True):
+                with forbid_reads(), contextlib.redirect_stdout(output):
+                    exit_code = key_rotation.main(arguments)
+            self.assertEqual(2, exit_code)
+            result = json.loads(output.getvalue())
+            self.assertEqual("failed", result["state"])
+            self.assertEqual(NO_KEYS_TO_ROTATE, result["error"])
+
+    def test_an_unsupported_value_is_refused_before_the_run_lock_is_taken(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rotation-bad-mode-") as root_text:
+            config_path, config = repair_fixture.build_fixture(Path(root_text))
+            config["repository_access"] = "No_Password"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            with forbid_reads(), self.assertRaisesRegex(ValueError, "^unsupported repository_access$"):
+                self.rotate_config(config_path)
+
+    def test_a_backup_with_a_password_still_resumes_its_pending_rotation(self) -> None:
+        for access in (None, "password"):
+            with self.subTest(access=access), tempfile.TemporaryDirectory(prefix="rotation-password-") as root_text:
+                config_path, config = repair_fixture.build_fixture(Path(root_text), access=access)
+                (Path(config["state_directory"]) / key_rotation.JOURNAL_NAME).write_text("{}", encoding="utf-8")
+                finished = {"state": "rotated"}
+                with mock.patch.object(key_rotation, "_read_json", return_value={"phase": "prepared"}), mock.patch.object(
+                    key_rotation, "_finish_rotation", return_value=finished
+                ) as finish:
+                    result = self.rotate_config(config_path, require_manifest=False)
+                self.assertIs(finished, result)
+                finish.assert_called_once()
+
+
+@unittest.skipUnless(RESTIC.is_file(), "build the release artifact before key-rotation integration tests")
+class KeyRotationWithoutKeyRealResticTests(unittest.TestCase):
+    def test_the_keys_of_a_backup_without_a_password_are_left_as_they_are(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="restic-rotation-no-password-") as root_text:
+            root = Path(root_text)
+            config_path, config = repair_fixture.build_fixture(root, access="no_password")
+            repository = Path(config["repository"])
+            # The fixture's stand-in repository file is replaced by a real backup location made without a password.
+            (repository / "config").unlink()
+            environment = {name: value for name, value in os.environ.items() if not name.startswith("RESTIC_")}
+            initialized = subprocess.run(
+                [str(RESTIC), "init", "--repo", str(repository), "--insecure-no-password"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=90,
+                env=environment,
+            )
+            self.assertEqual(0, initialized.returncode, initialized.stderr)
+            before = snapshot(repository)
+            self.assertEqual(1, len([name for name in before if name.startswith("keys")]))
+
+            with self.assertRaises(RuntimeError) as caught:
+                key_rotation.rotate(
+                    config_path,
+                    expected_config_sha256=key_rotation.sha256_file(config_path),
+                    expected_plan_id=repair_fixture.PLAN_ID,
+                    expected_generation=4,
+                    expected_user_sid=repair_fixture.SID,
+                    sid_reader=lambda: repair_fixture.SID,
+                    require_manifest=False,
+                )
+
+            self.assertEqual(NO_KEYS_TO_ROTATE, str(caught.exception))
+            self.assertEqual(before, snapshot(repository))
 
 
 if __name__ == "__main__":

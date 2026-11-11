@@ -21,14 +21,6 @@ $workspaceName = 'ResticBackuper-integration-' + [Guid]::NewGuid().ToString('N')
 $workspace = Join-Path ([IO.Path]::GetTempPath()) $workspaceName
 $bundle = Join-Path $workspace 'bundle'
 $runtime = Join-Path $workspace 'runtime'
-$source = Join-Path $workspace 'source'
-$repository = Join-Path $workspace 'repository'
-$state = Join-Path $workspace 'state'
-$recoveryTools = Join-Path $workspace 'RecoveryTools'
-$recoveryKey = Join-Path $workspace 'RecoveryKey.txt'
-$restoreTarget = Join-Path $workspace 'restored'
-$drillTarget = Join-Path $workspace 'recovery-drill'
-$drillReport = Join-Path $state 'artifact-recovery-drill.json'
 
 function Invoke-EmbeddedPython {
     param([string[]]$Arguments)
@@ -68,33 +60,21 @@ function Assert-PayloadManifest {
     }
 }
 
-try {
-    New-Item -ItemType Directory -Path $bundle, $runtime, $source | Out-Null
-    Expand-Archive -LiteralPath $artifactPath -DestinationPath $bundle
-    Assert-PayloadManifest
-    foreach ($item in Get-ChildItem -LiteralPath (Join-Path $bundle 'payload') -Force) {
-        Copy-Item -LiteralPath $item.FullName -Destination $runtime -Recurse
-    }
-    foreach ($offsitePayload in @(
-        'verify_my_drive_cloud_repository.ps1',
-        'verify_cloud_repository_inventory.py',
-        'reveal-rclone-config-password.ps1',
-        'install_google_drive_sync_task.ps1'
-    )) {
-        if (-not (Test-Path -LiteralPath (Join-Path $runtime $offsitePayload) -PathType Leaf)) {
-            throw "Optional direct Google Drive verification payload is missing: $offsitePayload"
-        }
-    }
-    foreach ($recoveryPayload in @(
-        'recovery_health.py',
-        'restore.py',
-        'Manage-Restore.ps1',
-        'ResticBackuperDashboard.exe'
-    )) {
-        if (-not (Test-Path -LiteralPath (Join-Path $runtime $recoveryPayload) -PathType Leaf)) {
-            throw "Guided recovery payload is missing: $recoveryPayload"
-        }
-    }
+# One full run of the packaged engine in its own folders: initialize, two verified backups, a representative drill, an
+# independent restore and a listing. -Access is the backup's repository_access: with a password (the default) or
+# without one (Restic's empty password, --insecure-no-password on every command).
+function Invoke-ReleaseScenario {
+    param([Parameter(Mandatory = $true)] [ValidateSet('password', 'no_password')] [string]$Access)
+    $scenario = Join-Path $workspace $Access
+    $source = Join-Path $scenario 'source'
+    $repository = Join-Path $scenario 'repository'
+    $state = Join-Path $scenario 'state'
+    $recoveryTools = Join-Path $scenario 'RecoveryTools'
+    $recoveryKey = Join-Path $scenario 'RecoveryKey.txt'
+    $restoreTarget = Join-Path $scenario 'restored'
+    $drillTarget = Join-Path $scenario 'recovery-drill'
+    $drillReport = Join-Path $state 'artifact-recovery-drill.json'
+    New-Item -ItemType Directory -Path $source | Out-Null
 
     [IO.File]::WriteAllText((Join-Path $source 'document.txt'), 'integration backup version 1', [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $source 'notes.txt'), 'bounded representative restore sample', [Text.UTF8Encoding]::new($false))
@@ -144,9 +124,26 @@ try {
     $configuration.source_identities[$source] = [ordered]@{
         expected_volume_serial = $fixtureVolumeSerial
     }
+    # The password scenario keeps the configuration shape every install had before the choice existed (no key).
+    if ($Access -ceq 'no_password') { $configuration['repository_access'] = 'no_password' }
     [IO.File]::WriteAllText($configPath, ($configuration | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
 
     Invoke-EmbeddedPython -Arguments @((Join-Path $runtime 'initialize_repository.py'), '--config', $configPath)
+    $secretFile = Join-Path $state 'repository-password.dpapi.json'
+    $repositoryRecord = Get-Content -LiteralPath (Join-Path $state 'repository.json') -Raw | ConvertFrom-Json
+    $recoveryManifest = Get-Content -LiteralPath (Join-Path $recoveryTools 'recovery-manifest.json') -Raw | ConvertFrom-Json
+    if ([string]$repositoryRecord.repository_access -cne $Access -or [string]$recoveryManifest.repository_access -cne $Access) {
+        throw "The initializer did not record repository_access $Access."
+    }
+    if ($Access -ceq 'no_password') {
+        # A backup without a password never gets a DPAPI password file or a recovery key.
+        foreach ($absent in @($secretFile, $recoveryKey)) {
+            if (Test-Path -LiteralPath $absent) { throw "A backup without a password got a key file: $absent" }
+        }
+    }
+    elseif (-not (Test-Path -LiteralPath $secretFile -PathType Leaf) -or -not (Test-Path -LiteralPath $recoveryKey -PathType Leaf)) {
+        throw 'A backup with a password is missing its DPAPI password file or recovery key.'
+    }
     Invoke-EmbeddedPython -Arguments @((Join-Path $runtime 'backup.py'), '--config', $configPath)
     if (-not (Test-Path -LiteralPath (Join-Path $state 'last-success.json') -PathType Leaf)) {
         throw 'First integration backup did not record a verified success.'
@@ -156,31 +153,39 @@ try {
     Invoke-EmbeddedPython -Arguments @((Join-Path $runtime 'backup.py'), '--config', $configPath)
 
     $lastSuccess = Get-Content -LiteralPath (Join-Path $state 'last-success.json') -Raw | ConvertFrom-Json
+    if ([string]$lastSuccess.repository_access -cne $Access) {
+        throw "The verified backup did not record repository_access $Access."
+    }
     $canaryProof = $lastSuccess.verification.canary
     $repositoryConfigHashBeforeDrill = (Get-FileHash -LiteralPath (Join-Path $repository 'config') -Algorithm SHA256).Hash
     $sourceHashesBeforeDrill = @{}
     foreach ($sourceFile in Get-ChildItem -LiteralPath $source -File) {
         $sourceHashesBeforeDrill[$sourceFile.Name] = (Get-FileHash -LiteralPath $sourceFile.FullName -Algorithm SHA256).Hash
     }
-    Invoke-EmbeddedPython -Arguments @(
+    # With a password the drill proves the recovery key; without one it restores with no key at all.
+    $drillArguments = @(
         (Join-Path $runtime 'restore.py'),
         '--config', $configPath,
         '--snapshot', [string]$lastSuccess.snapshot_id,
         '--target', $drillTarget,
-        '--report', $drillReport,
-        '--recovery-key-file', $recoveryKey,
+        '--report', $drillReport
+    )
+    if ($Access -ceq 'password') { $drillArguments += @('--recovery-key-file', $recoveryKey) }
+    $drillArguments += @(
         '--recovery-drill',
         '--drill-canary-sha256', [string]$canaryProof.sha256,
         '--drill-canary-bytes', [string]$canaryProof.bytes
     )
+    Invoke-EmbeddedPython -Arguments $drillArguments
+    $expectedCredentialSource = if ($Access -ceq 'password') { 'recovery_key' } else { 'none' }
     $drill = Get-Content -LiteralPath $drillReport -Raw | ConvertFrom-Json
     $drillFiles = @(Get-ChildItem -LiteralPath $drillTarget -Recurse -File)
     if (-not $drill.verified -or [string]$drill.result -cne 'verified' -or
         [string]$drill.drill_kind -cne 'recovery_key_representative' -or
-        [string]$drill.credential_source -cne 'recovery_key' -or
+        [string]$drill.credential_source -cne $expectedCredentialSource -or
         -not $drill.canary_verified -or [int]$drill.sample_file_count -lt 2 -or
         $drillFiles.Count -ne ([int]$drill.sample_file_count + 1)) {
-        throw 'Packaged recovery-key representative drill did not produce complete bounded evidence.'
+        throw "Packaged representative drill ($Access) did not produce complete bounded evidence."
     }
     if ((Get-FileHash -LiteralPath (Join-Path $repository 'config') -Algorithm SHA256).Hash -cne $repositoryConfigHashBeforeDrill) {
         throw 'Packaged recovery drill changed the repository configuration.'
@@ -203,7 +208,13 @@ try {
         throw 'Independent integration restore did not reproduce the latest source content.'
     }
 
-    $snapshotsJson = & (Join-Path $runtime 'restic.exe') --repo $repository --password-command ((Join-Path $runtime 'Python\python.exe').Replace('\','/') + ' -I -S -B ' + (Join-Path $runtime 'secret_store.py').Replace('\','/') + ' reveal --secret-file ' + (Join-Path $state 'repository-password.dpapi.json').Replace('\','/')) snapshots --json
+    if ($Access -ceq 'password') {
+        $snapshotsJson = & (Join-Path $runtime 'restic.exe') --repo $repository --password-command ((Join-Path $runtime 'Python\python.exe').Replace('\','/') + ' -I -S -B ' + (Join-Path $runtime 'secret_store.py').Replace('\','/') + ' reveal --secret-file ' + (Join-Path $state 'repository-password.dpapi.json').Replace('\','/')) snapshots --json
+    }
+    else {
+        # Anyone with the folder can list it: only the flag, no password.
+        $snapshotsJson = & (Join-Path $runtime 'restic.exe') --repo $repository --insecure-no-password snapshots --json
+    }
     if ($LASTEXITCODE -ne 0) { throw 'Could not query integration snapshots.' }
     # Windows PowerShell 5.1 can preserve a JSON array as one nested pipeline
     # object when ConvertFrom-Json is wrapped directly in @(...).
@@ -213,14 +224,54 @@ try {
         throw "Expected at least two integration snapshots; found $($snapshots.Count)."
     }
 
-    [pscustomobject]@{
-        artifact = $artifactPath
-        artifact_sha256 = (Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    return [pscustomobject]@{
+        access = $Access
         snapshots = $snapshots.Count
         verified_backups = 2
         independent_restore = $true
-        recovery_key_drill = $true
+        representative_drill = $true
+        credential_source = [string]$drill.credential_source
         recovery_drill_files = $drillFiles.Count
+    }
+}
+
+try {
+    New-Item -ItemType Directory -Path $bundle, $runtime | Out-Null
+    Expand-Archive -LiteralPath $artifactPath -DestinationPath $bundle
+    Assert-PayloadManifest
+    foreach ($item in Get-ChildItem -LiteralPath (Join-Path $bundle 'payload') -Force) {
+        Copy-Item -LiteralPath $item.FullName -Destination $runtime -Recurse
+    }
+    foreach ($offsitePayload in @(
+        'verify_my_drive_cloud_repository.ps1',
+        'verify_cloud_repository_inventory.py',
+        'reveal-rclone-config-password.ps1',
+        'install_google_drive_sync_task.ps1'
+    )) {
+        if (-not (Test-Path -LiteralPath (Join-Path $runtime $offsitePayload) -PathType Leaf)) {
+            throw "Optional direct Google Drive verification payload is missing: $offsitePayload"
+        }
+    }
+    foreach ($recoveryPayload in @(
+        'recovery_health.py',
+        'restore.py',
+        'Manage-Restore.ps1',
+        'ResticBackuperDashboard.exe'
+    )) {
+        if (-not (Test-Path -LiteralPath (Join-Path $runtime $recoveryPayload) -PathType Leaf)) {
+            throw "Guided recovery payload is missing: $recoveryPayload"
+        }
+    }
+
+    $scenarios = @(
+        (Invoke-ReleaseScenario -Access 'password'),
+        (Invoke-ReleaseScenario -Access 'no_password')
+    )
+
+    [pscustomobject]@{
+        artifact = $artifactPath
+        artifact_sha256 = (Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        scenarios = $scenarios
         payload_manifest = $true
         workspace = if ($KeepWorkspace) { $workspace } else { $null }
     } | ConvertTo-Json -Depth 4

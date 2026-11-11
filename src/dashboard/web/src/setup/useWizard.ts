@@ -2,8 +2,10 @@
 // install or uninstall that is running. The screens only read it and call its actions.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ContractError, INSTALL_PHASES, UNINSTALL_PHASES, isUnsupported, keptEntriesOf, parsePlan, parseProgressLine,
-  type InstallPlan, type InstallResult, type KnownFolderKey, type PlanInputs, type PlanVolume, type ProgressPhase, type StorageMode,
+  ContractError, INSTALL_PHASES, NO_PASSWORD_PHASE_TITLES, UNINSTALL_PHASES, accessToSend, installAccess, isUnsupported, keptEntriesOf,
+  parsePlan, parseProgressLine, passwordPageFor, plannedAccess, recoveryNeededFor,
+  type InstallPlan, type InstallResult, type KnownFolderKey, type PasswordPage, type PlanInputs, type PlanVolume, type ProgressPhase,
+  type RepositoryAccess, type StorageMode,
 } from './contract';
 import {
   bridge, messageOf, type HostEvent, type HostInfo, type MeasureUpdate, type Operation, type OperationFinished,
@@ -13,21 +15,33 @@ import { driveRoot, folderName, isUsablePath, isWithin, joinPath, samePath } fro
 
 export type Screen =
   | 'loading' | 'hostError' | 'unsupported' | 'maintenance'
-  | 'welcome' | 'folders' | 'location' | 'schedule' | 'review'
+  | 'welcome' | 'folders' | 'location' | 'password' | 'schedule' | 'review'
   | 'installing' | 'recovery' | 'done' | 'uninstalling' | 'uninstalled';
 
-/** The steps the person moves through, in order. The rail shows them; the first five can be revisited until Install. */
+/** Every step the person can move through, in order. The first six can be revisited until Install; stepsFor drops the ones an install does not have. */
 export const STEPS: readonly { screen: Screen; label: string }[] = [
   { screen: 'welcome', label: 'Welcome' },
   { screen: 'folders', label: 'Protected folders' },
   { screen: 'location', label: 'Backup location' },
+  { screen: 'password', label: 'Password' },
   { screen: 'schedule', label: 'Automatic backups' },
   { screen: 'review', label: 'Review' },
   { screen: 'installing', label: 'Install' },
   { screen: 'recovery', label: 'Recovery key' },
   { screen: 'done', label: 'Done' },
 ];
-export const CHOICE_STEPS: readonly Screen[] = ['welcome', 'folders', 'location', 'schedule', 'review'];
+export const CHOICE_STEPS: readonly Screen[] = ['welcome', 'folders', 'location', 'password', 'schedule', 'review'];
+
+/** The steps of this install: Recovery key only when there is a key to save (recoveryNeededFor). The rail, the compact bar and "Step N of M" all come from this list. */
+export function stepsFor(recoveryNeeded: boolean): readonly { screen: Screen; label: string }[] {
+  return recoveryNeeded ? STEPS : STEPS.filter(step => step.screen !== 'recovery');
+}
+
+/** A screen's number among those steps (counting from 1), or undefined for a screen that is not one of them. */
+export function stepNumber(steps: readonly { screen: Screen }[], screen: Screen): number | undefined {
+  const index = steps.findIndex(step => step.screen === screen);
+  return index < 0 ? undefined : index + 1;
+}
 
 export interface FolderChoice { path: string; key: KnownFolderKey | null; selected: boolean; exists: boolean; custom: boolean }
 
@@ -42,6 +56,12 @@ export interface Choices {
   schedule: string;
   vss: boolean;
   startBackup: boolean;
+  /**
+   * The person's pick on the Password page, for backups they are starting (default: a password, the recommended way). It is kept
+   * when they change the location, is never part of a plan request (inputsOf leaves it out) and goes to the installer only through
+   * accessToSend, at Install.
+   */
+  repositoryAccess: RepositoryAccess;
 }
 
 export interface FolderSize {
@@ -82,6 +102,8 @@ export interface OperationState {
   startBackup: boolean;
   /** An uninstall that is the first half of a reinstall: when it succeeds, Setup goes on to the setup steps instead of ending. */
   reinstall: boolean;
+  /** The mode the backups were chosen or recorded to have when the install started (null: not known until the installer looks). */
+  access: RepositoryAccess | null;
 }
 
 export interface Validation { plan: InstallPlan | null; checking: boolean; error: string | null }
@@ -157,7 +179,7 @@ function initialChoices(plan: InstallPlan, preferredRepository?: string): Choice
   const location: LocationChoice = keptLocation ?? {
     storageMode: 'local_ntfs', driveRoot: drive?.root ?? '', repository: drive ? defaultRepositoryFor(drive.root, plan) : '', customRepository: false,
   };
-  return { folders: folders.slice(0, MAX_SOURCES), ...location, schedule: plan.defaults.schedule, vss: true, startBackup: true };
+  return { folders: folders.slice(0, MAX_SOURCES), ...location, schedule: plan.defaults.schedule, vss: true, startBackup: true, repositoryAccess: 'password' };
 }
 
 function firstScreen(plan: InstallPlan): Screen {
@@ -187,8 +209,16 @@ export function operationProgress(operation: OperationState): number {
   return Math.min(0.99, reached / total);
 }
 
-/** A phase's title in the wizard's words, or the installer's own for a phase the wizard does not know. */
-export function phaseTitle(kind: Operation, id: string, reported: string): string {
+/** The mode of the install `operation` is running or ran (see installAccess); null for an uninstall or while it is not known. */
+export function accessOfOperation(operation: OperationState): RepositoryAccess | null {
+  if (operation.operation !== 'install') return null;
+  const credential = operation.phases.find(phase => phase.phase === 'credential')?.state ?? null;
+  return installAccess(operation.result, credential, operation.access);
+}
+
+/** A phase's title in the wizard's words (the words for backups without a password when `access` says so), or the installer's own for a phase the wizard does not know. */
+export function phaseTitle(kind: Operation, id: string, reported: string, access: RepositoryAccess | null = null): string {
+  if (kind === 'install' && access === 'no_password' && Object.hasOwn(NO_PASSWORD_PHASE_TITLES, id)) return NO_PASSWORD_PHASE_TITLES[id];
   return (kind === 'uninstall' ? UNINSTALL_PHASES : INSTALL_PHASES).find(phase => phase.id === id)?.title ?? (reported || id);
 }
 
@@ -198,13 +228,19 @@ export interface ListedPhase { id: string; title: string; state: ProgressPhase['
 export function listedPhases(operation: OperationState): ListedPhase[] {
   const reported = new Map(operation.phases.map(phase => [phase.phase, phase]));
   const table = operation.operation === 'uninstall' ? UNINSTALL_PHASES : INSTALL_PHASES;
+  const noPassword = accessOfOperation(operation) === 'no_password';
   const known = table
     .filter(phase => phase.id !== 'first_backup' || operation.startBackup || reported.has(phase.id))
+    // The installer skips its password step for backups without a password: there is nothing to list for it (a failure would still be).
+    .filter(phase => !(noPassword && phase.id === 'credential' && reported.get(phase.id)?.state !== 'failed'))
     .map(phase => {
       const report = reported.get(phase.id);
       // The wizard's own words for the phases it knows (the installer's titles say "repository" and "dashboard"); the installer's
       // title is used only for a phase this version does not know.
-      return { id: phase.id, title: phase.title, state: report?.state ?? 'pending' as const, detail: report?.detail ?? null, weight: phase.weight };
+      return {
+        id: phase.id, title: phaseTitle(operation.operation, phase.id, '', noPassword ? 'no_password' : null), state: report?.state ?? 'pending' as const,
+        detail: report?.detail ?? null, weight: phase.weight,
+      };
     });
   const extra = operation.phases.filter(phase => !table.some(known => known.id === phase.phase))
     .map(phase => ({ id: phase.phase, title: phase.title || phase.phase, state: phase.state, detail: phase.detail, weight: 4 }));
@@ -558,6 +594,8 @@ export function useWizard() {
     },
     setVss: (vss: boolean) => update(current => ({ ...current, vss })),
     setStartBackup: (startBackup: boolean) => update(current => ({ ...current, startBackup })),
+    /** The person's pick on the Password page. It changes no plan request: inputsOf does not carry it. */
+    setRepositoryAccess: (repositoryAccess: RepositoryAccess) => update(current => ({ ...current, repositoryAccess })),
     dismissNotice: () => setNotice(null),
   }), [base, choices, forgetMeasurement, keptRepository, measure, setScreen, start, update]);
 
@@ -565,11 +603,19 @@ export function useWizard() {
     if (!choices) return;
     setNotice(null);
     reinstalling.current = kind === 'uninstall' && !!options.reinstall;
-    setOperation({ operation: kind, stage: 'preparing', phases: [], lines: [], result: null, finished: null, cancelling: false, startBackup: choices.startBackup, reinstall: reinstalling.current });
+    setOperation({
+      operation: kind, stage: 'preparing', phases: [], lines: [], result: null, finished: null, cancelling: false, startBackup: choices.startBackup,
+      reinstall: reinstalling.current, access: plannedAccess(validation.plan, choices.repository, choices.repositoryAccess),
+    });
     setScreenState(kind === 'install' ? 'installing' : 'uninstalling');
     try {
       if (kind === 'install') {
-        await bridge.request('install', { choices: { ...inputsOf(choices, base), startBackup: choices.startBackup } });
+        // The pick goes only with the install, and only for a location the latest plan found empty (accessToSend); backups that are
+        // already there keep the mode the installer recorded for them or finds out itself.
+        const repositoryAccess = accessToSend(validation.plan, choices.repository, choices.repositoryAccess);
+        await bridge.request('install', {
+          choices: { ...inputsOf(choices, base), ...(repositoryAccess ? { repositoryAccess } : {}), startBackup: choices.startBackup },
+        });
       } else {
         await bridge.request('uninstall');
       }
@@ -579,7 +625,18 @@ export function useWizard() {
         finished: { operation: kind, outcome: 'failed', result: null, message: messageOf(error), exitCode: null },
       } : current);
     }
-  }, [base, choices]);
+  }, [base, choices, validation.plan]);
+
+  // The Password page, the steps and the Recovery key step all follow the same facts: what the installer found at the chosen folder,
+  // the person's pick, and, once an install runs, what that install reports.
+  const passwordPage = useMemo<PasswordPage>(
+    () => passwordPageFor(validation.plan, choices?.repository ?? '', validation.checking, validation.error !== null),
+    [choices?.repository, validation.checking, validation.error, validation.plan]);
+  const access = useMemo<RepositoryAccess | null>(
+    () => operation && operation.operation === 'install' ? accessOfOperation(operation) : plannedAccess(validation.plan, choices?.repository ?? '', choices?.repositoryAccess),
+    [choices?.repository, choices?.repositoryAccess, operation, validation.plan]);
+  const recoveryNeeded = recoveryNeededFor(access);
+  const steps = useMemo(() => stepsFor(recoveryNeeded), [recoveryNeeded]);
 
   // Install starts only after one more scan of the chosen folders: the scan the person waited for may be minutes old, OneDrive
   // or Storage Sense can make files online-only meanwhile, and the installer's own last check doesn't look for them although
@@ -631,6 +688,14 @@ export function useWizard() {
   return {
     host, theme, screen, furthest, base, hostError, choices, validation, sizes, operation, notice, maintenance, refreshing, refreshNote,
     scheduleDraftValid, keptRepository,
+    /** The Password page's state: the choice, what existing backups have, or a wait. */
+    passwordPage,
+    /** The mode the backups have or will have, as far as is known (null when the installer finds that out itself). */
+    access,
+    /** False only when the backups are known to have no password: then there is no recovery key to save, and no step for it. */
+    recoveryNeeded,
+    /** The steps of this install, from stepsFor(recoveryNeeded). */
+    steps,
     actions,
     goTo: setScreen,
     /** Scans the chosen folders once more, then installs unless online-only files turned up (then back to Review, saying so). */

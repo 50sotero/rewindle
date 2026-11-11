@@ -735,6 +735,12 @@ namespace Rewindle.Setup
             {
                 reported = installResult;
             }
+            // Backups without a password have no recovery key. A key file an earlier install left at the usual place is not theirs, so
+            // whatever path the result line carries, it is not copied or shown (the installer reports none for these backups anyway).
+            if (reported != null && string.Equals(reported.RepositoryAccess, InstallerContract.AccessNone, StringComparison.Ordinal))
+            {
+                throw new SetupFailure("no_recovery_key", "These backups have no password, so there is no recovery key to copy.");
+            }
             if (reported == null || string.IsNullOrEmpty(reported.RecoveryKeyPath))
             {
                 throw new SetupFailure("no_recovery_key", "Setup doesn’t have a recovery key to copy yet.");

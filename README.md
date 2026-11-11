@@ -9,7 +9,7 @@
 
 <p align="center">
   A free, open-source backup app for Windows, powered by <a href="https://restic.net/">Restic</a>.<br>
-  Encrypted snapshots, a restore test after every run, and a dashboard that shows the evidence.
+  Backups protected by a password by default, a restore test after every run, and a dashboard that shows the evidence.
 </p>
 
 <p align="center">
@@ -23,12 +23,12 @@
 
 ---
 
-Rewindle backs up the folders you choose to an encrypted [Restic](https://restic.net/)
-repository every day. A run only counts as successful after Restic has checked
-the repository and Rewindle has restored a small test file from the new
-snapshot and checked its SHA-256 hash. The Rewindle dashboard shows that
-evidence, your run history, and guided restores, and asks Windows for approval
-before anything changes.
+Rewindle backs up the folders you choose to a [Restic](https://restic.net/)
+repository every day, protected by a password by default. A run only counts as
+successful after Restic has checked the repository and Rewindle has restored a
+small test file from the new snapshot and checked its SHA-256 hash. The
+Rewindle dashboard shows that evidence, your run history, and guided restores,
+and asks Windows for approval before anything changes.
 
 > [!WARNING]
 > **v0.2.0-alpha.2 is an early public test release.** Rewindle is a pet project,
@@ -132,14 +132,18 @@ Rewindle runs on Windows 10 and 11 (x64). The dashboard has four pages.
   sample of the backup data was last read back, without a prompt. From there
   you can **Run restore drill** (restore a sample with the recovery key into a
   new folder and check it), repair a credential or stale locks, and **Rotate
-  keys**.
+  keys**. Backups made without a password have no credential or recovery key,
+  so for them there is no key row and no credential repair or key rotation,
+  and the drill restores its sample with no key (see
+  [Backups without a password](#backups-without-a-password)).
 
 ### Settings
 
 - Appearance (theme System, Light or Dark; Windows High Contrast is respected),
   animations (Follow Windows, Always on or Reduced) and text size (Smaller, Normal size, Larger; kept for the next launch).
 - **Change location** moves the repository: it copies to an empty folder,
-  verifies the copy and then switches, keeping the old repository. The same
+  verifies the copy and then switches, keeping the old repository. A move never
+  changes whether the backups have a password. The same
   card has the **Low space warning**: warn when the backup drive will be full
   within 4, 8 (the default) or 12 weeks.
   **Edit schedule** sets daily or selected-day backups and their run conditions.
@@ -213,7 +217,7 @@ Control (UAC) prompt.
 
 | What | Runs as | Why |
 | --- | --- | --- |
-| Backup task `ResticBackuper` (launcher, embedded Python, Restic) | Your account, highest privileges, at the scheduled time while you are signed in | VSS needs administrator rights; your account unlocks the DPAPI-protected repository password |
+| Backup task `ResticBackuper` (launcher, embedded Python, Restic) | Your account, highest privileges, at the scheduled time while you are signed in | VSS needs administrator rights; your account unlocks the DPAPI-protected repository password (backups with a password) |
 | Dashboard | Your account, standard rights. It refuses to start as administrator | It only reads status and requests changes |
 | **Back up now** | `schtasks.exe /Run` after a UAC prompt | Starts the installed task. The dashboard never starts Restic itself |
 | Folder, schedule, location, cancel and restore managers (`Manage-*.ps1`), and the repair helpers | Elevated, after a UAC prompt for each request, for your account only | They change protected configuration, the task or the repository, or read backups to restore them |
@@ -240,10 +244,10 @@ section 9.
 | Purpose | Location |
 | --- | --- |
 | Engine, dashboard and backup configuration (protected) | `C:\Program Files\ResticBackuper` |
-| DPAPI password envelope, restore-test file, status, logs and run records (protected) | `C:\ProgramData\ResticBackuper` |
+| DPAPI password envelope (backups with a password), restore-test file, status, logs and run records (protected) | `C:\ProgramData\ResticBackuper` |
 | Repository | The folder you choose |
-| Recovery tools (Restic, restore script, `RECOVERY.md`; no password) | `RecoveryTools` beside a local repository, or `C:\ProgramData\ResticBackuperRecoveryTools` for Google Drive mode |
-| Recovery key (plain text) | `%USERPROFILE%\ResticBackuper-RecoveryKey.txt` |
+| Recovery tools (Restic, restore script, `RECOVERY.md`; never the password) | `RecoveryTools` beside a local repository, or `C:\ProgramData\ResticBackuperRecoveryTools` for Google Drive mode |
+| Recovery key (plain text; backups with a password only) | `%USERPROFILE%\ResticBackuper-RecoveryKey.txt` |
 | Dashboard settings (including `alerts.json` for backup alerts), run history and crash log | `%LOCALAPPDATA%\ResticBackuperDashboard` |
 | Google Drive verifier assets and evidence (optional) | `C:\ProgramData\ResticBackuperCloudVerification` |
 
@@ -257,9 +261,9 @@ trust boundaries.
 - 64-bit Windows 10 or Windows 11 with Windows PowerShell 5.1 and .NET
   Framework 4.8 (the installer checks .NET before changing anything).
 - A Windows account that is an administrator, with User Account Control on.
-  Approve the UAC prompt with that same account: the repository password is
-  protected for your account (DPAPI), so the installer refuses an approval from
-  a different administrator account.
+  Approve the UAC prompt with that same account: the repository password, when
+  the backups have one, is protected for your account (DPAPI), so the
+  installer refuses an approval from a different administrator account.
 - Microsoft Edge WebView2 Runtime. If it is missing, the installer downloads
   Microsoft's bootstrapper, checks its Microsoft signature and installs it. The
   setup wizard draws its pages with the same runtime, so before they open it
@@ -314,9 +318,11 @@ installer.
 
 ### The setup wizard
 
-Rewindle Setup is a window with eight pages: **Welcome**, **Protected folders**,
-**Backup location**, **Automatic backups**, **Review**, **Install**, **Recovery
-key** and **Done**. The suggestions on each page suit most people, so you can
+Rewindle Setup is a window with nine pages: **Welcome**, **Protected folders**,
+**Backup location**, **Password**, **Automatic backups**, **Review**,
+**Install**, **Recovery key** and **Done**. The **Recovery key** page is shown
+only for backups with a password, so for backups without one there are eight.
+The suggestions on each page suit most people, so you can
 just choose **Next**. Back and Next are in the same place on every page, `Enter`
 means Next (except on Review, where Install takes a deliberate click) and `Esc`
 means Back, and it follows Windows' light or dark theme and
@@ -325,7 +331,7 @@ High Contrast.
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/setup/welcome-dark.png">
-    <img src="docs/images/setup/welcome-light.png" width="720" alt="Rewindle Setup's Welcome page, with the eight steps listed on the left">
+    <img src="docs/images/setup/welcome-light.png" width="720" alt="Rewindle Setup's Welcome page, with the steps listed on the left">
   </picture>
 </p>
 
@@ -337,6 +343,13 @@ High Contrast.
   is the Windows drive, which is on the same disk as Windows, and which can't
   hold backups and why. It checks that your folders fit, and offers Google
   Drive for desktop when it is running.
+- **Password** asks whether your backups should have a password. A password is
+  the recommended choice: Setup makes a strong one and keeps it safely on this
+  PC, so you never type it. If you choose **No password**, the page says what
+  that means (see [Backups without a password](#backups-without-a-password))
+  and that the choice can't be changed later for these backups. A location that
+  already holds backups keeps the way they were made, and the page says so
+  instead of asking.
 - **Automatic backups** sets the daily time. Under *Advanced* you can turn off backing up
   open files.
 - **Review** shows every choice with an Edit link and whether to run the first
@@ -346,8 +359,10 @@ High Contrast.
 - **Install** asks Windows for permission once, then shows the installer's
   progress. You can cancel until Windows asks. If something fails, it says what
   was and wasn't changed and lets you copy the details.
-- **Recovery key** explains the key and lets you save a copy, for example to a
-  USB drive. Finish waits until you confirm you've saved it.
+- **Recovery key** (only for backups with a password) explains the key and lets
+  you save a copy, for example to a USB drive. Finish waits until you confirm
+  you've saved it. Backups without a password have no recovery key, so Setup
+  goes from Install straight to Done.
 
 <table>
   <tr>
@@ -366,7 +381,7 @@ window with `tests\Test-SetupWindow.ps1 -Culture en-US`.
 If Rewindle is already installed, Setup opens a maintenance page instead (open
 it, reinstall or repair, or uninstall). This alpha does not upgrade in place, so
 reinstalling removes the app first, asking Windows for permission, and then goes
-through the steps again; your backups and recovery key are kept. Setup suggests
+through the steps again; your backups and recovery key (if they have a password) are kept. Setup suggests
 the backup location your earlier backups are in, also when Rewindle was removed
 from Installed apps before, and says before you choose another place that a
 new backup would start there from scratch. The wizard is built from
@@ -386,15 +401,20 @@ approval, and then:
    the standard folders that exist on your PC (Desktop, Documents, Pictures,
    Videos, Music, Favorites, Downloads and Saved Games). Folders may not
    contain one another or overlap the repository.
-4. Shows a summary and asks you to confirm. Nothing is created before you
+4. For a new backup location, asks whether the backups should have a password.
+   Press Enter to keep the password (recommended), or type `yes` for no
+   password, after the installer has said what that means. A location that
+   already holds backups is not asked about: they keep the way they were made.
+5. Shows a summary and asks you to confirm. Nothing is created before you
    answer `y`.
-5. Installs WebView2 if needed, copies the engine and dashboard into
-   `C:\Program Files\ResticBackuper`, initializes the encrypted repository with
-   a random password stored for your account (DPAPI), writes the plain-text
-   recovery key to your profile folder, and creates the recovery-tools folder.
-6. Restricts the protected folders so only Administrators and SYSTEM can
+6. Installs WebView2 if needed, copies the engine and dashboard into
+   `C:\Program Files\ResticBackuper`, initializes the repository (with a random
+   password stored for your account (DPAPI), unless you chose no password),
+   writes the plain-text recovery key to your profile folder (also only with a
+   password), and creates the recovery-tools folder.
+7. Restricts the protected folders so only Administrators and SYSTEM can
    change them.
-7. Registers the daily backup task (02:00 by default; it starts as soon as
+8. Registers the daily backup task (02:00 by default; it starts as soon as
    possible after a missed time and may wake the PC), a logon task that starts
    the dashboard in the notification area, a Start menu shortcut (named
    `ResticBackuper`), and a **Rewindle** entry in Installed apps.
@@ -434,6 +454,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-ResticBackuper
 | `-StartBackup` | Start the first backup when installation finishes. |
 | `-Unattended` | No prompts. |
 | `-RepositoryStorageMode google_drivefs_stream` | Keep the repository in Google Drive for desktop (see below), with `-DriveFsMyDriveRoot 'G:\My Drive'` and `-DriveFsCacheDirectory "$env:LOCALAPPDATA\Google\DriveFS"`. |
+| `-RepositoryAccess password` or `-RepositoryAccess no_password` | Whether the backups have a password, written in lower case. Left out, a new backup location gets a password (the recommended way), and a location that already holds backups keeps the way they were made, which Setup checks. Backups are never switched: a choice that doesn't match the backups already in the folder stops the install before anything changes. See [Backups without a password](#backups-without-a-password). |
 | `-PlanOnly -PlanOutput <file.json>` | Check your choices without changing anything, and write the findings, defaults and a description of this PC (drives, Windows version, WebView2) to a new JSON file in your temporary folder. Needs no elevation. |
 | `-ProgressPath <file.jsonl>` | With `-Unattended -ExpectedUserSid <sid>`: append one JSON line per installation step to a new file in your temporary folder, ending with a result line. Uninstall takes the same option. |
 
@@ -444,6 +465,28 @@ codes and the installation phases are specified in
 is unchanged.
 
 </details>
+
+### Backups without a password
+
+A password is the recommended choice, and the default: Setup makes a strong one,
+keeps it safely for your account and gives you a recovery key. Setup's
+**Password** page, and `-RepositoryAccess no_password` in an unattended
+install, let you make new backups without one instead.
+
+Anyone who can open the backup folder can restore every backed-up file,
+including saved sign-ins. That includes the folder in Google Drive or on a lost
+USB drive.
+
+There is no recovery key to keep and nothing to remember. The choice is made once
+for a set of backups: Rewindle keeps the way existing backups were made and never
+switches them, so to choose differently you start new backups in another place.
+For these backups the dashboard's footer says "Your backups have no password",
+and [`RECOVERY.md`](src/RECOVERY.md) tells you to add Restic's
+`--insecure-no-password` option to each command. If you already have backups
+and want to change them yourself with Restic, read
+[Switching an existing backup](SECURITY.md#switching-an-existing-backup) first.
+[SECURITY.md](SECURITY.md#backups-without-a-password) says what this means for
+who can read your backups.
 
 ### Optional: an off-site copy
 
@@ -480,12 +523,15 @@ separate system you have tested.
 3. Wait for the run to finish. The first backup reads everything and can take a
    long time; later runs only store what changed. Protection reports the backup
    as verified only after the checks above pass.
-4. Copy `%USERPROFILE%\ResticBackuper-RecoveryKey.txt` somewhere off this PC:
+4. If your backups have a password, copy
+   `%USERPROFILE%\ResticBackuper-RecoveryKey.txt` somewhere off this PC:
    a password manager, an encrypted USB drive, or a printed copy in a safe
    place. Anyone with this key and the repository can read your backup. If you
    lose both your Windows profile and this key, the backup cannot be decrypted.
    Copy it rather than move it: the Restore Center, the readiness check and the
    restore drill expect the original at that path and refuse to run without it.
+   (Backups without a password have no recovery key, so there is nothing to
+   copy.)
 5. Restore a few real files to a new folder and open them (see below). Repeat
    this from time to time and after changing your setup.
 
@@ -515,8 +561,9 @@ started cannot be cancelled from the dashboard.
 
 **Without the dashboard.** The recovery-tools folder contains Restic, the
 restore script and [`RECOVERY.md`](src/RECOVERY.md), which explains a restore on
-the same PC and one with only the repository and the recovery key. For example,
-with only those two:
+the same PC and one with only the repository and the recovery key, and says how
+to tell whether your backups have a password. For example, with only the
+repository and the recovery key of backups with a password:
 
 ```powershell
 .\restic.exe --repo 'X:\Path\To\Repository' snapshots
@@ -526,7 +573,10 @@ with only those two:
 ```
 
 Restic asks for the password: paste the value from the `Password:` line of the
-recovery key file.
+recovery key file. For backups without a password there is no key: clear any
+`RESTIC_PASSWORD`, `RESTIC_PASSWORD_FILE` and `RESTIC_PASSWORD_COMMAND` in that
+window, add `--insecure-no-password` after `--repo` in each command, and Restic
+asks for nothing. `RECOVERY.md` has the commands.
 
 ## Upgrading
 
@@ -539,7 +589,7 @@ repository, credential, recovery key and recovery tools are kept), then run the
 new installer and keep the repository folder it suggests, which is the one the
 earlier version used. The installer reuses the
 repository when the credential kept in `C:\ProgramData\ResticBackuper` still
-opens it.
+opens it (or, for backups made without a password, when they open without one).
 
 A new installation starts a new backup plan. Snapshots from the earlier plan
 stay in the repository. The Restore page lists the current plan's snapshots,
@@ -582,7 +632,8 @@ backup, so let it finish first. It removes:
 - the Start menu shortcut and the Installed apps entry.
 
 It deliberately keeps your repository, `C:\ProgramData\ResticBackuper` (the
-password envelope, status and logs), the recovery tools, the recovery key,
+password envelope, if the backups have a password, status and logs), the
+recovery tools, the recovery key (also only with a password),
 any Google Drive verifier assets, and the dashboard's settings and history in
 `%LOCALAPPDATA%\ResticBackuperDashboard`. Delete those yourself only when you
 no longer need the backups. Deleting the repository deletes your backups.
@@ -672,9 +723,14 @@ an installed copy. CI runs most of them on every pull request; see
   protected results folder and only when every binding matches the request.
   Repair helpers are bound to the current plan, its generation, the
   configuration hash and your account.
-- The repository password is random, stored with Windows DPAPI for your
-  account, and handed to Restic through a password command, never on a command
-  line or in a log. The recovery key is a separate copy for disaster recovery.
+- In a backup with a password (the default), the repository password is random,
+  stored with Windows DPAPI for your account, and handed to Restic through a
+  password command, never on a command line or in a log. The recovery key is a
+  separate copy for disaster recovery.
+- A backup made without a password has none of that: anyone who can open the
+  backup folder can restore it. See
+  [Backups without a password](#backups-without-a-password) and
+  [SECURITY.md](SECURITY.md#backups-without-a-password).
 - The installer checks every file against a SHA-256 manifest, and the folder,
   location and restore managers re-check the installed runtime against its
   manifest before acting.

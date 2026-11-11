@@ -5,6 +5,10 @@ envelope and configured recovery-key document are then switched under the
 global operation lock, while the previous recovery document and repository key
 remain available for rollback.  A durable journal makes an interrupted local
 publish resumable and blocks normal backups until recovery completes.
+
+Backups set up without a password have no keys to rotate: this is refused at
+once, before any key, secret or journal (an unfinished rotation's included) is
+read.
 """
 
 from __future__ import annotations
@@ -21,7 +25,13 @@ import subprocess
 from typing import Any, Callable
 
 from credential_repair import sha256_file, validate_runtime_manifest
-from recovery_health import authenticate, parse_recovery_key, password_command, utc_now
+from recovery_health import (
+    authenticate,
+    parse_recovery_key,
+    password_command,
+    refuse_when_backups_have_no_key,
+    utc_now,
+)
 from restic_common import (
     atomic_write_json,
     load_config_under_lock,
@@ -43,6 +53,7 @@ LATEST_NAME = "key-rotation-latest.json"
 HISTORY_NAME = "key-rotation-history.json"
 MAX_JSON_BYTES = 4 * 1024 * 1024
 MAX_HISTORY = 32
+NO_KEYS_TO_ROTATE = "This backup opens without a key, so there are no keys to rotate."
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -428,6 +439,9 @@ def rotate(
         raise RuntimeError("The protected configuration changed before key rotation.")
     if sid_reader().casefold() != expected_user_sid.casefold():
         raise RuntimeError("Key rotation must be approved by the requesting Windows account.")
+    # Backups without a password have no keys to rotate. Only the configuration file (whose hash was just checked) has
+    # been read so far: no key, no secret, and not the journal of an unfinished rotation either.
+    refuse_when_backups_have_no_key(config_path, NO_KEYS_TO_ROTATE)
     if require_manifest:
         validate_runtime_manifest(config_path.parent)
         manifest = json.loads(

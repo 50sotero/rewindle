@@ -54,6 +54,36 @@ function Invoke-Manager {
     return [pscustomobject]@{ ExitCode = $exitCode; Json = $json; Text = $text }
 }
 
+function Set-FixtureAccess {
+    # Writes repository_access (or takes it out, with $null) in the protected configuration, the recovery copy of it and
+    # the recovery manifest, then rebinds the two manifests' records of the two configurations.
+    param([AllowNull()] [object]$Live, [AllowNull()] [object]$RecoveryConfig, [AllowNull()] [object]$RecoveryManifest)
+    foreach ($entry in @(
+        [pscustomobject]@{ Path = $configPath; Value = $Live },
+        [pscustomobject]@{ Path = $recoveryConfigPath; Value = $RecoveryConfig },
+        [pscustomobject]@{ Path = $recoveryManifestPath; Value = $RecoveryManifest }
+    )) {
+        $json = Get-Content -LiteralPath $entry.Path -Raw | ConvertFrom-Json
+        $property = $json.PSObject.Properties['repository_access']
+        if ($null -eq $entry.Value) {
+            if ($null -ne $property) { $json.PSObject.Properties.Remove('repository_access') }
+        }
+        elseif ($null -eq $property) { $json | Add-Member -NotePropertyName 'repository_access' -NotePropertyValue $entry.Value }
+        else { $property.Value = $entry.Value }
+        Write-JsonFile -Path $entry.Path -Value $json
+    }
+    foreach ($binding in @(
+        [pscustomobject]@{ Manifest = $runtimeManifestPath; Property = 'relative_path'; File = $configPath },
+        [pscustomobject]@{ Manifest = $recoveryManifestPath; Property = 'name'; File = $recoveryConfigPath }
+    )) {
+        $manifest = Get-Content -LiteralPath $binding.Manifest -Raw | ConvertFrom-Json
+        $record = @($manifest.files | Where-Object { [string]$_.($binding.Property) -eq 'backup-config.json' })
+        $record[0].bytes = (Get-Item -LiteralPath $binding.File).Length
+        $record[0].sha256 = Get-Hash -Path $binding.File
+        Write-JsonFile -Path $binding.Manifest -Value $manifest
+    }
+}
+
 try {
     $installRoot = Join-Path $fixtureRoot 'ProgramFiles\ResticBackuper'
     $stateRoot = Join-Path $fixtureRoot 'ProgramData\ResticBackuper'
@@ -199,14 +229,43 @@ try {
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $driveFsRoot 'RecoveryTools'))) `
         'source manager wrote recovery material into DriveFS'
 
+    # Backups without a password in Google Drive (backup-config.json "repository_access"): the mode rides along with a
+    # source change in the protected configuration and the recovery copy, and a recovery bundle that names the other mode
+    # is refused. Everything above ran on a configuration without the key.
+    Set-FixtureAccess -Live 'no_password' -RecoveryConfig 'no_password' -RecoveryManifest 'no_password'
+    $noPasswordRemove = Invoke-Manager -Action 'Remove' -Path $addSource
+    Assert-True ($noPasswordRemove.ExitCode -eq 0 -and [bool]$noPasswordRemove.Json.ok) `
+        "DriveFS source change on backups without a password failed: $($noPasswordRemove.Text)"
+    $publishedNoPassword = Get-Content -Raw -LiteralPath $configPath | ConvertFrom-Json
+    $publishedNoPasswordRecovery = Get-Content -Raw -LiteralPath $recoveryConfigPath | ConvertFrom-Json
+    Assert-True ([string]$publishedNoPassword.repository_access -ceq 'no_password' -and
+        [string]$publishedNoPasswordRecovery.repository_access -ceq 'no_password' -and
+        [string]$publishedNoPassword.repository_storage_mode -ceq 'google_drivefs_stream') `
+        'a DriveFS source change keeps repository_access in the live configuration and the recovery copy'
+    Assert-True (-not (@($publishedNoPassword.sources) -contains $addSource) -and
+        -not (@($publishedNoPasswordRecovery.sources) -contains $addSource)) 'the DriveFS source was removed from both'
+    Set-FixtureAccess -Live 'no_password' -RecoveryConfig $null -RecoveryManifest 'no_password'
+    $beforeMismatch = @{}
+    foreach ($path in @($configPath, $runtimeManifestPath, $recoveryConfigPath, $recoveryManifestPath)) {
+        $beforeMismatch[$path] = Get-Hash -Path $path
+    }
+    $mismatch = Invoke-Manager -Action 'Add' -Path $addSource
+    Assert-True ($mismatch.ExitCode -eq 1 -and [string]$mismatch.Json.error -match 'repository_access is not synchronized') `
+        "a DriveFS recovery copy without the key beside no_password was not refused: $($mismatch.Text)"
+    foreach ($path in $beforeMismatch.Keys) {
+        Assert-True ((Get-Hash -Path $path) -eq $beforeMismatch[$path]) "a refused DriveFS source change changed $path"
+    }
+
     $global:LASTEXITCODE = 0
     [pscustomobject]@{
         ok = $true
-        tests = 4
+        tests = 6
         drivefs_separate_recovery_tools = 'passed'
         drivefs_journal_rollback = 'passed'
         drivefs_source_update = 'passed'
         standalone_recovery_paths_preserved = 'passed'
+        drivefs_repository_access_kept = 'passed'
+        drivefs_repository_access_mismatch_refused = 'passed'
     } | ConvertTo-Json -Depth 3
 }
 finally {

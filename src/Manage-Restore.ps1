@@ -403,6 +403,19 @@ function Get-OptionalProperty {
     return $(if ($null -eq $property) { $null } else { $property.Value })
 }
 
+function Get-RepositoryAccess {
+    # How Restic opens these backups (backup-config.json "repository_access"): 'password' (also when the key is absent,
+    # as in every configuration written before the choice existed) or 'no_password'. Anything else is refused.
+    param([Parameter(Mandatory = $true)] [object]$Configuration)
+    $property = $Configuration.PSObject.Properties['repository_access']
+    if ($null -eq $property) { return 'password' }
+    $value = $property.Value
+    if ($value -isnot [string] -or $value -cnotin @('password', 'no_password')) {
+        throw 'unsupported repository_access'
+    }
+    return [string]$value
+}
+
 function New-ResultDirectorySecurity {
     param([string]$UserSid)
     $security = [Security.AccessControl.DirectorySecurity]::new()
@@ -666,7 +679,9 @@ function Write-FinalResult {
 }
 
 function Write-RestoreHistory {
-    param([object]$Payload, [int]$BackendExitCode)
+    # -RepositoryAccess is how the configuration says Restic opens these backups (Get-RepositoryAccess). A recovery drill
+    # of backups without a password used no key, and its entry says so.
+    param([object]$Payload, [int]$BackendExitCode, [Parameter(Mandatory = $true)] [string]$RepositoryAccess)
     $entries = @()
     if ([IO.File]::Exists($restoreHistoryPath)) {
         $history = (Read-BoundedJsonObject -File $restoreHistoryPath -MaximumBytes 1MB -Description 'Protected restore history').Json
@@ -679,7 +694,9 @@ function Write-RestoreHistory {
     $entry = [ordered]@{
         finished_utc = [DateTime]::UtcNow.ToString('o')
         kind = if ($requestAction -eq 'restore_drill') { 'recovery_key_representative_drill' } else { 'manual_restore' }
-        credential_source = if ($requestAction -eq 'restore_drill') { 'recovery_key' } else { 'active_credential' }
+        credential_source = if ($requestAction -eq 'restore_drill') {
+            if ($RepositoryAccess -ceq 'no_password') { 'none' } else { 'recovery_key' }
+        } else { 'active_credential' }
         plan_id = $ExpectedPlanId
         config_generation = $ExpectedConfigGeneration
         snapshot_generation = Get-OptionalProperty -Object $Payload -Name 'snapshot_generation'
@@ -844,6 +861,9 @@ function Get-ValidatedConfiguration {
         'repository','repository_volume_serial','restic_executable','recovery_tools_directory',
         'python_executable','state_directory','secret_file','recovery_key_file','canary_file','sources','source_identities'
     )) { [void](Get-RequiredProperty -Object $config -Name $name -Description 'Protected backup configuration') }
+    # secret_file and recovery_key_file stay in every configuration, with their usual paths, whether or not these backups
+    # have a password; whether anything is at those paths matters only when they do.
+    $repositoryAccess = Get-RepositoryAccess -Configuration $config
     $repository = Get-CanonicalLocalPath -Value ([string]$config.repository)
     $recoveryTools = Get-CanonicalLocalPath -Value ([string]$config.recovery_tools_directory)
     $configuredState = Get-CanonicalLocalPath -Value ([string]$config.state_directory)
@@ -880,13 +900,17 @@ function Get-ValidatedConfiguration {
     foreach ($file in @($managerPath, $restorePath, $pythonPath, $resticPath, $configPath, (Join-Path $repository 'config'))) {
         [void](Assert-NormalFile -File $file)
     }
-    Assert-RecoveryKeyAcl -Path (Get-CanonicalLocalPath -Value ([string]$config.recovery_key_file))
+    # Backups without a password have no recovery key: an older install's file at that path is not looked at.
+    if ($repositoryAccess -ceq 'password') {
+        Assert-RecoveryKeyAcl -Path (Get-CanonicalLocalPath -Value ([string]$config.recovery_key_file))
+    }
     [void](Assert-NormalFile -File $lastSuccessPath)
     return [pscustomobject]@{
         Json = $config
         Repository = $repository
         RecoveryTools = $recoveryTools
         RepositoryStorageMode = $storage.Mode
+        RepositoryAccess = $repositoryAccess
         Bytes = $loaded.Bytes
     }
 }
@@ -1295,9 +1319,12 @@ function Get-RecoveryDrillEvidence {
 }
 
 function Assert-RecoveryDrillReport {
-    param([object]$Payload, [pscustomobject]$Evidence)
+    # The report must name the credential that matches these backups: the recovery key, or none for backups without a
+    # password (which have no key). The other one is refused.
+    param([object]$Payload, [pscustomobject]$Evidence, [Parameter(Mandatory = $true)] [string]$RepositoryAccess)
+    $expectedCredentialSource = if ($RepositoryAccess -ceq 'no_password') { 'none' } else { 'recovery_key' }
     if ([string]$Payload.drill_kind -cne 'recovery_key_representative' -or
-        [string]$Payload.credential_source -cne 'recovery_key' -or
+        [string]$Payload.credential_source -cne $expectedCredentialSource -or
         [string]$Payload.repository_id -cne $Evidence.RepositoryId -or
         [string]$Payload.result -cne 'verified' -or
         $Payload.verified -isnot [bool] -or -not [bool]$Payload.verified -or
@@ -1483,12 +1510,18 @@ function Invoke-RestoreOperation {
             $arguments += @('--snapshot',$canonicalSnapshotId,'--target',$canonicalTarget,'--report',$reportPath)
             if ($allowLegacy) { $arguments += '--allow-legacy-unbound' }
             if ($requestAction -eq 'restore_drill') {
+                # Backups without a password have no recovery key: the drill is given none, and restore.py opens them
+                # without one (and refuses a key file for them).
+                if ($configuration.RepositoryAccess -ceq 'password') {
+                    $arguments += @('--recovery-key-file',[string]$configuration.Json.recovery_key_file)
+                }
                 $arguments += @(
-                    '--recovery-key-file',[string]$configuration.Json.recovery_key_file,
                     '--recovery-drill','--drill-canary-sha256',$drillEvidence.CanarySha256,
                     '--drill-canary-bytes',$drillEvidence.CanaryBytes.ToString([Globalization.CultureInfo]::InvariantCulture)
                 )
-                Write-ProgressResult -Stage restoring -Message 'Restoring the canary and a bounded representative sample with the recovery key.' -Percent 25
+                Write-ProgressResult -Stage restoring -Message $(if ($configuration.RepositoryAccess -ceq 'no_password') {
+                    'Restoring the restore test file and a small sample of your files.'
+                } else { 'Restoring the canary and a bounded representative sample with the recovery key.' }) -Percent 25
             }
             else {
                 foreach ($include in $includes) { $arguments += @('--include',[string]$include) }
@@ -1523,7 +1556,7 @@ function Invoke-RestoreOperation {
             [IO.File]::Delete($reportPath); $script:reportPath = $null
             if ($backend.ExitCode -ne 0 -or [string]$payload.result -ne 'verified') {
                 if ($requestAction -eq 'restore') {
-                    try { Write-RestoreHistory -Payload $payload -BackendExitCode $backend.ExitCode; $script:historyRecorded = $true }
+                    try { Write-RestoreHistory -Payload $payload -BackendExitCode $backend.ExitCode -RepositoryAccess $configuration.RepositoryAccess; $script:historyRecorded = $true }
                     catch { $script:historyRecorded = $false; $script:historyError = Get-SanitizedError -Message $_.Exception.Message }
                 }
                 $failureMessage = [string]$payload.error
@@ -1537,7 +1570,7 @@ function Invoke-RestoreOperation {
                 return
             }
             if ($requestAction -eq 'restore_drill') {
-                Assert-RecoveryDrillReport -Payload $payload -Evidence $drillEvidence
+                Assert-RecoveryDrillReport -Payload $payload -Evidence $drillEvidence -RepositoryAccess $configuration.RepositoryAccess
                 try { Protect-RecoveryDrillTarget -Path $canonicalTarget }
                 catch {
                     Write-ProgressResult -Stage failed -Message 'The sample was verified, but its retained review ACL could not be protected.' -Percent 0
@@ -1545,7 +1578,7 @@ function Invoke-RestoreOperation {
                     return
                 }
             }
-            try { Write-RestoreHistory -Payload $payload -BackendExitCode $backend.ExitCode; $script:historyRecorded = $true }
+            try { Write-RestoreHistory -Payload $payload -BackendExitCode $backend.ExitCode -RepositoryAccess $configuration.RepositoryAccess; $script:historyRecorded = $true }
             catch { $script:historyRecorded = $false; $script:historyError = Get-SanitizedError -Message $_.Exception.Message }
             if ($requestAction -eq 'restore_drill' -and -not $historyRecorded) {
                 Write-ProgressResult -Stage failed -Message 'The sample was restored and verified, but readiness evidence was not recorded.' -Percent 0
@@ -1554,7 +1587,8 @@ function Invoke-RestoreOperation {
             }
         }
         Write-ProgressResult -Stage complete -Message $(if ($requestAction -eq 'restore_drill') {
-            'Recovery-key restore drill completed, verified, and was recorded.'
+            if ($configuration.RepositoryAccess -ceq 'no_password') { 'Restore drill completed, verified, and was recorded.' }
+            else { 'Recovery-key restore drill completed, verified, and was recorded.' }
         } elseif ($requestAction -eq 'restore') {
             'Restore completed and was verified.'
         } elseif ($requestAction -eq 'find_files') {

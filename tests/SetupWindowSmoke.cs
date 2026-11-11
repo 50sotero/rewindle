@@ -71,6 +71,9 @@ namespace Rewindle.Setup.Smoke
             Dictionary<string, object> resolved = new Dictionary<string, object>();
             resolved["repository"] = inputs.Repository ?? "E:\\Rewindle Backups";
             resolved["storage_mode"] = "local_ntfs";
+            // No backups at the chosen place yet: the installer's default is a password, and the page offers the choice.
+            resolved["repository_access"] = "password";
+            resolved["existing_repository_access"] = null;
             resolved["drivefs_my_drive_root"] = null;
             resolved["sources"] = inputs.Sources.Count > 0 ? (object)inputs.Sources.ToArray() : sources.ToArray();
             resolved["canary_source"] = "C:\\ProgramData\\ResticBackuper\\Canary";
@@ -135,7 +138,7 @@ namespace Rewindle.Setup.Smoke
 
         private readonly int exitCode;
 
-        public ScriptedProcess(string progressPath, string keyPath, bool fail)
+        public ScriptedProcess(string progressPath, string keyPath, bool fail, bool noPassword)
         {
             exitCode = fail ? 1 : 0;
             Task.Factory.StartNew(delegate
@@ -165,6 +168,12 @@ namespace Rewindle.Setup.Smoke
                             Append(progressPath, Line(++seq, phase[0], "skipped", phase[1]));
                             break;
                         }
+                        // As the installer does for backups without a password: no password step, and the recovery tools instead of a key.
+                        if (noPassword && phase[0] == "credential")
+                        {
+                            Append(progressPath, Line(++seq, phase[0], "skipped", "Choosing no password", "No password: this backup opens without one."));
+                            break;
+                        }
                         if (fail && phase[0] == "repository" && state == "completed")
                         {
                             string message = "The drive E: stopped responding while the backup location was being prepared.";
@@ -190,7 +199,9 @@ namespace Rewindle.Setup.Smoke
                             finished.Set();
                             return;
                         }
-                        Append(progressPath, Line(++seq, phase[0], state, phase[1]));
+                        string title = noPassword && phase[0] == "recovery_key" ? "Saving the recovery tools" : phase[1];
+                        string detail = noPassword && phase[0] == "recovery_key" && state == "completed" ? "This backup has no password, so there is no recovery key." : null;
+                        Append(progressPath, Line(++seq, phase[0], state, title, detail));
                         Thread.Sleep(280);
                     }
                 }
@@ -200,16 +211,23 @@ namespace Rewindle.Setup.Smoke
                 result["ok"] = true;
                 result["error"] = null;
                 result["install_root"] = "C:\\Program Files\\ResticBackuper";
-                result["recovery_key_path"] = keyPath;
-                result["recovery_key_readable_by_user"] = true;
+                // Without a password the installer reports no key at all, whatever an older install left on the disk.
+                result["recovery_key_path"] = noPassword ? null : keyPath;
+                result["recovery_key_readable_by_user"] = noPassword ? (object)null : true;
                 result["dashboard_executable"] = "C:\\Program Files\\ResticBackuper\\ResticBackuperDashboard.exe";
                 result["version"] = Smoke.ProductVersion;
+                result["repository_access"] = noPassword ? "no_password" : "password";
                 Append(progressPath, Json.Serialize(result));
                 finished.Set();
             }, TaskCreationOptions.LongRunning);
         }
 
         private static string Line(int seq, string phase, string state, string title)
+        {
+            return Line(seq, phase, state, title, null);
+        }
+
+        private static string Line(int seq, string phase, string state, string title, string detail)
         {
             Dictionary<string, object> line = new Dictionary<string, object>();
             line["schema"] = "Rewindle.InstallProgress.v1";
@@ -219,7 +237,7 @@ namespace Rewindle.Setup.Smoke
             line["phase"] = phase;
             line["state"] = state;
             line["title"] = title;
-            line["detail"] = null;
+            line["detail"] = detail;
             return Json.Serialize(line);
         }
 
@@ -269,7 +287,11 @@ namespace Rewindle.Setup.Smoke
             {
                 throw new ElevationDeclinedException();
             }
-            return new ScriptedProcess(powershellArguments[powershellArguments.IndexOf("-ProgressPath") + 1], keyPath, mode == "install-failure");
+            // The wizard's pick travels through the real host as -RepositoryAccess; the scripted installer answers the way the real one does.
+            int access = powershellArguments.IndexOf("-RepositoryAccess");
+            bool noPassword = access >= 0 && powershellArguments[access + 1] == "no_password";
+            if (mode == "no-password" && !noPassword) { throw new InvalidOperationException("The host did not pass -RepositoryAccess no_password to the installer."); }
+            return new ScriptedProcess(powershellArguments[powershellArguments.IndexOf("-ProgressPath") + 1], keyPath, mode == "install-failure", noPassword);
         }
     }
 
@@ -277,8 +299,9 @@ namespace Rewindle.Setup.Smoke
     {
         private static string outputFolder;
         private static string theme = "light";
-        // happy, plan-failure (the first check of the PC fails), install-failure, declined (the first Windows prompt is declined) or
-        // runtime-missing (the window opens as on a PC without the WebView2 Runtime).
+        // happy, plan-failure (the first check of the PC fails), install-failure, declined (the first Windows prompt is declined),
+        // no-password (a whole install that chooses no password on the Password page) or runtime-missing (the window opens as on a PC
+        // without the WebView2 Runtime).
         private static string scenario = "happy";
         // Draws the page as Windows' High Contrast makes it (the web view's forced-colors mode), for a look at it.
         private static bool forcedColors;
@@ -567,11 +590,24 @@ namespace Rewindle.Setup.Smoke
             await Shot(view, "location");
 
             await Click(view, "Next");
+            await WaitUntil(view, "document.getElementById('screen-title').textContent.indexOf('have a password') >= 0", "Whether the backups have a password", 10000);
+            // What no password means is on the page before anything is chosen.
+            await WaitUntil(view, "document.body.innerText.indexOf('Anyone who can open the backup folder can restore every backed-up file, including saved sign-ins.') >= 0", "the warning about no password", 5000);
+            await Shot(view, "password");
+            if (scenario == "no-password")
+            {
+                await Eval(view, "document.querySelectorAll('input[name=\"backup-password\"]')[1].click()");
+                await WaitUntil(view, "document.querySelectorAll('input[name=\"backup-password\"]')[1].checked", "No password chosen", 5000);
+                await Shot(view, "password-none");
+            }
+
+            await Click(view, "Next");
             await WaitUntil(view, "document.getElementById('screen-title').textContent.indexOf('When should') >= 0", "When to back up", 10000);
             await Shot(view, "schedule");
 
             await Click(view, "Next");
             await WaitUntil(view, "document.getElementById('screen-title').textContent.indexOf('Ready to install') >= 0", "Review", 10000);
+            await WaitUntil(view, "document.body.innerText.indexOf('" + (scenario == "no-password" ? "No password. Anyone who can open the backup folder can restore your files." : "Yes. You\u2019ll get a recovery key to keep.") + "') >= 0", "the password choice on Review", 5000);
             await Shot(view, "review");
 
             await Click(view, "Install");
@@ -598,6 +634,19 @@ namespace Rewindle.Setup.Smoke
             }
             await WaitUntil(view, "document.getElementById('screen-title').textContent.indexOf('is installed') >= 0", "the install finishing", 60000);
             await Shot(view, "installed");
+
+            if (scenario == "no-password")
+            {
+                // No password, no recovery key: Continue goes straight to Done, which has no alarm about a key.
+                await Click(view, "Continue");
+                await WaitUntil(view, "document.getElementById('screen-title').textContent.indexOf('all set') >= 0", "Done without a recovery key step", 10000);
+                string alarm = await Eval(view, "document.body.innerText.indexOf('recovery key is still') >= 0");
+                if (alarm != "false") { throw new InvalidOperationException("Done warns about a recovery key that does not exist."); }
+                await WaitUntil(view, "document.body.innerText.indexOf('Your backups have no password, so there is no recovery key to keep.') >= 0", "the line that there is no key to keep", 5000);
+                await Shot(view, "done-no-password");
+                await CheckErrors(view);
+                return;
+            }
 
             await Click(view, "Continue");
             await WaitUntil(view, "document.getElementById('screen-title').textContent.indexOf('recovery key') >= 0", "the recovery key", 10000);

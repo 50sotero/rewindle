@@ -108,6 +108,40 @@ public static class FakeRestic {
     }
     return null;
   }
+  // ---- Restic 0.19.1's rules for --insecure-no-password (the same text in Test-ManageRestore.ps1 and Test-ManageRetention.ps1) ----
+  // FAKE_REPOSITORY_ACCESS (control file) says what backups this stand-in is: password (the default) or no_password. The
+  // first rule that applies refuses the command, as Restic does: 1. the flag next to a password source (an option, or a
+  // variable with a value): exit 1; 2. backups without a password opened without the flag: exit 1 (with stdin closed, as
+  // every caller has it; with an open stdin the real Restic waits for a password instead); 3. backups with a password
+  // opened with the flag: exit 12. -1 means the command may go on.
+  static int Access(string[] args) {
+    bool flag = Array.IndexOf(args, "--insecure-no-password") >= 0;
+    bool source = false;
+    foreach (string argument in args) {
+      foreach (string option in new[] { "--password-command", "--password-file", "--new-password-file" }) {
+        if (argument == option || argument.StartsWith(option + "=", StringComparison.Ordinal)) source = true;
+      }
+    }
+    foreach (string variable in new[] { "RESTIC_PASSWORD", "RESTIC_PASSWORD_FILE", "RESTIC_PASSWORD_COMMAND" }) {
+      if (!String.IsNullOrEmpty(Environment.GetEnvironmentVariable(variable))) source = true;
+    }
+    string access = Control("FAKE_REPOSITORY_ACCESS");
+    if (String.IsNullOrEmpty(access)) access = "password";
+    if (flag && source) {
+      Console.Error.WriteLine("Fatal: --insecure-no-password must not be specified together with providing a password via a cli option or environment variable");
+      return 1;
+    }
+    if (access == "no_password" && !flag) {
+      Console.Error.WriteLine("Fatal: an empty password is not allowed by default. Pass the flag `--insecure-no-password` to restic to disable this check");
+      return 1;
+    }
+    if (access == "password" && flag) {
+      Console.Error.WriteLine("Fatal: wrong password or no key found");
+      return 12;
+    }
+    return -1;
+  }
+  // ---- end of the access rules ----
   public static int Main(string[] args) {
     foreach (System.Collections.DictionaryEntry item in Environment.GetEnvironmentVariables()) {
       string name = ((string)item.Key).ToUpperInvariant();
@@ -117,6 +151,8 @@ public static class FakeRestic {
     }
     string log = Control("FAKE_RESTIC_LOG");
     if (!String.IsNullOrEmpty(log)) File.AppendAllText(log, String.Join("\t", args) + Environment.NewLine);
+    int refused = Access(args);
+    if (refused >= 0) return refused;
     string plan = Control("FAKE_PLAN_ID");
     string source = Control("FAKE_SOURCE");
     bool legacy = Control("FAKE_LEGACY_SNAPSHOT") == "1";
@@ -158,7 +194,7 @@ public static class FakeRestic {
       Console.WriteLine("[{\"id\":\"" + snapshot + "\",\"short_id\":\"" + snapshot.Substring(0, 8) + "\",\"time\":\"2026-07-20T02:00:00Z\",\"hostname\":\"FIXTURE\",\"tags\":[" + tags + "],\"paths\":[\"" + Escape(source) + "\"],\"summary\":{\"total_files_processed\":2,\"total_bytes_processed\":42}}]"); return 0;
     }
     if (args.Contains("ls")) {
-      if (!String.IsNullOrEmpty(Environment.GetEnvironmentVariable("RESTIC_PASSWORD"))) {
+      if (!String.IsNullOrEmpty(Environment.GetEnvironmentVariable("RESTIC_PASSWORD")) || args.Contains("--insecure-no-password")) {
         string root = Path.GetFullPath(source); string drive = root.Substring(0, 1).ToUpperInvariant();
         string tail = root.Substring(2).Replace('\\', '/').Trim('/'); string prefix = "/" + drive + "/" + tail;
         Console.WriteLine("{\"name\":\"canary.txt\",\"type\":\"file\",\"path\":\"" + Escape(prefix + "/canary.txt") + "\",\"size\":7}");
@@ -204,7 +240,7 @@ Add-Type -TypeDefinition $fakeResticSource -OutputAssembly $fakeRestic -OutputTy
 
 function Write-FakeResticControl {
     # Restic gets an allow-listed environment, so this process's FAKE_* settings reach the fake through a file.
-    $lines = @(foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_RESTORE_NOTHING','FAKE_LEGACY_SNAPSHOT','FAKE_FIND_SLEEP_MS')) {
+    $lines = @(foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_RESTORE_NOTHING','FAKE_LEGACY_SNAPSHOT','FAKE_FIND_SLEEP_MS','FAKE_REPOSITORY_ACCESS')) {
         $value = [Environment]::GetEnvironmentVariable($name, 'Process')
         if ($null -ne $value) { $name + '=' + $value }
     })
@@ -261,7 +297,11 @@ Add-Type -TypeDefinition $pythonWrapperSource -OutputAssembly $pythonWrapper -Ou
 function New-Fixture {
     # -WithPasswordHelper: the configuration names a stored password, as every installed one does, so restore.py gives Restic
     # its password helper (which this fake never runs). A file search needs it; the other requests also run without it.
-    param([switch]$WithPasswordHelper)
+    # -Access: the "repository_access" the configuration names; '' leaves the key out, as every older install's configuration
+    # does. -NoRecoveryKey: no file at the recovery key's path, as for a new backup without a password. -BrokenRecoveryKey: an
+    # empty file there, an older install's key that no longer checks out. -BackupsAre: what the stand-in Restic's backups are
+    # (password or no_password); by default what the configuration says.
+    param([switch]$WithPasswordHelper, [string]$Access = '', [switch]$NoRecoveryKey, [switch]$BrokenRecoveryKey, [string]$BackupsAre = '')
     $root = Join-Path ([IO.Path]::GetTempPath()) ('RSTR-T-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
     $roots.Add($root)
     $install = Join-Path $root 'ProgramFiles\ResticBackuper'
@@ -281,7 +321,11 @@ function New-Fixture {
     [IO.File]::WriteAllText((Join-Path $source 'canary.txt'), "canary`n", $encoding)
     [IO.File]::WriteAllText((Join-Path $source 'live.txt'), "live source sentinel`n", $encoding)
     [IO.File]::WriteAllText((Join-Path $source 'notes.txt'), "fixture notes`n", $encoding)
-    [IO.File]::WriteAllText((Join-Path $root 'RecoveryKey.txt'), "Password: fixture-recovery-password-material-that-is-long-enough-12345`n", $encoding)
+    $recoveryKeyPath = Join-Path $root 'RecoveryKey.txt'
+    if ($BrokenRecoveryKey) { [IO.File]::WriteAllBytes($recoveryKeyPath, [byte[]]@()) }
+    elseif (-not $NoRecoveryKey) {
+        [IO.File]::WriteAllText($recoveryKeyPath, "Password: fixture-recovery-password-material-that-is-long-enough-12345`n", $encoding)
+    }
     [IO.File]::WriteAllText((Join-Path $repository 'config'), "repository config sentinel`n", $encoding)
     [IO.File]::WriteAllText((Join-Path $repository 'pack'), "encrypted repository sentinel`n", $encoding)
     [IO.File]::WriteAllBytes((Join-Path $state 'run.lock'), [byte[]](0))
@@ -298,12 +342,13 @@ function New-Fixture {
         repository = $repository; repository_volume_serial = $serial
         restic_executable = Join-Path $install 'restic.exe'; recovery_tools_directory = $recovery
         python_executable = Join-Path $install 'Python\python.exe'; state_directory = $state
-        secret_file = $secretFile; recovery_key_file = Join-Path $root 'RecoveryKey.txt'
+        secret_file = $secretFile; recovery_key_file = $recoveryKeyPath
         exclude_file = Join-Path $install 'excludes.txt'; canary_file = Join-Path $source 'canary.txt'
         hostname = 'FIXTURE'; scheduled_tag = 'scheduled'; use_vss = $false
         cloud_placeholder_policy = 'strict'; sources = @($source)
         source_identities = [ordered]@{ $source = [ordered]@{ expected_volume_serial = $serial } }
     }
+    if ($Access -ne '') { $config['repository_access'] = $Access }
     $configPath = Join-Path $install 'backup-config.json'
     Write-Json -Path $configPath -Value $config
     Write-Json -Path (Join-Path $state 'last-success.json') -Value ([ordered]@{
@@ -334,9 +379,10 @@ function New-Fixture {
         $encoding
     )
     $log = Join-Path $root 'restic.log'
+    $fakeAccess = if ($BackupsAre) { $BackupsAre } elseif ($Access -ceq 'no_password') { 'no_password' } else { 'password' }
     return [pscustomobject]@{
         Root=$root; Install=$install; State=$state; Repository=$repository; Recovery=$recovery;
-        Source=$source; ConfigPath=$configPath; Log=$log
+        Source=$source; ConfigPath=$configPath; Log=$log; RecoveryKey=$recoveryKeyPath; Secret=$secretFile; FakeAccess=$fakeAccess
     }
 }
 
@@ -389,6 +435,7 @@ function Invoke-Manager {
     $env:FAKE_RESTIC_LOG = $Fixture.Log
     $env:FAKE_PLAN_ID = $planId
     $env:FAKE_SOURCE = $Fixture.Source
+    $env:FAKE_REPOSITORY_ACCESS = $Fixture.FakeAccess
     if ($LegacyFixture) { $env:FAKE_LEGACY_SNAPSHOT = '1' }
     else { Remove-Item Env:FAKE_LEGACY_SNAPSHOT -ErrorAction SilentlyContinue }
     Write-FakeResticControl
@@ -573,6 +620,139 @@ try {
         [string]$drillHistory.entries[0].kind -ceq 'recovery_key_representative_drill' -and
         [string]$drillHistory.entries[0].repository_id -ceq $repositoryId -and
         [long]$drillHistory.entries[0].snapshot_generation -eq $generation) 'only complete drill evidence is durably recorded'
+    # A configuration without repository_access (the fixtures so far, and every older install, the owner's included) is a
+    # backup with a password: its drill used the recovery key, says so in its report and history, and its Restic never got
+    # the empty-password flag.
+    $ownerShapedConfiguration = Get-Content -LiteralPath $drillFixture.ConfigPath -Raw | ConvertFrom-Json
+    Assert-True ($null -eq $ownerShapedConfiguration.PSObject.Properties['repository_access']) 'the fixtures so far are shaped like an older configuration, without repository_access'
+    Assert-True ([string]$drillHistory.entries[0].credential_source -ceq 'recovery_key') 'a drill of backups with a password is recorded as made with the recovery key'
+    Assert-True ([string]$drill.Progress.message -ceq 'Recovery-key restore drill completed, verified, and was recorded.') 'the drill of backups with a password keeps its completion text'
+    Assert-True (-not ((Get-Content -LiteralPath $drillFixture.Log -Raw) -match 'insecure-no-password')) 'backups with a password never get the empty-password flag'
+
+    # ------------------------------------------------------------------------------------------------------------------
+    # Backups without a password ("repository_access": "no_password"). They have no recovery key and no saved password:
+    # nothing is looked for at those paths, and Restic opens them with --insecure-no-password and nothing else (the stand-in
+    # follows Restic 0.19.1: it refuses the flag next to a password source and backups without a password opened without it).
+    # ------------------------------------------------------------------------------------------------------------------
+    $accessTokens = $null
+    $accessParseErrors = $null
+    $accessAst = [Management.Automation.Language.Parser]::ParseFile($managerSource, [ref]$accessTokens, [ref]$accessParseErrors)
+    Assert-True ($accessParseErrors.Count -eq 0) 'the restore manager parses'
+    foreach ($accessFunctionName in @('Get-RepositoryAccess', 'Assert-RecoveryDrillReport')) {
+        $accessDefinitions = @($accessAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $accessFunctionName
+        }, $false))
+        Assert-True ($accessDefinitions.Count -eq 1) ($accessFunctionName + ' is defined once in the manager')
+        . ([scriptblock]::Create($accessDefinitions[0].Extent.Text))
+    }
+    function ConvertTo-AccessConfiguration([string]$Json) { return (ConvertFrom-Json -InputObject $Json) }
+    # The reader (a byte-identical copy lives in every script that reads the field) under StrictMode, which throws on a
+    # dotted read of a key that older configurations do not have.
+    Assert-True ((Get-RepositoryAccess -Configuration (ConvertTo-AccessConfiguration '{"schema_version":1}')) -ceq 'password') 'a configuration without repository_access means a password'
+    Assert-True ((Get-RepositoryAccess -Configuration (ConvertTo-AccessConfiguration '{"repository_access":"password"}')) -ceq 'password') 'repository_access password means a password'
+    Assert-True ((Get-RepositoryAccess -Configuration (ConvertTo-AccessConfiguration '{"repository_access":"no_password"}')) -ceq 'no_password') 'repository_access no_password means no password'
+    foreach ($unsupported in @('"Password"', '"NO_PASSWORD"', '"No_Password"', '"no-password"', '"none"', '""', '" password"', 'null', '5', 'true', '["password"]', '{}')) {
+        $refusedValue = $false
+        try { [void](Get-RepositoryAccess -Configuration (ConvertTo-AccessConfiguration ('{"repository_access":' + $unsupported + '}'))) }
+        catch { $refusedValue = ([string]$_.Exception.Message -ceq 'unsupported repository_access') }
+        Assert-True $refusedValue ('repository_access ' + $unsupported + ' is refused, never read as a default')
+    }
+    # What a recovery drill's report must name: the recovery key for backups with a password, none for backups without one.
+    $drillEvidenceSample = [pscustomobject]@{ RepositoryId = $repositoryId; CanarySha256 = ('c' * 64); CanaryBytes = [long]7 }
+    function Test-DrillReportAccepted([string]$CredentialSource, [string]$Access) {
+        $report = [pscustomobject]@{
+            drill_kind = 'recovery_key_representative'; credential_source = $CredentialSource; repository_id = $repositoryId
+            result = 'verified'; verified = $true; partial_target_retained = $false; canary_verified = $true
+            canary_sha256 = ('c' * 64); canary_bytes = [long]7; sample_policy = 'one-or-two-bounded-files-per-source-v1'
+            sample_file_count = [long]2; sample_bytes = [long]35; sample_paths_sha256 = ('d' * 64)
+        }
+        try { Assert-RecoveryDrillReport -Payload $report -Evidence $drillEvidenceSample -RepositoryAccess $Access; return $true }
+        catch { return $false }
+    }
+    Assert-True (Test-DrillReportAccepted 'recovery_key' 'password') 'a drill of backups with a password is accepted when it names the recovery key'
+    Assert-True (Test-DrillReportAccepted 'none' 'no_password') 'a drill of backups without a password is accepted when it names no credential'
+    Assert-True (-not (Test-DrillReportAccepted 'none' 'password')) 'a drill of backups with a password that used no key is refused'
+    Assert-True (-not (Test-DrillReportAccepted 'recovery_key' 'no_password')) 'a drill of backups without a password that claims a recovery key is refused'
+    Assert-True (-not (Test-DrillReportAccepted 'None' 'no_password')) 'the credential a drill names is compared exactly'
+    Assert-True (-not (Test-DrillReportAccepted 'active_credential' 'no_password')) 'no other credential is accepted for a drill'
+
+    # No recovery key file at all, as for a new backup without a password: every request used to look for one first.
+    $noKeyFixture = New-Fixture -Access no_password -NoRecoveryKey
+    Assert-True (-not (Test-Path -LiteralPath $noKeyFixture.RecoveryKey)) 'the backup without a password starts with no recovery key file'
+    $noKeyList = Invoke-Manager -Fixture $noKeyFixture -Action list_snapshots
+    Assert-True ($noKeyList.ExitCode -eq 0 -and $noKeyList.Result.ok -eq $true) ('backups without a password list without any recovery key file: ' + [string]$noKeyList.Result.error)
+    $noKeyCalls = @(Get-Content -LiteralPath $noKeyFixture.Log)
+    Assert-True ($noKeyCalls.Count -ge 2 -and @($noKeyCalls | Where-Object { $_ -notmatch '(^|\t)--insecure-no-password(\t|$)' }).Count -eq 0) 'every Restic for backups without a password was given the empty-password flag'
+    $noKeyTree = Invoke-Manager -Fixture $noKeyFixture -Action list_tree -Snapshot $snapshotId -TreePath '/'
+    Assert-True ($noKeyTree.ExitCode -eq 0 -and $noKeyTree.Result.ok -eq $true) 'a folder of backups without a password lists too'
+
+    # An older install's recovery key that no longer checks out, and its saved password, are left exactly as they are: not
+    # looked at, not used (Restic would run a password command before it refused one next to the flag), and not needed.
+    $leftoverFixture = New-Fixture -Access no_password -BrokenRecoveryKey -WithPasswordHelper
+    $leftoverKeyHash = Get-Hash -Path $leftoverFixture.RecoveryKey
+    $leftoverSecretHash = Get-Hash -Path $leftoverFixture.Secret
+    $leftoverTarget = Join-Path $leftoverFixture.Root 'Restored\NoPassword'
+    $leftoverRestore = Invoke-Manager -Fixture $leftoverFixture -Action restore -Snapshot $snapshotId -Target $leftoverTarget -Includes @('/notes.txt')
+    Assert-True ($leftoverRestore.ExitCode -eq 0 -and $leftoverRestore.Result.ok -eq $true -and [string]$leftoverRestore.Result.payload.result -ceq 'verified') ('a restore of backups without a password ignores an older key: ' + [string]$leftoverRestore.Result.error)
+    Assert-True (Test-Path -LiteralPath (Join-Path $leftoverTarget 'notes.txt') -PathType Leaf) 'the restore of backups without a password brought the chosen item back'
+    $leftoverCalls = @(Get-Content -LiteralPath $leftoverFixture.Log)
+    Assert-True ($leftoverCalls.Count -ge 3 -and @($leftoverCalls | Where-Object { $_ -notmatch '(^|\t)--insecure-no-password(\t|$)' -or $_ -match 'password-command' -or $_ -match 'secret_store' }).Count -eq 0) 'a saved password left by an older install is never turned into a password command for backups without a password'
+    Assert-True ((Get-Hash -Path $leftoverFixture.RecoveryKey) -ceq $leftoverKeyHash -and (Get-Hash -Path $leftoverFixture.Secret) -ceq $leftoverSecretHash) 'an older recovery key and saved password were left byte for byte as they were'
+    $leftoverHistory = Get-Content -LiteralPath (Join-Path $leftoverFixture.State 'restore-history.json') -Raw | ConvertFrom-Json
+    Assert-True (@($leftoverHistory.entries).Count -eq 1 -and [string]$leftoverHistory.entries[0].kind -ceq 'manual_restore' -and
+        [string]$leftoverHistory.entries[0].credential_source -ceq 'active_credential' -and $leftoverHistory.entries[0].verified -eq $true) 'a restore of backups without a password is recorded like any restore'
+
+    # The restore drill without a key: no key file is given, Restic opens the backups with the flag, and the report and the
+    # history say that no credential was used. The progress says so in plain words.
+    $noPasswordDrillFixture = New-Fixture -Access no_password -NoRecoveryKey
+    $noPasswordDrill = Invoke-Manager -Fixture $noPasswordDrillFixture -Action restore_drill
+    if ($noPasswordDrill.ExitCode -ne 0) {
+        Write-Output ("no-password drill output: " + ($noPasswordDrill.Output -join ' | '))
+        if ($null -ne $noPasswordDrill.Result) { Write-Output ("no-password drill result: " + ($noPasswordDrill.Result | ConvertTo-Json -Compress -Depth 20)) }
+    }
+    Assert-True ($noPasswordDrill.ExitCode -eq 0 -and $noPasswordDrill.Result.ok -eq $true -and $noPasswordDrill.Result.history_recorded -eq $true) 'a restore drill of backups without a password succeeds with no recovery key'
+    Assert-True ([string]$noPasswordDrill.Result.payload.drill_kind -ceq 'recovery_key_representative' -and
+        [string]$noPasswordDrill.Result.payload.credential_source -ceq 'none' -and
+        [bool]$noPasswordDrill.Result.payload.canary_verified -and [long]$noPasswordDrill.Result.payload.sample_file_count -eq 2) 'its report names no credential and holds verified canary and sample evidence'
+    $noPasswordDrillHistory = Get-Content -LiteralPath (Join-Path $noPasswordDrillFixture.State 'restore-history.json') -Raw | ConvertFrom-Json
+    Assert-True (@($noPasswordDrillHistory.entries).Count -eq 1 -and
+        [string]$noPasswordDrillHistory.entries[0].kind -ceq 'recovery_key_representative_drill' -and
+        [string]$noPasswordDrillHistory.entries[0].credential_source -ceq 'none' -and
+        [string]$noPasswordDrillHistory.entries[0].repository_id -ceq $repositoryId -and
+        $noPasswordDrillHistory.entries[0].verified -eq $true) 'its history entry keeps the drill kind and records that no credential was used'
+    Assert-True ([string]$noPasswordDrill.Progress.stage -ceq 'complete' -and
+        [string]$noPasswordDrill.Progress.message -ceq 'Restore drill completed, verified, and was recorded.') 'the drill of backups without a password finishes in plain words'
+    $noPasswordDrillCalls = @(Get-Content -LiteralPath $noPasswordDrillFixture.Log)
+    Assert-True ($noPasswordDrillCalls.Count -ge 3 -and
+        @($noPasswordDrillCalls | Where-Object { $_ -notmatch '(^|\t)--insecure-no-password(\t|$)' -or $_ -notmatch '(^|\t)--no-cache(\t|$)' }).Count -eq 0 -and
+        @($noPasswordDrillCalls | Where-Object { ($_ -split "`t") -contains 'ls' }).Count -ge 1) 'the drill listed and restored through the flag, reading only the backup location'
+    # The same drill with an older key at the usual path that no longer checks out: it is not looked at either.
+    $brokenKeyDrillFixture = New-Fixture -Access no_password -BrokenRecoveryKey
+    $brokenKeyDrill = Invoke-Manager -Fixture $brokenKeyDrillFixture -Action restore_drill
+    Assert-True ($brokenKeyDrill.ExitCode -eq 0 -and $brokenKeyDrill.Result.ok -eq $true -and [string]$brokenKeyDrill.Result.payload.credential_source -ceq 'none') 'an older, unusable recovery key does not stop the drill of backups without a password'
+
+    # A configuration that says "password" in so many words is the same as one without the key.
+    $explicitPasswordFixture = New-Fixture -Access password
+    $explicitPasswordList = Invoke-Manager -Fixture $explicitPasswordFixture -Action list_snapshots
+    Assert-True ($explicitPasswordList.ExitCode -eq 0 -and $explicitPasswordList.Result.ok -eq $true -and
+        -not ((Get-Content -LiteralPath $explicitPasswordFixture.Log -Raw) -match 'insecure-no-password')) 'repository_access password is a backup with a password'
+    # ... and for a backup with a password the recovery key is still required (and checked) for every request.
+    $missingKeyFixture = New-Fixture -NoRecoveryKey
+    $missingKey = Invoke-Manager -Fixture $missingKeyFixture -Action list_snapshots
+    Assert-True ($missingKey.ExitCode -ne 0 -and $missingKey.Result.ok -eq $false -and [string]$missingKey.Result.error -match 'Required regular file is missing') 'backups with a password still need their recovery key file'
+    Assert-True (-not (Test-Path -LiteralPath $missingKeyFixture.Log)) 'nothing reached Restic when the recovery key was missing'
+
+    # Anything but the two values is refused, before Restic is reached.
+    $unsupportedFixture = New-Fixture -Access 'No_Password'
+    $unsupportedList = Invoke-Manager -Fixture $unsupportedFixture -Action list_snapshots
+    Assert-True ($unsupportedList.ExitCode -ne 0 -and $unsupportedList.Result.ok -eq $false -and [string]$unsupportedList.Result.error -ceq 'unsupported repository_access') 'an unsupported repository_access is refused in plain words'
+    Assert-True (-not (Test-Path -LiteralPath $unsupportedFixture.Log)) 'nothing reached Restic for an unsupported repository_access'
+
+    # Backups that now ask for a password (one was added outside Rewindle) fail at once, with nothing waiting for a password.
+    $nowPasswordFixture = New-Fixture -Access no_password -NoRecoveryKey -BackupsAre password
+    $nowPassword = Invoke-Manager -Fixture $nowPasswordFixture -Action list_snapshots
+    Assert-True ($nowPassword.ExitCode -ne 0 -and $nowPassword.Result.ok -eq $false -and [string]$nowPassword.Result.error -notmatch '(?i)(password-command|RESTIC_PASSWORD|dpapi)') 'backups that now ask for a password fail at once'
 
     $partialDrillFixture = New-Fixture
     $env:FAKE_RESTORE_PARTIAL = '1'
@@ -920,6 +1100,7 @@ try {
         $env:FAKE_RESTIC_LOG = $Fixture.Log
         $env:FAKE_PLAN_ID = $planId
         $env:FAKE_SOURCE = $Fixture.Source
+        $env:FAKE_REPOSITORY_ACCESS = $Fixture.FakeAccess
         if ($LegacyFixture) { $env:FAKE_LEGACY_SNAPSHOT = '1' } else { Remove-Item Env:FAKE_LEGACY_SNAPSHOT -ErrorAction SilentlyContinue }
         Write-FakeResticControl
         $start = [Diagnostics.ProcessStartInfo]::new()
@@ -1153,6 +1334,24 @@ try {
     Assert-True ($ended.EndedOnItsOwn -and [string]$ended.Record.close_reason -ceq 'client_closed' -and
         [int]$ended.Record.operations.find_files -eq 4 -and [int]$ended.Record.operations.list_snapshots -eq 1) 'the session record counts the searches'
     Assert-True ((Get-Content -LiteralPath $broker.ResultPath -Raw) -notmatch 'notes') 'the session record holds no search text'
+    # The same search for backups without a password: no saved password and no recovery key exist and none is needed (the search
+    # used to refuse to start without the protected password helper or a recovery key).
+    $noPasswordFindFixture = New-Fixture -Access no_password -NoRecoveryKey
+    $broker = Start-SessionBroker -Fixture $noPasswordFindFixture
+    [void](Open-SessionBroker $broker)
+    Send-SessionTestRequest $broker 1 'list_snapshots'
+    Assert-True ((Receive-SessionTestResult $broker 1).Result.ok -eq $true) 'a session lists backups without a password'
+    Send-SessionTestFind $broker 2 'notes'
+    $noPasswordSearch = Receive-SessionTestResult $broker 2
+    Assert-True ($noPasswordSearch.Result.ok -eq $true -and [string]$noPasswordSearch.Result.payload.status -ceq 'complete' -and
+        (@($noPasswordSearch.Result.payload.matches | ForEach-Object { [string]$_.name }) -join '|') -ceq '-notes draft.txt|notes.txt') ('a session finds files in backups without a password: ' + [string]$noPasswordSearch.Result.error)
+    $noPasswordFindCalls = @(Get-Content -LiteralPath $noPasswordFindFixture.Log | Where-Object { $_ -match '(^|\t)find(\t|$)' })
+    Assert-True ($noPasswordFindCalls.Count -eq 1 -and $noPasswordFindCalls[0] -match '(^|\t)--insecure-no-password(\t|$)' -and
+        $noPasswordFindCalls[0] -notmatch 'password-command') 'the search of backups without a password runs Restic find with the flag only'
+    Send-SessionTestMessage $broker ([ordered]@{ type = 'close' })
+    [void](Read-SessionTestMessage $broker 30000)
+    $ended = Wait-SessionBrokerEnd $broker
+    Assert-True ($ended.EndedOnItsOwn -and [string]$ended.Record.close_reason -ceq 'client_closed') 'the session for backups without a password ends when the dashboard closes it'
     # A single request can never ask for a search.
     $singleFind = Invoke-Manager -Fixture $findFixture -Action find_files
     Assert-True ($singleFind.ExitCode -ne 0 -and $null -eq $singleFind.Result) 'a single request asking for a search is refused'
@@ -1322,6 +1521,7 @@ namespace RestoreManagerTests {
         $env:FAKE_RESTIC_LOG = $interopFixture.Log
         $env:FAKE_PLAN_ID = $planId
         $env:FAKE_SOURCE = $interopFixture.Source
+        $env:FAKE_REPOSITORY_ACCESS = $interopFixture.FakeAccess
         Remove-Item Env:FAKE_LEGACY_SNAPSHOT -ErrorAction SilentlyContinue
         Write-FakeResticControl
         $profileType.GetMethod('UseFolderRootsForTesting', $memberFlags).Invoke($null, [object[]]@([string]$interopFixture.Root)) | Out-Null
@@ -1396,12 +1596,13 @@ namespace RestoreManagerTests {
         journal_and_lock_gates = 'passed'; orphan_recovery_and_manifest_parity = 'passed'; no_repository_or_source_mutation = 'passed'
         restore_session = 'passed'; session_framing_and_schema = 'passed'; session_client_identity = 'passed'
         session_single_restore = 'passed'; session_timeouts = 'passed'; session_pipe_squatting = 'passed'; session_file_search = 'passed'
+        backups_without_a_password = 'passed'; backups_with_a_password_unchanged = 'passed'
         dashboard_session_interop = $interopCheck
         production_untouched = $productionCheck
     } | ConvertTo-Json -Depth 3
 }
 finally {
-    foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_RESTORE_NOTHING','FAKE_LEGACY_SNAPSHOT','FAKE_FIND_SLEEP_MS')) {
+    foreach ($name in @('FAKE_RESTIC_LOG','FAKE_PLAN_ID','FAKE_SOURCE','FAKE_RESTORE_PARTIAL','FAKE_RESTORE_NOTHING','FAKE_LEGACY_SNAPSHOT','FAKE_FIND_SLEEP_MS','FAKE_REPOSITORY_ACCESS')) {
         Remove-Item "Env:$name" -ErrorAction SilentlyContinue
     }
     foreach ($name in $plantedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $null, 'Process') }

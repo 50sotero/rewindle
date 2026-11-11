@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -257,6 +258,230 @@ class AccessProbeTests(unittest.TestCase):
             self.assertFalse(options["shell"])
             self.assertFalse([name for name in options["env"] if name.upper().startswith("RESTIC_")])
             self.assertIsNone(restic_access_result(command, options["env"], "no_password"))
+
+
+GET_REPOSITORY_ACCESS = """function Get-RepositoryAccess {
+    # How Restic opens these backups (backup-config.json "repository_access"): 'password' (also when the key is absent,
+    # as in every configuration written before the choice existed) or 'no_password'. Anything else is refused.
+    param([Parameter(Mandatory = $true)] [object]$Configuration)
+    $property = $Configuration.PSObject.Properties['repository_access']
+    if ($null -eq $property) { return 'password' }
+    $value = $property.Value
+    if ($value -isnot [string] -or $value -cnotin @('password', 'no_password')) {
+        throw 'unsupported repository_access'
+    }
+    return [string]$value
+}
+"""
+
+GET_RECORDED_REPOSITORY_ACCESS = """function Get-RecordedRepositoryAccess {
+    # The access a configuration or state record names: 'password' (also when the key is absent), 'no_password', or
+    # $null when it names anything else. Callers treat $null as "can't tell".
+    param([object]$Record)
+    if ($null -eq $Record) { return $null }
+    $property = $Record.PSObject.Properties['repository_access']
+    if ($null -eq $property) { return 'password' }
+    $value = $property.Value
+    if ($value -is [string] -and $value -cin @('password', 'no_password')) { return [string]$value }
+    return $null
+}
+"""
+
+# Every PowerShell script that opens backups reads the mode with the one throwing reader; the installer and the
+# uninstaller, which must never stop on a record they can't use, with the non-failing one.
+THROWING_READERS = (
+    "src/Manage-Repository.ps1",
+    "src/Manage-Restore.ps1",
+    "src/Manage-Sources.ps1",
+    "src/verify_my_drive_cloud_repository.ps1",
+)
+RECORD_READERS = (
+    "installer/Install-ResticBackuper.ps1",
+    "installer/Uninstall-ResticBackuper.ps1",
+)
+
+# Files that give Restic a password and need not know the mode, with the reason. Every other file under src\ or
+# installer\ that mentions a password source must also handle backups without a password.
+PASSWORD_SOURCE_ALLOWED = {
+    "src/secret_store.py": "the DPAPI helper itself; it starts no Restic process",
+    "src/dashboard/RunDetailsWindow.cs": "a log filter that hides such words; it starts no Restic process",
+    "src/sync_repository_to_google_drive.ps1": "retired, never shipped (build\\Build-Release.ps1 leaves it out)",
+}
+
+
+# What a file that gives Restic a password must contain to show it knows backups without one: the mode's value or
+# Restic's flag, a reader of the mode, or the shared refusal (recovery_health.refuse_when_backups_have_no_key).
+HANDLES_BACKUPS_WITHOUT_A_PASSWORD = (
+    "no_password",
+    "insecure-no-password",
+    "NO_PASSWORD_FLAG",
+    "repository_access(",
+    "refuse_when_backups_have_no_key(",
+    "Get-RepositoryAccess",
+    "Get-RecordedRepositoryAccess",
+)
+
+
+def text_of(relative: str) -> str:
+    return (PROJECT / relative).read_text(encoding="utf-8")
+
+
+def windows_powershell() -> str:
+    system = os.environ.get("SystemRoot", r"C:\Windows")
+    return os.path.join(system, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+
+
+def run_windows_powershell(script: str) -> subprocess.CompletedProcess:
+    """Run a script in Windows PowerShell 5.1 (as the managers run), with its own module path and no window."""
+    environment = dict(os.environ)
+    system = os.environ.get("SystemRoot", r"C:\Windows")
+    environment["PSModulePath"] = os.path.join(system, "System32", "WindowsPowerShell", "v1.0", "Modules")
+    with tempfile.TemporaryDirectory(prefix="repository-access-ps-") as folder:
+        path = Path(folder) / "probe.ps1"
+        path.write_text(script, encoding="utf-8-sig")
+        return subprocess.run(
+            [windows_powershell(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(path)],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+            env=environment,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
+
+class CopiesOfTheRuleTests(unittest.TestCase):
+    """Every copy of the rule, in every language, accepts the same two values and defaults the same way."""
+
+    def test_powershell_copies_are_the_design_text(self) -> None:
+        for relative in THROWING_READERS:
+            with self.subTest(file=relative):
+                text = text_of(relative)
+                self.assertEqual(1, text.count("function Get-RepositoryAccess {"))
+                self.assertIn(GET_REPOSITORY_ACCESS, text)
+        for relative in RECORD_READERS:
+            with self.subTest(file=relative):
+                text = text_of(relative)
+                self.assertEqual(1, text.count("function Get-RecordedRepositoryAccess {"))
+                self.assertIn(GET_RECORDED_REPOSITORY_ACCESS, text)
+
+    @unittest.skipUnless(os.name == "nt", "needs Windows PowerShell")
+    def test_powershell_readers_behave_like_the_python_rule(self) -> None:
+        cases = [
+            ("absent", "[pscustomobject]@{}"),
+            ("password", "[pscustomobject]@{ repository_access = 'password' }"),
+            ("no_password", "[pscustomobject]@{ repository_access = 'no_password' }"),
+            ("capitalised", "[pscustomobject]@{ repository_access = 'Password' }"),
+            ("upper-case", "[pscustomobject]@{ repository_access = 'NO_PASSWORD' }"),
+            ("empty", "[pscustomobject]@{ repository_access = '' }"),
+            ("null", "[pscustomobject]@{ repository_access = $null }"),
+            ("number", "[pscustomobject]@{ repository_access = 5 }"),
+            ("json-absent", "('{\"schema_version\": 1}' | ConvertFrom-Json)"),
+            ("json-no_password", "('{\"repository_access\": \"no_password\"}' | ConvertFrom-Json)"),
+        ]
+        # PowerShell's [ordered] keys ignore case, so no two labels may differ only in case.
+        self.assertEqual(len(cases), len({name.lower() for name, _ in cases}))
+        lines = [
+            "Set-StrictMode -Version Latest",
+            "$ErrorActionPreference = 'Stop'",
+            GET_REPOSITORY_ACCESS,
+            GET_RECORDED_REPOSITORY_ACCESS,
+            "$results = [ordered]@{}",
+        ]
+        for name, expression in cases:
+            lines.append(
+                f"$record = {expression}\n"
+                f"try {{ $strict = Get-RepositoryAccess -Configuration $record }} catch {{ $strict = 'refused: ' + $_.Exception.Message }}\n"
+                f"$recorded = Get-RecordedRepositoryAccess -Record $record\n"
+                f"$results['{name}'] = [ordered]@{{ strict = $strict; recorded = $recorded }}"
+            )
+        lines.append("$results['no-record'] = [ordered]@{ strict = $null; recorded = (Get-RecordedRepositoryAccess -Record $null) }")
+        lines.append("$results | ConvertTo-Json -Depth 3 -Compress")
+        result = run_windows_powershell("\n".join(lines) + "\n")
+        self.assertEqual(0, result.returncode, result.stderr)
+        observed = json.loads(result.stdout)
+        refused = "refused: unsupported repository_access"
+        expected = {
+            "absent": ("password", "password"),
+            "password": ("password", "password"),
+            "no_password": ("no_password", "no_password"),
+            "capitalised": (refused, None),
+            "upper-case": (refused, None),
+            "empty": (refused, None),
+            "null": (refused, None),
+            "number": (refused, None),
+            "json-absent": ("password", "password"),
+            "json-no_password": ("no_password", "no_password"),
+        }
+        for name, (strict, recorded) in expected.items():
+            with self.subTest(case=name):
+                self.assertEqual(strict, observed[name]["strict"])
+                self.assertEqual(recorded, observed[name]["recorded"])
+        self.assertIsNone(observed["no-record"]["recorded"])
+        # And the Python rule agrees on every value both can express.
+        for value, outcome in (("password", "password"), ("no_password", "no_password")):
+            self.assertEqual(outcome, restic_common.repository_access({"repository_access": value}))
+        for value in ("Password", "NO_PASSWORD", "", None, 5):
+            with self.assertRaises(ValueError):
+                restic_common.repository_access({"repository_access": value})
+
+    def test_python_copies_match_the_engine(self) -> None:
+        import recovery_health
+        import refresh_recovery_tools
+        import restore
+
+        for module in (restore, refresh_recovery_tools):
+            with self.subTest(module=module.__name__):
+                self.assertEqual(restic_common.REPOSITORY_ACCESS_VALUES, tuple(module.REPOSITORY_ACCESS_VALUES))
+                self.assertEqual(restic_common.DEFAULT_REPOSITORY_ACCESS, module.DEFAULT_REPOSITORY_ACCESS)
+                for value in (None, "password", "no_password", "Password", "", 5, "none"):
+                    config = {} if value is None else {"repository_access": value}
+                    try:
+                        expected = restic_common.repository_access(config)
+                    except ValueError as error:
+                        with self.assertRaises(ValueError) as caught:
+                            module.repository_access(config)
+                        self.assertEqual(str(error), str(caught.exception))
+                    else:
+                        self.assertEqual(expected, module.repository_access(config))
+        self.assertEqual(restic_common.NO_PASSWORD_FLAG, restore.NO_PASSWORD_FLAG)
+        # recovery_health reads the mode through the engine and never builds a reveal for backups without a password.
+        self.assertIs(restic_common.repository_access, recovery_health.repository_access)
+        with self.assertRaises(RuntimeError):
+            recovery_health.password_command({"repository_access": "no_password"}, SOURCE)
+
+
+class PasswordSourceSweepTests(unittest.TestCase):
+    """Search the tree, don't trust a list: a file that gives Restic a password must also know backups without one."""
+
+    def test_every_file_with_a_password_source_handles_backups_without_one(self) -> None:
+        found = []
+        for root in ("src", "installer"):
+            for path in sorted((PROJECT / root).rglob("*")):
+                if not path.is_file() or path.suffix.lower() not in (".py", ".ps1", ".cs", ".ts", ".tsx", ".cmd"):
+                    continue
+                if any(part in ("node_modules", "dist", "obj", "__pycache__", "vendor") for part in path.parts):
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+                if "--password-command" in text or "RESTIC_PASSWORD" in text or "--password-file" in text:
+                    found.append(path.relative_to(PROJECT).as_posix())
+        self.assertTrue(found)
+        for relative in found:
+            with self.subTest(file=relative):
+                if relative in PASSWORD_SOURCE_ALLOWED:
+                    continue
+                text = text_of(relative)
+                self.assertTrue(
+                    any(marker in text for marker in HANDLES_BACKUPS_WITHOUT_A_PASSWORD),
+                    f"{relative} gives Restic a password but never mentions backups without one",
+                )
+        self.assertNotIn(
+            "sync_repository_to_google_drive.ps1",
+            (PROJECT / "build" / "Build-Release.ps1").read_text(encoding="utf-8"),
+            "the retired script is allowed only because it is not shipped",
+        )
 
 
 class FakeContractTests(unittest.TestCase):

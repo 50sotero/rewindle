@@ -450,7 +450,7 @@ namespace ResticBackuper.Dashboard
             root.Children.Add(pageHost);
 
             footerDetails = new TextBlock();
-            footerDetails.Text = "Encrypted locally  •  Protected changes require Windows approval";
+            footerDetails.Text = "Stored on this PC  •  Protected changes require Windows approval";
             footerDetails.Foreground = themeResolution.Palette.FooterText;
             footerDetails.FontSize = 12;
             footerDetails.FontWeight = FontWeights.SemiBold;
@@ -1209,7 +1209,7 @@ namespace ResticBackuper.Dashboard
             title.Foreground = PrimaryText;
             copy.Children.Add(title);
             TextBlock hint = new TextBlock();
-            hint.Text = "Where the encrypted Restic repository is stored.";
+            hint.Text = "Where your backups are stored.";
             hint.FontSize = 12;
             hint.Foreground = MutedText;
             hint.Margin = new Thickness(0, 3, 18, 0);

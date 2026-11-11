@@ -16,8 +16,11 @@ export function Done({ wizard, recovery }: { wizard: Wizard; recovery: RecoveryS
   const started = choices.startBackup && firstBackup?.state === 'completed' && !result?.warnings.some(warning => warning.code === 'first_backup_not_started');
   const noAutostart = !!result?.warnings.some(warning => warning.code === 'dashboard_autostart_failed');
   // "Skip for now" (or a tick without a saved copy) leaves the key only on this PC; this page is the last place to say so.
+  // Only backups that have a key can have one left unsaved: without a password there is no key, the Recovery page was never shown, and
+  // an alarm about a key that doesn't exist would have no next step.
   const keyPath = result?.recoveryKeyPath ?? null;
-  const keyUnsaved = !recovery.savedTo && !recovery.acknowledged;
+  const keyUnsaved = wizard.recoveryNeeded && !!keyPath && !recovery.savedTo && !recovery.acknowledged;
+  const noPassword = wizard.access === 'no_password';
   const total = selectedTotal(choices, wizard.sizes);
   const when = `${nextRunDay(choices.schedule)} at ${formatTime(choices.schedule, locale)}`;
   const reduced = wizard.theme?.reducedMotion;
@@ -39,12 +42,15 @@ export function Done({ wizard, recovery }: { wizard: Wizard; recovery: RecoveryS
           <li>
             <span className="point-icon is-warning"><KeyRound size={18} aria-hidden="true" /></span>
             <span>
-              <strong>Your recovery key is still only on this PC.</strong> Copy {keyPath ? <span className="inline-path">{keyPath}</span> : 'it'} to a USB drive or a password manager soon.
+              <strong>Your recovery key is still only on this PC.</strong> Copy <span className="inline-path">{keyPath}</span> to a USB drive or a password manager soon.
               {' '}Without it, your backups can’t be opened if this PC is lost.
-              {keyPath && <>{' '}<button type="button" className="text-link" onClick={() => { setKeyError(null); wizard.request('showRecoveryKey').catch(error => setKeyError(messageOf(error))); }}>Show in folder</button></>}
+              {' '}<button type="button" className="text-link" onClick={() => { setKeyError(null); wizard.request('showRecoveryKey').catch(error => setKeyError(messageOf(error))); }}>Show in folder</button>
               {keyError && <span role="alert"> {keyError}</span>}
             </span>
           </li>
+        )}
+        {noPassword && (
+          <li className="is-quiet"><span>Your backups have no password, so there is no recovery key to keep.</span></li>
         )}
         <li>
           <span className="point-icon">{started ? <PlayCircle size={18} aria-hidden="true" /> : <CalendarClock size={18} aria-hidden="true" />}</span>

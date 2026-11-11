@@ -4,6 +4,10 @@ The report intentionally contains no password material.  It independently
 authenticates with the active CurrentUser DPAPI envelope and, when available,
 the offline recovery key.  Restic is invoked only with read-only commands and
 ``--no-lock``/``--no-cache``.
+
+Backups set up without a password (``repository_access`` ``no_password``) have
+no DPAPI envelope and no recovery key: they are opened with Restic's
+``--insecure-no-password`` flag alone, and the two key checks are left out.
 """
 
 from __future__ import annotations
@@ -26,7 +30,10 @@ from refresh_recovery_tools import (
 )
 from restic_common import (
     DRIVE_FIXED,
+    NO_PASSWORD_FLAG,
     canonical_windows_path,
+    probe_repository_access,
+    repository_access,
     restic_child_environment,
     validate_repository_volume,
     windows_volume_metadata,
@@ -43,6 +50,27 @@ DATA_CHECK_STATE_NAME = "data-check.json"
 MAX_DATA_CHECK_BYTES = 64 * 1024
 # The check runs about once a week, so two weeks allows one missed week.
 DATA_CHECK_FRESH_DAYS = 14
+# Restic's exit code for "wrong password or no key found" (also what a backup with a password answers when it is
+# opened with --insecure-no-password, and what one without answers once a password key was added).
+RESTIC_NO_MATCHING_KEY_EXIT = 12
+# The whole readiness inspection has one minute, so the follow-up look at how the backups open gets a short limit.
+ACCESS_FOLLOW_UP_TIMEOUT_SECONDS = 20
+
+# What the checks say for backups without a password. Shown as written (never run through a filter that hides
+# the word "password"), but free of every word a filter would hide.
+NO_PASSWORD_OPENS_SUMMARY = "Rewindle can open your backups."
+NO_PASSWORD_FAILS_SUMMARY = (
+    "Rewindle couldn't open your backups. Check that the backup drive or Google Drive folder is connected, "
+    "then run the checks again."
+)
+NO_PASSWORD_NOW_ASKS_DETAIL = (
+    "These backups now ask for a password, usually because one was added outside Rewindle. "
+    "See Switching an existing backup in Rewindle's guide."
+)
+PASSWORD_NOW_OPENS_FREELY_DETAIL = (
+    "These backups now open without a password, usually because it was removed outside Rewindle. "
+    "See Switching an existing backup in Rewindle's guide."
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -132,6 +160,10 @@ def command_result(
 
 
 def password_command(config: dict[str, Any], script_directory: Path) -> str:
+    if repository_access(config) == "no_password":
+        # Restic runs a password command before it refuses one next to --insecure-no-password, so for these backups none
+        # is built: an older install's DPAPI file at secret_file is never looked at.
+        raise RuntimeError("This backup opens without a key, so no key reveal is built for it.")
     python = Path(str(config.get("python_executable", "")))
     secret = Path(str(config.get("secret_file", "")))
     helper = script_directory / "secret_store.py"
@@ -150,6 +182,31 @@ def password_command(config: dict[str, Any], script_directory: Path) -> str:
             str(secret).replace("\\", "/"),
         ]
     )
+
+
+def credential_arguments(config: dict[str, Any], script_directory: Path) -> list[str]:
+    """What lets Restic open these backups as Rewindle itself does: the flag, or the DPAPI password command."""
+    if repository_access(config) == "no_password":
+        return [NO_PASSWORD_FLAG]
+    return ["--password-command", password_command(config, script_directory)]
+
+
+def refuse_when_backups_have_no_key(config_path: Path, message: str) -> None:
+    """Raise RuntimeError(message) when the configuration at config_path says the backups open without a key.
+
+    For the tools that repair or rotate keys: it reads the configuration file only, so a backup without a key is
+    refused before any key, secret or journal is read.
+    """
+    if repository_access(load_object(config_path)) == "no_password":
+        raise RuntimeError(message)
+
+
+class RepositoryAuthenticationFailed(RuntimeError):
+    """Restic could not open the backups; exit_code is what Restic answered."""
+
+    def __init__(self, exit_code: int) -> None:
+        super().__init__(f"Repository authentication failed with Restic exit code {exit_code}.")
+        self.exit_code = exit_code
 
 
 def parse_repository_config(stdout: str) -> tuple[str, int]:
@@ -192,7 +249,7 @@ def authenticate(
         runner=runner,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"Repository authentication failed with Restic exit code {result.returncode}.")
+        raise RepositoryAuthenticationFailed(result.returncode)
     return parse_repository_config(result.stdout)
 
 
@@ -232,6 +289,27 @@ def lock_count(
     raise RuntimeError("Restic returned an unsupported lock response.")
 
 
+def backups_now_open_without_password(
+    restic: Path,
+    repository: Path,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+) -> bool:
+    """True when backups set up with a password open with no password at all (a read-only look, run only after Restic
+    refused the saved password with exit 12). Any other answer, or no answer in time, is False."""
+    try:
+        return (
+            probe_repository_access(
+                restic,
+                repository,
+                timeout_seconds=ACCESS_FOLLOW_UP_TIMEOUT_SECONDS,
+                runner=runner,
+            )
+            == "no_password"
+        )
+    except Exception:
+        return False
+
+
 def add_check(
     checks: list[dict[str, Any]],
     check_id: str,
@@ -258,6 +336,9 @@ def inspect(
 ) -> dict[str, Any]:
     config_path = config_path.resolve(strict=True)
     config = load_object(config_path)
+    # How Restic opens these backups. Read first, so an unsupported value is named here and nowhere else.
+    access = repository_access(config)
+    no_password = access == "no_password"
     storage = validate_storage_config(config, "protected")
     script_directory = config_path.parent
     repository = Path(str(config.get("repository", ""))).resolve(strict=True)
@@ -280,6 +361,7 @@ def inspect(
         "config_generation": config.get("config_generation"),
         "repository": str(repository),
         "repository_storage_mode": storage["mode"],
+        "repository_access": access,
         "repository_id": None,
         "repository_format": None,
         "free_bytes": None,
@@ -366,51 +448,78 @@ def inspect(
                 "recovery_key_file",
                 "exclude_file",
                 "canary_file",
+                # Compared as the mode each one names (a missing key means a password), below.
+                "repository_access",
             }
             drift = sorted(
                 name for name in shared_fields if recovery["config"].get(name) != config.get(name)
             )
+            if repository_access(recovery["config"]) != access:
+                drift = sorted([*drift, "repository_access"])
             if drift:
                 raise RuntimeError("Recovery configuration drift: " + ", ".join(drift))
         add_check(checks, "recovery_bundle", "pass", "Your recovery information is complete and matches your backup settings.")
     except Exception as error:
         add_check(checks, "recovery_bundle", "fail", "Your recovery information needs repair.", str(error))
 
-    dpapi_auth: list[str] | None = None
+    active_auth: list[str] | None = None
     try:
-        dpapi_auth = ["--password-command", password_command(config, script_directory)]
+        active_auth = credential_arguments(config, script_directory)
         repository_id, repository_format = authenticate(
-            restic, repository, dpapi_auth, runner=runner
+            restic, repository, active_auth, runner=runner
         )
         report["repository_id"] = repository_id
         report["repository_format"] = repository_format
-        add_check(checks, "active_credential", "pass", "Rewindle's saved password for this Windows account opens your backups.")
+        add_check(
+            checks,
+            "active_credential",
+            "pass",
+            NO_PASSWORD_OPENS_SUMMARY
+            if no_password
+            else "Rewindle's saved password for this Windows account opens your backups.",
+        )
     except Exception as error:
-        add_check(checks, "active_credential", "fail", "Rewindle's saved password for this Windows account can't open your backups, so scheduled backups would fail.", str(error))
+        detail = str(error)
+        if getattr(error, "exit_code", None) == RESTIC_NO_MATCHING_KEY_EXIT:
+            if no_password:
+                detail = NO_PASSWORD_NOW_ASKS_DETAIL
+            elif backups_now_open_without_password(restic, repository, runner):
+                detail = PASSWORD_NOW_OPENS_FREELY_DETAIL
+        add_check(
+            checks,
+            "active_credential",
+            "fail",
+            NO_PASSWORD_FAILS_SUMMARY
+            if no_password
+            else "Rewindle's saved password for this Windows account can't open your backups, so scheduled backups would fail.",
+            detail,
+        )
 
-    try:
-        acl_verifier(recovery_key)
-        password = parse_recovery_key(recovery_key, repository)
-        environment = restic_child_environment()
-        environment["RESTIC_PASSWORD"] = password
+    if not no_password:
+        # Backups without a password have no recovery key to check.
         try:
-            recovery_id, recovery_format = authenticate(
-                restic,
-                repository,
-                [],
-                environment=environment,
-                runner=runner,
-            )
-        finally:
-            environment.pop("RESTIC_PASSWORD", None)
-            password = ""
-        if report["repository_id"] is not None and recovery_id != report["repository_id"]:
-            raise RuntimeError("The recovery key authenticated to an unexpected repository ID.")
-        report["repository_id"] = recovery_id
-        report["repository_format"] = recovery_format
-        add_check(checks, "recovery_key", "pass", "Your recovery key opens your backups on its own.")
-    except Exception as error:
-        add_check(checks, "recovery_key", "fail", "Your recovery key is missing, unsafe to use, or doesn't open your backups.", str(error))
+            acl_verifier(recovery_key)
+            password = parse_recovery_key(recovery_key, repository)
+            environment = restic_child_environment()
+            environment["RESTIC_PASSWORD"] = password
+            try:
+                recovery_id, recovery_format = authenticate(
+                    restic,
+                    repository,
+                    [],
+                    environment=environment,
+                    runner=runner,
+                )
+            finally:
+                environment.pop("RESTIC_PASSWORD", None)
+                password = ""
+            if report["repository_id"] is not None and recovery_id != report["repository_id"]:
+                raise RuntimeError("The recovery key authenticated to an unexpected repository ID.")
+            report["repository_id"] = recovery_id
+            report["repository_format"] = recovery_format
+            add_check(checks, "recovery_key", "pass", "Your recovery key opens your backups on its own.")
+        except Exception as error:
+            add_check(checks, "recovery_key", "fail", "Your recovery key is missing, unsafe to use, or doesn't open your backups.", str(error))
 
     try:
         usage = shutil.disk_usage(repository)
@@ -425,10 +534,10 @@ def inspect(
     except Exception as error:
         add_check(checks, "capacity", "fail", "Rewindle couldn't check the free space on the drive holding your backups.", str(error))
 
-    if dpapi_auth is not None:
+    if active_auth is not None:
         try:
             report["active_lock_count"] = lock_count(
-                restic, repository, dpapi_auth, runner=runner
+                restic, repository, active_auth, runner=runner
             )
             count = report["active_lock_count"]
             add_check(
@@ -539,60 +648,65 @@ def inspect(
             "No unusual changes are waiting for your confirmation.",
         )
 
-    rotation_path = state_directory / "key-rotation-latest.json"
-    if rotation_path.exists() or rotation_path.is_symlink():
-        try:
-            acl_verifier(rotation_path)
-            rotation = load_object(rotation_path)
-            if (
-                rotation.get("schema") != "ResticBackuper.KeyRotation.v1"
-                or rotation.get("state") != "rotated"
-                or rotation.get("plan_id") != config.get("plan_id")
-                or rotation.get("config_generation") != config.get("config_generation")
-                or rotation.get("repository_id") != report.get("repository_id")
-                or rotation.get("previous_repository_key_retained") is not True
-            ):
-                raise RuntimeError("The latest key-rotation evidence does not bind this plan.")
-            previous = Path(str(rotation.get("previous_recovery_file", ""))).resolve(strict=True)
-            configured_recovery = recovery_key.resolve(strict=True)
-            if previous.parent != configured_recovery.parent or ".previous-" not in previous.name:
-                raise RuntimeError("The previous recovery-key path is outside the configured key directory.")
-            acl_verifier(previous)
-            previous_password = parse_recovery_key(previous, repository)
-            environment = restic_child_environment()
-            environment["RESTIC_PASSWORD"] = previous_password
+    # Backups without a password have no keys to rotate: nothing to check here.
+    if not no_password:
+        rotation_path = state_directory / "key-rotation-latest.json"
+        if rotation_path.exists() or rotation_path.is_symlink():
             try:
-                previous_id, previous_format = authenticate(
-                    restic, repository, [], environment=environment, runner=runner
+                acl_verifier(rotation_path)
+                rotation = load_object(rotation_path)
+                if (
+                    rotation.get("schema") != "ResticBackuper.KeyRotation.v1"
+                    or rotation.get("state") != "rotated"
+                    or rotation.get("plan_id") != config.get("plan_id")
+                    or rotation.get("config_generation") != config.get("config_generation")
+                    or rotation.get("repository_id") != report.get("repository_id")
+                    or rotation.get("previous_repository_key_retained") is not True
+                ):
+                    raise RuntimeError("The latest key-rotation evidence does not bind this plan.")
+                previous = Path(str(rotation.get("previous_recovery_file", ""))).resolve(strict=True)
+                configured_recovery = recovery_key.resolve(strict=True)
+                if previous.parent != configured_recovery.parent or ".previous-" not in previous.name:
+                    raise RuntimeError("The previous recovery-key path is outside the configured key directory.")
+                acl_verifier(previous)
+                previous_password = parse_recovery_key(previous, repository)
+                environment = restic_child_environment()
+                environment["RESTIC_PASSWORD"] = previous_password
+                try:
+                    previous_id, previous_format = authenticate(
+                        restic, repository, [], environment=environment, runner=runner
+                    )
+                finally:
+                    environment.pop("RESTIC_PASSWORD", None)
+                    previous_password = ""
+                if previous_id != report.get("repository_id") or previous_format != report.get("repository_format"):
+                    raise RuntimeError("The retained previous key authenticates another repository.")
+                add_check(
+                    checks,
+                    "rotation_rollback_key",
+                    "pass",
+                    "The recovery key kept from before your last key change still opens your backups.",
                 )
-            finally:
-                environment.pop("RESTIC_PASSWORD", None)
-                previous_password = ""
-            if previous_id != report.get("repository_id") or previous_format != report.get("repository_format"):
-                raise RuntimeError("The retained previous key authenticates another repository.")
+            except Exception as error:
+                add_check(
+                    checks,
+                    "rotation_rollback_key",
+                    "fail",
+                    "The recovery key kept from before your last key change didn't pass its check.",
+                    str(error),
+                )
+        else:
             add_check(
                 checks,
                 "rotation_rollback_key",
                 "pass",
-                "The recovery key kept from before your last key change still opens your backups.",
+                "You haven't changed your keys, so your original recovery key is still the one in use.",
             )
-        except Exception as error:
-            add_check(
-                checks,
-                "rotation_rollback_key",
-                "fail",
-                "The recovery key kept from before your last key change didn't pass its check.",
-                str(error),
-            )
-    else:
-        add_check(
-            checks,
-            "rotation_rollback_key",
-            "pass",
-            "You haven't changed your keys, so your original recovery key is still the one in use.",
-        )
 
     history_path = state_directory / "restore-history.json"
+    # The restore drill's evidence names where its credential came from: the recovery key, or "none" for backups
+    # that open without one.
+    drill_credential_source = "none" if no_password else "recovery_key"
     try:
         if not history_path.exists():
             add_check(
@@ -600,7 +714,9 @@ def inspect(
                 "restore_drill",
                 "warn",
                 "You haven't run a restore drill yet.",
-                "Choose Run restore drill to restore a small sample of your files with your recovery key and check it.",
+                "Choose Run restore drill to restore a small sample of your files and check it."
+                if no_password
+                else "Choose Run restore drill to restore a small sample of your files with your recovery key and check it.",
             )
             history = None
         else:
@@ -615,7 +731,7 @@ def inspect(
                 for item in entries
                 if isinstance(item, dict)
                 and item.get("kind") == "recovery_key_representative_drill"
-                and item.get("credential_source") == "recovery_key"
+                and item.get("credential_source") == drill_credential_source
                 and item.get("plan_id") == config.get("plan_id")
                 and item.get("config_generation") == config.get("config_generation")
                 and item.get("snapshot_generation") == config.get("config_generation")
@@ -641,14 +757,18 @@ def inspect(
                     checks,
                     "restore_drill",
                     "pass",
-                    "A restore drill with your recovery key (the restore test file plus a small sample of your files) passed.",
+                    "A restore drill (the restore test file plus a small sample of your files) passed."
+                    if no_password
+                    else "A restore drill with your recovery key (the restore test file plus a small sample of your files) passed.",
                 )
             else:
                 add_check(
                     checks,
                     "restore_drill",
                     "warn",
-                    "Run the restore drill to prove your recovery key can restore your files.",
+                    "Run the restore drill to prove Rewindle can restore your files."
+                    if no_password
+                    else "Run the restore drill to prove your recovery key can restore your files.",
                 )
     except Exception as error:
         add_check(checks, "restore_drill", "warn", "Rewindle couldn't read the record of past restore drills.", str(error))

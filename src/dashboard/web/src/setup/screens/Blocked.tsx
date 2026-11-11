@@ -1,5 +1,5 @@
 import { ExternalLink, Trash2, WifiOff } from 'lucide-react';
-import { issuesFor, keptEntriesOf, type RemovedParts } from '../contract';
+import { issuesFor, keptEntriesOf, keptWords, type RemovedParts } from '../contract';
 import { Callout, IssueList } from '../ui';
 import type { Wizard } from '../useWizard';
 
@@ -61,6 +61,8 @@ export function Uninstalled({ wizard }: { wizard: Wizard }) {
   const kept = result?.kept;
   const keptEntries = keptEntriesOf(result);
   const stoppedReinstall = !!wizard.operation?.reinstall && keptEntries.length > 0;
+  // What was kept depends on the kind of backups the uninstaller reported: without a password there is no recovery key to keep.
+  const noPassword = kept?.repositoryAccess === 'no_password';
   const places = kept ? [
     kept.repository ? { label: 'Your backups', path: kept.repository } : null,
     kept.recoveryKey ? { label: 'Your recovery key', path: kept.recoveryKey } : null,
@@ -71,7 +73,12 @@ export function Uninstalled({ wizard }: { wizard: Wizard }) {
       <div className="blocked-emblem is-neutral"><Trash2 size={26} aria-hidden="true" /></div>
       <ul className="done-facts">
         <li><span>{removedSentence(result?.removed)}</span></li>
-        <li><span><strong>Your backups and recovery key were kept.</strong> Keep the recovery key: you need it to restore anything from those backups.</span></li>
+        <li>
+          <span>
+            <strong>{keptWords(kept?.repositoryAccess, 'were')}.</strong>
+            {noPassword ? ' They have no password, so there is no recovery key to keep.' : ' Keep the recovery key: you need it to restore anything from those backups.'}
+          </span>
+        </li>
         {places.length > 0 && (
           <li><span>{places.map(place => <span key={place.label} className="kept-place"><span>{place.label}</span><span className="inline-path">{place.path}</span></span>)}</span></li>
         )}

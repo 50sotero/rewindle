@@ -12,6 +12,10 @@ export const PROGRESS_SCHEMA = 'Rewindle.InstallProgress.v1';
 
 export type IssueField = 'repository' | 'sources' | 'schedule' | 'storage_mode' | 'environment';
 export type StorageMode = 'local_ntfs' | 'google_drivefs_stream';
+/** How Restic opens a backup: with the password Setup keeps for it (the default, and every backup made before the choice existed), or without one. */
+export type RepositoryAccess = 'password' | 'no_password';
+/** What the installer found at the chosen location: a recorded mode, `unknown` for backups whose mode it checks only when it installs (null: no backups there). */
+export type ExistingRepositoryAccess = RepositoryAccess | 'unknown';
 export type DriveType = 'fixed' | 'removable' | 'network' | 'cdrom' | 'ram' | 'unknown';
 export type KnownFolderKey = 'Desktop' | 'Documents' | 'Pictures' | 'Music' | 'Videos' | 'Downloads' | 'Favorites';
 
@@ -50,8 +54,9 @@ export interface PlanEnvironment {
   /**
    * `keptRepository`: where an earlier installation's backups are, from the records the state folder keeps after an uninstall
    * (null when there are none, or this account can't read them). It is a suggestion: the installer still checks the folder.
+   * `keptRepositoryAccess` is the mode those same records name for it (null whenever `keptRepository` is null, or the record names none).
    */
-  existingInstall: { rewindle: ExistingRewindle | null; legacyPersonalEdition: boolean; keptRepository: string | null };
+  existingInstall: { rewindle: ExistingRewindle | null; legacyPersonalEdition: boolean; keptRepository: string | null; keptRepositoryAccess: RepositoryAccess | null };
   volumes: PlanVolume[];
   drivefs: { detected: boolean; myDriveRoot: string | null };
   knownFolders: KnownFolder[];
@@ -64,6 +69,10 @@ export interface InstallPlan {
   resolved: {
     repository: string | null;
     storageMode: StorageMode;
+    /** The mode the installer would use: null only when it will find out at install time (backups whose mode is not recorded). */
+    repositoryAccess: RepositoryAccess | null;
+    /** What is already at the chosen location: a mode, `unknown`, or null when there are no backups there (the only case the person decides). */
+    existingRepositoryAccess: ExistingRepositoryAccess | null;
     driveFsMyDriveRoot: string | null;
     sources: string[];
     canarySource: string | null;
@@ -76,7 +85,10 @@ export interface InstallPlan {
   environment: PlanEnvironment;
 }
 
-/** What the wizard asks the installer to plan or install with. The host turns it into installer parameters. */
+/**
+ * What the wizard asks the installer to plan or install with. The host turns it into installer parameters. The person's password
+ * choice is deliberately not in here: a plan describes the location only, and the choice goes with the install (accessToSend).
+ */
 export interface PlanInputs {
   repository?: string;
   storageMode?: StorageMode;
@@ -88,6 +100,8 @@ export interface PlanInputs {
 
 export interface InstallChoices extends Required<Pick<PlanInputs, 'repository' | 'storageMode' | 'sources' | 'schedule' | 'vss'>> {
   driveFsMyDriveRoot?: string;
+  /** Only for backups the person is starting (no backups at the location yet); see accessToSend. */
+  repositoryAccess?: RepositoryAccess;
   startBackup: boolean;
 }
 
@@ -111,6 +125,8 @@ export interface InstallResult {
   recoveryKeyReadableByUser: boolean | null;
   dashboardExecutable: string | null;
   version: string | null;
+  /** The mode the backups were made in; null when the installer did not say (older installers, an unreadable value). */
+  repositoryAccess: RepositoryAccess | null;
   /** Non-fatal findings: `dashboard_autostart_failed`, `first_backup_not_started`, `recovery_key_not_readable_by_user`. */
   warnings: { code: string; message: string }[];
   /** After an uninstall: what it deliberately kept, so the person can be told where. */
@@ -128,7 +144,7 @@ const KEPT_ENTRY_WARNINGS = ['shortcut_kept_unexpected_target', 'registration_ke
 export const keptEntriesOf = (result: InstallResult | null | undefined) =>
   (result?.warnings ?? []).filter(warning => KEPT_ENTRY_WARNINGS.includes(warning.code));
 
-export interface KeptPaths { stateRoot: string | null; repository: string | null; recoveryKey: string | null; recoveryTools: string | null }
+export interface KeptPaths { stateRoot: string | null; repository: string | null; recoveryKey: string | null; recoveryTools: string | null; repositoryAccess: RepositoryAccess | null }
 
 export type ProgressLine = { kind: 'phase'; phase: ProgressPhase } | { kind: 'result'; result: InstallResult };
 
@@ -151,6 +167,17 @@ export const INSTALL_PHASES: readonly { id: string; title: string; weight: numbe
   { id: 'verification', title: 'Checking that everything works', weight: 15 },
   { id: 'first_backup', title: 'Starting your first backup', weight: 8 },
 ];
+
+/**
+ * The words for the install phases that read differently when the backups have no password. The installer skips its credential
+ * phase then, and the wizard hides that row (listedPhases); the other two say what actually happens. A literal table of its own so
+ * that INSTALL_PHASES stays the installer's list in the installer's order.
+ */
+export const NO_PASSWORD_PHASE_TITLES: Readonly<Record<string, string>> = {
+  credential: 'Choosing no password',
+  repository: 'Creating the backup location',
+  recovery_key: 'Saving the recovery tools',
+};
 
 /** The uninstaller's phases (section 4 of the contract). The last two may be skipped when there is nothing to remove. */
 export const UNINSTALL_PHASES: readonly { id: string; title: string; weight: number }[] = [
@@ -203,6 +230,12 @@ const countOrNull = (value: unknown): number | null => typeof value === 'number'
 const list = (value: unknown): unknown[] => Array.isArray(value) ? value.slice(0, 256) : [];
 const texts = (value: unknown): string[] => list(value).filter((item): item is string => typeof item === 'string').map(item => item.slice(0, MAX_TEXT));
 const storageMode = (value: unknown): StorageMode => value === 'google_drivefs_stream' ? 'google_drivefs_stream' : 'local_ntfs';
+// Anything but the two known words is "no answer": the page then claims neither a password nor the lack of one.
+const access = (value: unknown): RepositoryAccess | null => value === 'password' || value === 'no_password' ? value : null;
+// What the installer found at the chosen location. A value it never sends is treated as "backups whose mode is not known", the
+// careful reading, never as "no backups there" (which would offer a choice the installer would refuse).
+const existingAccess = (value: unknown): ExistingRepositoryAccess | null =>
+  value === 'password' || value === 'no_password' || value === 'unknown' ? value : value === null || value === undefined ? null : 'unknown';
 const schedule = (value: unknown, fallback: string): string => typeof value === 'string' && SCHEDULE_PATTERN.test(value) ? value : fallback;
 
 export const SCHEDULE_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -266,6 +299,7 @@ export function parsePlan(raw: unknown): InstallPlan {
   const existing = isObject(environment.existing_install) ? environment.existing_install : {};
   const drivefs = isObject(environment.drivefs) ? environment.drivefs : {};
   const errors = issues(plan.errors);
+  const keptRepository = drivePathOrNull(existing.kept_repository);
   return {
     // A plan with errors is never ok, whatever its flag says.
     ok: bool(plan.ok) && errors.length === 0,
@@ -274,6 +308,8 @@ export function parsePlan(raw: unknown): InstallPlan {
     resolved: {
       repository: textOrNull(resolved.repository),
       storageMode: storageMode(resolved.storage_mode),
+      repositoryAccess: access(resolved.repository_access),
+      existingRepositoryAccess: existingAccess(resolved.existing_repository_access),
       driveFsMyDriveRoot: textOrNull(resolved.drivefs_my_drive_root),
       sources: texts(resolved.sources),
       canarySource: textOrNull(resolved.canary_source),
@@ -298,7 +334,8 @@ export function parsePlan(raw: unknown): InstallPlan {
       existingInstall: {
         rewindle: existingRewindle(existing.rewindle),
         legacyPersonalEdition: bool(existing.legacy_personal_edition),
-        keptRepository: drivePathOrNull(existing.kept_repository),
+        keptRepository,
+        keptRepositoryAccess: keptRepository === null ? null : access(existing.kept_repository_access),
       },
       volumes: volumes(environment.volumes),
       drivefs: { detected: bool(drivefs.detected), myDriveRoot: textOrNull(drivefs.my_drive_root) },
@@ -322,9 +359,10 @@ export function parseProgressLine(raw: unknown): ProgressLine | null {
         recoveryKeyReadableByUser: typeof raw.recovery_key_readable_by_user === 'boolean' ? raw.recovery_key_readable_by_user : null,
         dashboardExecutable: textOrNull(raw.dashboard_executable),
         version: textOrNull(raw.version),
+        repositoryAccess: access(raw.repository_access),
         warnings: list(raw.warnings).filter(isObject).map(item => ({ code: text(item.code, 'unknown'), message: text(item.message) })),
         kept: isObject(raw.kept)
-          ? { stateRoot: textOrNull(raw.kept.state_root), repository: textOrNull(raw.kept.repository), recoveryKey: textOrNull(raw.kept.recovery_key), recoveryTools: textOrNull(raw.kept.recovery_tools) }
+          ? { stateRoot: textOrNull(raw.kept.state_root), repository: textOrNull(raw.kept.repository), recoveryKey: textOrNull(raw.kept.recovery_key), recoveryTools: textOrNull(raw.kept.recovery_tools), repositoryAccess: access(raw.kept.repository_access) }
           : null,
         removed: isObject(raw.removed)
           ? {
@@ -363,3 +401,82 @@ export function isUnsupported(plan: InstallPlan): boolean {
   const os = plan.environment.os;
   return !os.supported || !os.x64 || !plan.environment.dotnetFramework48;
 }
+
+// ---- the password choice ---------------------------------------------------------------------------------------------------------
+// Pure functions on the shapes above, kept in this module (which imports nothing) so a test can run them exactly as the wizard does.
+
+// The same folder however it is written: case, slash direction, doubled and trailing backslashes make no difference to Windows.
+const folderKey = (path: string) => path.replace(/\//g, '\\').replace(/\\{2,}/g, '\\').replace(/\\+$/, '').toLowerCase();
+
+/** `plan` when it was made for this backup folder (the installer echoes the folder it resolved), else null. */
+export function planFor(plan: InstallPlan | null, repository: string): InstallPlan | null {
+  const planned = plan === null ? null : plan.resolved.repository;
+  return plan !== null && planned !== null && repository.length > 0 && folderKey(planned) === folderKey(repository) ? plan : null;
+}
+
+/**
+ * What goes to the installer as `-RepositoryAccess` when Install is chosen: the person's own pick, and only for a location the latest
+ * plan found with no backups in it. For backups that are already there the installer uses what it recorded for them, or finds out
+ * itself, so the wizard sends nothing and can never contradict them; a plan for another folder than the one chosen now says nothing
+ * about it either. Never part of a plan request.
+ */
+export function accessToSend(plan: InstallPlan | null, repository: string, pick: RepositoryAccess | null | undefined): RepositoryAccess | undefined {
+  if (pick !== 'password' && pick !== 'no_password') return undefined;
+  const current = planFor(plan, repository);
+  return current !== null && current.resolved.existingRepositoryAccess === null ? pick : undefined;
+}
+
+/** What the Password page shows: the choice, the mode the backups there already have, or a wait. */
+export type PasswordPage =
+  | { kind: 'checking' }
+  | { kind: 'unavailable' }
+  | { kind: 'choice' }
+  | { kind: 'kept'; access: ExistingRepositoryAccess };
+
+/**
+ * The state of the Password page for the folder chosen now. The choice is offered only when the installer's latest answer is for
+ * that folder, is finished, and found no backups in it; with backups there, the page says what they have and offers nothing.
+ * `unavailable` is a plan that will not come for this folder (the installer refused the location, or could not be asked).
+ */
+export function passwordPageFor(plan: InstallPlan | null, repository: string, checking: boolean, failed: boolean): PasswordPage {
+  if (checking) return { kind: 'checking' };
+  const current = planFor(plan, repository);
+  if (current === null) {
+    const refused = plan !== null && plan.errors.some(issue => issue.field === 'repository' || issue.field === 'storage_mode');
+    return failed || refused ? { kind: 'unavailable' } : { kind: 'checking' };
+  }
+  const existing = current.resolved.existingRepositoryAccess;
+  return existing === null ? { kind: 'choice' } : { kind: 'kept', access: existing };
+}
+
+/**
+ * The mode the backups will have, as far as the page can tell before the installer says: what is recorded for backups already at the
+ * location, else the person's pick; null for backups whose mode the installer only finds out when it installs.
+ */
+export function plannedAccess(plan: InstallPlan | null, repository: string, pick: RepositoryAccess | null | undefined): RepositoryAccess | null {
+  const current = planFor(plan, repository);
+  if (current !== null) {
+    const existing = current.resolved.existingRepositoryAccess;
+    if (existing === 'unknown') return null;
+    if (existing !== null) return existing;
+  }
+  return pick === 'password' || pick === 'no_password' ? pick : null;
+}
+
+/**
+ * The mode an install has, or is going to have: the installer's result when it names one, else what its credential step did (it is
+ * skipped only for backups without a password, and done for backups with one), else what was chosen or recorded (null when unknown).
+ */
+export function installAccess(result: Pick<InstallResult, 'repositoryAccess'> | null | undefined, credential: PhaseState | null | undefined, planned: RepositoryAccess | null): RepositoryAccess | null {
+  if (result && result.repositoryAccess !== null) return result.repositoryAccess;
+  if (credential === 'skipped') return 'no_password';
+  if (credential === 'started' || credential === 'completed') return 'password';
+  return planned;
+}
+
+/** The Recovery page is skipped only when the backups are known to have no password: for anything else (password, absent, unknown) it is shown. */
+export const recoveryNeededFor = (access: RepositoryAccess | null) => access !== 'no_password';
+
+/** What stays on this PC when Rewindle is removed, in words that fit the kind of backups; `tense` is "are" before the removal and "were" after. */
+export const keptWords = (access: RepositoryAccess | null | undefined, tense: 'are' | 'were' = 'are') =>
+  access === 'no_password' ? `Your backups ${tense} kept` : `Your backups and recovery key ${tense} kept`;

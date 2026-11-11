@@ -1,4 +1,4 @@
-import { CalendarClock, Cloud, CircleCheck, FolderCheck, HardDrive, Pencil, PlayCircle } from 'lucide-react';
+import { CalendarClock, Cloud, CircleCheck, FolderCheck, HardDrive, LockKeyhole, LockKeyholeOpen, Pencil, PlayCircle } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Button } from '@/components/atoms/Button';
 import { issuesFor } from '../contract';
@@ -20,7 +20,26 @@ function Row({ icon, title, edit, onEdit, children }: { icon: ReactNode; title: 
   );
 }
 
-/** Step 4: every choice on one page, each with a way back to change it, and the one decision left: the first backup. */
+/**
+ * The Password row's words: what the person picked when they are starting the backups, "the same" when the location already holds
+ * backups (they keep the kind they have, and Edit goes to Location, where another place can be chosen), and a wait or a pointer back
+ * while the installer has no answer for this location.
+ */
+function passwordRow(wizard: Wizard): { icon: ReactNode; value: string; edit: Screen } {
+  const page = wizard.passwordPage;
+  const open = <LockKeyholeOpen size={18} aria-hidden="true" />, closed = <LockKeyhole size={18} aria-hidden="true" />;
+  switch (page.kind) {
+    case 'kept': return { icon: page.access === 'no_password' ? open : closed, value: 'Same as your existing backups', edit: 'location' };
+    case 'unavailable': return { icon: closed, value: 'Fix the backup location first.', edit: 'location' };
+    case 'checking': return { icon: closed, value: 'Checking this location…', edit: 'password' };
+    default:
+      return wizard.choices!.repositoryAccess === 'no_password'
+        ? { icon: open, value: 'No password. Anyone who can open the backup folder can restore your files.', edit: 'password' }
+        : { icon: closed, value: 'Yes. You’ll get a recovery key to keep.', edit: 'password' };
+  }
+}
+
+/** Step 6: every choice on one page, each with a way back to change it, and the one decision left: the first backup. */
 export function Review({ wizard }: { wizard: Wizard }) {
   const choices = wizard.choices!;
   const environment = wizard.base!.environment;
@@ -32,6 +51,7 @@ export function Review({ wizard }: { wizard: Wizard }) {
   const cloud = choices.storageMode === 'google_drivefs_stream';
   const volume = environment.volumes.find(item => samePath(item.root, choices.driveRoot));
   const go = (screen: Screen) => () => wizard.goTo(screen);
+  const password = passwordRow(wizard);
   const all = issuesFor(plan, 'environment', 'sources', 'repository', 'storage_mode', 'schedule');
   // "The backup folder already holds a backup" is good news on a reinstall, so it is said as such rather than drawn as a warning.
   const earlier = all.warnings.some(warning => warning.code === 'repository_exists');
@@ -57,6 +77,9 @@ export function Review({ wizard }: { wizard: Wizard }) {
             {cloud ? 'Google Drive, uploaded by Google Drive for desktop'
               : volume ? `${driveName(volume)} · ${formatBytes(volume.freeBytes, locale)} free` : driveLetter(choices.driveRoot)}
           </p>
+        </Row>
+        <Row icon={password.icon} title="Password" edit="Edit the password choice" onEdit={go(password.edit)}>
+          <p className="review-main">{password.value}</p>
         </Row>
         <Row icon={<CalendarClock size={18} aria-hidden="true" />} title="Automatic backups" edit="Edit automatic backups" onEdit={go('schedule')}>
           <p className="review-main">Every day at {formatTime(choices.schedule, locale)}</p>

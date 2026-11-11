@@ -10,6 +10,8 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
+import tempfile
 import unittest
 
 
@@ -130,6 +132,11 @@ class PlanModeCannotChangeTheMachineTests(unittest.TestCase):
         "Write-Utf8NoBom",
         "Invoke-InstallPreflight",
         "Invoke-WebView2Phase",
+        # Asks the installed program about the backups (and starts it); the question asks the person. Neither may run in a plan.
+        "Invoke-RepositoryAccessDetection",
+        "Invoke-ProtectedPython",
+        "Invoke-RepositoryAccessQuestion",
+        "Read-RepositoryAccessChoice",
     )
     MUTATING = (
         r"\bNew-Item\b", r"\bSet-Acl\b", r"\bRemove-Item\b", r"\bCopy-Item\b", r"\bMove-Item\b", r"\bRename-Item\b",
@@ -160,7 +167,7 @@ class PlanModeCannotChangeTheMachineTests(unittest.TestCase):
     def test_the_graph_is_not_trivially_small(self) -> None:
         for name in (
             "Resolve-RepositorySelection", "Resolve-SourceSelection", "Assert-RepositoryTarget", "Get-PlanVolumes", "Write-PlanDocument",
-            "Get-KeptRepository",
+            "Get-KeptRepository", "Resolve-RepositoryAccess", "Get-ExistingRepositoryAccess", "Get-RecordedRepositoryAccess",
         ):
             self.assertIn(name, self.reachable)
 
@@ -263,12 +270,20 @@ class ContractMatchesTheScriptsTests(unittest.TestCase):
              "eligible", "ineligible_reason", "ineligible_message", "recommended"],
             list(plan["environment"]["volumes"][0]),
         )
-        self.assertEqual(["rewindle", "legacy_personal_edition", "kept_repository"], list(plan["environment"]["existing_install"]))
+        self.assertEqual(
+            ["rewindle", "legacy_personal_edition", "kept_repository", "kept_repository_access"],
+            list(plan["environment"]["existing_install"]),
+        )
+        self.assertEqual(
+            ["repository", "storage_mode", "repository_access", "existing_repository_access", "drivefs_my_drive_root", "sources",
+             "canary_source", "schedule", "vss", "minimum_free_bytes", "estimated_source_bytes"],
+            list(plan["resolved"]),
+        )
         phase, result = documents[1], documents[2]
         self.assertEqual(["schema", "seq", "time", "type", "phase", "state", "title", "detail"], list(phase))
         self.assertEqual(
             ["schema", "seq", "time", "type", "ok", "error", "install_root", "recovery_key_path", "recovery_key_readable_by_user",
-             "dashboard_executable", "version", "warnings"],
+             "dashboard_executable", "version", "repository_access", "warnings"],
             list(result),
         )
 
@@ -282,10 +297,13 @@ class ContractMatchesTheScriptsTests(unittest.TestCase):
         self.assertIsNotNone(result)
 
     def test_the_result_properties_are_documented(self) -> None:
-        for name in ("install_root", "recovery_key_path", "recovery_key_readable_by_user", "dashboard_executable", "version", "warnings"):
+        for name in (
+            "install_root", "recovery_key_path", "recovery_key_readable_by_user", "dashboard_executable", "version",
+            "repository_access", "warnings",
+        ):
             self.assertIn(name, self.contract)
             self.assertIn(f"{name} = ", self.installer)
-        for name in ("operation", "removed", "kept", "state_root", "cloud_verification_root"):
+        for name in ("operation", "removed", "kept", "state_root", "cloud_verification_root", "repository_access"):
             self.assertIn(name, self.contract)
             self.assertIn(f"{name} = ", self.uninstaller)
 
@@ -311,7 +329,10 @@ class ContractMatchesTheScriptsTests(unittest.TestCase):
         self.assertIn("$keptRepository = Get-KeptRepository\n", plan)
         self.assertNotRegex(plan, r"Get-PlanEnvironmentPart[^\n]*Get-KeptRepository")
         existing = re.search(r"existing_install = \[ordered\]@\{\n(.*?)\n\s+\}", plan, re.S).group(1)
-        self.assertEqual(["rewindle", "legacy_personal_edition", "kept_repository"], re.findall(r"^\s+(\w+) = ", existing, re.M))
+        self.assertEqual(
+            ["rewindle", "legacy_personal_edition", "kept_repository", "kept_repository_access"],
+            re.findall(r"^\s+(\w+) = ", existing, re.M),
+        )
         reader = defined["Get-KeptRepository"]
         # It reads the three records, needs the stored password, never throws and never raises a finding.
         for name in ("'repository.json'", "'last-success.json'", "'status.json'", "$secretFile"):
@@ -323,6 +344,7 @@ class ContractMatchesTheScriptsTests(unittest.TestCase):
         for finding in ("Stop-InstallValidation", "New-InstallFinding", "Add-PlanFinding", "throw"):
             self.assertNotIn(finding, reader)
         self.assertIn("`environment.existing_install.kept_repository`", self.contract)
+        self.assertIn("`environment.existing_install.kept_repository_access`", self.contract)
         self.assertIn("**A reinstall.**", self.contract.split("## 6. Notes for the wizard", 1)[1])
 
     def test_the_console_suggests_the_kept_backup_location(self) -> None:
@@ -622,6 +644,500 @@ class FailedInstallRollbackTests(unittest.TestCase):
         return " ".join(section.split())
 
 
+# The non-failing reader that both scripts carry, character for character (design section 3).
+GET_RECORDED_REPOSITORY_ACCESS = """function Get-RecordedRepositoryAccess {
+    # The access a configuration or state record names: 'password' (also when the key is absent), 'no_password', or
+    # $null when it names anything else. Callers treat $null as "can't tell".
+    param([object]$Record)
+    if ($null -eq $Record) { return $null }
+    $property = $Record.PSObject.Properties['repository_access']
+    if ($null -eq $property) { return 'password' }
+    $value = $property.Value
+    if ($value -is [string] -and $value -cin @('password', 'no_password')) { return [string]$value }
+    return $null
+}
+"""
+
+NO_PASSWORD_WARNING = (
+    "Anyone who can open the backup folder can restore every backed-up file, including saved sign-ins. "
+    "That includes the folder in Google Drive or on a lost USB drive."
+)
+
+
+def powershell_function(text: str, name: str) -> str:
+    start = text.index(f"\nfunction {name} {{\n") + 1
+    return text[start : text.index("\n}\n", start) + 3]
+
+
+class OptionalPasswordInstallerTests(unittest.TestCase):
+    """Backups with a password (the default) or without one: what the installer and its plan do about the choice.
+    tests/Test-InstallPlan.ps1 runs the helpers themselves; these pin where each piece sits in the scripts."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.installer = read(INSTALLER)
+        cls.defined = functions(cls.installer)
+        cls.marker = cls.installer.index("if ($PlanOnly) {\n    try {")
+        cls.main = cls.installer.split("$preflightSucceeded = $false", 1)[1]
+        cls.payload = cls.main.split("Start-InstallPhase 'payload'", 1)[1].split("Complete-InstallPhase 'payload'", 1)[0]
+        cls.initialization = cls.main.split("Start-InstallPhase 'canary'", 1)[1].split("Start-InstallPhase 'permissions'", 1)[0]
+        cls.catch = cls.main.rsplit("\ncatch {\n", 1)[1].split("\nfinally {\n", 1)[0]
+
+    # --- the parameter ---
+
+    def test_the_non_failing_reader_is_the_same_in_the_installer_and_the_uninstaller(self) -> None:
+        installer = powershell_function(self.installer, "Get-RecordedRepositoryAccess")
+        uninstaller = powershell_function(read(UNINSTALLER), "Get-RecordedRepositoryAccess")
+        self.assertEqual(installer, uninstaller)
+        self.assertEqual(GET_RECORDED_REPOSITORY_ACCESS, installer)
+
+    def test_the_resolved_mode_never_shares_a_name_with_the_parameter(self) -> None:
+        # PowerShell variable names ignore case, so a script variable called repositoryAccess is the parameter itself, whose
+        # value set refuses $null: the resolved mode (null while it is not known) lives in repositoryAccessMode.
+        code = re.sub(r"(?m)^\s*#.*$", "", self.installer)
+        self.assertEqual([], re.findall(r"(?i)\$(?:script|global|local|private):repositoryaccess(?![a-z])", code))
+        self.assertIn("$script:repositoryAccessMode = ", code)
+
+    def test_the_parameter_is_a_value_set_and_its_case_is_checked_in_a_plan_and_before_elevation(self) -> None:
+        head = self.installer.split("Set-StrictMode", 1)[0]
+        self.assertIn("[ValidateSet('password', 'no_password')]\n    [string]$RepositoryAccess,\n", head)
+        check = self.defined["Assert-RepositoryAccessValue"]
+        self.assertIn("if (-not $invocationParameters.ContainsKey('RepositoryAccess')) { return }", check)
+        self.assertIn("$RepositoryAccess -cnotin @('password', 'no_password')", check)
+        self.assertIn("-Code 'repository_access_invalid' -Field 'repository'", check)
+        self.assertIn("Invoke-PlanStage -Field 'repository' { Assert-RepositoryAccessValue }", self.defined["Invoke-PlanMode"])
+        preflight = self.defined["Invoke-InstallPreflight"]
+        self.assertLess(preflight.index("Assert-ScheduleValue"), preflight.index("Assert-RepositoryAccessValue"))
+        self.assertLess(preflight.index("Assert-RepositoryAccessValue"), preflight.index("Assert-MicrosoftSignedExecutable"))
+        self.assertLess(preflight.index("Assert-RepositoryAccessValue"), preflight.index("Invoke-SelfElevation"))
+
+    def test_self_elevation_forwards_the_parameter_only_when_it_was_given(self) -> None:
+        body = self.defined["Invoke-SelfElevation"]
+        forward = (
+            "if ($invocationParameters.ContainsKey('RepositoryAccess')) {\n"
+            "        $arguments += @('-RepositoryAccess', (Quote-ProcessArgument $RepositoryAccess))\n"
+            "    }"
+        )
+        self.assertIn(forward, body)
+        self.assertLess(body.index("'-RepositoryStorageMode', (Quote-ProcessArgument $RepositoryStorageMode),"), body.index(forward))
+        self.assertLess(body.index(forward), body.index("if ($invocationParameters.ContainsKey('Repository')) {"))
+
+    def test_the_script_variables_start_empty(self) -> None:
+        head = self.installer.split("function New-InstallFinding", 1)[0]
+        for name in ("repositoryAccessMode", "existingRepositoryAccess", "repositoryAccessSource"):
+            self.assertIn(f"$script:{name} = $null\n", head)
+
+    # --- resolving it ---
+
+    def test_the_choice_is_resolved_after_the_backup_folder_and_before_the_sources(self) -> None:
+        preflight = self.defined["Invoke-InstallPreflight"]
+        self.assertLess(preflight.index("Resolve-RepositorySelection"), preflight.index("Resolve-RepositoryAccess"))
+        self.assertLess(preflight.index("Resolve-RepositoryAccess"), preflight.index("Resolve-SourceSelection"))
+        plan = self.defined["Invoke-PlanMode"]
+        stage = "if ($repositoryOk) {\n        [void](Invoke-PlanStage -Field 'repository' { Resolve-RepositoryAccess })\n    }"
+        self.assertIn(stage, plan)
+        self.assertLess(plan.index("{ Resolve-RepositorySelection }"), plan.index(stage))
+        self.assertLess(plan.index(stage), plan.index("{ Resolve-SourceSelection }"))
+
+    def test_the_plan_reports_the_choice_beside_the_storage_mode_and_the_kept_backups(self) -> None:
+        plan = self.defined["Invoke-PlanMode"]
+        self.assertIn(
+            "            storage_mode = $RepositoryStorageMode\n"
+            "            repository_access = $script:repositoryAccessMode\n"
+            "            existing_repository_access = $script:existingRepositoryAccess\n",
+            plan,
+        )
+        self.assertIn(
+            "kept_repository = if ($null -ne $keptRepository) { $keptRepository.repository } else { $null }\n"
+            "                kept_repository_access = if ($null -ne $keptRepository) { $keptRepository.repository_access } else { $null }\n",
+            plan,
+        )
+
+    def test_the_kept_record_carries_its_access_and_needs_a_stored_password_only_for_a_password(self) -> None:
+        reader = self.defined["Get-KeptRepository"]
+        self.assertIn("$access = Get-RecordedRepositoryAccess -Record $document\n                if ($null -eq $access) { continue }", reader)
+        self.assertIn("repository = [string]$document.repository; storage_mode = $mode; repository_access = $access", reader)
+        # The stored password is asked for after the newest record is chosen, and only for a record of backups with a password.
+        loop_end = reader.index("# Backups with a password can be carried on only")
+        self.assertGreater(loop_end, reader.index("foreach ($record in @("))
+        self.assertIn(
+            "$kept.repository_access -ceq 'password' -and -not (Test-Path -LiteralPath $secretFile -PathType Leaf)", reader[loop_end:]
+        )
+        self.assertNotIn("$secretFile", reader[:loop_end])
+
+    def test_the_recorded_access_comes_from_the_kept_record_then_the_recovery_tools_then_the_folder_itself(self) -> None:
+        existing = self.defined["Get-ExistingRepositoryAccess"]
+        self.assertLess(existing.index("if (-not $repositoryPreviouslyInitialized) { return $null }"), existing.index("Get-KeptRepository"))
+        self.assertLess(existing.index("Get-KeptRepository"), existing.index("Get-RecoveryToolsRepositoryAccess"))
+        self.assertTrue(existing.rstrip().endswith("return 'unknown'"))
+        tools = self.defined["Get-RecoveryToolsRepositoryAccess"]
+        for name in ("backup-config.json", "recovery-manifest.json", "Get-RecordedRepositoryAccess", "Test-SameFolderPath"):
+            self.assertIn(name, tools)
+        self.assertNotIn("throw", tools)
+
+    def test_the_resolution_table_is_followed(self) -> None:
+        decision = self.defined["Get-RepositoryAccessDecision"]
+        for text in (
+            "access = $Given; source = 'parameter'",
+            "access = $Existing; source = 'recorded'",
+            "access = $null; source = $null",
+            "access = 'password'; source = 'default'",
+        ):
+            self.assertIn(text, decision)
+        resolve = self.defined["Resolve-RepositoryAccess"]
+        self.assertLess(resolve.index("Assert-RepositoryAccessValue"), resolve.index("Get-ExistingRepositoryAccess"))
+        self.assertLess(resolve.index("Get-RepositoryAccessDecision"), resolve.index("Assert-NoPendingKeyChange"))
+
+    def test_a_pending_key_change_only_stops_a_choice_of_no_password(self) -> None:
+        check = self.defined["Assert-NoPendingKeyChange"]
+        self.assertIn("if ($script:repositoryAccessMode -cne 'no_password') { return }", check)
+        self.assertIn("'credential-rotation.journal.json'", check)
+        self.assertIn("-Code 'repository_access_rotation_pending' -Field 'repository' -Path $stateRoot", check)
+
+    def test_a_choice_that_contradicts_the_record_is_a_warning_only_when_it_was_given(self) -> None:
+        warnings = self.defined["Get-InstallWarnings"]
+        self.assertIn("if ($script:repositoryAccessSource -ceq 'parameter') {", warnings)
+        self.assertIn("-Code 'repository_access_differs' -Field 'repository'", warnings)
+        message = self.defined["Get-RepositoryAccessDifferenceMessage"]
+        self.assertIn(
+            "The backups in this location were made without a password. If they still open without one, Setup stops before "
+            "changing anything. Choose no password to continue them, or choose another location.",
+            message,
+        )
+        self.assertIn(
+            "The backups in this location were made with a password. If they still need one, Setup stops before changing "
+            "anything. Choose a password to continue them, or choose another location.",
+            message,
+        )
+
+    # --- the console ---
+
+    def test_the_console_question_comes_last_and_is_never_asked_in_a_plan(self) -> None:
+        preflight = self.defined["Invoke-InstallPreflight"]
+        order = [
+            "Assert-RepositoryTarget", "Get-InstallationConflicts", "Invoke-RepositoryAccessQuestion", "Write-InstallSummary",
+            "Read-Host 'Install this configuration? [y/N]'",
+        ]
+        positions = [preflight.index(name) for name in order]
+        self.assertEqual(sorted(positions), positions)
+        for name in ("Invoke-RepositoryAccessQuestion", "Read-RepositoryAccessChoice"):
+            self.assertGreater(self.installer.index(f"function {name} "), self.marker, name)
+        choice = self.defined["Read-RepositoryAccessChoice"]
+        self.assertLess(choice.index("if ($PlanOnly -or $Unattended) { return $null }"), choice.index("Read-Host"))
+        question = self.defined["Invoke-RepositoryAccessQuestion"]
+        self.assertIn("if ($script:repositoryAccessSource -ceq 'default' -and -not $Unattended) {", question)
+
+    def test_the_console_says_the_consequence_before_it_asks(self) -> None:
+        warning = self.defined["Get-NoPasswordWarning"]
+        self.assertIn(f"'{NO_PASSWORD_WARNING}'", warning)
+        choice = self.defined["Read-RepositoryAccessChoice"]
+        self.assertLess(choice.index("Get-NoPasswordWarning"), choice.index("Read-Host"))
+        self.assertLess(choice.index("You can't change this later for these backups."), choice.index("Read-Host"))
+        self.assertIn(
+            "Make backups without a password? Type yes for no password, or press Enter to keep the password (recommended)", choice
+        )
+        self.assertIn("Please type yes or no, or press Enter.", choice)
+        question = self.defined["Invoke-RepositoryAccessQuestion"]
+        for text in (
+            "These backups were made without a password, so Setup keeps them that way.",
+            "These backups were made with a password, so Setup keeps them that way.",
+            "Setup will check whether these backups have a password and keep them that way.",
+        ):
+            self.assertIn(text, question)
+
+    def test_the_summary_says_which_kind_of_backups_these_are_before_the_confirmation(self) -> None:
+        summary = self.defined["Write-InstallSummary"]
+        self.assertIn("Write-Host '  Password   : yes (recommended)'", summary)
+        self.assertIn("Write-Host '  Password   : none'\n        Write-Warning (Get-NoPasswordWarning)", summary)
+        self.assertIn("Write-Host '  Password   : the same as the backups already in this location'", summary)
+
+    # --- the install ---
+
+    def test_the_program_paths_are_hoisted_and_the_detection_runs_before_the_configuration_is_written(self) -> None:
+        for name in ("$python = Join-Path $installRoot 'Python\\python.exe'\n", "$initializer = Join-Path $installRoot 'initialize_repository.py'\n"):
+            self.assertEqual(1, self.installer.count("    " + name), name)
+        payload = self.payload
+        tree = payload.index("Assert-TreeMatchesManifest -Root $installRoot")
+        python = payload.index("    $python = Join-Path $installRoot 'Python\\python.exe'")
+        initializer = payload.index("    $initializer = Join-Path $installRoot 'initialize_repository.py'")
+        detection = payload.index("    if ($null -eq $script:repositoryAccessMode) {\n        Invoke-RepositoryAccessDetection\n    }")
+        guard = payload.index("if ($script:repositoryAccessMode -cnotin @('password', 'no_password')) {\n        throw ")
+        configuration = payload.index("$configuration = [ordered]@{")
+        written = payload.index("Write-Utf8NoBom -Path $configPath")
+        manifest = payload.index("New-RuntimeManifest -Root $installRoot")
+        self.assertLess(tree, python)
+        self.assertLess(python, initializer)
+        self.assertLess(initializer, detection)
+        self.assertLess(detection, guard)
+        self.assertLess(guard, configuration)
+        self.assertLess(configuration, written)
+        self.assertLess(written, manifest)
+
+    def test_the_detection_is_install_only_and_asks_the_installed_program_in_one_layout(self) -> None:
+        self.assertGreater(self.installer.index("function Invoke-RepositoryAccessDetection "), self.marker)
+        body = self.defined["Invoke-RepositoryAccessDetection"]
+        self.assertIn(
+            "    $accessExit = Invoke-ProtectedPython -Python $python -WorkingDirectory $installRoot `\n"
+            "        -TemporaryDirectory $script:protectedTemporaryFolder `\n"
+            "        -Arguments @('-I', '-S', '-B', $initializer, '--detect-access', '--repository', $repositoryPath, "
+            "'--restic', (Join-Path $installRoot 'restic.exe'))\n",
+            body,
+        )
+        self.assertIn("-Code 'repository_access_unreadable' -Field 'repository'", body)
+        self.assertEqual(1, self.installer.count("Invoke-RepositoryAccessDetection\n    }"))
+        mapping = self.defined["Get-RepositoryAccessFromDetectionExit"]
+        for text in (
+            "if ($ExitCode -eq 20) { return [pscustomobject]@{ access = 'no_password'; source = 'detected' } }",
+            "if ($ExitCode -eq 21) { return [pscustomobject]@{ access = 'password'; source = 'detected' } }",
+            "if ($ExitCode -eq 22) { return [pscustomobject]@{ access = 'password'; source = 'default' } }",
+        ):
+            self.assertIn(text, mapping)
+        self.assertTrue(mapping.rstrip().endswith("return $null"))
+
+    def test_the_configuration_names_the_access_right_after_the_storage_mode(self) -> None:
+        self.assertIn(
+            "        repository_storage_mode = $RepositoryStorageMode\n"
+            "        repository_access = $script:repositoryAccessMode\n"
+            "        repository_volume_serial = $volume.serial\n",
+            self.payload,
+        )
+
+    def test_the_phases_skip_the_credential_for_backups_without_a_password(self) -> None:
+        block = self.initialization
+        skip = block.index("Skip-InstallPhase 'credential' 'No password: this backup opens without one.'")
+        self.assertLess(block.index("if ($script:repositoryAccessMode -ceq 'no_password') {"), skip)
+        self.assertLess(skip, block.index("Start-InstallPhase 'repository'"))
+        self.assertLess(block.index("Start-InstallPhase 'repository'"), block.index("$initializerExit = Invoke-ProtectedPython"))
+        self.assertIn("Complete-InstallPhase 'recovery_key' 'This backup has no password, so there is no recovery key.'", block)
+        self.assertEqual(1, block.count("$initializerExit = Invoke-ProtectedPython"))
+        # The phase titles of a backup without a password are the documented ones, and the other phases keep theirs.
+        titles = re.search(r"\$noPasswordPhaseTitles = @\{\n(.*?)\n\}", self.installer, re.S).group(1)
+        self.assertEqual(
+            [("credential", "Choosing no password"), ("repository", "Creating the backup location"),
+             ("recovery_key", "Saving the recovery tools")],
+            re.findall(r"^\s+([a-z0-9_]+) = '([^']*)'$", titles, re.M),
+        )
+        title = self.defined["Get-InstallPhaseTitle"]
+        self.assertIn("$script:repositoryAccessMode -ceq 'no_password' -and $noPasswordPhaseTitles.ContainsKey($Phase)", title)
+        for name in ("Start", "Complete", "Skip"):
+            self.assertIn("-Title (Get-InstallPhaseTitle -Phase $Phase)", self.defined[f"{name}-InstallPhase"])
+        self.assertIn("-Title (Get-InstallPhaseTitle -Phase $phase)", self.defined["Write-InstallFailure"])
+
+    def test_the_documented_titles_for_backups_without_a_password_are_the_ones_in_the_script(self) -> None:
+        contract = read(CONTRACT)
+        section = contract.split("### 3.3 Phases", 1)[1].split("\n### ", 1)[0]
+        table = section.split("| Phase | Title for backups without a password |", 1)[1].split("\n\n", 1)[0]
+        in_doc = re.findall(r"^\| `([a-z0-9_]+)` \| ([^|]+?) \|$", table, re.M)
+        titles = re.search(r"\$noPasswordPhaseTitles = @\{\n(.*?)\n\}", self.installer, re.S).group(1)
+        self.assertEqual(re.findall(r"^\s+([a-z0-9_]+) = '([^']*)'$", titles, re.M), in_doc)
+        self.assertIn("No password: this backup opens without one.", section)
+        self.assertIn("This backup has no password, so there is no recovery key.", section)
+
+    def test_the_initializer_refusals_end_the_install_with_their_own_code(self) -> None:
+        block = self.initialization
+        mismatch = block.index("if ($initializerExit -eq 4 -or $initializerExit -eq 5) {")
+        unreadable = block.index("if ($initializerExit -eq 6) {")
+        other = block.index("if ($initializerExit -ne 0) {")
+        self.assertLess(mismatch, unreadable)
+        self.assertLess(unreadable, other)
+        self.assertIn("-Code 'repository_access_mismatch' -Field 'repository'", block[mismatch:unreadable])
+        self.assertIn("-Code 'repository_access_unreadable' -Field 'repository'", block[unreadable:other])
+        self.assertIn('throw "Repository initialization failed with exit code $initializerExit."', block[other:])
+
+    def test_the_refusal_messages_are_the_designed_ones_and_end_by_saying_nothing_was_touched(self) -> None:
+        body = self.defined["Get-RepositoryAccessRefusalMessage"]
+        self.assertIn("$ending = ' Setup undid its changes, and your backups were not touched.'", body)
+        for text in (
+            "The backups in this location are protected by a password, but you chose no password. To continue these backups, "
+            "choose a password. To start without one, choose another location.$ending",
+            "The backups in this location were made without a password, but you chose a password. To continue these backups, "
+            "choose no password. To start with a password, choose another location.$ending",
+            "These backups no longer match what Setup recorded for them, usually because they were changed outside Rewindle. "
+            "Setup can't carry on with them here. Choose another location, or see Switching an existing backup in Rewindle's "
+            "guide.$ending",
+            "Setup couldn't open the backups in this location to continue them. Check that the backup drive or Google Drive "
+            "folder is connected and available, then try again.$ending",
+        ):
+            self.assertIn(text, body)
+
+    def test_the_catch_block_blames_a_phase_only_for_a_failure_nothing_named(self) -> None:
+        self.assertIn(
+            "    if ($null -eq (Get-InstallFinding -ErrorRecord $caught) -and\n"
+            "        ($script:FeedCurrentPhase -ceq 'credential' -or ($script:repositoryAccessMode -ceq 'no_password' "
+            "-and $script:FeedCurrentPhase -ceq 'repository'))) {\n"
+            "        Set-InitializationFailurePhase\n    }",
+            self.catch,
+        )
+        body = self.defined["Set-InitializationFailurePhase"]
+        branch = body.split("if ($script:repositoryAccessMode -ceq 'no_password') {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertNotIn("$secretFile", branch)
+        self.assertIn("Join-Path $repositoryPath 'config'", branch)
+        self.assertIn("return", branch)
+        self.assertLess(body.index("-ceq 'no_password'"), body.index("$secretFile"))
+
+    def test_nothing_about_a_recovery_key_is_checked_or_reported_for_backups_without_a_password(self) -> None:
+        bindings = self.defined["Resolve-ProtectedBindings"]
+        guard = bindings.index("if ($script:repositoryAccessMode -cne 'no_password') {")
+        self.assertLess(guard, bindings.index("Assert-NoReparsePath -Path $recoveryKey"))
+        self.assertLess(guard, bindings.index("'recovery_key_path_unsafe'"))
+        # A stale key is held against the install only for backups known to have a password.
+        self.assertIn("if ($script:repositoryAccessMode -ceq 'password' -and -not (Test-Path -LiteralPath $secretFile -PathType Leaf)) {", bindings)
+        self.assertIn(
+            "if ($script:repositoryAccessMode -ceq 'no_password' -and $protectedBinding[1] -cin @('DPAPI credential', 'Recovery key')) { continue }",
+            bindings,
+        )
+        facts = self.defined["Get-RecoveryKeyFacts"]
+        self.assertLess(facts.index("if ($script:repositoryAccessMode -ceq 'no_password') {"), facts.index("Test-Path -LiteralPath $recoveryKey"))
+        verified = self.defined["Assert-InstallationVerified"]
+        gate = verified.index("if ($script:repositoryAccessMode -cne 'no_password') {")
+        self.assertLess(gate, verified.index("Test-Path -LiteralPath $secretFile"))
+        self.assertLess(gate, verified.index("Test-Path -LiteralPath $recoveryKey"))
+        # The commit of a kept key stays one call; the readability check and its warning are inside the mode check.
+        self.assertEqual(1, self.installer.count("'--commit-recovery-key'"))
+        verification = self.main.split("Start-InstallPhase 'verification'", 1)[1].split("Complete-InstallPhase 'verification'", 1)[0]
+        mode = verification.index("if ($script:repositoryAccessMode -cne 'no_password') {")
+        self.assertLess(mode, verification.index("Test-FileReadableByUser -Path $recoveryKey"))
+        self.assertLess(mode, verification.index("recovery_key_not_readable_by_user"))
+        self.assertLess(verification.index("'--commit-recovery-key'"), mode)
+
+    def test_the_success_text_and_results_leave_out_the_key_for_backups_without_a_password(self) -> None:
+        main = self.main
+        self.assertIn(
+            "Write-Host 'Rewindle installed successfully. This backup has no password, so there is no recovery key to keep.' "
+            "-ForegroundColor Green",
+            main,
+        )
+        self.assertIn("Write-Host \"Recovery key: $recoveryKey\" -ForegroundColor Yellow", main)
+        self.assertIn("$resultRecoveryKey = if ($script:repositoryAccessMode -ceq 'no_password') { $null } else { $recoveryKey }", main)
+        self.assertIn(
+            "        repository_storage_mode = $RepositoryStorageMode\n        repository_access = $script:repositoryAccessMode\n"
+            "        source_count = $configuredSources.Count",
+            main,
+        )
+        self.assertIn("        recovery_key_file = $resultRecoveryKey\n", main)
+        self.assertIn("        recovery_key_path = $resultRecoveryKey\n", main)
+        # Every result the install writes carries the access right after the version and before the warnings.
+        self.assertEqual(
+            3,
+            len(re.findall(r"version = \$(?:script:)?version\n\s+repository_access = \$script:repositoryAccessMode\n\s+warnings = ", self.installer)),
+        )
+        self.assertIn("-Description 'Verified incremental Restic backup supervised by ResticBackuper.'", main)
+        self.assertNotIn("Verified encrypted", self.installer)
+
+    def test_the_failure_tails_keep_their_wording_for_backups_with_a_password(self) -> None:
+        failure = self.defined["Write-InstallFailure"]
+        # Backups with a password: both tails exactly as before.
+        self.assertIn(
+            "Reinstall or repair, which removes them first. $keptTail\"", failure
+        )
+        self.assertIn("'Backups and the recovery key it had already created were kept.'", failure)
+        self.assertIn("$message += ' Setup undid its changes. Backups and the recovery key it had already created were kept.'", failure)
+        # Without a password, or when it is not known, there is no key to mention.
+        self.assertIn("'Backups it had already created were kept.'", failure)
+        self.assertIn("$message += ' Setup undid its changes. Backups it had already created were kept.'", failure)
+        self.assertIn("elseif ($script:repositoryAccessMode -ceq 'password') { 'Backups and the recovery key", failure)
+        # The refusals bring their own ending, and the repository phase's default is not about an encrypted place.
+        self.assertIn("$refusal = ($code -ceq 'repository_access_mismatch' -or $code -ceq 'repository_access_unreadable')", failure)
+        self.assertIn("if ($phase -ceq 'repository' -and $script:repositoryAccessMode -cne 'password') {", failure)
+        self.assertIn("$message = 'Setup could not create the backup location.'", failure)
+        write_error = self.catch.split('Write-Error "INSTALLATION FAILED: ', 1)[0]
+        self.assertIn("if ($script:repositoryAccessMode -ceq 'password') { 'Repository, recovery key, recovery tools, and ProgramData state' }", write_error)
+
+
+class OptionalPasswordUninstallerTests(unittest.TestCase):
+    """What an uninstall reports and says about backups with and without a password."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.text = read(UNINSTALLER)
+        cls.defined = functions(cls.text)
+
+    def test_the_kept_data_reports_the_access_and_a_key_only_for_backups_with_a_password(self) -> None:
+        body = self.defined["Get-KeptData"]
+        self.assertIn("        repository = $null\n        repository_access = $null\n        recovery_key = $null\n", body)
+        self.assertIn("$kept['repository_access'] = Get-RecordedRepositoryAccess -Record $script:configuration", body)
+        gate = body.index("if ($kept['repository_access'] -ceq 'password') {")
+        self.assertLess(gate, body.index("$kept['recovery_key'] = [string]$script:configuration.recovery_key_file"))
+        self.assertEqual(1, body.count("recovery_key_file"))
+
+    def test_the_console_names_a_recovery_key_only_for_backups_with_a_password(self) -> None:
+        main = self.text.split("$progressOpened = $false", 1)[1]
+        for line in ('Write-Host "  Recovery key: $($configuration.recovery_key_file) (preserved)"',
+                     'Write-Host "Preserved recovery key: $($configuration.recovery_key_file)"'):
+            before = main[: main.index(line)]
+            self.assertTrue(before.rstrip().endswith("if ($keptAccess -ceq 'password') {"), line)
+        self.assertEqual(2, main.count("elseif ($keptAccess -ceq 'no_password') {"))
+        self.assertEqual(1, main.count("Write-Host '  Backups have no password, so there is no recovery key.'"))
+        self.assertEqual(1, main.count("Write-Host 'Backups have no password, so there is no recovery key.'"))
+
+    @unittest.skipUnless(os.name == "nt", "runs Windows PowerShell 5.1")
+    def test_the_kept_data_is_read_without_failing_from_every_shape_of_configuration(self) -> None:
+        reader = powershell_function(self.text, "Get-RecordedRepositoryAccess")
+        kept = powershell_function(self.text, "Get-KeptData")
+        script = (
+            "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+            "$stateRoot = 'C:\\Fixture\\State'\n$cloudVerificationRoot = 'C:\\Fixture\\NoSuchFolder\\Cloud'\n"
+            + reader + "\n" + kept + "\n"
+            "function New-Shape {\n"
+            "    param([bool]$Has, [object]$Access)\n"
+            "    $fields = [ordered]@{ repository = 'D:\\Backups'; recovery_key_file = 'C:\\Users\\you\\key.txt'; "
+            "recovery_tools_directory = 'D:\\RecoveryTools' }\n"
+            "    if ($Has) { $fields['repository_access'] = $Access }\n"
+            "    return [pscustomobject]$fields\n"
+            "}\n"
+            "$shapes = [ordered]@{ absent = (New-Shape $false $null); password = (New-Shape $true 'password'); "
+            "no_password = (New-Shape $true 'no_password'); bogus = (New-Shape $true 'Password'); number = (New-Shape $true 7) }\n"
+            "$results = [ordered]@{}\n"
+            "foreach ($name in $shapes.Keys) {\n"
+            "    $script:configuration = $shapes[$name]\n"
+            "    $data = Get-KeptData\n"
+            "    $results[$name] = [ordered]@{ access = $data['repository_access']; key = $data['recovery_key']; "
+            "keys = @($data.Keys) -join ',' }\n"
+            "}\n"
+            "$script:configuration = $null\n$empty = Get-KeptData\n"
+            "$results['no configuration'] = [ordered]@{ access = $empty['repository_access']; key = $empty['recovery_key']; "
+            "keys = @($empty.Keys) -join ',' }\n"
+            "$results | ConvertTo-Json -Depth 4 -Compress\n"
+        )
+        completed = run_windows_powershell(script)
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+        results = json.loads([line for line in completed.stdout.splitlines() if line.strip()][-1])
+        key = "C:\\Users\\you\\key.txt"
+        self.assertEqual("password", results["absent"]["access"])
+        self.assertEqual(key, results["absent"]["key"])
+        self.assertEqual("password", results["password"]["access"])
+        self.assertEqual(key, results["password"]["key"])
+        self.assertEqual("no_password", results["no_password"]["access"])
+        self.assertIsNone(results["no_password"]["key"])
+        for shape in ("bogus", "number", "no configuration"):
+            with self.subTest(shape=shape):
+                self.assertIsNone(results[shape]["access"])
+                self.assertIsNone(results[shape]["key"])
+        self.assertEqual(
+            "state_root,repository,repository_access,recovery_key,recovery_tools,cloud_verification_root", results["absent"]["keys"]
+        )
+
+
+def windows_powershell() -> str:
+    system = os.environ.get("SystemRoot", r"C:\Windows")
+    return os.path.join(system, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+
+
+def run_windows_powershell(script: str) -> "subprocess.CompletedProcess[str]":
+    """Runs `script` in Windows PowerShell 5.1 with no window, standard input closed and the module path pinned."""
+    system = os.environ.get("SystemRoot", r"C:\Windows")
+    environment = dict(os.environ)
+    environment["PSModulePath"] = os.path.join(system, "System32", "WindowsPowerShell", "v1.0", "Modules")
+    with tempfile.TemporaryDirectory(prefix="rewindle-setup-contract-probe-", ignore_cleanup_errors=True) as temp:
+        path = Path(temp) / "probe.ps1"
+        path.write_text(script, encoding="ascii", newline="\n")
+        return subprocess.run(
+            [windows_powershell(), "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(path)],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=240, env=environment,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
+
 class ContinuousIntegrationTests(unittest.TestCase):
     def test_ci_runs_the_hermetic_plan_suite_and_the_real_install_test(self) -> None:
         ci = read(CI)
@@ -640,6 +1156,98 @@ class ContinuousIntegrationTests(unittest.TestCase):
             self.assertGreater(text.index(dangerous), guard, f"{dangerous} appears before the CI guard")
         self.assertIn("RUNNER_ENVIRONMENT", text)
         self.assertIn("github-hosted", text)
+
+    def test_ci_checks_backups_without_a_password_with_the_pinned_restic(self) -> None:
+        ci = read(CI)
+        command = "python -m unittest -v tests.test_repository_access_restic"
+        self.assertEqual(1, ci.count(command))
+        self.assertTrue((PROJECT / "tests" / "test_repository_access_restic.py").is_file())
+        step = ci[: ci.index(command) + len(command)].rsplit("      - name: ", 1)[1]
+        self.assertTrue(step.startswith("Check backups without a password with the pinned Restic\n"), step)
+        # Like the other pinned-restic steps: only after the release is built, even when an earlier check failed, and a
+        # missing restic.exe fails the step instead of skipping the checks.
+        self.assertIn("if: ${{ !cancelled() && steps.build.outcome == 'success' }}", step)
+        self.assertIn('REWINDLE_REQUIRE_PINNED_RESTIC: "1"', step)
+        self.assertIn("shell: pwsh", step)
+        self.assertLess(ci.index("Build-Release.ps1"), ci.index(command))
+        # It comes after the steps that need the release, so a failure in it hides no other check.
+        self.assertLess(ci.index("python -m unittest -v tests.test_generation_parent"), ci.index(command))
+
+    def test_the_real_install_test_covers_backups_without_a_password(self) -> None:
+        text = read(CONTRACT_TEST)
+        # The second cycle installs backups without a password; the first, which has the checks that run once, keeps its
+        # password so the refusal of a switch is shown against real backups with one.
+        self.assertIn("[switch]$NoPassword", text)
+        cycle_one = re.search(r"Invoke-InstallCycle -Id 'cycle1'(?:[^\n]*`\n)*[^\n]*", text)
+        cycle_two = re.search(r"Invoke-InstallCycle -Id 'cycle2'(?:[^\n]*`\n)*[^\n]*", text)
+        self.assertIsNotNone(cycle_one)
+        self.assertIsNotNone(cycle_two)
+        self.assertIn("-Extras", cycle_one.group(0))
+        self.assertNotIn("-NoPassword", cycle_one.group(0))
+        self.assertIn("-NoPassword", cycle_two.group(0))
+        self.assertIn("if ($NoPassword) { $arguments += @('-RepositoryAccess', 'no_password') }", text)
+        # What the install feed and result say for backups without a password, and for a password.
+        for expected in (
+            "'skipped', 'Choosing no password', 'No password: this backup opens without one.'",
+            "'Creating the backup location'",
+            "'Saving the recovery tools', 'This backup has no password, so there is no recovery key.'",
+            "'Creating the backup password and storing it for your account'",
+            "'Creating the encrypted backup location'",
+            "'Writing your recovery key'",
+            "if ($NoPassword) { $skipped += 'credential' }",
+            "Assert-Equal $access $result.repository_access",
+            "Assert-Equal $access $configuration.repository_access",
+            "Assert-Equal $access $recoveryManifest.repository_access",
+            "Assert-Equal $access $uninstallResult.kept.repository_access",
+            "'version', 'repository_access', 'warnings'",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, text)
+        # How the installed program tells the two kinds of backups, and that nothing of the password is made, kept or lost.
+        self.assertIn("--detect-access", text)
+        for exit_code, meaning in ((20, "have no password"), (21, "have a password"), (22, "holds no backups")):
+            with self.subTest(exit_code=exit_code):
+                self.assertRegex(text, rf"Assert-Equal {exit_code} \(Get-DetectionExit -Folder [^\n]*{meaning}")
+        self.assertIn("--insecure-no-password", text)
+        self.assertIn("'--password-command' not in command", text)
+        self.assertIn("$seededSecretHash", text)
+        self.assertIn("$seededKeyHash", text)
+        self.assertIn("an older stored password is exactly as it was", text)
+        self.assertIn("an older recovery key is exactly as it was", text)
+
+    def test_the_real_install_test_refuses_a_switch_and_reinstalls_without_a_choice(self) -> None:
+        text = read(CONTRACT_TEST)
+        refusal = text.index("-Name 'install-no-password-over-password'")
+        block = text[refusal : text.index("# A reinstall over the state the uninstall kept", refusal)]
+        # Asking for no password over backups with a password is refused in the repository phase with the code and the
+        # words the contract documents, and the backups, the stored password and the key are exactly as they were.
+        self.assertIn("$argumentsWithoutChoice + @('-RepositoryAccess', 'no_password')", block)
+        self.assertIn("Assert-Equal 'repository_access_mismatch' $refusedResult.error.code", block)
+        self.assertIn("'repository:failed'", block)
+        self.assertIn("The backups in this location are protected by a password, but you chose no password.", block)
+        self.assertIn("Setup undid its changes, and your backups were not touched.", block)
+        for kept in ("Get-FolderFingerprint -Path $Repository", "$secretBefore", "$keyBefore"):
+            self.assertIn(kept, block)
+        self.assertIn("(-not (Test-Path -LiteralPath $installRoot))", block)
+        # A reinstall with no choice given keeps backups without a password, known from the kept record and then from the
+        # backups themselves (the kept state and the recovery tools are gone by then).
+        rounds = text[text.index("$laterArguments = $argumentsWithoutChoice") :]
+        rounds = rounds[: rounds.index("# Leave a clean machine for the next cycle")]
+        self.assertIn("Name = 'recorded'; Wipe = $false; Detail = ' They have no password.'", rounds)
+        self.assertIn("Name = 'detected'; Wipe = $true; Detail = ' They have no password, so Setup kept that.'", rounds)
+        self.assertIn("Remove-Item -LiteralPath $stateRoot -Recurse -Force", rounds)
+        self.assertIn("Remove-Item -LiteralPath $uninstallResult.kept.recovery_tools -Recurse -Force", rounds)
+        self.assertIn("Assert-Equal 'no_password' $roundResult.repository_access", rounds)
+        self.assertIn("Assert-Equal 'skipped' $roundCredential.state", rounds)
+        self.assertIn("Your existing backups in this location were kept and reused.", rounds)
+        self.assertNotIn("-RepositoryAccess", rounds)
+        # The summary names both new checks, and the clean-up copes with a cycle that made no recovery key.
+        self.assertIn("install_without_password = 'passed'", text)
+        self.assertIn("existing_backups_never_switched = 'passed'", text)
+        self.assertIn("if ($null -ne $result.recovery_key_path) { Remove-Item -LiteralPath $result.recovery_key_path -Force }", text)
+        # The first cycle's password and key are brought back for the second, which must leave them exactly as they were.
+        self.assertIn("$script:olderSecret = [IO.File]::ReadAllBytes(", text)
+        self.assertIn("$script:olderKey = [IO.File]::ReadAllBytes($result.recovery_key_path)", text)
 
     def test_the_hermetic_suite_never_starts_an_install(self) -> None:
         text = read(PROJECT / "tests" / "Test-InstallPlan.ps1")

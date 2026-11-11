@@ -151,6 +151,10 @@ namespace ResticBackuper.Dashboard
         // minimum_free_gib in bytes, the free space below which the backup service refuses to start a backup; -1 when it is missing or not
         // a usable number.
         public long MinimumFreeBytes { get; private set; }
+        // How Restic opens these backups: "password" (also when the configuration has no repository_access, as every configuration
+        // written before the choice existed), "no_password", or null when the configuration names anything else. The page and the
+        // texts never claim encryption, or its absence, for null (the engine refuses such a configuration anyway).
+        public string RepositoryAccess { get; private set; }
 
         private SourceConfiguration()
         {
@@ -369,8 +373,36 @@ namespace ResticBackuper.Dashboard
                 CloudPlaceholderPolicy = cloudPolicy,
                 Sources = sources,
                 RepositoryStorageMode = storageMode,
-                MinimumFreeBytes = minimumFreeBytes
+                MinimumFreeBytes = minimumFreeBytes,
+                RepositoryAccess = ReadRepositoryAccess(document)
             };
+        }
+
+        // The "repository_access" a configuration, or a report that echoes it, names: "password" when the key is absent (every
+        // configuration written before the choice existed, the owner's included) or says "password", "no_password" when it says
+        // that, and null for anything else (another text, a number, null, a different case). Never throws. A separate method from
+        // ReadSpaceSettings, whose signature a regression test reflects on.
+        internal static string ReadRepositoryAccess(IDictionary<string, object> document)
+        {
+            if (document == null)
+            {
+                return null;
+            }
+            object value;
+            if (!document.TryGetValue("repository_access", out value))
+            {
+                return "password";
+            }
+            string text = value as string;
+            if (string.Equals(text, "password", StringComparison.Ordinal))
+            {
+                return "password";
+            }
+            if (string.Equals(text, "no_password", StringComparison.Ordinal))
+            {
+                return "no_password";
+            }
+            return null;
         }
 
         // Reads the storage mode and the reserve, both engines' way. Never throws for them. The reserve is a number of GiB, fractions

@@ -320,14 +320,18 @@ class MyDriveCloudVerifierScriptTests(unittest.TestCase):
         for launch in launches:
             self.assertRegex(launch, r"-Environment \$\w+")
         self.assertIn("-Environment $helperEnvironment", SCRIPT)
+        # The settings come from Get-CloudEnvironmentSettings, which adds the Restic password command for a backup with a
+        # password only (tests/test_my_drive_cloud_verifier_access.py runs it for both).
+        settings = powershell_function(SCRIPT, "Get-CloudEnvironmentSettings")
         for setting in (
             "RCLONE_CONFIG",
             "RCLONE_PASSWORD_COMMAND",
             "RCLONE_ASK_PASSWORD",
             "RCLONE_CACHE_DIR",
-            "RESTIC_PASSWORD_COMMAND",
         ):
-            self.assertIn(f"            {setting} = ", SCRIPT)
+            self.assertIn(f"        {setting} = ", settings)
+        self.assertIn("        $settings['RESTIC_PASSWORD_COMMAND'] = $ResticPasswordCommand", settings)
+        self.assertIn("-Settings (Get-CloudEnvironmentSettings `", SCRIPT)
 
     @unittest.skipUnless(sys.platform == "win32", "Windows PowerShell 5.1 is Windows-only")
     def test_password_commands_start_the_intended_programs(self):

@@ -7,13 +7,16 @@ import { ArrowLeft, ArrowRight, Check, LayoutDashboard, RotateCcw, X } from 'luc
 import { Button } from '@/components/atoms/Button';
 import { bridge } from './bridge';
 import LoadingState from '@/components/primitives/LoadingState';
-import { issuesFor, SCHEDULE_PATTERN } from './contract';
+import { issuesFor, keptWords, SCHEDULE_PATTERN } from './contract';
 import { formatBytes, formatCount, plural } from './format';
 import { ConfirmDialog, ShieldIcon, Spinner } from './ui';
-import { CHOICE_STEPS, STEPS, onlineOnlyPaths, phaseTitle, selectedPaths, selectedTotal, useWizard, type Screen, type Wizard } from './useWizard';
+import {
+  CHOICE_STEPS, accessOfOperation, onlineOnlyPaths, phaseTitle, selectedPaths, selectedTotal, stepNumber, useWizard, type Screen, type Wizard,
+} from './useWizard';
 import { Welcome } from './screens/Welcome';
 import { Folders } from './screens/Folders';
 import { Location } from './screens/Location';
+import { Password } from './screens/Password';
 import { Schedule } from './screens/Schedule';
 import { Review } from './screens/Review';
 import { OperationView } from './screens/Installing';
@@ -26,25 +29,41 @@ interface FooterAction { label: string; onClick: () => void; disabled?: boolean;
 interface Footer { back?: FooterAction | null; next?: FooterAction | null; hint?: ReactNode }
 interface Header { eyebrow?: string; title: string; lead?: ReactNode }
 
-// Numbered like the rail, which counts Welcome through Done.
-const NUMBERED: Partial<Record<Screen, number>> = { folders: 2, location: 3, schedule: 4, review: 5 };
+// The Password page's title and lead follow what the installer found at the chosen folder (see passwordPageFor): the question when the
+// backups are being started, a statement when they already exist (they keep the kind they have), a wait while that is checked.
+function passwordHeader(wizard: Wizard, eyebrow: string | undefined): Header {
+  const page = wizard.passwordPage;
+  const goBack = 'To choose differently, go back and pick another location.';
+  switch (page.kind) {
+    case 'kept':
+      if (page.access === 'password') return { eyebrow, title: 'Your backups already have a password', lead: `This location already has backups made with a password. Setup keeps them that way, because backups can’t switch from one to the other. ${goBack}` };
+      if (page.access === 'no_password') return { eyebrow, title: 'Your backups have no password', lead: `This location already has backups made without a password. Setup keeps them that way, because backups can’t switch from one to the other. ${goBack}` };
+      return { eyebrow, title: 'Your existing backups', lead: `This location already has backups. Setup checks whether they have a password and keeps them that way. ${goBack}` };
+    case 'unavailable': return { eyebrow, title: 'This location can’t be used yet', lead: 'Go back to Backup location and fix the problem there. Then come back to choose.' };
+    case 'checking': return { eyebrow, title: 'Checking this location…' };
+    default: return { eyebrow, title: 'Should your backups have a password?', lead: 'A password keeps your backups private, even if someone gets hold of the backup drive or your Google Drive.' };
+  }
+}
 
 function headerFor(wizard: Wizard): Header {
   const operation = wizard.operation;
   const outcome = operation?.finished?.outcome;
-  const step = NUMBERED[wizard.screen];
-  const eyebrow = step ? `Step ${step} of 8` : undefined;
+  // Numbered from the same steps as the rail (Welcome is the first of them and has no number of its own).
+  const step = wizard.screen !== 'welcome' && CHOICE_STEPS.includes(wizard.screen) ? stepNumber(wizard.steps, wizard.screen) : undefined;
+  const eyebrow = step ? `Step ${step} of ${wizard.steps.length}` : undefined;
   switch (wizard.screen) {
     case 'hostError': return { title: 'Setup couldn’t start' };
     case 'unsupported': return { title: 'Rewindle can’t be installed on this PC', lead: 'This PC doesn’t meet Rewindle’s requirements.' };
     case 'maintenance': return { eyebrow: 'Rewindle Setup', title: 'Rewindle is already on this PC', lead: 'Open it, set it up again, or remove it.' };
-    case 'welcome': return { eyebrow: 'Rewindle Setup', title: 'Backup you can verify', lead: 'Set up daily, encrypted backups of your files in a few minutes. An external USB drive is the best place to keep them. The suggestions on each page suit most people, so you can just choose Next.' };
+    case 'welcome': return { eyebrow: 'Rewindle Setup', title: 'Backup you can verify', lead: 'Set up daily backups of your files in a few minutes. An external USB drive is the best place to keep them. The suggestions on each page suit most people, so you can just choose Next.' };
     case 'folders': return { eyebrow, title: 'What should Rewindle protect?', lead: 'Your main folders are already chosen. Add anything else you’d hate to lose.' };
     case 'location': return { eyebrow, title: 'Where should backups be kept?', lead: 'Choose a drive. A separate drive, like an external USB drive, keeps your files safest.' };
+    case 'password': return passwordHeader(wizard, eyebrow);
     case 'schedule': return { eyebrow, title: 'When should Rewindle back up?', lead: 'Rewindle backs up once a day and copies only what changed since the last time.' };
-    case 'review': return { eyebrow, title: 'Ready to install', lead: 'Check your choices. You can change folders and the schedule later in Rewindle.' };
+    case 'review': return { eyebrow, title: 'Ready to install', lead: 'Check your choices. You can change folders and the schedule later in Rewindle. The password choice can’t be changed later.' };
     case 'installing':
-      if (outcome === 'succeeded') return { title: 'Rewindle is installed', lead: 'One more step: save your recovery key.' };
+      // Without a password there is no recovery key to save, so nothing is left to do after the install.
+      if (outcome === 'succeeded') return { title: 'Rewindle is installed', lead: wizard.recoveryNeeded ? 'One more step: save your recovery key.' : undefined };
       if (outcome === 'cancelled') return { title: 'Rewindle wasn’t installed' };
       if (outcome === 'failed') return { title: 'Setup couldn’t finish' };
       return { title: 'Installing Rewindle', lead: operation?.stage === 'running' ? 'This usually takes a minute or two. You can keep using your PC.' : undefined };
@@ -101,6 +120,8 @@ export default function SetupApp() {
   }, [wizard]);
 
   const plan = wizard.validation.plan;
+  // What the installed Rewindle's backups have, for the words about what an uninstall keeps (the kept records name it; null: not told).
+  const keptAccess = wizard.base?.environment.existingInstall.keptRepositoryAccess ?? null;
   const footer = useMemo<Footer>(() => {
     const back = (to: Screen): FooterAction => ({ label: 'Back', icon: <ArrowLeft size={15} aria-hidden="true" />, onClick: () => wizard.goTo(to) });
     const next = (to: Screen, disabled = false): FooterAction => ({ label: 'Next', trailing: <ArrowRight size={15} aria-hidden="true" />, onClick: () => wizard.goTo(to), disabled, variant: 'primary' });
@@ -133,15 +154,25 @@ export default function SetupApp() {
         const errors = issuesFor(plan, 'repository', 'storage_mode').errors.length > 0;
         const checking = wizard.validation.checking;
         return {
-          back: back('folders'), next: next('schedule', !choices?.repository || errors || checking),
+          back: back('folders'), next: next('password', !choices?.repository || errors || checking),
           hint: checking ? <><Spinner size={12} /><span>Checking this location…</span></>
             : errors || !choices?.repository ? 'Fix the problem on this page to continue' : undefined,
+        };
+      }
+      case 'password': {
+        // The page offers the choice only once the installer has answered for the folder chosen now: until then (or when it can't answer
+        // for it) there is nothing to decide, and Next waits.
+        const kind = wizard.passwordPage.kind;
+        return {
+          back: back('location'), next: next('schedule', kind === 'checking' || kind === 'unavailable'),
+          hint: kind === 'checking' ? <><Spinner size={12} /><span>Checking this location…</span></>
+            : kind === 'unavailable' ? 'Fix the problem on the Backup location page to continue' : undefined,
         };
       }
       case 'schedule': {
         const errors = issuesFor(plan, 'schedule').errors.length > 0;
         const invalid = !SCHEDULE_PATTERN.test(choices?.schedule ?? '') || !wizard.scheduleDraftValid || errors;
-        return { back: back('location'), next: next('review', invalid), hint: invalid ? 'Enter a valid time to continue' : undefined };
+        return { back: back('password'), next: next('review', invalid), hint: invalid ? 'Enter a valid time to continue' : undefined };
       }
       case 'review': {
         // Install also waits for the first scan of every chosen folder: online-only files are only known once the scan reaches
@@ -150,10 +181,14 @@ export default function SetupApp() {
         const scan = selectedTotal(choices!, wizard.sizes);
         const scanning = scan.measuring;
         const problems = (plan?.errors.length ?? 0) > 0 || selectedPaths(choices!).length === 0 || onlineOnlyPaths(choices!, wizard.sizes).length > 0;
+        // The installer's answer for the location chosen last is what the password choice (and every other finding) rests on, so
+        // Install waits for it, like Next on the Backup location page.
+        const checking = wizard.validation.checking;
         return {
           back: back('schedule'),
-          next: { label: 'Install', icon: <ShieldIcon size={16} />, onClick: () => wizard.install(), disabled: problems || scanning, variant: 'primary' },
-          hint: problems ? 'Fix the problems above to install'
+          next: { label: 'Install', icon: <ShieldIcon size={16} />, onClick: () => wizard.install(), disabled: problems || scanning || checking, variant: 'primary' },
+          hint: checking ? <><Spinner size={12} /><span>Checking this location…</span></>
+            : problems ? 'Fix the problems above to install'
             // The count is what shows a long scan (a big photo library) is moving.
             : wizard.checkingBeforeInstall ? <><Spinner size={12} /><span>Checking your folders once more… {formatCount(scan.files, wizard.host?.locale)} files so far</span></>
               : scanning ? <><Spinner size={12} /><span>Checking your folders for files that are only in OneDrive…</span></>
@@ -169,7 +204,7 @@ export default function SetupApp() {
         const returnTo: Screen = screen === 'installing' ? 'review' : 'maintenance';
         if (outcome === 'succeeded') {
           return screen === 'installing'
-            ? { next: { label: 'Continue', trailing: <ArrowRight size={15} aria-hidden="true" />, onClick: () => wizard.goTo('recovery'), variant: 'primary' } }
+            ? { next: { label: 'Continue', trailing: <ArrowRight size={15} aria-hidden="true" />, onClick: () => wizard.goTo(wizard.recoveryNeeded ? 'recovery' : 'done'), variant: 'primary' } }
             : { next: closeAction('primary') };
         }
         if (outcome === 'failed' || outcome === 'cancelled') {
@@ -247,13 +282,15 @@ export default function SetupApp() {
     const key = latest ? `${latest.phase}:${latest.state}` : operation.stage;
     if (key === lastPhase.current) return;
     lastPhase.current = key;
-    const text = latest ? `${phaseTitle(operation.operation, latest.phase, latest.title)}${latest.state === 'completed' ? ', done' : latest.state === 'started' ? '…' : latest.state === 'skipped' ? ', not needed' : ', failed'}`
+    const text = latest ? `${phaseTitle(operation.operation, latest.phase, latest.title, accessOfOperation(operation))}${latest.state === 'completed' ? ', done' : latest.state === 'started' ? '…' : latest.state === 'skipped' ? ', not needed' : ', failed'}`
       : operation.stage === 'elevating' ? 'Waiting for permission. Choose Yes in the Windows prompt.' : '';
     setSpoken({ polite: text, assertive: '' });
   }, [operation]);
 
   const header = headerFor(wizard);
-  const stepIndex = STEPS.findIndex(step => step.screen === screen);
+  // The rail, the compact bar and "Step N of M" all count the same steps (they drop Recovery key for backups without a password).
+  const steps = wizard.steps;
+  const stepIndex = steps.findIndex(step => step.screen === screen);
   const inFlow = stepIndex >= 0;
   const locked = !!operation && screen !== 'review';
 
@@ -265,6 +302,7 @@ export default function SetupApp() {
       case 'welcome': return <Welcome wizard={wizard} />;
       case 'folders': return <Folders wizard={wizard} />;
       case 'location': return <Location wizard={wizard} />;
+      case 'password': return <Password wizard={wizard} />;
       case 'schedule': return <Schedule wizard={wizard} />;
       case 'review': return <Review wizard={wizard} />;
       case 'installing': case 'uninstalling': return operation ? <OperationView wizard={wizard} operation={operation} /> : null;
@@ -299,7 +337,7 @@ export default function SetupApp() {
           </div>
           {inFlow ? (
             <ol className="rail-steps">
-              {STEPS.map((step, index) => {
+              {steps.map((step, index) => {
                 const state = index < stepIndex ? 'done' : index === stepIndex ? 'current' : 'upcoming';
                 const reachable = !locked && CHOICE_STEPS.includes(step.screen) && CHOICE_STEPS.indexOf(step.screen) <= wizard.furthest && index !== stepIndex;
                 const content = <>
@@ -329,9 +367,9 @@ export default function SetupApp() {
           {inFlow && (
             <div className="compact-progress" aria-hidden="true">
               <img src="./rewindle-icon.svg" alt="" width="22" height="22" />
-              <span className="compact-label">{STEPS[stepIndex]?.label}</span>
-              <span className="compact-count">{stepIndex + 1} of {STEPS.length}</span>
-              <span className="compact-bar"><span style={{ width: `${((stepIndex + 1) / STEPS.length) * 100}%` }} /></span>
+              <span className="compact-label">{steps[stepIndex]?.label}</span>
+              <span className="compact-count">{stepIndex + 1} of {steps.length}</span>
+              <span className="compact-bar"><span style={{ width: `${((stepIndex + 1) / steps.length) * 100}%` }} /></span>
             </div>
           )}
           <div className="setup-scroll" ref={scrollRef}>
@@ -375,12 +413,12 @@ export default function SetupApp() {
         <ConfirmDialog open={confirmUninstall} title="Uninstall Rewindle?" confirm="Uninstall" cancel="Keep Rewindle" danger confirmIcon={<ShieldIcon size={15} />}
           onCancel={() => setConfirmUninstall(false)} onConfirm={() => { setConfirmUninstall(false); void wizard.uninstall(); }}>
           <p>This removes the Rewindle app, its scheduled backups, the Start menu shortcut and its entry in Installed apps. A backup that is running is stopped.</p>
-          <p><strong>Your backups and recovery key are kept</strong>, so you can still restore files or install Rewindle again. Windows will ask for permission.</p>
+          <p><strong>{keptWords(keptAccess)}</strong>, so you can still restore files or install Rewindle again. Windows will ask for permission.</p>
         </ConfirmDialog>
         <ConfirmDialog open={confirmReinstall} title="Set up Rewindle again?" confirm="Remove and set up again" cancel="Keep Rewindle" confirmIcon={<ShieldIcon size={15} />}
           onCancel={() => setConfirmReinstall(false)} onConfirm={() => { setConfirmReinstall(false); void wizard.reinstall(); }}>
           <p>Setup removes the Rewindle app and its scheduled backups first, then takes you through the setup steps again. Windows asks for your permission again when the new install starts.</p>
-          <p><strong>Your backups and recovery key are kept.</strong> Setup picks your existing backup location again if its drive is connected. Your folders and schedule start from the suggestions, so check them as you go.</p>
+          <p><strong>{keptWords(keptAccess)}.</strong> Setup picks your existing backup location again if its drive is connected. Your folders and schedule start from the suggestions, so check them as you go.</p>
         </ConfirmDialog>
         <ConfirmDialog open={confirmSkip} title="Skip saving your recovery key?" confirm="Skip for now" cancel="Go back"
           onCancel={() => setConfirmSkip(false)} onConfirm={() => { setConfirmSkip(false); wizard.goTo('done'); }}>

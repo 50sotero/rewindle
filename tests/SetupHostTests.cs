@@ -544,6 +544,19 @@ namespace Rewindle.Setup.Tests
             Check(!InstallerContract.TryReadInputs(Obj(@"{""repository"":""E:\\b"",""sources"":[],""schedule"":""02:00""}"), true, out inputs, out error), "an install needs a folder");
             Check(!InstallerContract.TryReadInputs(Obj(@"{""sources"":[""C:\\a""],""schedule"":""02:00""}"), true, out inputs, out error), "an install needs a repository");
             Check(!InstallerContract.TryReadInputs(Obj(@"{""repository"":""E:\\b"",""sources"":[""C:\\a""]}"), true, out inputs, out error), "an install needs a schedule");
+
+            // The password choice: one of two words, or none; nothing else is passed on to the installer.
+            Check(InstallerContract.TryReadInputs(full, true, out inputs, out error) && inputs.RepositoryAccess == null, "no password choice is read as none (the installer uses its records)");
+            Check(InstallerContract.TryReadInputs(Obj(@"{""repositoryAccess"":null}"), false, out inputs, out error) && inputs.RepositoryAccess == null, "a null password choice is none");
+            Check(InstallerContract.TryReadInputs(Obj(@"{""repositoryAccess"":""password""}"), false, out inputs, out error) && inputs.RepositoryAccess == "password", "the choice of a password is read");
+            Check(InstallerContract.TryReadInputs(Obj(@"{""repositoryAccess"":""no_password""}"), false, out inputs, out error) && inputs.RepositoryAccess == "no_password", "the choice of no password is read");
+            foreach (string badChoice in new string[] { "\"none\"", "\"No_Password\"", "\"PASSWORD\"", "\"\"", "\"password \"", "5", "true", "[\"password\"]", "{}" })
+            {
+                Check(!InstallerContract.TryReadInputs(Obj("{\"repositoryAccess\":" + badChoice + "}"), false, out inputs, out error) && error == "The password choice is not valid.",
+                    "a password choice of " + badChoice + " is refused with a plain sentence");
+                Check(!InstallerContract.TryReadInputs(Obj("{\"repository\":\"E:\\\\b\",\"sources\":[\"C:\\\\a\"],\"schedule\":\"02:00\",\"repositoryAccess\":" + badChoice + "}"), true, out inputs, out error),
+                    "and so is it for an install: " + badChoice);
+            }
         }
 
         private static void InstallerArguments()
@@ -589,10 +602,41 @@ namespace Rewindle.Setup.Tests
                 install,
                 "install arguments, open files off and a first backup");
             Check(!install.Contains("-PlanOnly"), "an install never carries -PlanOnly");
+            Check(!install.Contains("-RepositoryAccess"), "without a password choice, an install leaves the parameter out");
+
+            // The password choice goes with the install only, right after the storage mode (and the Google Drive root), before the folders.
+            inputs.RepositoryAccess = "no_password";
+            SequenceEqual(
+                new string[]
+                {
+                    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", @"C:\t\Install-ResticBackuper.ps1", "-Unattended", "-ExpectedUserSid",
+                    "S-1-5-21-1-2-3-1001", "-ProgressPath", @"C:\t\progress.jsonl", "-Repository", @"E:\Rewindle Backups", "-RepositoryStorageMode", "local_ntfs",
+                    "-RepositoryAccess", "no_password",
+                    "-SourceList", @"C:\Users\you\Desktop;C:\Users\you\Documents", "-Schedule", "02:00", "-DisableVss", "-StartBackup"
+                },
+                InstallerContract.InstallArguments(@"C:\t\Install-ResticBackuper.ps1", "S-1-5-21-1-2-3-1001", @"C:\t\progress.jsonl", inputs),
+                "install arguments with no password");
+            SequenceEqual(
+                new string[]
+                {
+                    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", @"C:\t\Install-ResticBackuper.ps1", "-PlanOnly", "-PlanOutput",
+                    @"C:\t\plan.json", "-Repository", @"E:\Rewindle Backups", "-RepositoryStorageMode", "local_ntfs", "-SourceList",
+                    @"C:\Users\you\Desktop;C:\Users\you\Documents", "-Schedule", "02:00", "-DisableVss"
+                },
+                InstallerContract.PlanArguments(@"C:\t\Install-ResticBackuper.ps1", @"C:\t\plan.json", inputs),
+                "a plan request never carries the password choice, even when one was read");
+            inputs.RepositoryAccess = "password";
+            Check(InstallerContract.InstallArguments("s.ps1", "S-1", "p.jsonl", inputs).SequenceEqual(new string[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "s.ps1", "-Unattended", "-ExpectedUserSid", "S-1",
+                "-ProgressPath", "p.jsonl", "-Repository", @"E:\Rewindle Backups", "-RepositoryStorageMode", "local_ntfs", "-RepositoryAccess", "password",
+                "-SourceList", @"C:\Users\you\Desktop;C:\Users\you\Documents", "-Schedule", "02:00", "-DisableVss", "-StartBackup" }), "install arguments with a password");
 
             inputs.StorageMode = InstallerContract.StorageDriveFs;
             inputs.DriveFsMyDriveRoot = @"G:\My Drive";
             Check(InstallerContract.PlanArguments("s.ps1", "p.json", inputs).Contains("-DriveFsMyDriveRoot"), "the Google Drive root is passed");
+            List<string> driveInstall = InstallerContract.InstallArguments("s.ps1", "S-1", "p.jsonl", inputs);
+            Check(driveInstall.IndexOf("-DriveFsMyDriveRoot") + 2 == driveInstall.IndexOf("-RepositoryAccess") && driveInstall.IndexOf("-RepositoryAccess") + 2 == driveInstall.IndexOf("-SourceList"),
+                "the password choice follows the Google Drive pair and comes before the folders");
+            inputs.RepositoryAccess = null;
 
             SequenceEqual(
                 new string[]
@@ -623,6 +667,9 @@ namespace Rewindle.Setup.Tests
             Check(phase.Fields != null && !phase.IsResult, "a phase line is an object, not a result");
             ProgressLine ok = InstallerContract.ReadProgressLine("{\"schema\":\"Rewindle.InstallProgress.v1\",\"type\":\"result\",\"ok\":true,\"error\":null,\"recovery_key_path\":\"C:\\\\Users\\\\you\\\\key.txt\",\"recovery_key_readable_by_user\":true,\"dashboard_executable\":\"C:\\\\Program Files\\\\ResticBackuper\\\\ResticBackuperDashboard.exe\",\"install_root\":\"C:\\\\Program Files\\\\ResticBackuper\"}");
             Check(ok.IsResult && ok.ResultOk && ok.RecoveryKeyReadableByUser == true && ok.RecoveryKeyPath == @"C:\Users\you\key.txt", "a successful result line");
+            Check(ok.RepositoryAccess == null, "a result line without repository_access reports none (an older installer)");
+            ProgressLine noPassword = InstallerContract.ReadProgressLine("{\"schema\":\"Rewindle.InstallProgress.v1\",\"type\":\"result\",\"ok\":true,\"error\":null,\"recovery_key_path\":null,\"recovery_key_readable_by_user\":null,\"version\":\"0.2.0\",\"repository_access\":\"no_password\",\"warnings\":[]}");
+            Check(noPassword.ResultOk && noPassword.RepositoryAccess == "no_password" && noPassword.RecoveryKeyPath == null, "a result line for backups without a password");
             ProgressLine failed = InstallerContract.ReadProgressLine("{\"schema\":\"Rewindle.InstallProgress.v1\",\"type\":\"result\",\"ok\":false,\"error\":{\"code\":\"x\",\"message\":\"It broke.\"}}");
             Check(failed.IsResult && !failed.ResultOk && failed.ResultErrorMessage == "It broke.", "a failed result line");
             ProgressLine unknown = InstallerContract.ReadProgressLine("{\"schema\":\"Rewindle.InstallProgress.v1\",\"type\":\"result\",\"ok\":true,\"error\":null,\"recovery_key_path\":\"C:\\\\k.txt\",\"recovery_key_readable_by_user\":null}");
@@ -962,10 +1009,10 @@ namespace Rewindle.Setup.Tests
             string script = Path.Combine(folder, "Install-ResticBackuper.ps1");
             File.WriteAllText(script, @"
 param([switch]$PlanOnly, [string]$PlanOutput, [string]$Repository, [string]$RepositoryStorageMode, [string]$DriveFsMyDriveRoot,
-      [string]$SourceList, [string]$Schedule, [switch]$DisableVss)
+      [string]$RepositoryAccess, [string]$SourceList, [string]$Schedule, [switch]$DisableVss)
 $mode = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'mode.txt') -Raw).Trim()
 $received = [ordered]@{ plan_only = [bool]$PlanOnly; repository = $Repository; mode = $RepositoryStorageMode; drivefs = $DriveFsMyDriveRoot;
-    sources = $SourceList; schedule = $Schedule; disable_vss = [bool]$DisableVss }
+    access = $RepositoryAccess; sources = $SourceList; schedule = $Schedule; disable_vss = [bool]$DisableVss }
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'received.json'), ($received | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
 switch ($mode) {
     'ok' { [IO.File]::WriteAllText($PlanOutput, '{""schema"":""Rewindle.InstallPlan.v1"",""ok"":true,""errors"":[],""warnings"":[]}', [Text.UTF8Encoding]::new($true)); exit 0 }
@@ -991,6 +1038,7 @@ switch ($mode) {
             inputs.Sources.Add(@"D:\Photo Archive\");
             inputs.Schedule = "04:15";
             inputs.Vss = false;
+            inputs.RepositoryAccess = "no_password";
 
             File.WriteAllText(modeFile, "ok");
             IDictionary<string, object> plan = runner.GetPlan(inputs, CancellationToken.None);
@@ -1002,6 +1050,7 @@ switch ($mode) {
             Equal("04:15", Json.String(received, "schedule", 64), "the schedule");
             Check(Json.Bool(received, "disable_vss") == true, "-DisableVss");
             Equal("local_ntfs", Json.String(received, "mode", 64), "the storage mode");
+            Check(string.IsNullOrEmpty(Json.String(received, "access", 64)), "a plan never receives the password choice, even from inputs that hold one");
             Check(Directory.GetFiles(Path.Combine(folder, "plans")).Length == 0, "the plan file is removed once read");
 
             File.WriteAllText(modeFile, "nofile");
@@ -1229,6 +1278,24 @@ switch ($mode) {
                     Check(events.All.Where(e => e.Key == "operationLine").Select(e => (string)e.Value["raw"]).Contains("this line is not JSON") &&
                           events.All.Where(e => e.Key == "operationLine").Any(e => e.Value["line"] == null), "a line that is not JSON is still forwarded as text");
                 }
+            }
+
+            // 1b. The password choice reaches the installer with the install, and only when there is one.
+            {
+                Events events = new Events();
+                FakeLauncher launcher = new FakeLauncher();
+                launcher.Lines = new string[] { OkResult };
+                InstallerInputs picked = SampleInputs();
+                picked.RepositoryAccess = "no_password";
+                SetupOperation operation = make(SetupOperation.Install, new FakePlans(), launcher, events, null);
+                operation.Run(picked);
+                Check(launcher.Arguments.IndexOf("-RepositoryAccess") >= 0 && launcher.Arguments[launcher.Arguments.IndexOf("-RepositoryAccess") + 1] == "no_password",
+                    "the install is started with the person's password choice");
+                Events plainEvents = new Events();
+                FakeLauncher plainLauncher = new FakeLauncher();
+                plainLauncher.Lines = new string[] { OkResult };
+                make(SetupOperation.Install, new FakePlans(), plainLauncher, plainEvents, null).Run(SampleInputs());
+                Check(!plainLauncher.Arguments.Contains("-RepositoryAccess"), "and without a choice, the installer is left to use what it recorded");
             }
 
             // 2. The choices fail the last check: nothing is started.
@@ -1668,6 +1735,59 @@ switch ($mode) {
             Check(lockedUi.WaitResponse("l1") && WaitFor(() => lockedUi.Events("operationFinished").Count == 1, 10000), "an install whose key only administrators can read finishes");
             lockedBridge.Receive(Request("l2", "saveRecoveryKeyCopy", null));
             Check(ErrorCode(lockedUi.Response("l2")) == "recovery_key_unreadable" && ((string)Json.String(Json.AsObject(Json.Get(lockedUi.Response("l2"), "error")), "message", 2000)).Contains("Show in folder"), "an unreadable key is an error that tells what to do instead");
+
+            // The password choice goes through the bridge to the install, validated; a plan request never forwards it to the installer.
+            {
+                FakeLauncher pickLauncher = new FakeLauncher();
+                FakeUi pickUi = new FakeUi();
+                FakePlans pickPlans = new FakePlans();
+                SetupBridge pickBridge = new SetupBridge(pickUi, NewEnvironment(NewFolder("pick"), pickPlans, pickLauncher));
+                pickLauncher.Lines = new string[] { OkResult };
+                string withChoice = choices.Replace("\"startBackup\":false", "\"startBackup\":false,\"repositoryAccess\":\"no_password\"");
+                pickBridge.Receive(Request("p1", "install", withChoice));
+                Check(pickUi.WaitResponse("p1") && Ok(pickUi.Response("p1")) && WaitFor(() => pickUi.Events("operationFinished").Count == 1, 10000), "an install with a password choice starts and finishes");
+                Check(pickLauncher.Arguments != null && pickLauncher.Arguments.IndexOf("-RepositoryAccess") >= 0 &&
+                      pickLauncher.Arguments[pickLauncher.Arguments.IndexOf("-RepositoryAccess") + 1] == "no_password", "the choice is passed to the installer as -RepositoryAccess");
+                pickBridge.Receive(Request("p2", "install", choices.Replace("\"startBackup\":false", "\"startBackup\":false,\"repositoryAccess\":\"none\"")));
+                Equal("invalid_choices", ErrorCode(pickUi.Response("p2")), "an install with a password choice that is neither word is refused");
+                pickBridge.Receive(Request("p3", "getPlan", "{\"inputs\":{\"repositoryAccess\":\"sideways\"}}"));
+                Equal("invalid_inputs", ErrorCode(pickUi.Response("p3")), "and so is a plan request that carries one");
+                pickBridge.Shutdown();
+            }
+
+            // Backups without a password have no recovery key: the host copies and shows none, whatever path a result line carries.
+            {
+                string keyForNone = Path.Combine(NewFolder("nokey"), "ResticBackuper-RecoveryKey.txt");
+                File.WriteAllText(keyForNone, "an older install's key");
+                foreach (string access in new string[] { "no_password", "password" })
+                {
+                    FakeLauncher keyLauncher = new FakeLauncher();
+                    FakeUi keyUi = new FakeUi();
+                    SetupBridge keyBridge = new SetupBridge(keyUi, NewEnvironment(NewFolder("keys-" + access), new FakePlans(), keyLauncher));
+                    keyLauncher.Lines = new string[]
+                    {
+                        "{\"schema\":\"Rewindle.InstallProgress.v1\",\"type\":\"result\",\"ok\":true,\"error\":null,\"recovery_key_path\":" + Json.Serialize(keyForNone) +
+                            ",\"recovery_key_readable_by_user\":true,\"repository_access\":\"" + access + "\"}"
+                    };
+                    keyBridge.Receive(Request("n1", "install", choices));
+                    Check(keyUi.WaitResponse("n1") && WaitFor(() => keyUi.Events("operationFinished").Count == 1, 10000), "an install reporting " + access + " finishes");
+                    keyUi.SaveToReturn = Path.Combine(NewFolder("copy-" + access), "key.txt");
+                    keyBridge.Receive(Request("n2", "saveRecoveryKeyCopy", null));
+                    keyBridge.Receive(Request("n3", "showRecoveryKey", null));
+                    if (access == "no_password")
+                    {
+                        Check(ErrorCode(keyUi.Response("n2")) == "no_recovery_key" && ErrorCode(keyUi.Response("n3")) == "no_recovery_key" && keyUi.Revealed.Count == 0 && !File.Exists(keyUi.SaveToReturn),
+                            "no key is copied or shown for backups without a password, even when a key file sits at the reported path");
+                        Check(((string)Json.String(Json.AsObject(Json.Get(keyUi.Response("n2"), "error")), "message", 2000)).Contains("no password"), "and the refusal says why");
+                    }
+                    else
+                    {
+                        Check(keyUi.WaitResponse("n2") && Ok(keyUi.Response("n2")) && File.Exists(keyUi.SaveToReturn) && Ok(keyUi.Response("n3")) && keyUi.Revealed.Count == 1,
+                            "the same result line for backups with a password is copied and shown as before");
+                    }
+                    keyBridge.Shutdown();
+                }
+            }
 
             // After Shutdown nothing more is answered.
             int before = ui.Sent.Count;

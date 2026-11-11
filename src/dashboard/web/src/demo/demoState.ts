@@ -120,7 +120,8 @@ export function createSampleState(now = Date.now()): DashboardState {
       summary: 'Daily at 02:00', nextRun: formatWhen(next), nextRunAt: next.toISOString(),
       detail: 'Run missed backups • Wait for AC power',
     },
-    repository: { path: repositoryPath, volume: 'D:\\  •  Backup drive  •  96.0 GiB free', space: sampleSpace() },
+    // The sample's backups have a password, as a backup does unless the person chose otherwise (`?access=no_password|unknown` shows the others).
+    repository: { path: repositoryPath, volume: 'D:\\  •  Backup drive  •  96.0 GiB free', space: sampleSpace(), repositoryAccess: 'password' },
     freshness: {
       title: 'Healthy', detail: `Last verified ${formatWhen(new Date(latest.started))}. Next scheduled ${formatWhen(next)}.`,
       state: 'Healthy', verifiedAt: new Date(Date.parse(latest.started) + latest.durationSeconds * 1000).toISOString(),

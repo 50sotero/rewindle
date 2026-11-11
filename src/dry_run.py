@@ -23,6 +23,7 @@ from restic_common import (
     atomic_write_json,
     ensure_free_space,
     load_config_under_lock,
+    repository_access,
     restic_base,
     sanitized_command,
     sha256_file,
@@ -59,6 +60,7 @@ def _run_locked(config: dict[str, Any]) -> int:
         "repository_storage_mode": config.get(
             "repository_storage_mode", "local_ntfs"
         ),
+        "repository_access": repository_access(config),
         "repository_readiness": None,
         "repository_volume_serial": config["repository_volume_serial"],
         "sources": config["sources"],
