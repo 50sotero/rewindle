@@ -436,13 +436,16 @@ export type PasswordPage =
 
 /**
  * The state of the Password page for the folder chosen now. The choice is offered only when the installer's latest answer is for
- * that folder, is finished, and found no backups in it; with backups there, the page says what they have and offers nothing.
+ * that folder and found no backups in it; with backups there, the page says what they have and offers nothing. While that answer is
+ * being renewed (`checking`) the page keeps what the answer on hand says for this folder, so a control the person just used is not
+ * taken from under them for the length of a plan; it is a wait only when no answer for this folder is on hand. Whatever must not go
+ * on with an answer that is being renewed (Next, Install, the pick that is sent) reads `checking` and the latest plan itself.
  * `unavailable` is a plan that will not come for this folder (the installer refused the location, or could not be asked).
  */
 export function passwordPageFor(plan: InstallPlan | null, repository: string, checking: boolean, failed: boolean): PasswordPage {
-  if (checking) return { kind: 'checking' };
   const current = planFor(plan, repository);
   if (current === null) {
+    if (checking) return { kind: 'checking' };
     const refused = plan !== null && plan.errors.some(issue => issue.field === 'repository' || issue.field === 'storage_mode');
     return failed || refused ? { kind: 'unavailable' } : { kind: 'checking' };
   }

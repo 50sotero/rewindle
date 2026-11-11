@@ -333,7 +333,6 @@ RECORD_READERS = (
 PASSWORD_SOURCE_ALLOWED = {
     "src/secret_store.py": "the DPAPI helper itself; it starts no Restic process",
     "src/dashboard/RunDetailsWindow.cs": "a log filter that hides such words; it starts no Restic process",
-    "src/sync_repository_to_google_drive.ps1": "retired, never shipped (build\\Build-Release.ps1 leaves it out)",
 }
 
 
@@ -577,7 +576,7 @@ class PasswordSourceSweepTests(unittest.TestCase):
         self.assertNotIn(
             "sync_repository_to_google_drive.ps1",
             (PROJECT / "build" / "Build-Release.ps1").read_text(encoding="utf-8"),
-            "the retired script is allowed only because it is not shipped",
+            "the retired script must not ship: it opens backups with their saved password",
         )
 
 
@@ -680,6 +679,43 @@ class PasswordSourceSweepOnACopyTests(unittest.TestCase):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text('const x = "--password-command";\n', encoding="utf-8")
         self.assertEqual([], password_source_problems(self.copy))
+
+
+class RetiredMirrorTests(unittest.TestCase):
+    """src/sync_repository_to_google_drive.ps1 is retired and never shipped, but it is still in the tree and opens the backups with
+    their saved password, so it must refuse backups without one before it reads or starts anything else."""
+
+    def test_the_retired_mirror_refuses_backups_without_a_password_before_anything_else(self) -> None:
+        system = os.environ.get("SystemRoot", r"C:\Windows")
+        powershell = Path(system) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        if os.name != "nt" or not powershell.is_file():
+            self.skipTest("Windows PowerShell 5.1 is unavailable")
+        with tempfile.TemporaryDirectory(prefix="rewindle-retired-mirror-", ignore_cleanup_errors=True) as temp:
+            root = Path(temp)
+            config = root / "backup-config.json"
+            # Nothing else the script checks is there (no repository, no saved password, no Restic): the refusal has to come first.
+            config.write_text(json.dumps({"schema_version": 1, "repository_access": "no_password"}), encoding="utf-8")
+            state = root / "state"
+            destination = root / "destination"
+            environment = dict(os.environ)
+            # The Python step on CI runs under PowerShell 7, whose module path Windows PowerShell 5.1 can't load.
+            environment["PSModulePath"] = str(Path(system) / "System32" / "WindowsPowerShell" / "v1.0" / "Modules")
+            completed = subprocess.run(
+                [
+                    str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
+                    str(PROJECT / "src" / "sync_repository_to_google_drive.ps1"), "-ConfigPath", str(config),
+                    "-DestinationRoot", str(destination), "-StateRoot", str(state), "-ValidateOnly",
+                ],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=120, check=False,
+            )
+            output = completed.stdout + completed.stderr
+            self.assertEqual(1, completed.returncode, output)
+            # Windows PowerShell wraps a long error at the console width, even inside a word.
+            refusal = "This retired local mirror copies only backups that have a password. These backups have none, so it stops here."
+            self.assertIn("".join(refusal.split()), "".join(output.split()), output)
+            self.assertFalse(state.exists())
+            self.assertFalse(destination.exists())
 
 
 class FakeContractTests(unittest.TestCase):

@@ -3,7 +3,8 @@
 When the person picks No password for a new, empty backup location, the install is started with -RepositoryAccess no_password. The plan
 Setup asks for just before it must carry the same parameter: without it the installer resolves a password for the location, and refuses
 over an old ResticBackuper-RecoveryKey.txt (recovery_key_stale) that an install without a password never reads, so every Install ended
-"blocked". The plans the wizard asks for stay as they were: they describe the location alone and never carry the pick.
+"blocked". The plans the wizard asks for stay as they were: they describe the location alone and never carry the pick. All of it holds
+for a backup location in Google Drive for desktop too: its plan carries the storage mode and the drive's My Drive root, and then the pick.
 
 The setup host's C# (installer/setup, without the window and the program's entry point) is compiled with a console harness,
 tests/fixtures/SetupGatePlanHarness.cs, and run on files in a disposable folder: no window, no elevated process, no real installer. See
@@ -34,6 +35,11 @@ CHOICES = [
 ]
 FOLDERS = ["-SourceList", r"C:\Users\you\Documents", "-Schedule", "02:00"]
 SCRIPT_ARGUMENTS = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", SCRIPT]
+# The same choices for a backup location in Google Drive for desktop: the storage mode, then the drive's My Drive root.
+DRIVE_CHOICES = [
+    "-Repository", r"G:\My Drive\Rewindle Backups", "-RepositoryStorageMode", "google_drivefs_stream",
+    "-DriveFsMyDriveRoot", r"G:\My Drive",
+]
 
 
 def pick(access: str | None) -> list[str]:
@@ -42,6 +48,10 @@ def pick(access: str | None) -> list[str]:
 
 def plan_arguments(access: str | None) -> list[str]:
     return SCRIPT_ARGUMENTS + ["-PlanOnly", "-PlanOutput", PLAN_FILE] + CHOICES + pick(access) + FOLDERS
+
+
+def drive_plan_arguments(access: str | None) -> list[str]:
+    return SCRIPT_ARGUMENTS + ["-PlanOnly", "-PlanOutput", PLAN_FILE] + DRIVE_CHOICES + pick(access) + FOLDERS
 
 
 @unittest.skipUnless(os.name == "nt", "Setup is Windows-only")
@@ -121,6 +131,21 @@ class SetupHostGatePlanTests(unittest.TestCase):
                 self.assertEqual(plan_arguments(None), arguments)
                 self.assertNotIn("-RepositoryAccess", arguments)
 
+    def test_for_google_drive_the_plan_before_an_install_carries_the_pick_between_the_drive_pair_and_the_folders(self) -> None:
+        lists = self.report["plan_arguments"]
+        for access in ("no_password", "password", None):
+            with self.subTest(access=access):
+                name = access or "none"
+                gate = lists[f"drive_for_install:{name}"]
+                # The Google Drive pair, then the pick (when there is one), then the folders: where the install has them.
+                self.assertEqual(drive_plan_arguments(access), gate)
+                install = lists[f"drive_install:{name}"]
+                self.assertEqual(gate[9:], install[11:])
+                self.assertEqual(access, install[install.index("-RepositoryAccess") + 1] if "-RepositoryAccess" in install else None)
+                # The wizard's plans still describe the location alone, Google Drive or not.
+                self.assertEqual(drive_plan_arguments(None), lists[f"drive_for_wizard:{name}"])
+                self.assertNotIn("-RepositoryAccess", lists[f"drive_for_wizard:{name}"])
+
     # ---- an install asks for its own check -------------------------------------------------------------------------------------------
 
     def test_an_install_without_a_password_is_not_blocked_by_the_plan_it_makes_first(self) -> None:
@@ -141,6 +166,31 @@ class SetupHostGatePlanTests(unittest.TestCase):
                 self.assertEqual([True], run["asked"])
                 self.assertEqual([""] if access == "none" else ["password"], run["picks"])
                 # With a password (picked, or by default), the same old recovery key file is a real problem: nothing is started.
+                self.assertEqual("blocked", run["outcome"])
+                self.assertEqual("recovery_key_stale", run["blocked_by"])
+                self.assertEqual(["preparing"], run["stages"])
+                self.assertEqual(0, run["starts"])
+                self.assertIsNone(run["access_given"])
+
+    def test_an_install_to_google_drive_without_a_password_is_checked_as_the_install_will_run_and_goes_ahead(self) -> None:
+        run = self.report["operation"]["drive:no_password"]
+        # The same old recovery key file, asked about a Google Drive location: an error without the pick, nothing with it.
+        self.assertEqual(["google_drivefs_stream"], run["modes"])
+        self.assertEqual([True], run["asked"])
+        self.assertEqual(["no_password"], run["picks"])
+        self.assertEqual("succeeded", run["outcome"])
+        self.assertEqual(["preparing", "elevating", "running"], run["stages"])
+        self.assertEqual(1, run["starts"])
+        self.assertEqual("no_password", run["access_given"])
+        self.assertIsNone(run["blocked_by"])
+
+    def test_an_install_to_google_drive_that_leaves_the_pick_out_is_still_checked_without_it(self) -> None:
+        for access in ("password", "none"):
+            with self.subTest(access=access):
+                run = self.report["operation"][f"drive:{access}"]
+                self.assertEqual(["google_drivefs_stream"], run["modes"])
+                self.assertEqual([True], run["asked"])
+                self.assertEqual([""] if access == "none" else ["password"], run["picks"])
                 self.assertEqual("blocked", run["outcome"])
                 self.assertEqual("recovery_key_stale", run["blocked_by"])
                 self.assertEqual(["preparing"], run["stages"])
@@ -189,6 +239,33 @@ class SetupHostGatePlanTests(unittest.TestCase):
         self.assertIs(False, runner["wizard_plan"]["plan_allows_install"])
         self.assertEqual(["access=no_password"], runner["install_plan"]["stub_received"])
         self.assertIs(True, runner["install_plan"]["plan_allows_install"])
+
+    def test_the_real_plan_runner_gives_the_installer_the_pick_for_a_google_drive_install_too(self) -> None:
+        runner = self.runner_report()
+        location = "mode=google_drivefs_stream;drivefs=" + r"G:\My Drive"
+        picked = runner["drive_install_no_password"]
+        # The installer was asked about a Google Drive location (the stub says so), and was given the pick for the install's check.
+        self.assertEqual(location, picked["stub_location"])
+        self.assertEqual(["access=no_password"], picked["stub_received"])
+        self.assertEqual("succeeded", picked["outcome"])
+        self.assertEqual(1, picked["starts"])
+        self.assertEqual("no_password", picked["access_given"])
+        unpicked = runner["drive_install_no_pick"]
+        self.assertEqual(location, unpicked["stub_location"])
+        self.assertEqual(["access="], unpicked["stub_received"])
+        self.assertEqual("blocked", unpicked["outcome"])
+        self.assertEqual("recovery_key_stale", unpicked["blocked_by"])
+        self.assertEqual(0, unpicked["starts"])
+
+    def test_the_real_plan_runner_keeps_the_two_kinds_of_plan_apart_for_google_drive_too(self) -> None:
+        runner = self.runner_report()
+        location = "mode=google_drivefs_stream;drivefs=" + r"G:\My Drive"
+        self.assertEqual(location, runner["drive_wizard_plan"]["stub_location"])
+        self.assertEqual(["access="], runner["drive_wizard_plan"]["stub_received"])
+        self.assertIs(False, runner["drive_wizard_plan"]["plan_allows_install"])
+        self.assertEqual(location, runner["drive_install_plan"]["stub_location"])
+        self.assertEqual(["access=no_password"], runner["drive_install_plan"]["stub_received"])
+        self.assertIs(True, runner["drive_install_plan"]["plan_allows_install"])
 
 
 if __name__ == "__main__":

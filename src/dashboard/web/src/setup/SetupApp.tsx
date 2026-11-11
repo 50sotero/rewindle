@@ -161,12 +161,14 @@ export default function SetupApp() {
         };
       }
       case 'password': {
-        // The page offers the choice only once the installer has answered for the folder chosen now: until then (or when it can't answer
-        // for it) there is nothing to decide, and Next waits.
+        // The page offers the choice only for a folder the installer has answered for: until then (or when it can't answer for it) there
+        // is nothing to decide. While it is asked again (a pick made after a refused install renews the plan) the page keeps what the last
+        // answer said, so the radio just pressed stays where it is, but Next waits for the new answer, like Install.
         const kind = wizard.passwordPage.kind;
+        const waiting = kind === 'checking' || wizard.validation.checking;
         return {
-          back: back('location'), next: next('schedule', kind === 'checking' || kind === 'unavailable'),
-          hint: kind === 'checking' ? <><Spinner size={12} /><span>Checking this location…</span></>
+          back: back('location'), next: next('schedule', waiting || kind === 'unavailable'),
+          hint: waiting ? <><Spinner size={12} /><span>Checking this location…</span></>
             : kind === 'unavailable' ? 'Fix the problem on the Backup location page to continue' : undefined,
         };
       }

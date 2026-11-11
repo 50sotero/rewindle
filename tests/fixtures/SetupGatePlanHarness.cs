@@ -25,6 +25,8 @@ namespace Rewindle.Setup.GateHarness
         public readonly List<bool> Asked = new List<bool>();
         // The value each request would carry after -RepositoryAccess, or an empty string when it would not carry the parameter.
         public readonly List<string> Picks = new List<string>();
+        // The storage mode each request would carry after -RepositoryStorageMode (local_ntfs, or google_drivefs_stream for Google Drive).
+        public readonly List<string> Modes = new List<string>();
 
         public IDictionary<string, object> GetPlan(InstallerInputs inputs, bool forInstall, CancellationToken cancel)
         {
@@ -35,6 +37,7 @@ namespace Rewindle.Setup.GateHarness
             {
                 Asked.Add(forInstall);
                 Picks.Add(pick);
+                Modes.Add(arguments[arguments.IndexOf("-RepositoryStorageMode") + 1]);
             }
             return SetupGatePlanHarness.ParsePlan(pick == InstallerContract.AccessNone ? SetupGatePlanHarness.CleanPlan : SetupGatePlanHarness.StaleKeyPlan);
         }
@@ -206,6 +209,16 @@ namespace Rewindle.Setup.GateHarness
             return inputs;
         }
 
+        // The same choices for a backup location in Google Drive for desktop: the storage mode and the drive's My Drive root go with it.
+        private static InstallerInputs DriveInputs(string access)
+        {
+            InstallerInputs inputs = Inputs(access);
+            inputs.Repository = @"G:\My Drive\Rewindle Backups";
+            inputs.StorageMode = InstallerContract.StorageDriveFs;
+            inputs.DriveFsMyDriveRoot = @"G:\My Drive";
+            return inputs;
+        }
+
         // ---- PlanArguments ---------------------------------------------------------------------------------------------------------
 
         private static Dictionary<string, object> ArgumentLists()
@@ -218,6 +231,10 @@ namespace Rewindle.Setup.GateHarness
                 lists["for_install:" + name] = InstallerContract.PlanArguments(@"C:\t\Install-ResticBackuper.ps1", @"C:\t\plan.json", inputs, true).ToArray();
                 lists["for_wizard:" + name] = InstallerContract.PlanArguments(@"C:\t\Install-ResticBackuper.ps1", @"C:\t\plan.json", inputs, false).ToArray();
                 lists["install:" + name] = InstallerContract.InstallArguments(@"C:\t\Install-ResticBackuper.ps1", User, @"C:\t\progress.jsonl", inputs).ToArray();
+                InstallerInputs drive = DriveInputs(access);
+                lists["drive_for_install:" + name] = InstallerContract.PlanArguments(@"C:\t\Install-ResticBackuper.ps1", @"C:\t\plan.json", drive, true).ToArray();
+                lists["drive_for_wizard:" + name] = InstallerContract.PlanArguments(@"C:\t\Install-ResticBackuper.ps1", @"C:\t\plan.json", drive, false).ToArray();
+                lists["drive_install:" + name] = InstallerContract.InstallArguments(@"C:\t\Install-ResticBackuper.ps1", User, @"C:\t\progress.jsonl", drive).ToArray();
             }
             return lists;
         }
@@ -226,6 +243,11 @@ namespace Rewindle.Setup.GateHarness
 
         // Runs one install to its end, with the given source of plans and the stand-in for the elevated start.
         private static Dictionary<string, object> RunInstall(IPlanSource plans, string folder, string script, string access)
+        {
+            return RunInstall(plans, folder, script, Inputs(access));
+        }
+
+        private static Dictionary<string, object> RunInstall(IPlanSource plans, string folder, string script, InstallerInputs inputs)
         {
             RecordingLauncher launcher = new RecordingLauncher();
             List<object> stages = new List<object>();
@@ -265,7 +287,7 @@ namespace Rewindle.Setup.GateHarness
                     }
                 },
                 null);
-            operation.Run(Inputs(access));
+            operation.Run(inputs);
             Dictionary<string, object> result = new Dictionary<string, object>();
             result["outcome"] = outcome[0];
             result["stages"] = stages.ToArray();
@@ -287,6 +309,14 @@ namespace Rewindle.Setup.GateHarness
                 run["asked"] = plans.Asked.ToArray();
                 run["picks"] = plans.Picks.ToArray();
                 cases[access ?? "none"] = run;
+
+                // The same install for a location in Google Drive: its check is asked for and made as the install's own there too.
+                KeyFileSensitivePlans drivePlans = new KeyFileSensitivePlans();
+                Dictionary<string, object> driveRun = RunInstall(drivePlans, folder, script, DriveInputs(access));
+                driveRun["asked"] = drivePlans.Asked.ToArray();
+                driveRun["picks"] = drivePlans.Picks.ToArray();
+                driveRun["modes"] = drivePlans.Modes.ToArray();
+                cases["drive:" + (access ?? "none")] = driveRun;
             }
             return cases;
         }
@@ -361,11 +391,13 @@ namespace Rewindle.Setup.GateHarness
 
         // A stand-in for Install-ResticBackuper.ps1 in plan mode that behaves as the installer does for the location above: it notes the
         // password choice it was given (one line per run), and answers with the old recovery key file as an error unless it was given
-        // -RepositoryAccess no_password.
+        // -RepositoryAccess no_password. It also notes the kind of location it was asked about (the last run only), so a test can tell
+        // a Google Drive request from a local one.
         private const string StubInstaller = @"
 param([switch]$PlanOnly, [string]$PlanOutput, [string]$Repository, [string]$RepositoryStorageMode, [string]$DriveFsMyDriveRoot,
       [string]$RepositoryAccess, [string]$SourceList, [string]$Schedule, [switch]$DisableVss)
 [IO.File]::AppendAllText((Join-Path $PSScriptRoot 'received.txt'), ('access=' + $RepositoryAccess + ""`n""))
+[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'received-location.txt'), ('mode=' + $RepositoryStorageMode + ';drivefs=' + $DriveFsMyDriveRoot))
 if ($RepositoryAccess -ceq 'no_password') {
     $plan = '{""schema"":""Rewindle.InstallPlan.v1"",""ok"":true,""errors"":[],""warnings"":[]}'
 } else {
@@ -386,6 +418,19 @@ exit 0
             return lines;
         }
 
+        // The kind of location the stub was last asked about ("mode=<storage mode>;drivefs=<My Drive root>"), or null when it was not run.
+        private static string LocationReceived(string folder)
+        {
+            string path = Path.Combine(folder, "received-location.txt");
+            if (!File.Exists(path))
+            {
+                return null;
+            }
+            string text = File.ReadAllText(path);
+            File.Delete(path);
+            return text;
+        }
+
         private static Dictionary<string, object> WithTheRealPlanRunner(string folder)
         {
             string script = Path.Combine(folder, "Install-ResticBackuper.ps1");
@@ -397,7 +442,7 @@ exit 0
             picked["stub_received"] = Received(folder);
             report["install_no_password"] = picked;
 
-            Dictionary<string, object> unpicked = RunInstall(runner, folder, script, null);
+            Dictionary<string, object> unpicked = RunInstall(runner, folder, script, (string)null);
             unpicked["stub_received"] = Received(folder);
             report["install_no_pick"] = unpicked;
 
@@ -411,6 +456,30 @@ exit 0
             gate["plan_allows_install"] = InstallerContract.PlanAllowsInstall(runner.GetPlan(inputs, true, CancellationToken.None));
             gate["stub_received"] = Received(folder);
             report["install_plan"] = gate;
+
+            // The same, for a backup location in Google Drive: the installer is asked for the pick there too, by the install's own check
+            // and by nothing else. (The stub answers at once, so PlanRunner's longer Google Drive time limit plays no part.)
+            Dictionary<string, object> driveInstall =RunInstall(runner, folder, script, DriveInputs(InstallerContract.AccessNone));
+            driveInstall["stub_received"] = Received(folder);
+            driveInstall["stub_location"] = LocationReceived(folder);
+            report["drive_install_no_password"] = driveInstall;
+
+            Dictionary<string, object> driveUnpicked = RunInstall(runner, folder, script, DriveInputs(null));
+            driveUnpicked["stub_received"] = Received(folder);
+            driveUnpicked["stub_location"] = LocationReceived(folder);
+            report["drive_install_no_pick"] = driveUnpicked;
+
+            InstallerInputs driveChoice = DriveInputs(InstallerContract.AccessNone);
+            Dictionary<string, object> driveWizard = new Dictionary<string, object>();
+            driveWizard["plan_allows_install"] = InstallerContract.PlanAllowsInstall(runner.GetPlan(driveChoice, false, CancellationToken.None));
+            driveWizard["stub_received"] = Received(folder);
+            driveWizard["stub_location"] = LocationReceived(folder);
+            report["drive_wizard_plan"] = driveWizard;
+            Dictionary<string, object> driveGate = new Dictionary<string, object>();
+            driveGate["plan_allows_install"] = InstallerContract.PlanAllowsInstall(runner.GetPlan(driveChoice, true, CancellationToken.None));
+            driveGate["stub_received"] = Received(folder);
+            driveGate["stub_location"] = LocationReceived(folder);
+            report["drive_install_plan"] = driveGate;
             return report;
         }
     }

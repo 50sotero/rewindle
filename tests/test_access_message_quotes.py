@@ -169,6 +169,27 @@ class TheDocumentsQuoteTheCodeTests(unittest.TestCase):
         self.assertIn("for every request kind (listing, folder, search, restore, drill)", paragraph)
         self.assertIn("when it is the whole of `restore.py`'s last stderr line", paragraph)
         self.assertIn("it reads no other stderr", paragraph)
+        # How it ends a run: a failed query says it as the last line; a restore that Restic itself ends with exit 12 (the drill's restore
+        # too) says it as the report's `error`, and its last line is another one, `RESTORE INCOMPLETE: ...`.
+        self.assertIn("as the `error` of the report when Restic itself ends a restore or the drill's restore with exit 12", paragraph)
+        self.assertIn("(the last line is then `RESTORE INCOMPLETE: ...`)", paragraph)
+        restore_source = read(RESTORE)
+        self.assertIn('if access == "no_password" and returncode == RESTIC_WRONG_PASSWORD_EXIT:', restore_source)
+        self.assertIn('report["error"] = NOW_ASKS_FOR_A_PASSWORD_MESSAGE', restore_source)
+        self.assertIn('f"RESTORE INCOMPLETE: Restic exited with {returncode}; "', restore_source)
+        # The manager passes it on only for backups without a password and a run that failed without timing out, and then reads no
+        # report; a restore that Restic itself ended with exit 12 prints another line last, so the manager keeps its report instead.
+        self.assertIn("after `RESTORE FAILED: ` for backups without a password and the run failed", paragraph)
+        self.assertIn("the run failed without timing out; it then reads no report", paragraph)
+        self.assertIn(
+            "A restore that Restic itself ended with exit 12 prints another line last, so the manager keeps its report and history entry",
+            paragraph,
+        )
+        self.assertIn(
+            "and that report's `error` starts with the same text (followed, when restored items were left in the restore folder, by "
+            "the message that says so)",
+            paragraph,
+        )
         # The manager's copy is only as honest as the exact text it compares; the prefix restore.py gives that line is documented.
         self.assertIn("after `RESTORE FAILED: `", paragraph)
         self.assertIn('print(f"RESTORE FAILED: {error}", file=sys.stderr)', read(RESTORE))

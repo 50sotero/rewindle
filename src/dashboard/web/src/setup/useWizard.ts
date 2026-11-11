@@ -429,6 +429,9 @@ export function useWizard() {
       measured.current.clear();
       setSizes({});
       setChoices(initial);
+      // The plan above was asked about no choices, so it describes the installer's own suggestion, not the folder chosen here. The
+      // choices may be the same as before (Try again, or a reinstall that keeps its folder), and then nothing else would ask about them.
+      setRevalidation(count => count + 1);
       setKeptRepository(kept ?? null);
       setValidation({ plan, checking: false, error: null, blocked: false });
       setScreen(firstScreen(plan));

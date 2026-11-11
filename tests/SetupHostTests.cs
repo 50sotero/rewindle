@@ -666,6 +666,30 @@ namespace Rewindle.Setup.Tests
             List<string> driveInstall = InstallerContract.InstallArguments("s.ps1", "S-1", "p.jsonl", inputs);
             Check(driveInstall.IndexOf("-DriveFsMyDriveRoot") + 2 == driveInstall.IndexOf("-RepositoryAccess") && driveInstall.IndexOf("-RepositoryAccess") + 2 == driveInstall.IndexOf("-SourceList"),
                 "the password choice follows the Google Drive pair and comes before the folders");
+
+            // The plan made just before an install carries the choice for a Google Drive location too: the Google Drive pair, then the
+            // choice, then the folders, the same choices the install has; and the plans the wizard asks for still never carry it.
+            foreach (string drivePick in new string[] { "no_password", "password", null })
+            {
+                inputs.RepositoryAccess = drivePick;
+                List<string> driveGate = InstallerContract.PlanArguments(@"C:\t\Install-ResticBackuper.ps1", @"C:\t\plan.json", inputs, true);
+                List<string> expectedDriveGate = new List<string>(new string[]
+                {
+                    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", @"C:\t\Install-ResticBackuper.ps1", "-PlanOnly", "-PlanOutput",
+                    @"C:\t\plan.json", "-Repository", @"E:\Rewindle Backups", "-RepositoryStorageMode", "google_drivefs_stream", "-DriveFsMyDriveRoot", @"G:\My Drive"
+                });
+                if (drivePick != null)
+                {
+                    expectedDriveGate.AddRange(new string[] { "-RepositoryAccess", drivePick });
+                }
+                expectedDriveGate.AddRange(new string[] { "-SourceList", @"C:\Users\you\Desktop;C:\Users\you\Documents", "-Schedule", "02:00", "-DisableVss" });
+                SequenceEqual(expectedDriveGate, driveGate, "the plan made just before a Google Drive install carries the choice (" + (drivePick ?? "none") + ") where the install does");
+                List<string> driveRun = InstallerContract.InstallArguments("s.ps1", "S-1", "p.jsonl", inputs);
+                Check(driveGate.Skip(9).SequenceEqual(driveRun.Skip(11).Where(word => word != "-StartBackup").ToList()),
+                    "and has the install's choices (" + (drivePick ?? "none") + ")");
+                Check(!InstallerContract.PlanArguments(@"C:\t\Install-ResticBackuper.ps1", @"C:\t\plan.json", inputs, false).Contains("-RepositoryAccess"),
+                    "while the wizard's Google Drive plan leaves the choice out (" + (drivePick ?? "none") + ")");
+            }
             inputs.RepositoryAccess = null;
 
             SequenceEqual(
@@ -1102,6 +1126,27 @@ switch ($mode) {
             Check(string.IsNullOrEmpty(Json.String(received, "access", 64)), "and is made without the choice, as if the check before an install had never run");
             Check(Directory.GetFiles(Path.Combine(folder, "plans")).Length == 0, "no plan file is left behind");
 
+            // The same for a backup location in Google Drive: the check before an install receives the choice there too (with the Google
+            // Drive pair), and the plan the wizard asks for still does not.
+            InstallerInputs driveChoice = new InstallerInputs();
+            driveChoice.Repository = @"G:\My Drive\Rewindle Backups";
+            driveChoice.StorageMode = InstallerContract.StorageDriveFs;
+            driveChoice.DriveFsMyDriveRoot = @"G:\My Drive";
+            driveChoice.Sources.Add(@"C:\Users\you\Documents");
+            driveChoice.RepositoryAccess = "no_password";
+            File.WriteAllText(Path.Combine(folder, "received.json"), "{}");
+            Check(runner.GetPlan(driveChoice, true, CancellationToken.None) != null, "the check before a Google Drive install is answered");
+            received = Obj(File.ReadAllText(Path.Combine(folder, "received.json")));
+            Equal("google_drivefs_stream", Json.String(received, "mode", 64), "it was asked about a Google Drive location");
+            Equal(@"G:\My Drive", Json.String(received, "drivefs", 4096), "with the drive's My Drive root");
+            Equal("no_password", Json.String(received, "access", 64), "and the check before a Google Drive install receives the password choice");
+            File.WriteAllText(Path.Combine(folder, "received.json"), "{}");
+            Check(runner.GetPlan(driveChoice, false, CancellationToken.None) != null, "a plan the wizard asks for about a Google Drive location is answered");
+            received = Obj(File.ReadAllText(Path.Combine(folder, "received.json")));
+            Equal("google_drivefs_stream", Json.String(received, "mode", 64), "it was asked about a Google Drive location too");
+            Check(string.IsNullOrEmpty(Json.String(received, "access", 64)), "and is made without the choice");
+            Check(Directory.GetFiles(Path.Combine(folder, "plans")).Length == 0, "no plan file is left behind for Google Drive either");
+
             File.WriteAllText(modeFile, "nofile");
             try { runner.GetPlan(inputs, false, CancellationToken.None); Check(false, "no plan file is a failure"); }
             catch (SetupFailure failure) { Check(failure.Code == "plan_failed" && failure.Message.Contains("3"), "no plan file: plan_failed with the exit code (" + failure.Message + ")"); }
@@ -1307,6 +1352,16 @@ switch ($mode) {
             return inputs;
         }
 
+        // The same choices for a backup location in Google Drive for desktop.
+        private static InstallerInputs SampleDriveInputs()
+        {
+            InstallerInputs inputs = SampleInputs();
+            inputs.Repository = @"G:\My Drive\Rewindle Backups";
+            inputs.StorageMode = InstallerContract.StorageDriveFs;
+            inputs.DriveFsMyDriveRoot = @"G:\My Drive";
+            return inputs;
+        }
+
         private static void OperationFlow()
         {
             string folder = NewFolder("operation");
@@ -1393,6 +1448,40 @@ switch ($mode) {
                     make(SetupOperation.Install, otherPlans, otherLauncher, otherEvents, null).Run(unpicked);
                     Check(otherPlans.Asked.Count == 1 && otherPlans.Asked[0], "an install with " + (other ?? "no choice") + " also asks for its check as an install's own");
                     SequenceEqual(new string[] { "stage:preparing", "finished:blocked" }, otherEvents.Names(), "an install with " + (other ?? "no choice") + " is still blocked by the old recovery key file");
+                    Check(otherLauncher.Starts == 0, "and starts nothing");
+                }
+            }
+
+            // 1d. The same for a backup location in Google Drive: the check just before the install is asked for as the install's own there
+            // too, so it carries the choice, and an install without a password is not blocked by a recovery key file it never reads.
+            {
+                Events events = new Events();
+                FakeLauncher launcher = new FakeLauncher();
+                launcher.Lines = new string[] { OkResult };
+                FakePlans plans = new FakePlans();
+                plans.StaleKeyUnlessNoPassword = true;
+                InstallerInputs picked = SampleDriveInputs();
+                picked.RepositoryAccess = "no_password";
+                make(SetupOperation.Install, plans, launcher, events, null).Run(picked);
+                Check(plans.Seen != null && plans.Seen.StorageMode == InstallerContract.StorageDriveFs, "the check was asked about a Google Drive location");
+                Check(plans.Asked.Count == 1 && plans.Asked[0], "an install to Google Drive asks for its check as an install's own (forInstall)");
+                Check(launcher.Starts == 1 && events.Names().Last() == "finished:succeeded" && !events.Names().Contains("finished:blocked"),
+                    "an install to Google Drive without a password is not blocked by a recovery key file it never reads");
+                Check(launcher.Arguments.IndexOf("-DriveFsMyDriveRoot") >= 0 && launcher.Arguments.IndexOf("-RepositoryAccess") >= 0 &&
+                      launcher.Arguments[launcher.Arguments.IndexOf("-RepositoryAccess") + 1] == "no_password",
+                    "and it starts for Google Drive with the choice the check was made with");
+
+                foreach (string other in new string[] { "password", null })
+                {
+                    Events otherEvents = new Events();
+                    FakeLauncher otherLauncher = new FakeLauncher();
+                    FakePlans otherPlans = new FakePlans();
+                    otherPlans.StaleKeyUnlessNoPassword = true;
+                    InstallerInputs unpicked = SampleDriveInputs();
+                    unpicked.RepositoryAccess = other;
+                    make(SetupOperation.Install, otherPlans, otherLauncher, otherEvents, null).Run(unpicked);
+                    Check(otherPlans.Asked.Count == 1 && otherPlans.Asked[0], "an install to Google Drive with " + (other ?? "no choice") + " also asks for its check as an install's own");
+                    SequenceEqual(new string[] { "stage:preparing", "finished:blocked" }, otherEvents.Names(), "an install to Google Drive with " + (other ?? "no choice") + " is still blocked by the old recovery key file");
                     Check(otherLauncher.Starts == 0, "and starts nothing");
                 }
             }

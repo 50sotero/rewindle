@@ -597,7 +597,8 @@ as the `error` of the report when Restic itself ends a restore or the drill's re
 (listing, folder, search, restore, drill), when it is the whole of `restore.py`'s last stderr line after `RESTORE FAILED: ` for
 backups without a password and the run failed without timing out; it then reads no report, and it reads no other stderr, so no
 other word of the backend's output reaches the dashboard. A restore that Restic itself ended with exit 12 prints another line
-last, so the manager keeps its report and history entry, and that report's `error` is the same text. The restore drill runs
+last, so the manager keeps its report and history entry, and that report's `error` starts with the same text (followed,
+when restored items were left in the restore folder, by the message that says so). The restore drill runs
 with no key and reports
 `credential_source` `none` (with a password: `recovery_key`); `drill_kind` stays `recovery_key_representative` and the history
 entry kind stays `recovery_key_representative_drill`. `Manage-Restore.ps1` then neither requires the recovery key file nor

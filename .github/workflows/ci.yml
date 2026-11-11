@@ -206,3 +206,14 @@ jobs:
         env:
           REWINDLE_REQUIRE_PINNED_RESTIC: "1"
         run: python -m unittest -v tests.test_repository_access_restic
+
+      # The unit-test step runs before the build, so it skips the Setup wizard's rendered pages and the checks that run its state:
+      # they bundle the wizard with esbuild from src/dashboard/web/node_modules, which the release build installs. Run them here;
+      # with the variable set, a missing Node.js or esbuild fails the step instead of skipping. Like the steps above, it runs
+      # whenever the release was built.
+      - name: Check the Setup wizard's pages and state
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        env:
+          REWINDLE_REQUIRE_WEB_BUNDLE: "1"
+        run: python -m unittest -v tests.test_setup_wizard

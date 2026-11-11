@@ -181,6 +181,11 @@ function Resolve-ProtectedRepository {
     if ($config.schema_version -ne 1) {
         throw "Unsupported protected backup configuration schema: $($config.schema_version)"
     }
+    # This retired mirror opens the backups with their saved password, so backups made without one (repository_access
+    # no_password) are refused here, before anything else is read or started.
+    if ($config.PSObject.Properties.Name -contains 'repository_access' -and [string]$config.repository_access -ceq 'no_password') {
+        throw 'This retired local mirror copies only backups that have a password. These backups have none, so it stops here.'
+    }
     foreach ($property in @(
         'repository', 'repository_volume_serial', 'restic_executable',
         'python_executable', 'secret_file', 'state_directory', 'plan_id',

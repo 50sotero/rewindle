@@ -1184,6 +1184,14 @@ class WizardNotesMatchTheCodeTests(unittest.TestCase):
             "carries the choice exactly when the install does",
             note,
         )
+        # So the check describes the install that follows; and the reason the plans of the wizard leave the pick out is the installer's
+        # warning about a choice that contradicts the backups already in the folder (repository_access_differs, raised only for a pick
+        # that was given: test_a_choice_that_contradicts_the_record_is_a_warning_only_when_it_was_given).
+        self.assertIn("when the install does, so it describes the install that follows", note)
+        self.assertIn(
+            "with it, the installer would warn about a mode the person never saw at a location that may already have backups",
+            note,
+        )
         self.assertNotIn("Do not make the pick part of what a plan is requested with", note)
         # The same note says what to pass on: the pick goes with the install alone.
         self.assertIn("the password choice goes with the install alone", wizard_note(self.contract, "Plan, then install with the same inputs"))
@@ -1194,6 +1202,9 @@ class WizardNotesMatchTheCodeTests(unittest.TestCase):
         )
         note = wizard_note(self.contract, "Backups Setup can't carry on with")
         self.assertIn("`repository_access_mismatch` and `repository_password_unavailable`", note)
+        # Both are refusals the installer ends with "Setup undid its changes, and your backups were not touched." (pinned with the
+        # refusal messages), so an install that meets one leaves nothing changed.
+        self.assertIn("both end an install with nothing changed", note)
         self.assertIn("trying the same location again would end the same way", note)
         self.assertIn("go back and change the backup location, not to try again", note)
 
@@ -1333,6 +1344,24 @@ class ContinuousIntegrationTests(unittest.TestCase):
             self.assertGreater(text.index(dangerous), guard, f"{dangerous} appears before the CI guard")
         self.assertIn("RUNNER_ENVIRONMENT", text)
         self.assertIn("github-hosted", text)
+
+    def test_ci_runs_the_setup_wizard_checks_with_the_web_bundle_required(self) -> None:
+        ci = read(CI)
+        command = "python -m unittest -v tests.test_setup_wizard"
+        self.assertEqual(1, ci.count(command))
+        step = ci[: ci.index(command) + len(command)].rsplit("      - name: ", 1)[1]
+        self.assertTrue(step.startswith("Check the Setup wizard's pages and state\n"), step)
+        # After the release build (it installs web/node_modules), even when an earlier check failed; with the variable set, a missing
+        # Node.js or esbuild fails the step instead of skipping the rendered pages and the state runs.
+        self.assertIn("if: ${{ !cancelled() && steps.build.outcome == 'success' }}", step)
+        self.assertIn('REWINDLE_REQUIRE_WEB_BUNDLE: "1"', step)
+        self.assertIn("shell: pwsh", step)
+        self.assertLess(ci.index("Build-Release.ps1"), ci.index(command))
+
+    def test_the_host_readme_says_which_plans_carry_the_password_choice(self) -> None:
+        readme = " ".join(read(PROJECT / "installer" / "setup" / "README.md").split())
+        self.assertIn("These plans describe the location alone, so they never carry the person's password choice (`-RepositoryAccess`).", readme)
+        self.assertIn("this time with `-RepositoryAccess <password|no_password>` exactly when the install carries it", readme)
 
     def test_ci_checks_backups_without_a_password_with_the_pinned_restic(self) -> None:
         ci = read(CI)
