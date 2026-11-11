@@ -994,7 +994,7 @@ function Get-MoveFileNativeMethods {
 function Move-FileReplacing {
     # Renames Source over Target, on the same volume, in one step: Target always names the old file or the new one, never
     # nothing, which File.Replace does not promise. A file that another program has open just then is tried again.
-    # It throws only when nothing was renamed: Update-ProtectedPasswordHelper relies on that to remove its copies.
+    # If it throws, nothing was renamed: Update-ProtectedPasswordHelper relies on that to remove its copies.
     param(
         [Parameter(Mandatory)] [string]$Source,
         [Parameter(Mandatory)] [string]$Target

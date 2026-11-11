@@ -553,8 +553,11 @@ function Move-FileReplacing {
     if (-not $script:renamed -and $Target.EndsWith($renamedFile)) {
         $script:renamed = $true
         [IO.File]::WriteAllText($signalPath, 'renamed')
-        # As if the rename were still running: the stop is noticed only once this returns.
-        [System.Threading.Thread]::Sleep(3000)
+        # Waits for the stop right after the rename. PowerShell notices it between these calls, as it notices a stop
+        # that arrives during a rename once the rename has returned.
+        for ($waited = 0; $waited -lt 60000; $waited += 25) {
+            [System.Threading.Thread]::Sleep(25)
+        }
     }
 }
 """,
@@ -594,6 +597,7 @@ $workerScript = (
 $worker = [powershell]::Create()
 $renamed = $false
 $state = ''
+$ended = ''
 try {
     [void]$worker.AddScript($workerScript)
     $handle = $worker.BeginInvoke()
@@ -604,6 +608,11 @@ try {
     $renamed = Test-Path -LiteralPath $signal
     $worker.Stop()
     $state = [string]$worker.InvocationStateInfo.State
+    # How the worker ended, for the failure message when it ended some other way than by the stop.
+    $ended = @(
+        @($worker.Streams.Error | ForEach-Object { [string]$_ }) +
+        @($worker.InvocationStateInfo.Reason | Where-Object { $null -ne $_ } | ForEach-Object { $_.Message })
+    ) -join ' | '
 }
 finally {
     $worker.Dispose()
@@ -615,6 +624,7 @@ ConvertTo-AsciiJson -Value ([ordered]@{
     plan = $plan
     renamed = $renamed
     state = $state
+    ended = $ended
     manifest_before = $manifestBefore
     manifest_after = Get-Sha256Hex -Path (Join-Path $root 'assets-manifest.json')
     plan_after = Get-RootPlan -Root $root -PackagedPath $packaged
@@ -1139,10 +1149,14 @@ try {
 catch {
     $message = $_.Exception.Message
 }
+$lock = Enter-ProtectedRunLock -Path $lockPath
+$lockFree = $null -ne $lock
+Exit-ProtectedRunLock -Stream $lock
 ConvertTo-AsciiJson -Value ([ordered]@{
     plan = $plan
     message = $message
     manifest_before = $manifestBefore
+    lock_free = $lockFree
 })
 """
         )
@@ -1150,6 +1164,7 @@ ConvertTo-AsciiJson -Value ([ordered]@{
         self.assertEqual(
             "The refreshed rclone password helper could not be confirmed. Register the check again.", report["message"]
         )
+        self.assertTrue(report["lock_free"], "the run lock was still held afterwards")
         folders = self.evidence_folders()
         self.assertEqual(1, len(folders), "the copy of the manifest that was replaced was removed")
         self.assertEqual(["assets-manifest.json.previous"], [path.name for path in folders[0].iterdir()])
@@ -1158,12 +1173,101 @@ ConvertTo-AsciiJson -Value ([ordered]@{
             hashlib.sha256((folders[0] / "assets-manifest.json.previous").read_bytes()).hexdigest(),
         )
 
+    def test_a_helper_that_another_program_changes_before_it_is_confirmed_is_not_accepted(self):
+        # The helper was renamed, and then another program changed it before the refresh confirmed it. The manifest
+        # was replaced too, so the copies of both earlier files must stay.
+        report = self.probe(
+            r"""
+New-AssetsRoot -Root $root -HelperBytes $earlierBytes
+$plan = Get-RootPlan -Root $root -PackagedPath $packaged
+$realMove = ${function:Move-FileReplacing}
+function Move-FileReplacing {
+    param([string]$Source, [string]$Target)
+
+    & $realMove -Source $Source -Target $Target
+    if ($Target.EndsWith('reveal-rclone-config-password.ps1')) {
+        [IO.File]::WriteAllText($Target, '# changed by another program')
+    }
+}
+$message = ''
+$warnings = @()
+try {
+    [void](Invoke-Refresh -Root $root -Plan $plan -PackagedPath $packaged -LockPath $lockPath 3>&1 |
+        ForEach-Object { $warnings += [string]$_ })
+}
+catch {
+    $message = $_.Exception.Message
+}
+$lock = Enter-ProtectedRunLock -Path $lockPath
+$lockFree = $null -ne $lock
+Exit-ProtectedRunLock -Stream $lock
+ConvertTo-AsciiJson -Value ([ordered]@{ plan = $plan; message = $message; warnings = $warnings; lock_free = $lockFree })
+"""
+        )
+        self.assertEqual("refresh", report["plan"])
+        self.assertEqual(
+            "The refreshed rclone password helper could not be confirmed. Register the check again.", report["message"]
+        )
+        self.assertEqual([], report["warnings"])
+        self.assertTrue(report["lock_free"], "the run lock was still held afterwards")
+        self.assertEqual(b"# changed by another program", (self.fixture.root / HELPER_NAME).read_bytes())
+        folders = self.evidence_folders()
+        self.assertEqual(1, len(folders), "the copies of the files that were replaced were removed")
+        self.assertEqual(
+            sorted([HELPER_NAME + ".previous", "assets-manifest.json.previous"]),
+            sorted(path.name for path in folders[0].iterdir()),
+        )
+        self.assertEqual(earlier_helper(2), (folders[0] / (HELPER_NAME + ".previous")).read_bytes())
+
+    def test_the_way_back_leaves_a_helper_that_another_program_changed(self):
+        # The helper was renamed, then another program changed it, and then the manifest's rename was refused. The
+        # helper is no longer the one the refresh put in, so it is not the refresh's to put back.
+        report = self.probe(
+            r"""
+New-AssetsRoot -Root $root -HelperBytes $earlierBytes
+$plan = Get-RootPlan -Root $root -PackagedPath $packaged
+$realMove = ${function:Move-FileReplacing}
+function Move-FileReplacing {
+    param([string]$Source, [string]$Target)
+
+    if ($Target.EndsWith('assets-manifest.json')) {
+        throw 'Stand-in: the manifest could not be replaced.'
+    }
+    & $realMove -Source $Source -Target $Target
+    # Only after the swap: the way back renames onto the helper too.
+    if ($Source.EndsWith('.new') -and $Target.EndsWith('reveal-rclone-config-password.ps1')) {
+        [IO.File]::WriteAllText($Target, '# changed by another program')
+    }
+}
+$message = ''
+$warnings = @()
+try {
+    [void](Invoke-Refresh -Root $root -Plan $plan -PackagedPath $packaged -LockPath $lockPath 3>&1 |
+        ForEach-Object { $warnings += [string]$_ })
+}
+catch {
+    $message = $_.Exception.Message
+}
+ConvertTo-AsciiJson -Value ([ordered]@{ plan = $plan; message = $message; warnings = $warnings })
+"""
+        )
+        self.assertEqual("refresh", report["plan"])
+        self.assertEqual("Stand-in: the manifest could not be replaced.", report["message"])
+        self.assertEqual([], report["warnings"])
+        self.assertEqual(b"# changed by another program", (self.fixture.root / HELPER_NAME).read_bytes())
+        folders = self.evidence_folders()
+        self.assertEqual(1, len(folders))
+        self.assertEqual(
+            sorted([HELPER_NAME + ".previous", "assets-manifest.json.new", "assets-manifest.json.previous"]),
+            sorted(path.name for path in folders[0].iterdir()),
+        )
+
     def test_a_stop_during_the_helpers_rename_puts_the_earlier_helper_back(self):
         # The stop takes effect once the helper is renamed and before the manifest is: the earlier helper must go back.
         report = self.stopped_refresh("refresh", "New-AssetsRoot -Root $root -HelperBytes $earlierBytes", HELPER_NAME)
         self.assertEqual("refresh", report["plan"])
-        self.assertTrue(report["renamed"], "the helper was never renamed")
-        self.assertEqual("Stopped", report["state"])
+        self.assertTrue(report["renamed"], "the helper was never renamed. The refresh ended: " + report["ended"])
+        self.assertEqual("Stopped", report["state"], report["ended"])
         self.assertEqual(report["manifest_before"], report["manifest_after"], "the manifest changed")
         self.assertEqual(
             earlier_helper(2),
@@ -1194,8 +1298,8 @@ New-AssetsRoot -Root $root -HelperBytes $earlierBytes
             "assets-manifest.json",
         )
         self.assertEqual("finish", report["plan"])
-        self.assertTrue(report["renamed"], "the manifest was never renamed")
-        self.assertEqual("Stopped", report["state"])
+        self.assertTrue(report["renamed"], "the manifest was never renamed. The refresh ended: " + report["ended"])
+        self.assertEqual("Stopped", report["state"], report["ended"])
         self.assertNotEqual(report["manifest_before"], report["manifest_after"], "the manifest was not replaced")
         self.assertEqual("current", report["plan_after"])
         self.assertTrue(report["lock_free"], "the run lock was still held after the stop")

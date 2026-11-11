@@ -295,9 +295,7 @@ protected password helper (`needed`, with the SHA-256 the manifest records for
 the helper it replaces in `password_helper_previous_sha256`) or not
 (`not_needed`). Once registering has replaced it, the output says `performed`,
 and `password_helper_previous_copy` names the folder that keeps the replaced
-files. If registering finished an update that was cut short, that folder keeps
-only the earlier manifest, and the earlier helper is in the folder that the
-cut-short update left.
+files.
 
 The protected assets keep the copy of the password helper they were set up
 with. When an update ships a changed helper, registering the task again
@@ -323,7 +321,11 @@ check is running, it stops without changing anything and asks you to register
 the task again once that has finished. If another program has one of the files
 open, it asks you to close that program and register the task again. If the
 manifest cannot be replaced after the helper was, the earlier helper is put
-back; if even that fails, registering the task again finishes the change.
+back. If even that fails, or setup ends between the two, for example in a power
+cut, registering the task again finishes the change. The folder it names in
+`password_helper_previous_copy` then keeps only the earlier manifest, and the
+earlier helper is in the `evidence\password-helper-<UTC time>-<id>` folder of
+the attempt that replaced it.
 
 For compatibility with installations that used the earlier mirror experiment,
 the default task name remains `ResticBackuperGoogleDriveSync`. Its installed
