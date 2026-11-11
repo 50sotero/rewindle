@@ -1009,8 +1009,11 @@ function Move-FileReplacing {
         $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
         # Access denied, a sharing violation or a lock violation: usually another program reading the file at that moment.
         if ($attempt -ge 5 -or $code -notin @(5, 32, 33)) {
-            $failed = 'Could not replace {0} ({1}). Close any program that has it open, then register the check again.'
-            throw ($failed -f $Target, [ComponentModel.Win32Exception]::new($code).Message)
+            $failed = (
+                'Could not replace {0} with {1} ({2}). If another program has either file open, close it, then ' +
+                'register the check again.'
+            )
+            throw ($failed -f $Target, $Source, [ComponentModel.Win32Exception]::new($code).Message)
         }
         [System.Threading.Thread]::Sleep(200)
     }
@@ -1143,8 +1146,8 @@ function Update-ProtectedPasswordHelper {
             }
             catch {
                 Write-Warning (
-                    'The earlier rclone password helper could not be put back (' + $_.Exception.Message + '). ' +
-                    'Registering the check again finishes the update.'
+                    'The earlier rclone password helper could not be put back. Registering the check again finishes ' +
+                    'the update. ' + $_.Exception.Message
                 )
             }
         }

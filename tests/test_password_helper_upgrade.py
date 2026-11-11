@@ -891,8 +891,14 @@ ConvertTo-AsciiJson -Value ([ordered]@{
 """
         )
         self.assertEqual("Stand-in: the file could not be replaced.", report["message"])
-        self.assertEqual(1, len(report["warnings"]), report["warnings"])
-        self.assertIn("Registering the check again finishes the update.", report["warnings"][0])
+        # What happened and what to do first, then the reason, which may carry its own next step.
+        self.assertEqual(
+            [
+                "The earlier rclone password helper could not be put back. Registering the check again finishes the "
+                "update. Stand-in: the file could not be replaced."
+            ],
+            report["warnings"],
+        )
         self.assertEqual("finish", report["cut_short"])
         self.assertEqual("current", report["after"])
         self.assertEqual(self.fixture.packaged.read_bytes(), (self.fixture.root / HELPER_NAME).read_bytes())
@@ -1188,11 +1194,13 @@ ConvertTo-AsciiJson -Value ([ordered]@{
         )
         self.assertEqual("new", report["replaced"])
         self.assertTrue(report["source_gone"])
-        # Windows' reason, in its own language, then what to do.
+        # Both files, Windows' reason in its own language, then what to do.
         refused = re.compile(
             "^Could not replace "
             + re.escape(str(self.fixture.state / "target.txt"))
-            + r" \(.+\)\. Close any program that has it open, then register the check again\.$"
+            + " with "
+            + re.escape(str(self.fixture.state / "source.txt"))
+            + r" \(.+\)\. If another program has either file open, close it, then register the check again\.$"
         )
         self.assertRegex(report["refusal"], refused)
         self.assertGreater(report["seconds"], 0.5, "a target in use was not tried again")
