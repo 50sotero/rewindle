@@ -27,6 +27,11 @@ namespace ResticBackuper.Dashboard
         // The Evergreen bootstrapper from Microsoft. A fixed address: nothing the page or the
         // protected state supplies is ever opened.
         private const string WebViewRuntimeDownloadUri = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
+        // The page is drawn without the graphics card. It is a small, mostly still page that the processor draws in no
+        // time, while waking a hardware-drawn page that has been hidden in the tray for hours could freeze the whole
+        // screen for several seconds when the window opened (seen on a laptop with a 300 Hz panel on its NVIDIA GPU).
+        // A WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS variable or WebView2 policy still overrides this, as WebView2 intends.
+        private const string WebPresentationBrowserArguments = "--disable-gpu --disable-gpu-compositing";
         private const string WebPresentationDeveloperHint =
             "Building from source? Run build.ps1 to rebuild the bundled web assets, or start with --native for the diagnostic window.";
         // A crashed renderer or browser is reloaded on its own at most this often, so a crash loop ends
@@ -347,9 +352,12 @@ namespace ResticBackuper.Dashboard
                 // The page's date fields and calendar are the browser's own and follow its language, not the page's. Giving it the regional
                 // format the page is sent as `locale` keeps them in the order of the dates beside them, not the browser's default.
                 string webLanguage = CultureInfo.CurrentCulture.Name;
-                CoreWebView2EnvironmentOptions environmentOptions = string.IsNullOrEmpty(webLanguage)
-                    ? null
-                    : new CoreWebView2EnvironmentOptions { Language = webLanguage };
+                CoreWebView2EnvironmentOptions environmentOptions = new CoreWebView2EnvironmentOptions();
+                environmentOptions.AdditionalBrowserArguments = WebPresentationBrowserArguments;
+                if (!string.IsNullOrEmpty(webLanguage))
+                {
+                    environmentOptions.Language = webLanguage;
+                }
                 CoreWebView2Environment environment =
                     await CoreWebView2Environment.CreateAsync(null, userDataFolder, environmentOptions);
                 if (webPresentationClosing || webPresentation == null)

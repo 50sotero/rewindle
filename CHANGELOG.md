@@ -135,6 +135,11 @@ ones a home user reads without a glossary.
 
 ### Fixed
 
+- **Opening Rewindle no longer freezes the screen.** On some PCs, opening
+  Rewindle from the notification area could freeze the whole screen, mouse
+  pointer included, for several seconds while its page woke up on the graphics
+  card. The dashboard page is now drawn without the graphics card, which it
+  doesn't need.
 - **An update or a reinstall no longer makes the next backup read every file
   again.** Every update is installed as a reinstall, and after each one the
   next backup read all your folders again to add almost nothing (about two
